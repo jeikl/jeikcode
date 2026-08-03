@@ -5,6 +5,7 @@
 //! need the heavy coding context).
 
 use super::{coerce_eol, err, ok, resolve_path};
+use crate::tool_feedback::{format_path_not_found, parse_tool_args};
 use async_trait::async_trait;
 use atomcode_kernel::tool::{RiskLevel, Tool, ToolContext, ToolResult};
 use serde::Deserialize;
@@ -54,14 +55,13 @@ impl Tool for EditFileTool {
         String::new()
     }
     async fn execute(&self, args: &str, ctx: &ToolContext) -> ToolResult {
-        let a: Args = match serde_json::from_str(args) {
+        let a: Args = match parse_tool_args(
+            "edit_file",
+            args,
+            r#"{"file_path":"<path>","old_string":"<exact>","new_string":"<replacement>"}"#,
+        ) {
             Ok(a) => a,
-            Err(e) => {
-                return err(format!(
-                    "edit_file: invalid arguments: {e}. Expected \
-                     {{\"file_path\",\"old_string\",\"new_string\"}}."
-                ))
-            }
+            Err(e) => return e.into_tool_result(),
         };
         if a.old_string == a.new_string {
             return err(
@@ -79,10 +79,18 @@ impl Tool for EditFileTool {
         let content = match tokio::fs::read_to_string(&path).await {
             Ok(c) => c,
             Err(e) => {
+                if e.kind() == std::io::ErrorKind::NotFound {
+                    return err(format_path_not_found(
+                        "edit_file",
+                        &a.file_path,
+                        &path,
+                        &ctx.working_dir,
+                    ));
+                }
                 return err(format!(
                     "edit_file: cannot read {}: {e}",
                     crate::pathnorm::to_display(&path)
-                ))
+                ));
             }
         };
 

@@ -3,6 +3,7 @@
 //! reader, minus the coding enrichments (semantic skeleton, read_cache, file_store).
 
 use super::{err, looks_binary, ok, ok_with_images, resolve_path};
+use crate::tool_feedback::{format_path_not_found, parse_tool_args};
 use async_trait::async_trait;
 use atomcode_kernel::message::ImageContent;
 use atomcode_kernel::tool::{Tool, ToolContext, ToolResult};
@@ -139,23 +140,24 @@ impl Tool for ReadFileTool {
     }
     // read is non-destructive → risk() defaults to Safe.
     async fn execute(&self, args: &str, ctx: &ToolContext) -> ToolResult {
-        let a: Args = match serde_json::from_str(args) {
+        let a: Args = match parse_tool_args(
+            "read_file",
+            args,
+            r#"{"file_path":"<path>","offset":1,"limit":200}"#,
+        ) {
             Ok(a) => a,
-            Err(e) => {
-                return err(format!(
-                    "read_file: invalid arguments: {e}. Expected {{\"file_path\": \"<path>\"}}."
-                ))
-            }
+            Err(e) => return e.into_tool_result(),
         };
         let path = resolve_path(&a.file_path, &ctx.working_dir);
 
         let meta = match tokio::fs::metadata(&path).await {
             Ok(m) => m,
             Err(_) => {
-                return err(format!(
-                    "Error: no such file: {} (resolved to {})",
-                    a.file_path,
-                    crate::pathnorm::to_display(&path)
+                return err(format_path_not_found(
+                    "read_file",
+                    &a.file_path,
+                    &path,
+                    &ctx.working_dir,
                 ))
             }
         };

@@ -2,6 +2,7 @@
 //! skipped). Non-destructive ⇒ always `Safe`.
 
 use super::{err, is_skip_dir, ok, resolve_path};
+use crate::tool_feedback::{format_path_not_found, parse_tool_args};
 use async_trait::async_trait;
 use atomcode_kernel::tool::{Tool, ToolContext, ToolResult};
 use serde::Deserialize;
@@ -47,14 +48,13 @@ impl Tool for ListDirTool {
     }
     // listing is non-destructive → risk() defaults to Safe.
     async fn execute(&self, args: &str, ctx: &ToolContext) -> ToolResult {
-        let a: Args = match serde_json::from_str(args) {
+        let a: Args = match parse_tool_args(
+            "list_directory",
+            args,
+            r#"{"path":"<dir>","depth":2}"#,
+        ) {
             Ok(a) => a,
-            Err(e) => {
-                return err(format!(
-                    "list_directory: invalid arguments: {e}. Expected \
-                     {{\"path\":\"<dir>\",\"depth\":<int>}} (both optional)."
-                ))
-            }
+            Err(e) => return e.into_tool_result(),
         };
         let raw = a.path.unwrap_or_else(|| ".".to_string());
         let root = resolve_path(&raw, &ctx.working_dir);
@@ -69,9 +69,11 @@ impl Tool for ListDirTool {
                 ))
             }
             Err(_) => {
-                return err(format!(
-                    "Directory not found: {}",
-                    crate::pathnorm::to_display(&root)
+                return err(format_path_not_found(
+                    "list_directory",
+                    &raw,
+                    &root,
+                    &ctx.working_dir,
                 ))
             }
         }

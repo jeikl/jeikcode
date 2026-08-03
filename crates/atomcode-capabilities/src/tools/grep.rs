@@ -6,6 +6,7 @@
 
 use super::read::lenient_usize;
 use super::{err, is_skip_dir, ok, resolve_path};
+use crate::tool_feedback::{format_path_not_found, parse_tool_args};
 use async_trait::async_trait;
 use atomcode_kernel::tool::{Tool, ToolContext, ToolResult};
 use grep::regex::{RegexMatcher, RegexMatcherBuilder};
@@ -71,20 +72,22 @@ impl Tool for GrepTool {
     }
     // read-only → risk() defaults to Safe.
     async fn execute(&self, args: &str, ctx: &ToolContext) -> ToolResult {
-        let a: Args = match serde_json::from_str(args) {
+        let a: Args = match parse_tool_args(
+            "grep",
+            args,
+            r#"{"pattern":"<regex>","path":"<dir>","max_results":50}"#,
+        ) {
             Ok(a) => a,
-            Err(e) => {
-                return err(format!(
-                    "grep: invalid arguments: {e}. Expected {{\"pattern\":\"<regex>\"}}."
-                ))
-            }
+            Err(e) => return e.into_tool_result(),
         };
         let raw = a.path.clone().unwrap_or_else(|| ".".to_string());
         let root = resolve_path(&raw, &ctx.working_dir);
         if tokio::fs::metadata(&root).await.is_err() {
-            return err(format!(
-                "grep: path not found: {}",
-                crate::pathnorm::to_display(&root)
+            return err(format_path_not_found(
+                "grep",
+                &raw,
+                &root,
+                &ctx.working_dir,
             ));
         }
         let max = a

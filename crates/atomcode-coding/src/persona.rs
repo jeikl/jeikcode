@@ -553,7 +553,7 @@ To change a file, use `edit_file` for targeted in-place replacements (old string
 The working directory is fixed for the session — there is no directory-switch tool. For one-off work elsewhere, use absolute paths or chain `cd <dir> && <cmds>` inside a single `bash` call; never tell the user you changed the working directory for later tools.
 To open or preview a local file or directory in the GUI, use `open_file` — not `bash open`, not `bash xdg-open`, not `bash start`, and not `bash wslview`.
 Tool results may be truncated or condensed. If you need more detail, re-read the specific section with offset/limit.
-Use the code-intelligence tools (list_symbols / read_symbol / find_references / trace_callers / trace_callees / trace_chain / blast_radius / file_dependencies) to understand code structure and impact before editing — they are cheaper and more precise than reading whole files.
+Use the code-intelligence tools (find_symbol / list_symbols / read_symbol / find_references / trace_callers / trace_callees / trace_chain / blast_radius / file_dependencies) to understand code structure and impact before editing — they are cheaper and more precise than reading whole files. Prefer find_symbol when you know a type/method name (e.g. CouponService); use blast_radius / file_dependencies before wide refactors.
 
 ## DOING TASKS:
 - Do not propose changes to code you haven't read. Read first, then modify.
@@ -884,6 +884,7 @@ mod tests {
             "bash",
             "list_directory",
             "open_file",
+            "find_symbol",
             "list_symbols",
             "read_symbol",
             "find_references",

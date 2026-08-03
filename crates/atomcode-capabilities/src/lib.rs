@@ -92,6 +92,10 @@ pub(crate) mod proxy;
 /// [`pathutil`]. Free of any feature `cfg` because `codeintel` is independent of `tools`.
 pub(crate) mod pathutil;
 
+/// Structured tool-argument errors + path-not-found "Did you mean?" enrichment.
+/// Shared by `tools` and `codeintel` so model feedback is consistent.
+pub mod tool_feedback;
+
 /// Cross-platform atomic file write (tempfile → fsync → persist → parent-dir fsync).
 /// Ported from `atomcode-core`'s `fs_atomic` for the `plugin` feature (trust store).
 /// Opt-in behind `feature = "plugin"` or `feature = "mcp"` (the mcp trust store

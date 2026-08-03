@@ -4,6 +4,7 @@
 use super::lang::Lang;
 use super::symbols::extract_symbols;
 use super::{err, ok, resolve_path};
+use crate::tool_feedback::{format_path_not_found, parse_tool_args};
 use async_trait::async_trait;
 use atomcode_kernel::tool::{Tool, ToolContext, ToolResult};
 use serde::Deserialize;
@@ -41,24 +42,25 @@ impl Tool for ReadSymbolTool {
     }
     // read-only → risk() defaults to Safe.
     async fn execute(&self, args: &str, ctx: &ToolContext) -> ToolResult {
-        let a: Args = match serde_json::from_str(args) {
+        let a: Args = match parse_tool_args(
+            "read_symbol",
+            args,
+            r#"{"file_path":"<path>","symbol":"<name>"}"#,
+        ) {
             Ok(a) => a,
-            Err(e) => {
-                return err(format!(
-                    "read_symbol: invalid arguments: {e}. Expected {{\"file_path\":\"<path>\",\"symbol\":\"<name>\"}}."
-                ))
-            }
+            Err(e) => return e.into_tool_result(),
         };
         let path = resolve_path(&a.file_path, &ctx.working_dir);
         let display = a.file_path.clone();
         let symbol = a.symbol.clone();
-        tokio::task::spawn_blocking(move || render(&path, &display, &symbol))
+        let cwd = ctx.working_dir.clone();
+        tokio::task::spawn_blocking(move || render(&path, &display, &symbol, &cwd))
             .await
             .unwrap_or_else(|_| err("read_symbol: task failed"))
     }
 }
 
-fn render(path: &Path, display: &str, symbol: &str) -> ToolResult {
+fn render(path: &Path, display: &str, symbol: &str, cwd: &Path) -> ToolResult {
     let lang = match Lang::detect(path) {
         Some(l) => l,
         None => {
@@ -69,7 +71,12 @@ fn render(path: &Path, display: &str, symbol: &str) -> ToolResult {
     };
     let source = match std::fs::read_to_string(path) {
         Ok(s) => s,
-        Err(e) => return err(format!("read_symbol: cannot read {}: {e}", path.display())),
+        Err(e) => {
+            if e.kind() == std::io::ErrorKind::NotFound {
+                return err(format_path_not_found("read_symbol", display, path, cwd));
+            }
+            return err(format!("read_symbol: cannot read {}: {e}", path.display()));
+        }
     };
     let syms = match extract_symbols(&source, lang) {
         Some(s) => s,

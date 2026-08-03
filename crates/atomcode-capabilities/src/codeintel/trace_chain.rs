@@ -2,6 +2,7 @@
 
 use super::index::CodeIndex;
 use super::{canonical, display_path, err, ok};
+use crate::tool_feedback::{parse_tool_args, similar_symbol_names};
 use async_trait::async_trait;
 use atomcode_kernel::tool::{Tool, ToolContext, ToolResult};
 use serde::Deserialize;
@@ -45,9 +46,13 @@ impl Tool for TraceChainTool {
         })
     }
     async fn execute(&self, args: &str, ctx: &ToolContext) -> ToolResult {
-        let a: Args = match serde_json::from_str(args) {
+        let a: Args = match parse_tool_args(
+            "trace_chain",
+            args,
+            r#"{"from":"<Source>","to":"<Target>"}"#,
+        ) {
             Ok(a) => a,
-            Err(e) => return err(format!("trace_chain: invalid arguments: {e}. Expected {{\"from\":\"<a>\",\"to\":\"<b>\"}}.")),
+            Err(e) => return e.into_tool_result(),
         };
         let index = self.index.clone();
         let root = ctx.working_dir.clone();
@@ -65,10 +70,22 @@ fn render(index: &CodeIndex, root: &Path, from: &str, to: &str) -> ToolResult {
     let from_matches = g.find_by_name(from);
     let to_matches = g.find_by_name(to);
     if from_matches.is_empty() {
-        return err(format!("Source symbol '{from}' not found in code graph."));
+        let suggestions = similar_symbol_names(from, g.by_name.keys().map(|s| s.as_str()), 8);
+        let mut msg = format!("Source symbol '{from}' not found in code graph.");
+        if !suggestions.is_empty() {
+            msg.push_str("\nDid you mean one of these?\n  - ");
+            msg.push_str(&suggestions.join("\n  - "));
+        }
+        return err(msg);
     }
     if to_matches.is_empty() {
-        return err(format!("Target symbol '{to}' not found in code graph."));
+        let suggestions = similar_symbol_names(to, g.by_name.keys().map(|s| s.as_str()), 8);
+        let mut msg = format!("Target symbol '{to}' not found in code graph.");
+        if !suggestions.is_empty() {
+            msg.push_str("\nDid you mean one of these?\n  - ");
+            msg.push_str(&suggestions.join("\n  - "));
+        }
+        return err(msg);
     }
     for from_sym in &from_matches {
         for to_sym in &to_matches {

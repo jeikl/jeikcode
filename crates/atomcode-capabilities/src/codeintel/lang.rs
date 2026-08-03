@@ -71,12 +71,14 @@ impl Lang {
             }
             Lang::Java => include_str!("queries/java_calls.scm"),
             Lang::Go => include_str!("queries/go_calls.scm"),
+            Lang::CSharp => include_str!("queries/csharp_calls.scm"),
             _ => return None,
         })
     }
 
     /// Whether this language is walked into the cross-file code graph (`build_graph`).
-    /// Matches the production indexed-extension set (code languages; HTML/C# excluded).
+    /// Code languages with symbol + call extraction; HTML/PHP stay single-file only
+    /// (outline via `list_symbols`, no cross-file edges).
     pub fn is_indexed(&self) -> bool {
         matches!(
             self,
@@ -89,6 +91,7 @@ impl Lang {
                 | Lang::Java
                 | Lang::C
                 | Lang::Cpp
+                | Lang::CSharp
         )
     }
 
@@ -124,8 +127,18 @@ mod tests {
         assert_eq!(Lang::detect(Path::new("x/y/z.py")), Some(Lang::Python));
         assert_eq!(Lang::detect(Path::new("a.tsx")), Some(Lang::Tsx));
         assert_eq!(Lang::detect(Path::new("a.hpp")), Some(Lang::Cpp));
+        assert_eq!(Lang::detect(Path::new("CouponService.cs")), Some(Lang::CSharp));
         assert_eq!(Lang::detect(Path::new("a.unknownext")), None);
         assert_eq!(Lang::detect(Path::new("noext")), None);
+    }
+
+    #[test]
+    fn csharp_is_fully_indexed_with_calls() {
+        assert!(Lang::CSharp.is_indexed());
+        assert!(Lang::CSharp.calls_query().is_some());
+        let q = tree_sitter::Query::new(&Lang::CSharp.grammar(), Lang::CSharp.calls_query().unwrap())
+            .expect("csharp_calls.scm must compile");
+        assert!(q.capture_index_for_name("callee").is_some());
     }
 
     #[test]

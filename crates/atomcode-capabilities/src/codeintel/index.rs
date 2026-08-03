@@ -17,18 +17,24 @@ use tree_sitter::{Parser, Query, QueryCursor, StreamingIterator};
 /// `classify_symbol_kind`.
 fn classify_symbol_kind(ts: &str) -> SymbolKind {
     match ts {
-        "function_item" | "function_definition" | "function_declaration" | "func_literal" => {
-            SymbolKind::Function
-        }
-        "method_definition" | "method_declaration" => SymbolKind::Method,
-        "struct_item" | "struct_specifier" | "struct_type" => SymbolKind::Struct,
+        "function_item" | "function_definition" | "function_declaration" | "func_literal"
+        | "local_function_statement" => SymbolKind::Function,
+        "method_definition" | "method_declaration" | "constructor_declaration"
+        | "destructor_declaration" | "operator_declaration" => SymbolKind::Method,
+        "struct_item" | "struct_specifier" | "struct_type" | "struct_declaration"
+        | "record_declaration" => SymbolKind::Struct,
         "class_definition" | "class_declaration" | "class_specifier" => SymbolKind::Class,
         "trait_item" => SymbolKind::Trait,
         "interface_declaration" | "interface_type" => SymbolKind::Interface,
-        "enum_item" | "enum_declaration" | "enum_specifier" => SymbolKind::Enum,
-        "const_item" | "const_declaration" => SymbolKind::Constant,
+        "enum_item" | "enum_declaration" | "enum_specifier" | "enum_member_declaration" => {
+            SymbolKind::Enum
+        }
+        "const_item" | "const_declaration" | "property_declaration" | "event_declaration"
+        | "delegate_declaration" => SymbolKind::Constant,
         "let_declaration" | "variable_declaration" | "static_item" => SymbolKind::Variable,
-        "mod_item" | "module" => SymbolKind::Module,
+        "mod_item" | "module" | "namespace_declaration" | "file_scoped_namespace_declaration" => {
+            SymbolKind::Module
+        }
         "use_declaration" | "import_statement" | "import_declaration" => SymbolKind::Import,
         "type_item" | "type_alias_declaration" => SymbolKind::TypeAlias,
         "impl_item" => SymbolKind::Other("impl".to_string()),
@@ -130,10 +136,10 @@ fn parse_file(path: &Path, source: &str) -> Option<(Vec<SymbolNode>, Vec<RawCall
     Some((nodes, calls))
 }
 
-/// Extensions walked into the graph (matches production's INDEXED set + variants).
+/// Extensions walked into the graph (matches production's INDEXED set + C#).
 const INDEXED_EXTS: &[&str] = &[
     "rs", "py", "js", "jsx", "mjs", "cjs", "ts", "mts", "tsx", "go", "java", "c", "h", "cc", "cpp",
-    "cxx", "hpp", "hh",
+    "cxx", "hpp", "hh", "cs",
 ];
 
 /// A walked source file + the inputs to its staleness fingerprint.
@@ -390,6 +396,83 @@ mod tests {
         assert!(
             g.callees(recur.id).map(|e| e.is_empty()).unwrap_or(true),
             "self-call must be skipped"
+        );
+    }
+
+    #[test]
+    fn csharp_symbols_and_cross_file_calls_are_indexed() {
+        let d = tempfile::tempdir().unwrap();
+        std::fs::write(
+            d.path().join("CouponService.cs"),
+            r#"
+namespace Shop.Services;
+
+public class CouponService
+{
+    public decimal Apply(decimal price) => price * 0.9m;
+    public string Code { get; set; }
+}
+
+public record CouponDto(string Code, decimal Off);
+"#,
+        )
+        .unwrap();
+        std::fs::write(
+            d.path().join("OrderController.cs"),
+            r#"
+namespace Shop.Api;
+
+public class OrderController
+{
+    private readonly CouponService _coupons = new CouponService();
+
+    public decimal Checkout(decimal total)
+    {
+        return _coupons.Apply(total);
+    }
+}
+"#,
+        )
+        .unwrap();
+
+        let g = build_graph(d.path());
+        assert!(
+            g.find_by_name("CouponService").into_iter().next().is_some(),
+            "class CouponService must be indexed"
+        );
+        assert!(
+            g.find_by_name("Apply").into_iter().next().is_some(),
+            "method Apply must be indexed"
+        );
+        assert!(
+            g.find_by_name("CouponDto").into_iter().next().is_some(),
+            "record CouponDto must be indexed"
+        );
+        assert!(
+            g.find_by_name("Code").into_iter().next().is_some(),
+            "property Code must be indexed"
+        );
+
+        let checkout = g
+            .find_by_name("Checkout")
+            .into_iter()
+            .next()
+            .expect("Checkout");
+        let apply = g.find_by_name("Apply").into_iter().next().expect("Apply");
+        assert!(
+            g.callees(checkout.id)
+                .unwrap_or(&vec![])
+                .iter()
+                .any(|e| e.to == apply.id),
+            "OrderController.Checkout should call CouponService.Apply"
+        );
+
+        // blast-radius style: Apply has Checkout as a dependent caller file
+        let apply_file = &apply.file;
+        let deps = g.file_dependents(apply_file, 2);
+        assert!(
+            deps.iter().any(|f| f.file_name().and_then(|n| n.to_str()) == Some("OrderController.cs")),
+            "OrderController.cs must appear in blast radius of CouponService.cs: {deps:?}"
         );
     }
 

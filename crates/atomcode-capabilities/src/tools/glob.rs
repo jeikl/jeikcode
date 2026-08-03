@@ -4,6 +4,7 @@
 //! skipped; results sorted, capped at 100.
 
 use super::{err, is_absolute_path, is_skip_dir, ok, resolve_path};
+use crate::tool_feedback::{format_path_not_found, parse_tool_args};
 use async_trait::async_trait;
 use atomcode_kernel::tool::{Tool, ToolContext, ToolResult};
 use globset::GlobBuilder;
@@ -51,19 +52,20 @@ impl Tool for GlobTool {
     }
     // read-only → risk() defaults to Safe.
     async fn execute(&self, args: &str, ctx: &ToolContext) -> ToolResult {
-        let a: Args = match serde_json::from_str(args) {
+        let a: Args = match parse_tool_args(
+            "glob",
+            args,
+            r#"{"pattern":"<glob>","path":"<dir>"}"#,
+        ) {
             Ok(a) => a,
-            Err(e) => {
-                return err(format!(
-                    "glob: invalid arguments: {e}. Expected {{\"pattern\":\"<glob>\"}}."
-                ))
-            }
+            Err(e) => return e.into_tool_result(),
         };
         // Models routinely paste an absolute path straight into `pattern` (e.g.
         // `G:/VR2024/keystore/*`) with no `path` base. Without honoring that, the walk
         // would run in the working dir and silently match nothing — making an existing
         // file look like it "does not exist". An absolute prefix in the pattern wins
         // over `path`; otherwise fall back to `path` (default: the working dir).
+        let display_base = a.path.clone().unwrap_or_else(|| ".".to_string());
         let (base, match_pattern) = match split_absolute_base(&a.pattern) {
             Some((dir, rest)) => (dir, rest),
             None => {
@@ -74,9 +76,11 @@ impl Tool for GlobTool {
         match tokio::fs::metadata(&base).await {
             Ok(m) if m.is_dir() => {}
             _ => {
-                return err(format!(
-                    "glob: base directory does not exist: {}",
-                    crate::pathnorm::to_display(&base)
+                return err(format_path_not_found(
+                    "glob",
+                    &display_base,
+                    &base,
+                    &ctx.working_dir,
                 ))
             }
         }

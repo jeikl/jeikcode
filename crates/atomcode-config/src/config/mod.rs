@@ -2561,11 +2561,11 @@ model = "missing-type"
 
     #[test]
     fn can_handle_attached_images_true_when_active_provider_accepts_images() {
-        // Explicit vision flag, or OpenAI protocol default (unset).
+        // Explicit vision flag required for openai-compatible (protocol default off).
         let cfg = cfg_with("any-custom-model", Some(true), None);
         assert!(cfg.can_handle_attached_images());
-        // Unset + openai protocol → true (API multimodal contract).
-        assert!(cfg_with("deepseek-v4-flash", None, None).can_handle_attached_images());
+        // Unset + openai protocol → false (opt-in).
+        assert!(!cfg_with("deepseek-v4-flash", None, None).can_handle_attached_images());
     }
 
     #[test]
@@ -2611,14 +2611,15 @@ model = "missing-type"
                 .image_attach_support(),
             S::PreprocessorUnresolvable("NoSuchProvider".to_string())
         );
-        // Explicit vision / protocol default → Supported regardless of preprocessor.
+        // Explicit vision → Supported regardless of preprocessor.
         assert_eq!(
             cfg_with("any-custom", Some(true), None).image_attach_support(),
             S::Supported
         );
+        // Unset openai → Unconfigured (protocol default is opt-in false).
         assert_eq!(
             cfg_with("any-custom", None, None).image_attach_support(),
-            S::Supported
+            S::Unconfigured
         );
     }
 

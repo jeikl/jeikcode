@@ -141,7 +141,7 @@ pub(crate) struct ProviderInfo {
     pub skip_tls_verify: bool,
     pub ephemeral: bool,
     pub pricing: Option<atomcode_config::config::provider::ProviderPricing>,
-    /// Explicit vision flag from config (`None` = unset / protocol default).
+    /// Explicit vision flag from config (`None` = unset / protocol default opt-in false).
     pub supports_vision: Option<bool>,
 }
 

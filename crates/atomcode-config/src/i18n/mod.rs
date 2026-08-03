@@ -649,6 +649,14 @@ mod tests {
             ),
             "已保存模型“deepseek-chat”。"
         );
+        assert_eq!(
+            t_with(Locale::En, Msg::ProviderPanelImageDirectWhileVlSet),
+            "Images go to this model; turn off image input to use VL."
+        );
+        assert_eq!(
+            t_with(Locale::ZhCn, Msg::ProviderPanelImageDirectWhileVlSet),
+            "贴图将直发本模型；要用 VL 请关闭「支持图片输入」。"
+        );
 
         let en_row = t_with(Locale::En, Msg::ProviderPanelModelCount { count: 3 });
         let zh_row = t_with(Locale::ZhCn, Msg::ProviderPanelModelCount { count: 3 });

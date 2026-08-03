@@ -376,6 +376,9 @@ pub enum Msg<'a> {
     ProviderPanelModelSaved {
         model: &'a str,
     },
+    /// Shown after saving a model with image input on while a VL preprocessor
+    /// is configured: images go to this model; turn image input off to use VL.
+    ProviderPanelImageDirectWhileVlSet,
     ProviderPanelAddTitle,
     ProviderPanelEditAccountTitle {
         account: &'a str,

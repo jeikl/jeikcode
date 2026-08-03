@@ -609,9 +609,9 @@ impl CodingAgentConfig {
             keep_interrupted_context: false,
             user_agent: None,
             skip_tls_verify: false,
-            // OpenAI-compatible protocol default: multimodal content is allowed.
+            // Opt-in multimodal (matches resolve_supports_vision protocol default).
             // Callers that load from config overwrite this via `accepts_images()`.
-            supports_vision: true,
+            supports_vision: false,
             subagent_config: None,
             subagent_fast_provider: None,
             subagent_capable_provider: None,

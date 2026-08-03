@@ -74,8 +74,8 @@ fn get_user_home(_username: &str) -> Option<PathBuf> {
 
 /// Heuristic: does this model name look vision-capable? Verbatim copy of
 /// `atomcode_capabilities::provider::model_suggests_vision`. Fallback only —
-/// preferred path is explicit `supports_vision` on the model/provider config,
-/// with OpenAI/Anthropic protocol defaulting to true when unset (see
+/// preferred path is explicit `supports_vision` on the model/provider config;
+/// openai/claude/anthropic default to false when unset (opt-in; see
 /// [`crate::config::provider::resolve_supports_vision`]). MUST stay in sync
 /// with the capabilities copy.
 pub fn model_name_suggests_vision(name: &str) -> bool {

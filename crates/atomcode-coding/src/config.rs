@@ -911,6 +911,7 @@ impl std::fmt::Debug for CodingAgentConfig {
             .field("goal_max_rounds", &self.goal_max_rounds)
             .field("goal_max_duration_secs", &self.goal_max_duration_secs)
             .field("chat_options", &self.chat_options)
+            .field("supports_vision", &self.supports_vision)
             .field("telemetry", &self.telemetry.is_some())
             .finish_non_exhaustive()
     }

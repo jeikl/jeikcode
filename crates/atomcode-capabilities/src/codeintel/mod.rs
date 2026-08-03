@@ -23,6 +23,7 @@ use std::sync::Arc;
 pub mod blast_radius;
 pub mod file_deps;
 pub mod find_references;
+pub mod find_symbol;
 pub mod graph;
 pub mod index;
 pub mod lang;
@@ -42,6 +43,7 @@ pub mod lsp;
 pub use blast_radius::BlastRadiusTool;
 pub use file_deps::FileDependenciesTool;
 pub use find_references::FindReferencesTool;
+pub use find_symbol::FindSymbolTool;
 pub use graph::{CodeGraph, Edge, EdgeKind, SymbolId, SymbolKind, SymbolNode, Visibility};
 pub use index::{build_graph, CodeIndex};
 pub use lang::Lang;
@@ -65,6 +67,7 @@ pub fn codeintel_tool_names() -> &'static [&'static str] {
     &[
         "list_symbols",
         "read_symbol",
+        "find_symbol",
         "find_references",
         "trace_callers",
         "trace_callees",
@@ -79,6 +82,7 @@ pub fn codeintel_tool_names() -> &'static [&'static str] {
     &[
         "list_symbols",
         "read_symbol",
+        "find_symbol",
         "find_references",
         "trace_callers",
         "trace_callees",
@@ -88,14 +92,16 @@ pub fn codeintel_tool_names() -> &'static [&'static str] {
     ]
 }
 
-/// Register all code-intelligence tools. The 5 graph tools SHARE one lazily-built
-/// [`CodeIndex`]; the symbol tools and `find_references` are stateless. With the `lsp`
-/// feature, the `diagnostics` tool (sharing one [`LspManager`]) is also registered.
+/// Register all code-intelligence tools. Graph tools SHARE one lazily-built
+/// [`CodeIndex`]; single-file symbol tools and `find_references` are stateless. With
+/// the `lsp` feature, the `diagnostics` tool (sharing one [`LspManager`]) is also
+/// registered.
 pub fn register_codeintel_tools(reg: &mut ToolRegistry) {
     reg.register(Arc::new(ListSymbolsTool));
     reg.register(Arc::new(ReadSymbolTool));
     reg.register(Arc::new(FindReferencesTool));
     let index = Arc::new(CodeIndex::new());
+    reg.register(Arc::new(FindSymbolTool::new(index.clone())));
     reg.register(Arc::new(TraceCallersTool::new(index.clone())));
     reg.register(Arc::new(TraceCalleesTool::new(index.clone())));
     reg.register(Arc::new(TraceChainTool::new(index.clone())));

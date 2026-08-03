@@ -4,6 +4,7 @@
 use super::lang::Lang;
 use super::symbols::extract_symbols;
 use super::{err, ok, resolve_path};
+use crate::tool_feedback::{format_path_not_found, parse_tool_args};
 use async_trait::async_trait;
 use atomcode_kernel::tool::{Tool, ToolContext, ToolResult};
 use serde::Deserialize;
@@ -40,24 +41,25 @@ impl Tool for ListSymbolsTool {
     }
     // read-only → risk() defaults to Safe.
     async fn execute(&self, args: &str, ctx: &ToolContext) -> ToolResult {
-        let a: Args = match serde_json::from_str(args) {
+        let a: Args = match parse_tool_args(
+            "list_symbols",
+            args,
+            r#"{"file_path":"<path>"}"#,
+        ) {
             Ok(a) => a,
-            Err(e) => {
-                return err(format!(
-                    "list_symbols: invalid arguments: {e}. Expected {{\"file_path\":\"<path>\"}}."
-                ))
-            }
+            Err(e) => return e.into_tool_result(),
         };
         let path = resolve_path(&a.file_path, &ctx.working_dir);
         let display = a.file_path.clone();
+        let cwd = ctx.working_dir.clone();
         // tree-sitter parsing is CPU-bound — keep it off the async runtime.
-        tokio::task::spawn_blocking(move || render(&path, &display))
+        tokio::task::spawn_blocking(move || render(&path, &display, &cwd))
             .await
             .unwrap_or_else(|_| err("list_symbols: task failed"))
     }
 }
 
-fn render(path: &Path, display: &str) -> ToolResult {
+fn render(path: &Path, display: &str, cwd: &Path) -> ToolResult {
     let lang = match Lang::detect(path) {
         Some(l) => l,
         None => {
@@ -68,7 +70,12 @@ fn render(path: &Path, display: &str) -> ToolResult {
     };
     let source = match std::fs::read_to_string(path) {
         Ok(s) => s,
-        Err(e) => return err(format!("list_symbols: cannot read {}: {e}", path.display())),
+        Err(e) => {
+            if e.kind() == std::io::ErrorKind::NotFound {
+                return err(format_path_not_found("list_symbols", display, path, cwd));
+            }
+            return err(format!("list_symbols: cannot read {}: {e}", path.display()));
+        }
     };
     match extract_symbols(&source, lang) {
         Some(syms) if syms.is_empty() => ok(format!("No symbols found in {display}")),

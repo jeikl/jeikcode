@@ -3,6 +3,7 @@
 
 use super::index::CodeIndex;
 use super::{canonical, display_path, err, ok, resolve_path};
+use crate::tool_feedback::{format_path_not_found, parse_tool_args};
 use async_trait::async_trait;
 use atomcode_kernel::tool::{Tool, ToolContext, ToolResult};
 use serde::Deserialize;
@@ -45,13 +46,9 @@ impl Tool for FileDependenciesTool {
         })
     }
     async fn execute(&self, args: &str, ctx: &ToolContext) -> ToolResult {
-        let a: Args = match serde_json::from_str(args) {
+        let a: Args = match parse_tool_args("file_dependencies", args, r#"{"file":"<path>"}"#) {
             Ok(a) => a,
-            Err(e) => {
-                return err(format!(
-                    "file_dependencies: invalid arguments: {e}. Expected {{\"file\":\"<path>\"}}."
-                ))
-            }
+            Err(e) => return e.into_tool_result(),
         };
         let index = self.index.clone();
         let root = ctx.working_dir.clone();
@@ -64,6 +61,14 @@ impl Tool for FileDependenciesTool {
 }
 
 fn render(index: &CodeIndex, root: &Path, file: &Path, display: &str) -> ToolResult {
+    if !file.exists() {
+        return err(format_path_not_found(
+            "file_dependencies",
+            display,
+            file,
+            root,
+        ));
+    }
     let g = index.get(root);
     let croot = canonical(root);
     let root: &Path = &croot;
@@ -73,7 +78,8 @@ fn render(index: &CodeIndex, root: &Path, file: &Path, display: &str) -> ToolRes
         Some(s) if !s.is_empty() => s.clone(),
         _ => {
             return err(format!(
-                "File '{display}' not found in the code graph (no indexed symbols)."
+                "File '{display}' not found in the code graph (no indexed symbols). \
+                 Supported graph languages: Rust, Python, JS/TS, Go, Java, C/C++, C#."
             ))
         }
     };

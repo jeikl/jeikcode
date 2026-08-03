@@ -4,6 +4,7 @@
 //! invalidation, LSP notify).
 
 use super::{err, ok, resolve_path};
+use crate::tool_feedback::parse_tool_args;
 use async_trait::async_trait;
 use atomcode_kernel::tool::{RiskLevel, Tool, ToolContext, ToolResult};
 use serde::Deserialize;
@@ -46,14 +47,13 @@ impl Tool for WriteFileTool {
         String::new()
     }
     async fn execute(&self, args: &str, ctx: &ToolContext) -> ToolResult {
-        let a: Args = match serde_json::from_str(args) {
+        let a: Args = match parse_tool_args(
+            "write_file",
+            args,
+            r#"{"file_path":"<path>","content":"<text>"}"#,
+        ) {
             Ok(a) => a,
-            Err(e) => {
-                return err(format!(
-                    "write_file: invalid arguments: {e}. Expected \
-                     {{\"file_path\":\"<path>\",\"content\":\"<text>\"}}."
-                ))
-            }
+            Err(e) => return e.into_tool_result(),
         };
         let path = resolve_path(&a.file_path, &ctx.working_dir);
 

@@ -2,6 +2,7 @@
 
 use super::index::CodeIndex;
 use super::{canonical, display_path, err, ok};
+use crate::tool_feedback::{parse_tool_args, similar_symbol_names};
 use async_trait::async_trait;
 use atomcode_kernel::tool::{Tool, ToolContext, ToolResult};
 use serde::Deserialize;
@@ -46,13 +47,13 @@ impl Tool for TraceCallersTool {
         })
     }
     async fn execute(&self, args: &str, ctx: &ToolContext) -> ToolResult {
-        let a: Args = match serde_json::from_str(args) {
+        let a: Args = match parse_tool_args(
+            "trace_callers",
+            args,
+            r#"{"symbol":"<name>","depth":3}"#,
+        ) {
             Ok(a) => a,
-            Err(e) => {
-                return err(format!(
-                    "trace_callers: invalid arguments: {e}. Expected {{\"symbol\":\"<name>\"}}."
-                ))
-            }
+            Err(e) => return e.into_tool_result(),
         };
         let depth = a.depth.unwrap_or(3).min(5);
         let index = self.index.clone();
@@ -70,10 +71,16 @@ fn render(index: &CodeIndex, root: &Path, symbol: &str, depth: usize) -> ToolRes
     let root: &Path = &croot;
     let matches = g.find_by_name(symbol);
     if matches.is_empty() {
-        return err(format!(
+        let suggestions = similar_symbol_names(symbol, g.by_name.keys().map(|s| s.as_str()), 8);
+        let mut msg = format!(
             "Symbol '{symbol}' not found in code graph ({} symbols indexed).",
             g.node_count()
-        ));
+        );
+        if !suggestions.is_empty() {
+            msg.push_str("\nDid you mean one of these?\n  - ");
+            msg.push_str(&suggestions.join("\n  - "));
+        }
+        return err(msg);
     }
     let mut out = String::new();
     for sym in &matches {

@@ -18,9 +18,12 @@ use atomcode_config::config::Config;
 use std::sync::Arc;
 
 /// VL preprocessing for the local TUI runtime. Carries the provider factory and
-/// a base agent config (the runtime's main config) so it can build a one-off VL
-/// provider from `config.vision_preprocessor_provider`. When the active (main)
-/// model can't accept images, converts them to a text description and clears the
+/// a base agent config so it can build a one-off VL provider from
+/// `config.vision_preprocessor_provider` (tier routing / auth inherit from
+/// `base`). Vision *capability* is **not** taken from `base`: the runtime
+/// passes the per-turn `supports_vision` flag into [`ImagePreprocessor::preprocess`]
+/// so `/model` reassemble cannot leave a stale gate. When the active model
+/// can't accept images, converts them to a text description and clears the
 /// images; a vision-capable model passes through unchanged. Any failure to load
 /// config / resolve / build degrades to sending the original `(text, images)`.
 pub struct VlImagePreprocessor {
@@ -41,13 +44,17 @@ impl ImagePreprocessor for VlImagePreprocessor {
         text: String,
         images: Vec<ImageContent>,
         active_model: String,
+        supports_vision: bool,
         session_id: Option<String>,
     ) -> (UserInput, Option<VisionNotice>) {
         // Short-circuit: no images, or the main model already accepts images.
-        // The runtime passes its resolved model name; the live `base` config
-        // already carries the config/protocol `supports_vision` flag.
+        // Use the per-turn `supports_vision` the runtime just resolved from
+        // `CodingAgentConfig` (updated on `/model` reassemble and honouring
+        // `--provider`). Do NOT read `self.base.supports_vision` — that is a
+        // startup snapshot and goes stale when the preprocessor is preserved
+        // across reassemble (see runtime image_preprocessor clone).
         let _ = active_model; // reserved for future multi-model preprocessors
-        if should_skip(self.base.supports_vision, !images.is_empty()) {
+        if should_skip(supports_vision, !images.is_empty()) {
             return (UserInput { text, images }, None);
         }
         let config = match Config::load(&Config::default_path()) {

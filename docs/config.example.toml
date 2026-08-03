@@ -57,6 +57,11 @@ api_key = "sk-..."
 model = "deepseek-chat"
 base_url = "https://api.deepseek.com/v1"
 context_window = 64000
+# 是否接受图片输入（OpenAI image_url / Anthropic base64）。
+# 新 schema 写在 [models.*] 上，键名是 image_input（旧名 supports_vision 仍可读）。
+# 省略时：openai/claude 协议默认为 true；也可在 /provider 添加模型时交互选择。
+# 纯文本模型请设为 false，避免上游 400。
+# image_input = false
 
 # DeepSeek V4 专属：推理历史回显策略
 # (unset = auto-detect: deepseek-v4* → include, deepseek-reasoner/r1 → exclude)

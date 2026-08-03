@@ -182,6 +182,11 @@ pub struct CodingAgentConfig {
     /// Disable TLS certificate verification (self-signed / internal gateways).
     /// Sourced from `ProviderConfig::skip_tls_verify`; default false.
     pub skip_tls_verify: bool,
+    /// Whether the active model should receive image bytes on the wire
+    /// (OpenAI `image_url` / Anthropic base64). Resolved from config
+    /// `supports_vision` + protocol defaults (see
+    /// [`atomcode_config::config::provider::resolve_supports_vision`]).
+    pub supports_vision: bool,
     /// Full provider registry used to resolve task-tool fast/capable tiers.
     pub subagent_config: Option<Arc<atomcode_config::config::Config>>,
     /// Swap-aware, lazily-built FAST-tier provider for the `task` tool. `None` ⇒ the fast
@@ -230,6 +235,9 @@ pub struct CodingRuntimeConfig {
     /// requester to answer the Request → the kernel fail-closes to a stop).
     pub round_cap_checkpoint: bool,
     pub pricing: Option<atomcode_capabilities::session::ModelPricing>,
+    /// Whether the resolved model accepts image inputs (see
+    /// [`CodingAgentConfig::supports_vision`]).
+    pub supports_vision: bool,
 }
 
 impl CodingRuntimeConfig {
@@ -301,6 +309,7 @@ impl CodingRuntimeConfig {
             // TUI spawn sites and `event_loop::reload_runtime_provider_from`).
             round_cap_checkpoint: false,
             pricing,
+            supports_vision: r.map(|r| r.accepts_images()).unwrap_or(false),
         }
     }
 
@@ -327,6 +336,7 @@ impl CodingRuntimeConfig {
         config.thinking_keep = self.thinking_keep.clone();
         config.user_agent = self.user_agent.clone();
         config.skip_tls_verify = self.skip_tls_verify;
+        config.supports_vision = self.supports_vision;
         config.loop_max_rounds = self.loop_max_rounds;
         config.max_rounds = self.turn_max_rounds;
         config.subagent_config = self.subagent_config.clone();
@@ -364,6 +374,7 @@ pub fn apply_provider_config(
     config.thinking_keep = provider.thinking_keep.clone();
     config.user_agent = provider.user_agent.clone();
     config.skip_tls_verify = provider.skip_tls_verify;
+    config.supports_vision = provider.accepts_images();
 }
 
 /// A thunk the runtime supplies that constructs a (gateway-signed) tier provider. `Some` on
@@ -598,6 +609,9 @@ impl CodingAgentConfig {
             keep_interrupted_context: false,
             user_agent: None,
             skip_tls_verify: false,
+            // OpenAI-compatible protocol default: multimodal content is allowed.
+            // Callers that load from config overwrite this via `accepts_images()`.
+            supports_vision: true,
             subagent_config: None,
             subagent_fast_provider: None,
             subagent_capable_provider: None,

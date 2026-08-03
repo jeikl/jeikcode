@@ -349,7 +349,8 @@ atomcode --prompt-file task.md
 | `Ctrl+U` | 清空当前行 |
 | `Ctrl+W` | 删除一个单词 |
 | `Ctrl+K` | 删除到行尾 |
-| `Ctrl+V` | 从剪贴板粘贴图片（Windows 下请改用 `/paste`，见下方说明） |
+| `Alt+V` / `Ctrl+Alt+V` | 从剪贴板粘贴图片（Windows Terminal 推荐；`Ctrl+V` 常被终端拦截） |
+| `Ctrl+V` | 粘贴图片（终端转发该键时可用；否则用 Alt+V 或 `/paste`） |
 
 > **换行快捷键的终端兼容性：**
 > - `Shift+Enter`、`Ctrl+Enter` 需要终端支持 Kitty 键盘协议 — kitty、WezTerm、Alacritty、iTerm2 ≥3.5、Windows Terminal ≥1.21。不支持的终端（以及 Windows，atomcode 在其上不启用该协议）会把它们退化成普通 `Enter`（直接发送消息）—— 请改用 `\` + `Enter`，它在所有终端都生效。
@@ -357,9 +358,10 @@ atomcode --prompt-file task.md
 > - Xshell 不支持 Kitty 协议；可在键盘映射设置中把某个空闲组合映射为发送 `ESC, Enter`（`\x1b\r`）达到同样效果，或直接从剪贴板粘贴多行文本（已启用 bracketed paste）。
 
 > **Windows 下粘贴图片：**
-> Windows Terminal 和 conhost 默认把 `Ctrl+V` 绑给它们自己的 `paste` action — 这个 action 只会从剪贴板读 `CF_UNICODETEXT`，剪贴板上只有图片时它什么都不会发，应用里的 `Ctrl+V` 处理器根本收不到事件。两种解法：
-> 1. 使用 **`/paste`** —— 这个斜杠命令直接读取剪贴板图片并以 `[Image #N]` 的形式附加到输入框，在 Windows Terminal、PowerShell 7、conhost、git bash 等所有终端里都能正常工作。Windows 版的 TUI 右下角会自动显示 `剪贴板有图片 · /paste 粘贴` 作为提示。
-> 2. 若想保留 `Ctrl+V` 的肌肉记忆：打开 Windows Terminal 的 `settings.json`（`Ctrl+,` → 右下角"打开 JSON 文件"），在 `"actions"` 数组里删掉 `{ "command": "paste", "keys": "ctrl+v" }`，或把它改绑到 `ctrl+shift+v`。重启 Windows Terminal 后，`Ctrl+V` 就能透传给 atomcode 了。
+> Windows Terminal 和 conhost 默认把 `Ctrl+V` 绑给它们自己的 `paste` action — 这个 action 只会从剪贴板读 `CF_UNICODETEXT`，剪贴板上只有图片时它什么都不会发，应用里的 `Ctrl+V` 处理器根本收不到事件。推荐：
+> 1. 使用 **`Alt+V` 或 `Ctrl+Alt+V`** —— 应用内读取剪贴板图片并附加为 `[Image #N]`，Windows Terminal 一般不会拦截。
+> 2. 或使用 **`/paste`** —— 斜杠命令，任意终端可用。状态栏会提示 `剪贴板有图片 · alt+v / ctrl+alt+v / /paste`。
+> 3. 若想保留 `Ctrl+V`：在 Windows Terminal `settings.json` 里删掉或改绑 `"command": "paste", "keys": "ctrl+v"`。
 >
 > Git Bash（MinTTY）不拦截 `Ctrl+V`，开箱即用。
 
@@ -422,7 +424,7 @@ atomcode --prompt-file task.md
 | `/diff` | 显示当前修改的 git diff |
 | `/undo` | 撤销某一轮的文件编辑（`/undo` 或 `/undo N`） |
 | `/view <文件路径>` | 在浮层窗口中查看文件内容 |
-| `/paste` | 从剪贴板粘贴图片（Windows 下 Ctrl+V 被终端拦截时的备用入口） |
+| `/paste` | 从剪贴板粘贴图片（也可用 Alt+V / Ctrl+Alt+V） |
 | `/copy` | 从上一条回复复制代码块（`/copy`、`/copy N`、`/copy all`） |
 | `/cost` | 显示本次会话的 token 消耗 |
 | `/context` | 查看上下文预算占用明细 |

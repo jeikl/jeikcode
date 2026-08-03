@@ -124,9 +124,9 @@ pub(super) fn zh_cn(msg: Msg<'_>) -> Cow<'static, str> {
         Msg::StatusModelNotConfigured =>
             "（未配置）".into(),
         Msg::StatusClipboardImageHint =>
-            "剪贴板有图片 · ctrl+v / ctrl+alt+v 粘贴".into(),
+            "剪贴板有图片 · alt+v / ctrl+alt+v 粘贴".into(),
         Msg::StatusClipboardImageHintSlash =>
-            "剪贴板有图片 · /paste 粘贴".into(),
+            "剪贴板有图片 · alt+v / ctrl+alt+v / /paste".into(),
         Msg::StatusWebuiHint =>
             "提示：使用 /webui 在浏览器中打开 AtomCode".into(),
 
@@ -339,6 +339,9 @@ pub(super) fn zh_cn(msg: Msg<'_>) -> Cow<'static, str> {
         Msg::ProviderPanelFieldApiKey => "API 密钥".into(),
         Msg::ProviderPanelFieldModel => "模型".into(),
         Msg::ProviderPanelFieldWindow => "上下文窗口".into(),
+        Msg::ProviderPanelFieldSupportsVision => "支持图片输入？".into(),
+        Msg::ProviderPanelVisionYes => "是 [✓]  （将发送 base64 图片）".into(),
+        Msg::ProviderPanelVisionNo => "否 [ ]  （仅文本）".into(),
         Msg::ProviderPanelFieldMakeDefault => "设为默认".into(),
         Msg::ProviderPanelSwitchHint => "←→ 切换".into(),
         Msg::ProviderPanelEnvHint { env } => format!("留空使用 ${env}").into(),
@@ -348,7 +351,7 @@ pub(super) fn zh_cn(msg: Msg<'_>) -> Cow<'static, str> {
             "Tab 下一项  ←→ 切厂商  空格 勾选  ↵ 保存  Esc 返回".into(),
         Msg::ProviderPanelAccountFormHint => "Tab 切换  ↵ 保存  Esc 返回".into(),
         Msg::ProviderPanelModelFormHint =>
-            "Tab 下一项  ←→ 切账号  空格 勾选  ↵ 保存  Esc 返回".into(),
+            "Tab 下一项  ←→ 切账号  空格 切换图片/默认  ↵ 保存  Esc 返回".into(),
         // ── Model 选择器 ──
         Msg::ModelSwitched { provider, model } =>
             format!("  当前会话已切换到 {provider} · {model}\n").into(),
@@ -958,7 +961,7 @@ Msg::CmdDescBackground => "在隔离的后台上下文中运行一次性任务�
         Msg::CmdDescQuit => "退出 AtomCode".into(),
         Msg::CmdDescSkills => "浏览已加载的技能".into(),
         Msg::CmdDescPlugin => "插件市场（子命令：marketplace, install, uninstall, reload, list）".into(),
-        Msg::CmdDescPaste => "从剪贴板粘贴图片（Windows 下 Ctrl+V 被终端拦截时的备用入口）".into(),
+        Msg::CmdDescPaste => "从剪贴板粘贴图片（快捷键 Alt+V / Ctrl+Alt+V；Windows Terminal 下 Ctrl+V 常被拦截）".into(),
         Msg::CmdDescCopy => "复制上一条回复里的代码块，或用 /copy msg 复制整条回复（/copy、/copy N、/copy all、/copy msg）".into(),
         Msg::CopyOk { lines, chars } => format!("已复制代码块到剪贴板（{lines} 行，{chars} 字符）").into(),
         Msg::CopyOkMsg { lines, chars } => format!("已复制回复到剪贴板（{lines} 行，{chars} 字符）").into(),

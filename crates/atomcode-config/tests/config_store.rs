@@ -22,6 +22,7 @@ fn provider(model: &str) -> ProviderConfig {
         ephemeral: false,
         capable_model: None,
         pricing: None,
+            supports_vision: None,
     }
 }
 

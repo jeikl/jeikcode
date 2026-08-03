@@ -7015,6 +7015,7 @@ mod tests {
             ephemeral: false,
             capable_model: Some(rank),
             pricing: None,
+            supports_vision: None,
         }
     }
 

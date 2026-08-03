@@ -173,25 +173,35 @@ fn encode_rgba_to_png(width: u32, height: u32, rgba: &[u8]) -> Option<Vec<u8>> {
 /// and loading the image from that path.
 /// Whether a key event is the "paste clipboard image" chord.
 ///
-/// `Ctrl+V` is the canonical binding. `Ctrl+Alt+V` is an alternate for
-/// terminals — notably **Windows Terminal** — that bind plain `Ctrl+V` to their
-/// own text-paste action and never forward the key to the app, so plain `Ctrl+V`
-/// can't reach this handler there. The clipboard read (arboard, native Win32)
-/// works regardless; only the trigger key needs an alternate that the terminal
-/// doesn't intercept. `Ctrl+Shift+V` is deliberately NOT matched so a terminal's
+/// Bindings (any of these, without Shift):
+/// - **`Ctrl+V`** — classic; works when the terminal forwards the key
+/// - **`Alt+V`** — primary Windows Terminal alternate (WT does not steal Alt+V)
+/// - **`Ctrl+Alt+V`** — secondary alternate (also matches AltGr+V on some layouts)
+///
+/// Windows Terminal / conhost bind plain `Ctrl+V` to their own text-paste and
+/// often never deliver it to the app for image-only clipboards, so **`Alt+V`**
+/// is the reliable in-app trigger there. `/paste` remains a terminal-agnostic
+/// fallback. `Ctrl+Shift+V` is deliberately NOT matched so a terminal's
 /// "paste as plain text" chord passes through untouched.
 ///
-/// Known trade-off (same as Codex's `ctrl_alt(v)` binding): on Windows the
-/// **AltGr** key is delivered as `Ctrl+Alt`, so on the rare keyboard layout
-/// where `AltGr+V` is a printable glyph, that keystroke triggers image-paste
-/// instead of inserting the glyph. Accepted as an inherent cost of the chord.
+/// Known trade-off: on Windows **AltGr** is delivered as `Ctrl+Alt`, so on the
+/// rare layout where `AltGr+V` is a printable glyph, that keystroke triggers
+/// image-paste instead. Accepted as an inherent cost of the chord.
 fn is_paste_image_chord(
     code: crossterm::event::KeyCode,
     modifiers: crossterm::event::KeyModifiers,
 ) -> bool {
-    code == crossterm::event::KeyCode::Char('v')
-        && modifiers.contains(crossterm::event::KeyModifiers::CONTROL)
-        && !modifiers.contains(crossterm::event::KeyModifiers::SHIFT)
+    let is_v = matches!(
+        code,
+        crossterm::event::KeyCode::Char('v') | crossterm::event::KeyCode::Char('V')
+    );
+    if !is_v || modifiers.contains(crossterm::event::KeyModifiers::SHIFT) {
+        return false;
+    }
+    let ctrl = modifiers.contains(crossterm::event::KeyModifiers::CONTROL);
+    let alt = modifiers.contains(crossterm::event::KeyModifiers::ALT);
+    // Ctrl+V | Alt+V | Ctrl+Alt+V
+    ctrl || alt
 }
 
 /// Returns the image data and a fingerprint hash.
@@ -640,27 +650,37 @@ mod image_path_tests {
     use tempfile::tempdir;
 
     #[test]
-    fn paste_image_chord_accepts_ctrl_v_and_ctrl_alt_v_only() {
+    fn paste_image_chord_accepts_ctrl_v_alt_v_and_ctrl_alt_v() {
         use crossterm::event::{KeyCode, KeyModifiers};
         let v = KeyCode::Char('v');
-        // Canonical + the Windows-Terminal alternate both trigger.
+        // Ctrl+V, Alt+V (Windows Terminal primary), Ctrl+Alt+V.
         assert!(is_paste_image_chord(v, KeyModifiers::CONTROL));
+        assert!(is_paste_image_chord(v, KeyModifiers::ALT));
         assert!(is_paste_image_chord(
             v,
             KeyModifiers::CONTROL | KeyModifiers::ALT
+        ));
+        // Uppercase V without Shift modifier still counts (some hosts).
+        assert!(is_paste_image_chord(
+            KeyCode::Char('V'),
+            KeyModifiers::ALT
         ));
         // Ctrl+Shift+V stays a terminal "paste as plain text" passthrough.
         assert!(!is_paste_image_chord(
             v,
             KeyModifiers::CONTROL | KeyModifiers::SHIFT
         ));
-        // Not a paste chord without Ctrl, or on a different key.
-        assert!(!is_paste_image_chord(v, KeyModifiers::ALT));
+        assert!(!is_paste_image_chord(
+            v,
+            KeyModifiers::ALT | KeyModifiers::SHIFT
+        ));
+        // Not a paste chord without Ctrl/Alt, or on a different key.
         assert!(!is_paste_image_chord(v, KeyModifiers::NONE));
         assert!(!is_paste_image_chord(
             KeyCode::Char('b'),
             KeyModifiers::CONTROL
         ));
+        assert!(!is_paste_image_chord(KeyCode::Char('b'), KeyModifiers::ALT));
     }
 
     /// Materialise a small file at `<dir>/<name>` whose contents are
@@ -8515,6 +8535,7 @@ mod external_config_tests {
                 ephemeral,
                 capable_model: None,
                 pricing: None,
+                supports_vision: None,
             },
         );
         config
@@ -10196,10 +10217,9 @@ fn handle_input(
             //
             // Gated to Idle / Streaming. Approval and Suspended don't
             // accept input; modals (handled above) get first refusal.
-            // Chord matching lives in `is_paste_image_chord`: Ctrl+V AND
-            // Ctrl+Alt+V (the Windows-Terminal alternate) both trigger; only
-            // Ctrl+Shift+V is excluded so a terminal's "paste as plain text"
-            // chord still passes through.
+            // Chord matching lives in `is_paste_image_chord`: Ctrl+V, Alt+V,
+            // and Ctrl+Alt+V all trigger; only Ctrl/Alt+Shift+V is excluded so
+            // a terminal's "paste as plain text" chord still passes through.
             if matches!(app.state.phase, UiPhase::Idle | UiPhase::Streaming)
                 && is_paste_image_chord(code, modifiers)
             {
@@ -10207,29 +10227,23 @@ fn handle_input(
                 if attach_image_to_input(app, ctx, renderer, img_hash)? {
                     return Ok(());
                 }
-                // No image — fall back to clipboard text. Reaching this
-                // branch means the host terminal forwarded Ctrl+V as a
-                // real `\x16` key event rather than intercepting it as
-                // bracketed paste or character injection (classic
-                // conhost / older Windows Terminal configs / WT after
-                // the user removed the `paste` keybind per our Windows
-                // docs all hit this path). Without this fallback the
-                // keystroke is silently swallowed and the user's text
-                // paste disappears — a regression from before the
-                // Ctrl+V → image handler existed.
-                //
-                // Routing through `InputEvent::Paste` instead of
-                // `app.buf.insert_paste` directly so we get the modal-
-                // first dispatch, the image-from-path check, and the
-                // Streaming-vs-Idle redraw branching for free.
-                if let Some(text) = try_paste_clipboard_text() {
-                    return handle_input(app, ctx, renderer, InputEvent::Paste(text));
+                // No image — fall back to clipboard text ONLY for plain Ctrl+V
+                // (not Alt+V / Ctrl+Alt+V), so the Windows-safe image chords
+                // never inject a stray text paste or a literal `v`.
+                let plain_ctrl_v = modifiers
+                    .contains(crossterm::event::KeyModifiers::CONTROL)
+                    && !modifiers.contains(crossterm::event::KeyModifiers::ALT);
+                if plain_ctrl_v {
+                    // Host forwarded Ctrl+V as a real key event rather than
+                    // intercepting it as bracketed paste (classic conhost /
+                    // WT after the user removed the `paste` keybind).
+                    if let Some(text) = try_paste_clipboard_text() {
+                        return handle_input(app, ctx, renderer, InputEvent::Paste(text));
+                    }
                 }
-                // Empty clipboard — Ctrl+V has no other binding
-                // (key_action::classify maps it to NoOp), so swallow
-                // silently rather than insert a literal `v`. On HarmonyOS the
-                // clipboard is fundamentally unreadable, so surface the file-path
-                // hint once instead of a silent no-op (no-op on other platforms).
+                // Empty clipboard / Alt+V with no image — swallow rather than
+                // insert a literal `v`. On HarmonyOS surface the file-path
+                // hint once (clipboard is unreadable there).
                 show_ohos_paste_hint_once(app, ctx, renderer);
                 return Ok(());
             }
@@ -11145,54 +11159,10 @@ fn handle_idle_key(
         return Ok(());
     }
 
-    // Ctrl+V: try clipboard image first, fall back to text paste.
-    if code == KeyCode::Char('v') && modifiers.contains(crossterm::event::KeyModifiers::CONTROL) {
-        if let Some((img, hash)) = try_paste_clipboard_image() {
-            // Refuse to attach an image when there is no path for it to
-            // reach a vision-capable model — neither the active provider
-            // accepts images, nor a vision_preprocessor is configured to
-            // OCR them first. Without this gate, sending burns a turn on
-            // a 400 from the upstream's param validator (e.g.
-            // ModelArts.81001 "message[N].content[0] has invalid
-            // field(s): text, type" for GLM-5.1). Helper in
-            // `Config::can_handle_attached_images`.
-            if let Some(reject) = image_attach_reject_line(&ctx.config, &ctx.model_name) {
-                renderer.render(UiLine::Error(reject));
-                renderer.flush();
-                redraw_idle_plain(&app.buf, &app.state, ctx, renderer);
-                return Ok(());
-            }
-            // Insert the `[Image #N]` marker into the input buffer at
-            // cursor — same pattern as `insert_paste` for long text.
-            // The marker echoes through to scrollback on submit; image
-            // bytes are stashed in `pending_images` and drained then.
-            // N comes from `session_image_count` (monotonic across
-            // turns), NOT `pending_images.len()+1` — otherwise turn 1's
-            // first paste and turn 2's first paste would both render as
-            // `[Image #1]` in scrollback, ambiguous when scrolling back.
-            app.state.session_image_count += 1;
-            let n = app.state.session_image_count;
-            app.state.pending_images.push(img.clone());
-            app.state.pending_image_hashes.push(hash);
-            app.state.pending_image_markers.push(n);
-            cache_write_image(&crate::platform::image_cache_dir(), &img, hash);
-            let marker = format!("[Image #{}]", n);
-            app.buf.text.insert_str(app.buf.cursor, &marker);
-            app.buf.cursor += marker.len();
-            redraw_idle_plain(&app.buf, &app.state, ctx, renderer);
-            return Ok(());
-        }
-        // No image in clipboard. On HarmonyOS the clipboard is unreadable and
-        // falling through would insert a literal `v` — show the file-path hint
-        // once and swallow the key instead.
-        #[cfg(target_env = "ohos")]
-        {
-            show_ohos_paste_hint_once(app, ctx, renderer);
-            return Ok(());
-        }
-        // Elsewhere: fall through to normal key handling (the `v` char will be
-        // inserted as a regular character via classify).
-    }
+    // Image-paste chords (Ctrl+V / Alt+V / Ctrl+Alt+V) are handled earlier in
+    // `handle_input` via `is_paste_image_chord` before phase dispatch. No
+    // duplicate idle-path handler here — that used to only match Ctrl+V and
+    // left Alt+V falling through to insert a literal `v`.
 
     // Ctrl+T cycles reasoning_effort
     if code == KeyCode::Char('t') && modifiers.contains(crossterm::event::KeyModifiers::CONTROL) {

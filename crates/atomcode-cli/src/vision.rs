@@ -44,7 +44,10 @@ impl ImagePreprocessor for VlImagePreprocessor {
         session_id: Option<String>,
     ) -> (UserInput, Option<VisionNotice>) {
         // Short-circuit: no images, or the main model already accepts images.
-        if should_skip(&active_model, !images.is_empty()) {
+        // The runtime passes its resolved model name; the live `base` config
+        // already carries the config/protocol `supports_vision` flag.
+        let _ = active_model; // reserved for future multi-model preprocessors
+        if should_skip(self.base.supports_vision, !images.is_empty()) {
             return (UserInput { text, images }, None);
         }
         let config = match Config::load(&Config::default_path()) {

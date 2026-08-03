@@ -103,6 +103,43 @@ pub struct ProviderConfig {
     /// Optional price snapshot used for local `/cost` estimates.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pricing: Option<ProviderPricing>,
+    /// Whether this model accepts image inputs on the wire (OpenAI
+    /// `image_url` / Anthropic base64 `image` blocks). `None` = unset —
+    /// resolved by [`resolve_supports_vision`] (OpenAI/Anthropic protocol
+    /// defaults to true; other types fall back to the model-name heuristic).
+    ///
+    /// TOML key is **`image_input`** on both legacy `[providers.*]` and new
+    /// `[models.*]` entries. The older name `supports_vision` is still accepted
+    /// when reading. Set interactively via `/provider`, or by CodingPlan login.
+    #[serde(
+        default,
+        rename = "image_input",
+        alias = "supports_vision",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub supports_vision: Option<bool>,
+}
+
+/// Resolve whether image bytes should be encoded for a model selection.
+///
+/// Priority:
+/// 1. Explicit `image_input` / `supports_vision` in config (`Some(true|false)`)
+/// 2. OpenAI-compatible / Anthropic Messages protocol → `true` (multimodal
+///    content is part of the API contract; base64 is sent with the current
+///    session model id — not gated on a model-name whitelist)
+/// 3. Other provider types (e.g. ollama) → model-name heuristic
+pub fn resolve_supports_vision(
+    explicit: Option<bool>,
+    provider_type: &str,
+    model: &str,
+) -> bool {
+    if let Some(v) = explicit {
+        return v;
+    }
+    match provider_type {
+        "openai" | "claude" | "anthropic" => true,
+        _ => crate::util::model_name_suggests_vision(model),
+    }
 }
 
 /// A provider *account*: a reusable connection + credential identity (new schema,
@@ -174,6 +211,15 @@ pub struct ModelProfileConfig {
     pub thinking_budget: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pricing: Option<ProviderPricing>,
+    /// Whether this model accepts image inputs. TOML key: `image_input`
+    /// (alias `supports_vision`). See [`ProviderConfig::supports_vision`].
+    #[serde(
+        default,
+        rename = "image_input",
+        alias = "supports_vision",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub supports_vision: Option<bool>,
 }
 
 /// One flattened, immutable resolution of a model selection (design §3.4). This
@@ -206,6 +252,8 @@ pub struct ResolvedModelConfig {
     pub thinking_budget: Option<u32>,
     pub capable_model: Option<i64>,
     pub pricing: Option<ProviderPricing>,
+    /// Explicit config value (may be `None` when unset).
+    pub supports_vision: Option<bool>,
 }
 
 impl std::fmt::Debug for ResolvedModelConfig {
@@ -250,18 +298,22 @@ impl ResolvedModelConfig {
             ephemeral: false,
             capable_model: self.capable_model,
             pricing: self.pricing,
+            supports_vision: self.supports_vision,
         }
+    }
+
+    /// Whether image bytes should be sent for this resolved selection.
+    pub fn accepts_images(&self) -> bool {
+        resolve_supports_vision(self.supports_vision, &self.provider_type, &self.model)
     }
 }
 
 impl ProviderConfig {
     /// True if this provider's active model can accept image inputs.
-    /// Driven entirely by the model-name heuristic in
-    /// `provider::model_name_suggests_vision` — if a future model isn't
-    /// recognised, extend the heuristic rather than threading a
-    /// per-provider config flag (no user-facing knob to discover).
+    /// Honors explicit `supports_vision` when set; otherwise OpenAI/Anthropic
+    /// protocol defaults to true, other types use the model-name heuristic.
     pub fn accepts_images(&self) -> bool {
-        crate::util::model_name_suggests_vision(&self.model)
+        resolve_supports_vision(self.supports_vision, &self.provider_type, &self.model)
     }
 
     /// Resolve the API key for this provider, taking environment variables into account.
@@ -440,17 +492,28 @@ output_per_million = 0
 
     #[test]
     fn accepts_images_false_for_text_only_model() {
-        // Regression for the user's GLM-5.1 case: heuristic rejects
-        // text-only models so the TUI's Ctrl+V handler refuses image
-        // paste before sending a doomed request.
+        // OpenAI protocol defaults to accepting images when unset; text-only
+        // deployments must set image_input = false so paste/send refuse the
+        // doomed multimodal request before it hits the gateway.
         let toml_str = r#"
             type = "openai"
             model = "GLM-5.1"
             api_key = "sk-test"
             base_url = "https://api-ai.gitcode.com/v1"
+            image_input = false
         "#;
         let cfg: ProviderConfig = toml::from_str(toml_str).expect("parse");
         assert!(!cfg.accepts_images());
+        // Unset + openai protocol → true (API multimodal contract).
+        let open: ProviderConfig = toml::from_str(
+            r#"
+            type = "openai"
+            model = "GLM-5.1"
+            api_key = "sk-test"
+        "#,
+        )
+        .expect("parse");
+        assert!(open.accepts_images());
     }
 
     #[test]
@@ -520,6 +583,60 @@ output_per_million = 0
     }
 
     #[test]
+    fn resolve_supports_vision_prefers_explicit_then_protocol() {
+        assert!(resolve_supports_vision(Some(true), "openai", "deepseek-chat"));
+        assert!(!resolve_supports_vision(Some(false), "openai", "gpt-4o"));
+        // Unset + OpenAI/Anthropic protocol → true (API multimodal contract).
+        assert!(resolve_supports_vision(None, "openai", "any-custom-model"));
+        assert!(resolve_supports_vision(None, "claude", "any-custom-model"));
+        assert!(resolve_supports_vision(None, "anthropic", "any-custom-model"));
+        // Ollama falls back to the name heuristic.
+        assert!(!resolve_supports_vision(None, "ollama", "llama3"));
+        assert!(resolve_supports_vision(None, "ollama", "llava"));
+    }
+
+    #[test]
+    fn image_input_round_trips_in_toml() {
+        // Canonical TOML key on disk is `image_input`.
+        let toml_str = r#"
+            type = "openai"
+            model = "my-vl-model"
+            api_key = "sk-test"
+            image_input = true
+        "#;
+        let cfg: ProviderConfig = toml::from_str(toml_str).expect("parse");
+        assert_eq!(cfg.supports_vision, Some(true));
+        assert!(cfg.accepts_images());
+        let s = toml::to_string(&cfg).expect("serialize");
+        assert!(
+            s.contains("image_input = true"),
+            "serialize must use image_input key: {s}"
+        );
+        // Legacy alias still loads.
+        let legacy: ProviderConfig = toml::from_str(
+            r#"
+            type = "openai"
+            model = "x"
+            supports_vision = false
+        "#,
+        )
+        .expect("parse alias");
+        assert_eq!(legacy.supports_vision, Some(false));
+    }
+
+    #[test]
+    fn model_profile_image_input_parses() {
+        let toml_str = r#"
+            account = "maxo"
+            model = "auto"
+            context_window = 262144
+            image_input = true
+        "#;
+        let m: ModelProfileConfig = toml::from_str(toml_str).expect("parse model profile");
+        assert_eq!(m.supports_vision, Some(true));
+    }
+
+    #[test]
     fn skip_tls_verify_not_serialized_when_false() {
         let cfg = ProviderConfig {
             provider_type: "openai".into(),
@@ -540,6 +657,7 @@ output_per_million = 0
             ephemeral: false,
             capable_model: None,
             pricing: None,
+            supports_vision: None,
         };
         let serialized = toml::to_string(&cfg).expect("serialize");
         assert!(
@@ -569,6 +687,7 @@ output_per_million = 0
             ephemeral: false,
             capable_model: None,
             pricing: None,
+            supports_vision: None,
         };
         let serialized = toml::to_string(&cfg).expect("serialize");
         assert!(
@@ -646,6 +765,7 @@ output_per_million = 0
             ephemeral: false,
             capable_model: None,
             pricing: None,
+            supports_vision: None,
         };
 
         assert_eq!(cfg.resolved_api_key(), Some("sk-from-env-var".to_string()));
@@ -674,6 +794,7 @@ output_per_million = 0
             ephemeral: false,
             capable_model: None,
             pricing: None,
+            supports_vision: None,
         };
 
         assert_eq!(cfg.resolved_api_key(), Some("sk-custom-123".to_string()));
@@ -702,6 +823,7 @@ output_per_million = 0
             ephemeral: false,
             capable_model: None,
             pricing: None,
+            supports_vision: None,
         };
 
         assert_eq!(cfg.resolved_api_key(), Some("sk-openai-std".to_string()));

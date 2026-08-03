@@ -39,9 +39,10 @@ impl Tool for FindSymbolTool {
     fn description(&self) -> &str {
         "Find definitions of a symbol by exact name across the workspace code graph \
          (classes, methods, functions, records, …). Prefer this over grep when you know \
-         the symbol name (e.g. CouponService). Supports Rust, Python, JS/TS, Go, Java, \
-         C/C++, C#. For callers/callees/impact use trace_callers / trace_callees / \
-         blast_radius after locating the symbol."
+         the symbol name (e.g. CouponService from a DOMAIN GLOSSARY or prior hit). \
+         After grep finds a candidate type/method name, call this to jump to definitions. \
+         Supports Rust, Python, JS/TS, Go, Java, C/C++, C#. Next: trace_callers / \
+         blast_radius / file_dependencies for impact."
     }
     fn parameters_schema(&self) -> serde_json::Value {
         json!({

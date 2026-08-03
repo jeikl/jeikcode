@@ -540,7 +540,7 @@ Call multiple tools in ONE turn whenever they have NO data dependency on each ot
 
 MANDATORY parallel scenarios (must be ONE turn):
 - Reading multiple files for context: read_file × N in one response.
-- Searching for multiple patterns or paths: grep × N / glob × N in one response.
+- Searching for multiple patterns or paths: grep × N / glob × N in one response (including multi-alias business-term search below).
 - Creating multiple new files: write_file × N in one response.
 
 Sequential is OK ONLY when step N+1's command DEPENDS on step N's output (edit then verify; check error then fix; test then commit).
@@ -553,7 +553,17 @@ To change a file, use `edit_file` for targeted in-place replacements (old string
 The working directory is fixed for the session — there is no directory-switch tool. For one-off work elsewhere, use absolute paths or chain `cd <dir> && <cmds>` inside a single `bash` call; never tell the user you changed the working directory for later tools.
 To open or preview a local file or directory in the GUI, use `open_file` — not `bash open`, not `bash xdg-open`, not `bash start`, and not `bash wslview`.
 Tool results may be truncated or condensed. If you need more detail, re-read the specific section with offset/limit.
-Use the code-intelligence tools (find_symbol / list_symbols / read_symbol / find_references / trace_callers / trace_callees / trace_chain / blast_radius / file_dependencies) to understand code structure and impact before editing — they are cheaper and more precise than reading whole files. Prefer find_symbol when you know a type/method name (e.g. CouponService); use blast_radius / file_dependencies before wide refactors.
+
+## LOCATING CODE (business terms → structure):
+When the user names a product/business concept (优惠券, 结算, 开票, …) rather than a code identifier:
+1. Check session context packs first — DOMAIN GLOSSARY (code aliases), BUSINESS RULES (org/process), DB WORDS (tables/columns), and PROJECT INSTRUCTIONS. Do not invent a single English guess when a pack already maps the term.
+2. In ONE turn, parallel-search: original term + 2–4 code aliases (glossary / dbwords hits, or common stems like Coupon/Promo/Voucher) via grep × N and/or glob × N (`*Coupon*`, `*Promo*`). Also try Service/Controller/Repo/Handler suffixes and real table names from DB WORDS when relevant.
+3. After hits: UPGRADE — do not stop at raw grep lines. Use find_symbol for exact type/method names, list_symbols / read_symbol on candidate files, then blast_radius / file_dependencies / trace_callers when you need impact or call chains.
+4. If you already know an exact symbol name (e.g. CouponService), call find_symbol FIRST — skip broad grep.
+5. Budget: after ~3 search/read rounds without a clear entry point, STOP and report aliases tried + next diagnostics. Do not keep grepping the same patterns.
+6. When answering about org structure, approval flow, or product policy, prefer BUSINESS RULES over guessing.
+
+Use the code-intelligence tools (find_symbol / list_symbols / read_symbol / find_references / trace_callers / trace_callees / trace_chain / blast_radius / file_dependencies) to understand code structure and impact before editing — they are cheaper and more precise than reading whole files. Prefer find_symbol when you know a type/method name; use blast_radius / file_dependencies before wide refactors.
 
 ## DOING TASKS:
 - Do not propose changes to code you haven't read. Read first, then modify.
@@ -899,6 +909,17 @@ mod tests {
                 "persona must advertise the mounted tool `{tool}`"
             );
         }
+        assert!(
+            p.contains("LOCATING CODE")
+                && p.contains("DOMAIN GLOSSARY")
+                && p.contains("BUSINESS RULES")
+                && p.contains("DB WORDS"),
+            "persona must teach business-term packs (glossary/rules/db): {p}"
+        );
+        assert!(
+            p.contains("UPGRADE") && p.contains("find_symbol FIRST"),
+            "persona must require grep→symbol upgrade and find_symbol-first for known names"
+        );
     }
 
     #[test]

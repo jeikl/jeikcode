@@ -11,9 +11,6 @@
 
 use std::path::{Path, PathBuf};
 
-/// Maximum size for a single instruction file (1 MB).
-const MAX_INSTRUCTION_SIZE: usize = 1_048_576;
-
 #[derive(Debug)]
 pub struct InstructionFile {
     pub path: PathBuf,
@@ -90,12 +87,7 @@ impl LayeredInstructions {
         if content.trim().is_empty() {
             return None;
         }
-        let content = if content.len() > MAX_INSTRUCTION_SIZE {
-            let truncated: String = content.chars().take(MAX_INSTRUCTION_SIZE).collect();
-            format!("{}\n\n[Truncated — file exceeds 1MB]", truncated)
-        } else {
-            content
-        };
+        // No size cap: full-file load (matches session hot-reload policy).
         Some(InstructionFile {
             path: path.to_path_buf(),
             content,
@@ -392,17 +384,17 @@ mod tests {
     }
 
     #[test]
-    fn large_file_is_truncated() {
+    fn large_file_is_not_truncated() {
         let tmp = tempfile::tempdir().unwrap();
-        let big = "x".repeat(MAX_INSTRUCTION_SIZE + 100);
+        let big = format!("head-{}-tail", "x".repeat(1_100_000));
         fs::write(tmp.path().join("big.md"), &big).unwrap();
         let loaded =
             LayeredInstructions::try_load(&tmp.path().join("big.md"), InstructionLevel::Global);
         assert!(loaded.is_some());
         let f = loaded.unwrap();
-        assert!(f.content.ends_with("[Truncated — file exceeds 1MB]"));
-        // Content should be capped around MAX_INSTRUCTION_SIZE + the suffix.
-        assert!(f.content.len() < big.len());
+        assert!(!f.content.contains("[Truncated"));
+        assert!(f.content.contains("head-") && f.content.contains("-tail"));
+        assert_eq!(f.content.len(), big.len());
     }
 
     #[test]

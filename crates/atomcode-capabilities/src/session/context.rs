@@ -1,20 +1,23 @@
 //! `SessionContextHook` — injects the per-session "context block" (environment + project
-//! instructions + git snapshot) as ONE leading `Role::System` message at session start,
-//! replacing the former core runtime-injected prompt sections.
+//! instructions + domain glossary + git snapshot) as ONE leading `Role::System` message.
 //!
-//! Cache-safe: the block is read ONCE at session start and frozen — a SNAPSHOT of where
-//! the session began, not a live view (the git section says so explicitly). The wire
-//! adapter then coalesces persona + this block + memory into a single system message
-//! (commit `3956f9fc`), so a model never sees more than one system message.
+//! ## Hot-reload (every user turn)
 //!
-//! Identified by [`CONTEXT_HEADER`] so `--resume` can locate it; lands after the
-//! leading-system run (persona). On resume env + project instructions are re-rendered (edits to
-//! AGENTS.md apply, the shell label refreshes), but the saved GIT section is FROZEN — its bytes
-//! drift on every commit and rewriting them would invalidate prefix caching for the whole
-//! resumed conversation on its first turn. When env/instructions are unchanged the re-rendered
-//! block is byte-identical, so the cache still holds. A full fresh block is inserted only when a
-//! legacy session carries none. `/cd` is a NEW SESSION (the driver re-prepares in the new dir),
-//! so `session_start` runs fresh there.
+//! On **each** user message (`turn_start`), env + GLOBAL/PROJECT/USER instructions +
+//! DOMAIN GLOSSARY are re-read from disk and the SESSION CONTEXT system message is
+//! rewritten in place. Edit `AGENTS.md` / `.atomcode/glossary.md` mid-session and the
+//! next send picks them up without restart.
+//!
+//! - Unchanged files → re-render is byte-identical → prefix cache still holds.
+//! - Changed instruction/glossary bytes → prefix cache invalidates for that turn (intended).
+//! - **Git section stays frozen** at session-start (or resume) snapshot: live `git status`
+//!   drifts every commit and would bust the cache every turn if refreshed.
+//!
+//! Fresh sessions inject the full block at `session_start`; resume refreshes
+//! instructions the same way while preserving the saved git section.
+//!
+//! The wire adapter coalesces persona + this block + memory into a single system message
+//! (commit `3956f9fc`). Identified by [`CONTEXT_HEADER`]. `/cd` is a NEW SESSION.
 
 use super::instructions::render_instructions;
 use async_trait::async_trait;
@@ -22,15 +25,17 @@ use atomcode_kernel::hook::LifecycleHooks;
 use atomcode_kernel::message::{Conversation, Message, Role};
 use std::path::PathBuf;
 
-/// First line of the rendered block — how the resume path locates it for in-place refresh.
+/// First line of the rendered block — how refresh/resume locate it for in-place rewrite.
 const CONTEXT_HEADER: &str = "=== SESSION CONTEXT ===";
 
 /// Separator + marker that begins the git sub-section (always the LAST section, joined onto
-/// the base with a blank line). On resume the saved git bytes — from this marker to the end —
-/// are spliced back verbatim so the frozen snapshot survives while env/instructions refresh.
+/// the base with a blank line). On resume / turn hot-reload the saved git bytes — from this
+/// marker to the end — are spliced back verbatim so the frozen snapshot survives while
+/// env/instructions refresh.
 const GIT_SECTION_SEP: &str = "\n\n=== GIT STATUS";
 
-/// Injects environment + project-instructions + git-status context at session start.
+/// Injects environment + project-instructions + git-status context; hot-reloads instruction
+/// tiers on every user turn.
 pub struct SessionContextHook {
     working_dir: PathBuf,
     /// Config root (`~/.atomcode`) for the GLOBAL instructions tier. Defaults to
@@ -63,11 +68,8 @@ impl SessionContextHook {
         }
     }
 
-    /// The NON-git portion — header + env + project instructions. Split from the git snapshot
-    /// because on resume we RE-RENDER this (the user may have edited AGENTS.md, or the shell
-    /// changed) while KEEPING the saved git section: git bytes drift on every commit and would
-    /// otherwise break the cached prefix (see `session_start`). `GIT_SECTION_SEP` assumes this
-    /// base carries no `=== GIT STATUS` marker of its own.
+    /// The NON-git portion — header + env + project instructions (+ glossary).
+    /// Re-read from disk on every call (hot-reload).
     fn render_base(&self) -> String {
         let mut out = vec![CONTEXT_HEADER.to_string(), self.env_block()];
         let instr = render_instructions(&self.home, &self.working_dir);
@@ -148,6 +150,39 @@ impl SessionContextHook {
         }
         Some(String::from_utf8_lossy(&out.stdout).into_owned())
     }
+
+    /// Re-read instruction/glossary files from disk and rewrite the SESSION CONTEXT
+    /// system message in place. Git section (if any) is preserved from the saved block.
+    ///
+    /// Used by resume and by every `turn_start` (hot-reload).
+    fn refresh_instructions_in_place(&self, convo: &mut Conversation) {
+        // Scope to the leading system run so a later user/assistant echo of the header
+        // cannot suppress or overwrite the real block.
+        let leading = convo
+            .messages
+            .iter()
+            .take_while(|m| m.role == Role::System)
+            .count();
+        match convo.messages[..leading]
+            .iter()
+            .position(|m| m.text.starts_with(CONTEXT_HEADER))
+        {
+            Some(i) => {
+                let saved = &convo.messages[i].text;
+                let refreshed = match saved.rfind(GIT_SECTION_SEP) {
+                    // Splice frozen git bytes (marker → end) onto a freshly rendered base.
+                    // `+ 2` skips the "\n\n" the separator carries so the join isn't doubled.
+                    Some(sep) => format!("{}\n\n{}", self.render_base(), &saved[sep + 2..]),
+                    None => self.render_base(),
+                };
+                convo.messages[i] = Message::system(refreshed);
+            }
+            // Legacy session or missing block — insert after leading system run.
+            None => convo
+                .messages
+                .insert(leading, Message::system(self.render())),
+        }
+    }
 }
 
 #[async_trait]
@@ -164,47 +199,14 @@ impl LifecycleHooks for SessionContextHook {
             convo.messages.insert(at, Message::system(self.render()));
             return;
         }
-        // RESUME (same project): re-render env + project instructions (the user may have edited
-        // AGENTS.md, or the shell changed), but FREEZE the saved git section.
-        //
-        // The block lives in the leading, cached prefix (it coalesces into the persona system
-        // message on the wire). The one part that drifts on nearly every resume is the git
-        // section — a new HEAD after a commit, `git status` after edits — and rewriting it
-        // changes the prefix, invalidating the gateway's prefix cache for the WHOLE resumed
-        // conversation on its first turn (observed: HEAD `fcf0b5b6` → `dd526cb4` across a resume
-        // forcing a full re-prefill). Git is a session-start snapshot by design — its header
-        // says "run `git status` for live state" — so freezing it is the intended contract.
-        // Env/instructions, by contrast, are stable-or-rarely-edited and SHOULD apply on resume:
-        // when they are unchanged the re-rendered base is byte-identical and the cache still
-        // holds; when a rule genuinely changed, a one-turn re-prefill is the correct cost.
-        //
-        // Detection is scoped to the leading system run (where the block lives and is inserted)
-        // so a stray later message echoing the header can't suppress insertion.
-        let leading = convo
-            .messages
-            .iter()
-            .take_while(|m| m.role == Role::System)
-            .count();
-        match convo.messages[..leading]
-            .iter()
-            .position(|m| m.text.starts_with(CONTEXT_HEADER))
-        {
-            Some(i) => {
-                let saved = &convo.messages[i].text;
-                let refreshed = match saved.rfind(GIT_SECTION_SEP) {
-                    // Splice the frozen git bytes (marker → end) onto a freshly rendered base.
-                    // `+ 2` skips the "\n\n" the separator carries so the join isn't doubled.
-                    Some(sep) => format!("{}\n\n{}", self.render_base(), &saved[sep + 2..]),
-                    // Saved block carried no git section (not a repo at save time) — just refresh.
-                    None => self.render_base(),
-                };
-                convo.messages[i] = Message::system(refreshed);
-            }
-            // Legacy/pre-upgrade session that never carried the block — insert a full fresh one.
-            None => convo
-                .messages
-                .insert(leading, Message::system(self.render())),
-        }
+        // RESUME: hot-refresh instructions/glossary; freeze saved git section.
+        self.refresh_instructions_in_place(convo);
+    }
+
+    async fn turn_start(&self, convo: &mut Conversation) {
+        // Every user send: re-read GLOBAL / PROJECT / USER / DOMAIN GLOSSARY from disk.
+        // Git stays frozen (see module docs).
+        self.refresh_instructions_in_place(convo);
     }
 }
 
@@ -361,5 +363,57 @@ mod tests {
             "lands after persona"
         );
         assert_eq!(convo.messages[2].text, "earlier turn");
+    }
+
+    #[tokio::test]
+    async fn turn_start_hot_reloads_agents_and_glossary() {
+        let d = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(d.path().join(".atomcode")).unwrap();
+        std::fs::write(d.path().join("AGENTS.md"), "rule-v1").unwrap();
+        std::fs::write(d.path().join(".atomcode/glossary.md"), "term-v1").unwrap();
+        let hook = SessionContextHook::with_home(d.path(), d.path().join("nohome"));
+
+        let mut convo = Conversation::new();
+        convo.push(Message::system("persona"));
+        hook.session_start(&mut convo, false).await;
+        assert!(convo.messages[1].text.contains("rule-v1"));
+        assert!(convo.messages[1].text.contains("term-v1"));
+
+        // Mid-session edits on disk.
+        std::fs::write(d.path().join("AGENTS.md"), "rule-v2-hot").unwrap();
+        std::fs::write(d.path().join(".atomcode/glossary.md"), "term-v2-hot").unwrap();
+        convo.push(Message::user("next turn"));
+        hook.turn_start(&mut convo).await;
+
+        let block = &convo.messages[1].text;
+        assert!(
+            block.contains("rule-v2-hot") && !block.contains("rule-v1"),
+            "AGENTS.md hot-reloaded on turn_start: {block}"
+        );
+        assert!(
+            block.contains("term-v2-hot") && !block.contains("term-v1"),
+            "glossary hot-reloaded on turn_start: {block}"
+        );
+        assert_eq!(convo.messages.len(), 3, "no extra messages; in-place rewrite");
+    }
+
+    #[tokio::test]
+    async fn turn_start_keeps_git_frozen() {
+        let d = tempfile::tempdir().unwrap();
+        std::fs::write(d.path().join("AGENTS.md"), "a").unwrap();
+        let hook = SessionContextHook::with_home(d.path(), d.path().join("nohome"));
+        let saved = format!(
+            "{CONTEXT_HEADER}\n\nWorking directory: /x\n\n=== GIT STATUS (snapshot at session start, not live) ===\nHEAD: frozen-abc"
+        );
+        let mut convo = Conversation::new();
+        convo.push(Message::system("persona"));
+        convo.push(Message::system(saved));
+        convo.push(Message::user("hi"));
+        hook.turn_start(&mut convo).await;
+        assert!(
+            convo.messages[1].text.contains("HEAD: frozen-abc"),
+            "git must stay frozen across turn hot-reload"
+        );
+        assert!(convo.messages[1].text.contains("PROJECT INSTRUCTIONS"));
     }
 }

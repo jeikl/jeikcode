@@ -336,6 +336,7 @@ mod tests {
             text: String,
             _images: Vec<atomcode_coding::ImageContent>,
             _active_model: String,
+            _supports_vision: bool,
             _session_id: Option<String>,
         ) -> (
             atomcode_coding::UserInput,

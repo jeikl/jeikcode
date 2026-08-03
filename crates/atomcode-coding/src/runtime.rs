@@ -585,10 +585,12 @@ impl RuntimeEventEmitter {
 #[async_trait::async_trait]
 pub trait ImagePreprocessor: Send + Sync {
     /// `active_model` is the runtime's resolved main-turn model name (honours
-    /// a `--provider` / `/model` selection), used to decide vision support —
-    /// authoritative, unlike re-reading a config default. `session_id` is the
-    /// active conversation's id, forwarded onto any auxiliary (VL) call so a
-    /// gateway pins it to the same upstream account.
+    /// a `--provider` / `/model` selection). `supports_vision` is the same
+    /// flag the runtime already resolved onto [`CodingAgentConfig`] for this
+    /// turn — pass it in so the preprocessor never relies on a startup
+    /// snapshot that goes stale after `/model` reassemble. `session_id` is
+    /// the active conversation's id, forwarded onto any auxiliary (VL) call
+    /// so a gateway pins it to the same upstream account.
     ///
     /// Returns the rewritten input plus an optional [`VisionNotice`] the
     /// runtime turns into a user-visible status line (the "✓ VL recognised
@@ -599,6 +601,7 @@ pub trait ImagePreprocessor: Send + Sync {
         text: String,
         images: Vec<ImageContent>,
         active_model: String,
+        supports_vision: bool,
         session_id: Option<String>,
     ) -> (UserInput, Option<VisionNotice>);
 }
@@ -2975,13 +2978,14 @@ fn spawn_runtime_owner_with_optional_agent(
                             if let Some(pp) =
                                 resources.as_ref().and_then(|r| r.image_preprocessor.clone())
                             {
-                                // Authoritative active-turn model + session id come
-                                // from the runtime's own resolved resources, not a
-                                // re-read config default (which would miss a
-                                // `--provider` override).
-                                let active_model = resources
+                                // Authoritative active-turn model / vision flag /
+                                // session id come from the runtime's own resolved
+                                // resources (updated on `/model` reassemble), not
+                                // a re-read config default or a startup snapshot
+                                // captured inside the preprocessor.
+                                let (active_model, supports_vision) = resources
                                     .as_ref()
-                                    .map(|r| r.config.model.clone())
+                                    .map(|r| (r.config.model.clone(), r.config.supports_vision))
                                     .unwrap_or_default();
                                 let session_id = resources
                                     .as_ref()
@@ -2992,6 +2996,7 @@ fn spawn_runtime_owner_with_optional_agent(
                                         std::mem::take(&mut input.text),
                                         std::mem::take(&mut input.images),
                                         active_model,
+                                        supports_vision,
                                         session_id,
                                     )
                                     .await;
@@ -9639,6 +9644,7 @@ mod tests {
             text: String,
             _images: Vec<ImageContent>,
             _active_model: String,
+            _supports_vision: bool,
             _session_id: Option<String>,
         ) -> (UserInput, Option<VisionNotice>) {
             (
@@ -9665,6 +9671,7 @@ mod tests {
             text: String,
             _images: Vec<ImageContent>,
             _active_model: String,
+            _supports_vision: bool,
             _session_id: Option<String>,
         ) -> (UserInput, Option<VisionNotice>) {
             self.called.store(true, Ordering::Release);
@@ -9681,8 +9688,42 @@ mod tests {
         }
     }
 
+    /// Captures the turn-level model + vision flag the runtime passes in.
+    /// Guards against the preprocessor falling back to a stale startup snapshot
+    /// after `/model` reassemble.
+    struct CapturingPreprocessor {
+        captured: Arc<std::sync::Mutex<Option<(String, bool)>>>,
+    }
+    #[async_trait::async_trait]
+    impl ImagePreprocessor for CapturingPreprocessor {
+        async fn preprocess(
+            &self,
+            text: String,
+            images: Vec<ImageContent>,
+            active_model: String,
+            supports_vision: bool,
+            _session_id: Option<String>,
+        ) -> (UserInput, Option<VisionNotice>) {
+            *self.captured.lock().unwrap() = Some((active_model, supports_vision));
+            // Passthrough — we only care that the args arrived correctly.
+            (UserInput { text, images }, None)
+        }
+    }
+
     async fn spawn_with_preprocessor(
         pp: Option<Arc<dyn ImagePreprocessor>>,
+    ) -> (
+        CodingRuntimeHandle,
+        mpsc::UnboundedReceiver<AgentCommand>,
+        mpsc::UnboundedReceiver<CodingRuntimeEvent>,
+        KernelRuntimeAdapter,
+    ) {
+        spawn_with_preprocessor_config(pp, |c| c).await
+    }
+
+    async fn spawn_with_preprocessor_config(
+        pp: Option<Arc<dyn ImagePreprocessor>>,
+        tweak: impl FnOnce(CodingAgentConfig) -> CodingAgentConfig,
     ) -> (
         CodingRuntimeHandle,
         mpsc::UnboundedReceiver<AgentCommand>,
@@ -9700,6 +9741,7 @@ mod tests {
             plugin_hooks,
             ..
         } = native_start(false);
+        let config = tweak(config);
         let parts =
             prepare_with_plugin_hook_source(&config, prepare.clone(), plugin_hooks.as_ref())
                 .await
@@ -9777,6 +9819,52 @@ mod tests {
         assert!(
             saw_success,
             "runtime must emit VisionPreprocessSuccess for the toast"
+        );
+    }
+
+    // The runtime must hand the preprocessor the *live* CodingAgentConfig
+    // vision flag (post-reassemble / post-`--provider`), not force the
+    // preprocessor to re-read a startup snapshot. Regression for the
+    // vision→text `/model` switch that left raw base64 on a text-only model.
+    #[tokio::test]
+    async fn image_submit_passes_live_supports_vision_to_preprocessor() {
+        let captured = Arc::new(std::sync::Mutex::new(None));
+        let (handle, mut kernel_commands, _runtime_events, _adapter) =
+            spawn_with_preprocessor_config(
+                Some(Arc::new(CapturingPreprocessor {
+                    captured: captured.clone(),
+                })),
+                |mut cfg| {
+                    cfg.model = "glm-5.2-text-only".into();
+                    cfg.supports_vision = false;
+                    cfg
+                },
+            )
+            .await;
+
+        handle
+            .submit(UserInput {
+                text: "look".into(),
+                images: vec![ImageContent {
+                    media_type: "image/png".into(),
+                    data: "AAAA".into(),
+                }],
+            })
+            .await
+            .unwrap();
+
+        // Drain the kernel command so the preprocessor has definitely run.
+        let _ = kernel_commands.recv().await;
+
+        let got = captured
+            .lock()
+            .unwrap()
+            .clone()
+            .expect("preprocessor must have been invoked");
+        assert_eq!(got.0, "glm-5.2-text-only");
+        assert!(
+            !got.1,
+            "runtime must pass the live supports_vision=false, not a stale true"
         );
     }
 

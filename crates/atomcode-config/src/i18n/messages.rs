@@ -368,6 +368,7 @@ pub enum Msg<'a> {
     ProviderPanelModelCount {
         count: usize,
     },
+    ProviderPanelAddModelRow,
     ProviderPanelAccountsHint,
     ProviderPanelModelsHint,
     ProviderPanelFilteredModelsHint {
@@ -663,6 +664,12 @@ pub enum Msg<'a> {
         available: usize,
     },
     CmdUndoBusy,
+    /// `/rewind` rejected because a turn is running (rewind mutates history +
+    /// files, so it must not race an active turn).
+    CmdRewindBusy,
+    /// `/rewind` (or the double-Esc gesture) couldn't open the checkpoint
+    /// picker — used as a `"{msg}: {error}"` prefix.
+    CmdRewindUnavailable,
     CmdUndoBadArg,
     CmdNoChanges,
     CmdDiffTruncated,
@@ -1168,6 +1175,9 @@ pub enum Msg<'a> {
     CmdDescMemory,
     CmdDescMcp,
     CmdDescUndo,
+    /// Description for the `/rewind` slash command — opens the checkpoint
+    /// picker (same as the double-Esc gesture) to restore an earlier point.
+    CmdDescRewind,
     CmdDescWorktree,
     CmdDescUpgrade,
     CmdDescPlan,
@@ -1255,6 +1265,8 @@ pub enum Msg<'a> {
     CmdDescProxy,
     /// Description for the `/todo` slash command — reprint the current task list.
     CmdDescTodo,
+    /// Description for the `/schedule` slash command — list local scheduled tasks.
+    CmdDescSchedule,
     /// Description for the `/desktop` slash command.
     CmdDescDesktop,
     /// `/desktop` — launching the found app (`name` = app, `path` = its location).

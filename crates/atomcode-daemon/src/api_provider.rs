@@ -34,7 +34,7 @@ pub(crate) struct CreateProviderRequest {
     pub thinking_enabled: Option<bool>,
     pub thinking_budget: Option<u32>,
     pub pricing: Option<ProviderPricing>,
-    /// Whether the model accepts image inputs. Omitted → protocol default.
+    /// Whether the model accepts image inputs. Omitted → protocol default (opt-in false).
     pub supports_vision: Option<bool>,
     #[serde(default)]
     pub skip_tls_verify: bool,

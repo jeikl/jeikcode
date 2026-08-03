@@ -1135,7 +1135,7 @@ pub(crate) async fn preprocess_image_caption(
             })
         })
         .unwrap_or_else(|| {
-            // Last resort: protocol default for openai/anthropic if we know the type.
+            // Last resort: protocol default (openai/anthropic opt-in false) if we know the type.
             config
                 .provider_config_for_selection(active_model)
                 .map(|p| p.accepts_images())

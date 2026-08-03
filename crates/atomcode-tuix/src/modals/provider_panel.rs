@@ -297,9 +297,9 @@ impl ModelForm {
             api_key: String::new(),
             model: String::new(),
             window: String::new(),
-            // OpenAI / Anthropic protocol default: multimodal is on. User can
-            // Space-toggle off for text-only gateways.
-            supports_vision: true,
+            // Opt-in: default off so pure-text models never send base64 by
+            // accident. User Space-toggles on for multimodal gateways.
+            supports_vision: false,
             make_default: true,
             focus: ModelField::Account,
             edit_id: None,
@@ -313,7 +313,7 @@ impl ModelForm {
         let supports_vision = config
             .resolve_model(Some(id))
             .map(|r| r.accepts_images())
-            .unwrap_or_else(|_| m.supports_vision.unwrap_or(true));
+            .unwrap_or_else(|_| m.supports_vision.unwrap_or(false));
         Some(Self {
             account_ids: vec![m.account.clone()],
             needs_key: vec![false], // account already exists; edit its key via 账号页
@@ -950,16 +950,26 @@ impl ProviderPanel {
         if form.make_default {
             desired.default_model = Some(selection_id.clone());
         }
-        save_and_reload(
-            ctx,
-            desired,
-            renderer,
-            crate::i18n::t(crate::i18n::Msg::ProviderPanelModelSaved {
-                model: &selection_id,
-            })
-            .into_owned(),
-            true,
-        )
+        // When image input is on, runtime skips VL and sends base64 to this
+        // model. If a VL preprocessor is also set, say so briefly so users know
+        // how to switch back (turn image input off).
+        let mut notice = crate::i18n::t(crate::i18n::Msg::ProviderPanelModelSaved {
+            model: &selection_id,
+        })
+        .into_owned();
+        if form.supports_vision {
+            let vl_set = desired
+                .vision_preprocessor_provider
+                .as_deref()
+                .is_some_and(|k| !k.is_empty() && desired.resolve_model(Some(k)).is_ok());
+            if vl_set {
+                notice.push(' ');
+                notice.push_str(
+                    &crate::i18n::t(crate::i18n::Msg::ProviderPanelImageDirectWhileVlSet),
+                );
+            }
+        }
+        save_and_reload(ctx, desired, renderer, notice, true)
     }
 
     /// Delete the account (and its models) or a single model, then save.

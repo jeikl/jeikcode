@@ -347,6 +347,9 @@ pub(super) fn en(msg: Msg<'_>) -> Cow<'static, str> {
         Msg::ProviderPanelFilteredModelsHint { account } =>
             format!("[{account}] · ↑↓ select · ↵ default · Ctrl+A add model · Ctrl+E edit · Ctrl+Dx2 delete · Tab all · Esc close").into(),
         Msg::ProviderPanelModelSaved { model } => format!("Saved model \"{model}\".").into(),
+        Msg::ProviderPanelImageDirectWhileVlSet => {
+            "Images go to this model; turn off image input to use VL.".into()
+        }
         Msg::ProviderPanelAddTitle => "[Add provider account]".into(),
         Msg::ProviderPanelEditAccountTitle { account } =>
             format!("[Edit account {account}]").into(),

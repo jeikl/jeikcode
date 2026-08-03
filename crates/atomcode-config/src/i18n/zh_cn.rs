@@ -328,6 +328,9 @@ pub(super) fn zh_cn(msg: Msg<'_>) -> Cow<'static, str> {
         Msg::ProviderPanelFilteredModelsHint { account } =>
             format!("〔{account}〕· ↑↓选择 · ↵默认 · Ctrl+A加模型 · Ctrl+E编辑 · Ctrl+Dx2 删除 · Tab全部 · Esc关闭").into(),
         Msg::ProviderPanelModelSaved { model } => format!("已保存模型“{model}”。").into(),
+        Msg::ProviderPanelImageDirectWhileVlSet => {
+            "贴图将直发本模型；要用 VL 请关闭「支持图片输入」。".into()
+        }
         Msg::ProviderPanelAddTitle => "【添加 Provider 账号】".into(),
         Msg::ProviderPanelEditAccountTitle { account } =>
             format!("【编辑账号 {account}】").into(),

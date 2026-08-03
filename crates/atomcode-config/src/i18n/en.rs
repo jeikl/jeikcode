@@ -139,9 +139,9 @@ pub(super) fn en(msg: Msg<'_>) -> Cow<'static, str> {
         Msg::StatusModelNotConfigured =>
             "(not configured)".into(),
         Msg::StatusClipboardImageHint =>
-            "Image in clipboard · ctrl+v / ctrl+alt+v to paste".into(),
+            "Image in clipboard · alt+v / ctrl+alt+v to paste".into(),
         Msg::StatusClipboardImageHintSlash =>
-            "Image in clipboard · /paste".into(),
+            "Image in clipboard · alt+v / ctrl+alt+v / /paste".into(),
         Msg::StatusWebuiHint =>
             "Tips: Use /webui to open AtomCode in your browser".into(),
 
@@ -358,6 +358,9 @@ pub(super) fn en(msg: Msg<'_>) -> Cow<'static, str> {
         Msg::ProviderPanelFieldApiKey => "API key".into(),
         Msg::ProviderPanelFieldModel => "Model".into(),
         Msg::ProviderPanelFieldWindow => "Context window".into(),
+        Msg::ProviderPanelFieldSupportsVision => "Support image input?".into(),
+        Msg::ProviderPanelVisionYes => "Yes [✓]  (send base64 images)".into(),
+        Msg::ProviderPanelVisionNo => "No [ ]  (text only)".into(),
         Msg::ProviderPanelFieldMakeDefault => "Set as default".into(),
         Msg::ProviderPanelSwitchHint => "←→ to switch".into(),
         Msg::ProviderPanelEnvHint { env } => format!("blank uses ${env}").into(),
@@ -367,7 +370,7 @@ pub(super) fn en(msg: Msg<'_>) -> Cow<'static, str> {
             "Tab Next  ←→ Switch provider  Space Toggle  ↵ Save  Esc Back".into(),
         Msg::ProviderPanelAccountFormHint => "Tab Switch  ↵ Save  Esc Back".into(),
         Msg::ProviderPanelModelFormHint =>
-            "Tab Next  ←→ Switch account  Space Toggle  ↵ Save  Esc Back".into(),
+            "Tab Next  ←→ Switch account  Space Toggle image/default  ↵ Save  Esc Back".into(),
         // ── Model picker ──
         Msg::ModelSwitched { provider, model } =>
             format!("  Switched to {provider} · {model} for this session\n").into(),
@@ -985,7 +988,7 @@ Msg::CmdDescBackground => "Run a one-shot task in an isolated background context
         Msg::CmdDescQuit => "Exit AtomCode".into(),
         Msg::CmdDescSkills => "Browse loaded skills".into(),
         Msg::CmdDescPlugin => "Plugin marketplace (subcommands: marketplace, install, uninstall, reload, list)".into(),
-        Msg::CmdDescPaste => "Attach an image from the clipboard (Windows fallback for Ctrl+V)".into(),
+        Msg::CmdDescPaste => "Attach an image from the clipboard (also Alt+V / Ctrl+Alt+V)".into(),
         Msg::CmdDescCopy => "Copy a code block, or the full reply with /copy msg (/copy, /copy N, /copy all, /copy msg)".into(),
         Msg::CopyOk { lines, chars } => format!("Copied code block to clipboard ({lines} lines, {chars} chars)").into(),
         Msg::CopyOkMsg { lines, chars } => format!("Copied reply to clipboard ({lines} lines, {chars} chars)").into(),

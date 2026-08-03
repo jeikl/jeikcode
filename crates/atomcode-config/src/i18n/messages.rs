@@ -192,14 +192,12 @@ pub enum Msg<'a> {
         version: &'a str,
     },
     StatusModelNotConfigured,
-    /// macOS / Linux variant: "Image in clipboard · ctrl+v to paste".
-    /// Ctrl+V is intercepted by Windows Terminal / conhost before
-    /// reaching atomcode, so Windows builds emit
-    /// `StatusClipboardImageHintSlash` instead.
+    /// Status hint when the clipboard holds an image (non-Windows default
+    /// wording). Prefers Alt+V / Ctrl+Alt+V because Windows Terminal steals
+    /// plain Ctrl+V; Ctrl+V still works when the terminal forwards it.
     StatusClipboardImageHint,
-    /// Windows variant: "Image in clipboard · /paste". Tells the
-    /// user to fall back on the `/paste` slash command, which works
-    /// in every terminal regardless of host keybinds.
+    /// Windows status hint: Alt+V / Ctrl+Alt+V / `/paste` — WT intercepts
+    /// Ctrl+V, so the reliable in-app chords and the slash command are listed.
     StatusClipboardImageHintSlash,
     /// Lowest-priority status-row fallback: nudge the user toward the
     /// `/webui` command (browser UI) when no higher-priority hint
@@ -390,6 +388,12 @@ pub enum Msg<'a> {
     ProviderPanelFieldApiKey,
     ProviderPanelFieldModel,
     ProviderPanelFieldWindow,
+    /// "Does this model support image input?"
+    ProviderPanelFieldSupportsVision,
+    /// Toggle label when supports_vision is true.
+    ProviderPanelVisionYes,
+    /// Toggle label when supports_vision is false.
+    ProviderPanelVisionNo,
     ProviderPanelFieldMakeDefault,
     ProviderPanelSwitchHint,
     ProviderPanelEnvHint {

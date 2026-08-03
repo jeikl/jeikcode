@@ -1350,6 +1350,12 @@ fn build_codingplan_provider(entry: &ModelEntry) -> ProviderConfig {
             output_per_million: 0.0,
             cached_input_per_million: 0.0,
         }),
+        // Persist an explicit vision flag so paste/send gates don't rely on
+        // model-name guessing for built-in CodingPlan models. VL / vision /
+        // gpt-4o / claude-* etc. → true; text-only GLM/DeepSeek → false.
+        supports_vision: Some(atomcode_config::util::model_name_suggests_vision(
+            &entry.display_model_name,
+        )),
     }
 }
 
@@ -1534,6 +1540,16 @@ mod tests {
             "token loaded at runtime from auth.toml"
         );
         assert!(!p.ephemeral);
+        // Non-VL name → explicit false so paste/send don't rely on protocol
+        // default for text-only CodingPlan models.
+        assert_eq!(p.supports_vision, Some(false));
+    }
+
+    #[test]
+    fn build_provider_sets_supports_vision_for_vl_models() {
+        let p = build_codingplan_provider(&entry("Qwen/Qwen3-VL-8B-Instruct"));
+        assert_eq!(p.supports_vision, Some(true));
+        assert!(p.accepts_images());
     }
 
     #[test]

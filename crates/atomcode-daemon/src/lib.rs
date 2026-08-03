@@ -141,6 +141,8 @@ pub(crate) struct ProviderInfo {
     pub skip_tls_verify: bool,
     pub ephemeral: bool,
     pub pricing: Option<atomcode_config::config::provider::ProviderPricing>,
+    /// Explicit vision flag from config (`None` = unset / protocol default).
+    pub supports_vision: Option<bool>,
 }
 
 /// Login attempts stay addressable while a blocking poll is in flight. Per-record
@@ -6156,6 +6158,7 @@ mod tests {
             ephemeral: false,
             capable_model: None,
             pricing: None,
+            supports_vision: None,
         }
     }
 

@@ -356,7 +356,8 @@ Then just type what you want:
 | `Ctrl+U` | Clear line |
 | `Ctrl+W` | Delete word |
 | `Ctrl+K` | Delete to end of line |
-| `Ctrl+V` | Paste image from clipboard (Windows: use `/paste`, see below) |
+| `Alt+V` / `Ctrl+Alt+V` | Paste image from clipboard (recommended on Windows Terminal; `Ctrl+V` is often intercepted) |
+| `Ctrl+V` | Paste image when the terminal forwards the key; otherwise use Alt+V or `/paste` |
 
 > **Terminal compatibility for newline chords:**
 > - `Shift+Enter` and `Ctrl+Enter` need a terminal that speaks the Kitty keyboard protocol — kitty, WezTerm, Alacritty, iTerm2 ≥3.5, Windows Terminal ≥1.21. Older terminals (and Windows, where atomcode doesn't enable the protocol) collapse them to plain `Enter` (which sends the message) — use `\` + `Enter`, which works everywhere.
@@ -364,9 +365,10 @@ Then just type what you want:
 > - Xshell does not support the Kitty protocol; in its keymap settings, map a free chord to send `ESC, Enter` (`\x1b\r`) to get the same effect, or paste multi-line text via the clipboard (bracketed paste is enabled).
 
 > **Pasting images on Windows:**
-> Windows Terminal and conhost bind `Ctrl+V` to their own `paste` action, which only forwards `CF_UNICODETEXT` from the clipboard — an image-only clipboard sends nothing, so the in-app `Ctrl+V` handler never fires. Two ways out:
-> 1. Use **`/paste`** — the slash command pulls the clipboard image and attaches it as `[Image #N]`. Works in every terminal, including Windows Terminal, PowerShell 7, conhost, and git bash. The TUI's bottom-right hint on Windows says `Image in clipboard · /paste` automatically.
-> 2. If you want `Ctrl+V` muscle memory: open Windows Terminal `settings.json` (`Ctrl+,` → "Open JSON file") and either delete the `{ "command": "paste", "keys": "ctrl+v" }` entry under `"actions"`, or rebind it to `ctrl+shift+v`. After a restart, `Ctrl+V` passes through to atomcode.
+> Windows Terminal and conhost bind `Ctrl+V` to their own `paste` action, which only forwards `CF_UNICODETEXT` from the clipboard — an image-only clipboard sends nothing, so the in-app `Ctrl+V` handler never fires. Recommended:
+> 1. Use **`Alt+V` or `Ctrl+Alt+V`** — in-app clipboard image attach as `[Image #N]`; Windows Terminal usually does not intercept these.
+> 2. Or use **`/paste`** — works in every terminal. The status hint shows `Image in clipboard · alt+v / ctrl+alt+v / /paste`.
+> 3. To keep `Ctrl+V`: remove or rebind `{ "command": "paste", "keys": "ctrl+v" }` in Windows Terminal `settings.json`.
 >
 > Git Bash (MinTTY) doesn't intercept `Ctrl+V`, so it works there out of the box.
 
@@ -429,7 +431,7 @@ Type `/` in the TUI to browse the full list with live completion; `/help` shows 
 | `/diff` | Show git diff of current changes |
 | `/undo` | Undo a turn's file edits (`/undo` or `/undo N`) |
 | `/view <filepath>` | View file content in an overlay modal |
-| `/paste` | Attach an image from the clipboard (Windows fallback for Ctrl+V) |
+| `/paste` | Attach an image from the clipboard (also Alt+V / Ctrl+Alt+V) |
 | `/copy` | Copy a code block from the last reply (`/copy`, `/copy N`, `/copy all`) |
 | `/cost` | Show token usage for this session |
 | `/context` | Show the context budget breakdown |

@@ -83,6 +83,7 @@ pub(crate) fn provider_info(
         skip_tls_verify: p.skip_tls_verify,
         ephemeral: p.ephemeral,
         pricing: p.pricing,
+        supports_vision: p.supports_vision,
     }
 }
 
@@ -171,6 +172,7 @@ mod tests {
             ephemeral: false,
             capable_model: None,
             pricing: None,
+            supports_vision: None,
         }
     }
 

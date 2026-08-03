@@ -140,8 +140,9 @@ impl CodingProviderFactory for DefaultCodingProviderFactory {
                 let mut pc = OpenAiCompatConfig::new(&cfg.api_key, &cfg.base_url, &cfg.model);
                 pc.context_window = cfg.context_window;
                 pc.idle_timeout = cfg.stream_timeout;
-                pc.supports_vision =
-                    atomcode_capabilities::provider::model_suggests_vision(&cfg.model);
+                // Config/protocol flag — not a model-name whitelist. OpenAI
+                // and Anthropic wire formats accept base64 when this is true.
+                pc.supports_vision = cfg.supports_vision;
                 pc.max_tokens = Some(default_max_tokens(cfg.context_window));
                 pc.reasoning_policy =
                     ReasoningPolicy::from_config(cfg.reasoning_history.as_deref())
@@ -194,6 +195,7 @@ pub fn derive_tier_config(
     tier.thinking_enabled = provider.thinking_enabled;
     tier.user_agent = provider.user_agent.clone();
     tier.skip_tls_verify = provider.skip_tls_verify;
+    tier.supports_vision = provider.accepts_images();
     tier.subagent_fast_provider = None;
     tier.subagent_capable_provider = None;
     tier.subagent_config = None;
@@ -240,6 +242,7 @@ pub fn derive_tier_config_from_resolved(
     tier.thinking_enabled = resolved.thinking_enabled;
     tier.user_agent = resolved.user_agent.clone();
     tier.skip_tls_verify = resolved.skip_tls_verify;
+    tier.supports_vision = resolved.accepts_images();
     tier.subagent_fast_provider = None;
     tier.subagent_capable_provider = None;
     tier.subagent_config = None;

@@ -233,6 +233,8 @@ enum ModelField {
     ApiKey,
     Model,
     Window,
+    /// Interactive: does this model accept image input?
+    SupportsVision,
     MakeDefault,
 }
 
@@ -265,6 +267,8 @@ struct ModelForm {
     api_key: String,
     model: String,
     window: String,
+    /// Whether the model accepts image inputs (written as TOML `image_input`).
+    supports_vision: bool,
     make_default: bool,
     focus: ModelField,
     /// When set, this is an edit of an existing model id (account locked).
@@ -293,6 +297,9 @@ impl ModelForm {
             api_key: String::new(),
             model: String::new(),
             window: String::new(),
+            // OpenAI / Anthropic protocol default: multimodal is on. User can
+            // Space-toggle off for text-only gateways.
+            supports_vision: true,
             make_default: true,
             focus: ModelField::Account,
             edit_id: None,
@@ -301,6 +308,12 @@ impl ModelForm {
 
     fn new_edit(config: &Config, id: &str) -> Option<Self> {
         let m = config.logical_models().get(id).cloned()?;
+        // Resolved accept value so the form shows the effective default when
+        // the profile left `supports_vision` unset.
+        let supports_vision = config
+            .resolve_model(Some(id))
+            .map(|r| r.accepts_images())
+            .unwrap_or_else(|_| m.supports_vision.unwrap_or(true));
         Some(Self {
             account_ids: vec![m.account.clone()],
             needs_key: vec![false], // account already exists; edit its key via 账号页
@@ -308,6 +321,7 @@ impl ModelForm {
             api_key: String::new(),
             model: m.model.clone(),
             window: m.context_window.to_string(),
+            supports_vision,
             make_default: config.effective_model_selection().as_deref() == Some(id),
             focus: ModelField::Model,
             edit_id: Some(id.to_string()),
@@ -336,6 +350,7 @@ impl ModelForm {
         }
         v.push(ModelField::Model);
         v.push(ModelField::Window);
+        v.push(ModelField::SupportsVision);
         v.push(ModelField::MakeDefault);
         v
     }
@@ -426,7 +441,9 @@ impl ProviderPanel {
                 ModelField::Window => form
                     .window
                     .extend(clean.chars().filter(char::is_ascii_digit)),
-                ModelField::Account | ModelField::MakeDefault => {}
+                ModelField::Account
+                | ModelField::MakeDefault
+                | ModelField::SupportsVision => {}
             },
             Mode::List => {
                 self.query.push_str(clean);
@@ -874,9 +891,11 @@ impl ProviderPanel {
             if let Some(m) = desired.models.get_mut(id) {
                 m.model = model_name.to_string();
                 m.context_window = context_window;
+                m.supports_vision = Some(form.supports_vision);
             } else if let Some(p) = desired.providers.get_mut(id) {
                 p.model = model_name.to_string();
                 p.context_window = context_window;
+                p.supports_vision = Some(form.supports_vision);
             }
             id.clone()
         } else {
@@ -910,6 +929,10 @@ impl ProviderPanel {
                     thinking_enabled: None,
                     thinking_budget: None,
                     pricing: None,
+                    // Explicit: the interactive form always persists the user's
+                    // choice as TOML `image_input` so paste/send gates don't
+                    // re-guess later.
+                    supports_vision: Some(form.supports_vision),
                 },
             );
             model_id
@@ -1079,6 +1102,11 @@ impl Modal for ProviderPanel {
                 KeyCode::Right if form.focus == ModelField::Account => form.cycle_account(true),
                 KeyCode::Char(' ') if form.focus == ModelField::MakeDefault => {
                     form.make_default = !form.make_default;
+                }
+                KeyCode::Char(' ') | KeyCode::Left | KeyCode::Right
+                    if form.focus == ModelField::SupportsVision =>
+                {
+                    form.supports_vision = !form.supports_vision;
                 }
                 KeyCode::Char(c) => match form.focus {
                     ModelField::ApiKey => form.api_key.push(c),
@@ -1520,6 +1548,15 @@ impl Modal for ProviderPanel {
                     &crate::i18n::t(crate::i18n::Msg::ProviderPanelFieldWindow),
                     win,
                     form.focus == ModelField::Window,
+                ));
+                items.push(field_row(
+                    &crate::i18n::t(crate::i18n::Msg::ProviderPanelFieldSupportsVision),
+                    if form.supports_vision {
+                        crate::i18n::t(crate::i18n::Msg::ProviderPanelVisionYes).into_owned()
+                    } else {
+                        crate::i18n::t(crate::i18n::Msg::ProviderPanelVisionNo).into_owned()
+                    },
+                    form.focus == ModelField::SupportsVision,
                 ));
                 items.push(field_row(
                     &crate::i18n::t(crate::i18n::Msg::ProviderPanelFieldMakeDefault),

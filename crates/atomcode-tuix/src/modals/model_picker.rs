@@ -365,6 +365,7 @@ mod tests {
                     ephemeral: false,
                     capable_model: None,
                     pricing: None,
+                    supports_vision: None,
                 },
             );
         }

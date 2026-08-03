@@ -209,7 +209,7 @@ const BUILTIN_COMMANDS: &[Command] = &[
     // `/paste` calls the same `try_paste_clipboard_image` →
     // `attach_image_to_input` pipeline directly so the user has a
     // terminal-agnostic way to attach an image. Works on every OS.
-    Command { name: "paste",   desc: "Attach an image from the clipboard (Windows fallback for Ctrl+V)", needs_args: false, hidden: false },
+    Command { name: "paste",   desc: "Attach an image from the clipboard (also Alt+V / Ctrl+Alt+V)", needs_args: false, hidden: false },
     Command { name: "copy",    desc: "Copy a code block from the last reply to the clipboard (/copy, /copy N, /copy all, /copy msg)", needs_args: false, hidden: false },
     Command { name: "save",    desc: "Save the current conversation to a markdown file (/save, /save [filename])", needs_args: false, hidden: false },
     Command { name: "view",    desc: "View file content in an overlay modal", needs_args: true, hidden: false },

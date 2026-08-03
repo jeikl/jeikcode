@@ -34,6 +34,8 @@ pub(crate) struct CreateProviderRequest {
     pub thinking_enabled: Option<bool>,
     pub thinking_budget: Option<u32>,
     pub pricing: Option<ProviderPricing>,
+    /// Whether the model accepts image inputs. Omitted → protocol default.
+    pub supports_vision: Option<bool>,
     #[serde(default)]
     pub skip_tls_verify: bool,
     #[serde(default)]
@@ -71,6 +73,9 @@ pub(crate) struct PatchProviderRequest {
     pub pricing: Option<Option<ProviderPricing>>,
     #[serde(default)]
     pub clear_pricing: bool,
+    pub supports_vision: Option<Option<bool>>,
+    #[serde(default)]
+    pub clear_supports_vision: bool,
 }
 
 /// PATCH /providers/:name/thinking - Update thinking settings.
@@ -171,6 +176,7 @@ pub(crate) async fn create_provider(Json(req): Json<CreateProviderRequest>) -> i
         ephemeral: false,
         capable_model: None,
         pricing: req.pricing,
+        supports_vision: req.supports_vision,
     };
 
     let mut is_new = false;
@@ -322,6 +328,11 @@ pub(crate) async fn patch_provider(
             existing.pricing = None;
         } else if let Some(value) = req.pricing {
             existing.pricing = value;
+        }
+        if req.clear_supports_vision {
+            existing.supports_vision = None;
+        } else if let Some(value) = req.supports_vision {
+            existing.supports_vision = value;
         }
         if final_name != name {
             let provider = config.providers.remove(&name).expect("validated above");

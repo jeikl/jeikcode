@@ -438,10 +438,12 @@ impl Config {
     /// but unresolvable" (a typo) and message accordingly.
     pub fn image_attach_support(&self) -> ImageAttachSupport {
         // Route through the single resolution boundary (§14.1) so both schemas
-        // work and the active model matches what the runtime builds.
+        // work and the active model matches what the runtime builds. Image
+        // support is config/protocol driven (`supports_vision` / OpenAI+Anthropic
+        // protocol default), not a model-name whitelist.
         let active_accepts = self
             .resolve_model(None)
-            .map(|r| crate::util::model_name_suggests_vision(&r.model))
+            .map(|r| r.accepts_images())
             .unwrap_or(false);
         if active_accepts {
             return ImageAttachSupport::Supported;
@@ -722,6 +724,7 @@ impl Config {
             thinking_budget: model.thinking_budget,
             capable_model: model.capable_model,
             pricing: model.pricing,
+            supports_vision: model.supports_vision,
         })
     }
 
@@ -928,6 +931,7 @@ fn project_legacy_model(account_id: &str, p: &ProviderConfig) -> ModelProfileCon
         thinking_enabled: p.thinking_enabled,
         thinking_budget: p.thinking_budget,
         pricing: p.pricing,
+        supports_vision: p.supports_vision,
     }
 }
 
@@ -2245,6 +2249,7 @@ model = "missing-type"
                 ephemeral: false,
                 capable_model: None,
                 pricing: None,
+                supports_vision: None,
             },
         );
         cfg.save(&tmp).unwrap();
@@ -2459,6 +2464,7 @@ model = "missing-type"
                 ephemeral: false,
                 capable_model: None,
                 pricing: None,
+                supports_vision: None,
             },
         );
         cfg.save(tmp.path()).unwrap();
@@ -2514,9 +2520,13 @@ model = "missing-type"
         );
     }
 
-    /// Helper: minimal Config with one provider, configurable model name +
-    /// optional preprocessor key. Used by the can_handle_attached_images tests.
-    fn cfg_with(active_model: &str, preprocessor_key: Option<&str>) -> Config {
+    /// Helper: minimal Config with one provider. `supports_vision` is the
+    /// explicit config flag (`None` = protocol default for openai/claude).
+    fn cfg_with(
+        active_model: &str,
+        supports_vision: Option<bool>,
+        preprocessor_key: Option<&str>,
+    ) -> Config {
         let mut providers = std::collections::HashMap::new();
         providers.insert(
             "active".to_string(),
@@ -2539,6 +2549,7 @@ model = "missing-type"
                 ephemeral: false,
                 capable_model: None,
                 pricing: None,
+                supports_vision,
             },
         );
         Config {
@@ -2550,15 +2561,18 @@ model = "missing-type"
 
     #[test]
     fn can_handle_attached_images_true_when_active_provider_accepts_images() {
-        // Vision-capable main provider — preprocessor irrelevant.
-        let cfg = cfg_with("claude-sonnet-4-5", None);
+        // Explicit vision flag, or OpenAI protocol default (unset).
+        let cfg = cfg_with("any-custom-model", Some(true), None);
         assert!(cfg.can_handle_attached_images());
+        // Unset + openai protocol → true (API multimodal contract).
+        assert!(cfg_with("deepseek-v4-flash", None, None).can_handle_attached_images());
     }
 
     #[test]
-    fn can_handle_attached_images_false_for_text_only_main_and_no_preprocessor() {
-        // The original gate's behaviour: refuse paste.
-        let cfg = cfg_with("deepseek-v4-flash", None);
+    fn can_handle_attached_images_false_for_explicit_text_only_and_no_preprocessor() {
+        // User (or CodingPlan) set supports_vision = false → refuse paste
+        // unless a VL preprocessor is configured.
+        let cfg = cfg_with("deepseek-v4-flash", Some(false), None);
         assert!(!cfg.can_handle_attached_images());
     }
 
@@ -2567,38 +2581,43 @@ model = "missing-type"
         // Configured but the key is missing from `providers`. Must NOT
         // accept the paste — the user would just hit `[图片识别失败]` on
         // every send. Better to surface the error at paste time.
-        let cfg = cfg_with("deepseek-v4-flash", Some("NoSuchProvider"));
+        let cfg = cfg_with("deepseek-v4-flash", Some(false), Some("NoSuchProvider"));
         assert!(!cfg.can_handle_attached_images());
     }
 
     #[test]
     fn can_handle_attached_images_false_when_preprocessor_key_is_empty_string() {
-        let cfg = cfg_with("deepseek-v4-flash", Some(""));
+        let cfg = cfg_with("deepseek-v4-flash", Some(false), Some(""));
         assert!(!cfg.can_handle_attached_images());
     }
 
     #[test]
     fn image_attach_support_distinguishes_unconfigured_from_misconfigured() {
         use super::ImageAttachSupport as S;
-        // Text-only main, nothing set → Unconfigured.
+        // Explicit text-only main, nothing set → Unconfigured.
         assert_eq!(
-            cfg_with("deepseek-v4-flash", None).image_attach_support(),
+            cfg_with("deepseek-v4-flash", Some(false), None).image_attach_support(),
             S::Unconfigured
         );
         // Empty string is treated as unset, not a misconfigured name.
         assert_eq!(
-            cfg_with("deepseek-v4-flash", Some("")).image_attach_support(),
+            cfg_with("deepseek-v4-flash", Some(false), Some("")).image_attach_support(),
             S::Unconfigured
         );
         // Configured but the name doesn't resolve → names the offending value
         // so the gate can say "typo" instead of the misleading "未配置".
         assert_eq!(
-            cfg_with("deepseek-v4-flash", Some("NoSuchProvider")).image_attach_support(),
+            cfg_with("deepseek-v4-flash", Some(false), Some("NoSuchProvider"))
+                .image_attach_support(),
             S::PreprocessorUnresolvable("NoSuchProvider".to_string())
         );
-        // Active vision model → Supported regardless of preprocessor.
+        // Explicit vision / protocol default → Supported regardless of preprocessor.
         assert_eq!(
-            cfg_with("claude-sonnet-4-5", None).image_attach_support(),
+            cfg_with("any-custom", Some(true), None).image_attach_support(),
+            S::Supported
+        );
+        assert_eq!(
+            cfg_with("any-custom", None, None).image_attach_support(),
             S::Supported
         );
     }
@@ -2606,7 +2625,7 @@ model = "missing-type"
     #[test]
     fn can_handle_attached_images_true_when_preprocessor_resolves() {
         // Main is text-only but a preprocessor is configured + present.
-        let mut cfg = cfg_with("deepseek-v4-flash", Some("vl-helper"));
+        let mut cfg = cfg_with("deepseek-v4-flash", Some(false), Some("vl-helper"));
         cfg.providers.insert(
             "vl-helper".into(),
             crate::config::provider::ProviderConfig {
@@ -2628,6 +2647,7 @@ model = "missing-type"
                 ephemeral: false,
                 capable_model: None,
                 pricing: None,
+                supports_vision: Some(true),
             },
         );
         assert!(cfg.can_handle_attached_images());
@@ -2823,6 +2843,7 @@ capable_model = 5
                 thinking_enabled: None,
                 thinking_budget: None,
                 pricing: None,
+                supports_vision: None,
             },
         );
         let rendered = cfg.serialize_for_disk(None).unwrap();
@@ -2871,6 +2892,7 @@ capable_model = 5
                 thinking_enabled: None,
                 thinking_budget: None,
                 pricing: None,
+                supports_vision: None,
             },
         );
         cfg.default_model = Some("nope".into()); // unresolvable default → error

@@ -73,9 +73,11 @@ fn get_user_home(_username: &str) -> Option<PathBuf> {
 }
 
 /// Heuristic: does this model name look vision-capable? Verbatim copy of
-/// `atomcode_core::provider::model_name_suggests_vision` (and
-/// `atomcode_capabilities::provider::model_suggests_vision`). Used by
-/// `ProviderConfig::accepts_images`. MUST stay in sync with those copies.
+/// `atomcode_capabilities::provider::model_suggests_vision`. Fallback only —
+/// preferred path is explicit `supports_vision` on the model/provider config,
+/// with OpenAI/Anthropic protocol defaulting to true when unset (see
+/// [`crate::config::provider::resolve_supports_vision`]). MUST stay in sync
+/// with the capabilities copy.
 pub fn model_name_suggests_vision(name: &str) -> bool {
     let n = name.to_lowercase();
     n.contains("vision")

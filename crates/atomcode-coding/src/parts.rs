@@ -24,7 +24,7 @@ use atomcode_capabilities::cc_hooks::{CCExternalHooks, HookConfig};
 use atomcode_capabilities::codeintel::register_codeintel_tools;
 use atomcode_capabilities::mcp::{self, McpConnectEvent, McpRegistry};
 use atomcode_capabilities::memory::MemoryHook;
-use atomcode_capabilities::provider::model_suggests_vision;
+
 use atomcode_capabilities::session::snapshot::SnapshotPersistenceStatus;
 use atomcode_capabilities::session::{
     PresentationFile, RecallTool, SessionContextHook, SessionLease, SessionManager, SessionMeta,
@@ -266,11 +266,11 @@ async fn prepare_with_plugin_hooks_reusing_lease(
 
     // Always-on core: neutral fs/bash toolset + codeintel. Vision gating: a VL model
     // (e.g. Qwen3-VL) makes read_file hand image files to the model as pictures. Uses the
-    // SAME canonical detector as the user-paste path (`model_suggests_vision`) so one
+    // SAME flag as the user-paste path (`cfg.supports_vision`) so one
     // model can't accept a pasted image yet refuse a read_file image. NOTE: this is the
     // PREPARE-time flag; `assemble` re-registers read_file on every model swap (see there)
     // so a `/model` change to/from a VL model can't leave it stale.
-    register_coding_tools_with_vision(&mut registry, model_suggests_vision(&cfg.model));
+    register_coding_tools_with_vision(&mut registry, cfg.supports_vision);
     names.extend(
         atomcode_capabilities::tools::coding_tool_names()
             .iter()
@@ -1126,9 +1126,7 @@ pub fn assemble(
     // `review_provider` slot below.
     parts
         .registry
-        .register(Arc::new(ReadFileTool::new(model_suggests_vision(
-            &cfg.model,
-        ))));
+        .register(Arc::new(ReadFileTool::new(cfg.supports_vision)));
 
     // Session-bound: reload the complete canonical aggregate. Only a fresh
     // runtime intentionally staged in memory is allowed to assemble before its

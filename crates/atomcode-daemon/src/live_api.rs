@@ -329,6 +329,7 @@ pub(crate) fn chat_runtime_config(
         pricing: p.and_then(|provider| {
             atomcode_coding::resolve_provider_pricing(provider_name, provider)
         }),
+        supports_vision: p.map(|provider| provider.accepts_images()).unwrap_or(false),
     }
 }
 
@@ -1120,7 +1121,27 @@ pub(crate) async fn preprocess_image_caption(
         run_vl_caption, should_skip, vl_model_display, PreprocessOutcome,
     };
     // Short-circuit: no images, or the main model already accepts images.
-    if should_skip(active_model, !images.is_empty()) {
+    // Prefer the resolved selection's config/protocol flag over model-name guessing.
+    let supports_vision = config
+        .resolve_model(None)
+        .ok()
+        .filter(|r| r.model == active_model || r.selection_id == active_model)
+        .map(|r| r.accepts_images())
+        .or_else(|| {
+            config.logical_models().into_iter().find_map(|(id, m)| {
+                (m.model == active_model || id == active_model)
+                    .then(|| config.resolve_model(Some(&id)).ok().map(|r| r.accepts_images()))
+                    .flatten()
+            })
+        })
+        .unwrap_or_else(|| {
+            // Last resort: protocol default for openai/anthropic if we know the type.
+            config
+                .provider_config_for_selection(active_model)
+                .map(|p| p.accepts_images())
+                .unwrap_or(false)
+        });
+    if should_skip(supports_vision, !images.is_empty()) {
         return message.to_string();
     }
     // Nothing configured (None or empty) ⇒ pass through unchanged (Skipped).

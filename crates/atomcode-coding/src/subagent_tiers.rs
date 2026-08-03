@@ -67,6 +67,7 @@ mod tests {
             ephemeral: false,
             capable_model: capable,
             pricing: None,
+            supports_vision: None,
         }
     }
 

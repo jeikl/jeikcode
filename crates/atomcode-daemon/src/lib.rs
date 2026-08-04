@@ -1683,9 +1683,9 @@ fn first_query_value(query: &str, key: &str) -> Option<String> {
 }
 
 /// Drop every `key=…` pair from a raw query string, preserving the rest
-/// verbatim. Used by unit tests; the SPA now strips `token` client-side after
-/// capture (see webui `captureWebuiToken`).
-#[cfg_attr(not(test), allow(dead_code))]
+/// verbatim. Only used in unit tests (SPA strips `token` client-side after
+/// capture; see webui `captureWebuiToken`).
+#[cfg(test)]
 fn strip_query_key(query: &str, key: &str) -> String {
     query
         .split('&')

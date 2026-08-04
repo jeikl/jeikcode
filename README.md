@@ -121,8 +121,28 @@ Connect to any LLM that supports OpenAI's function-calling API:
 ### Web UI
 
 - **`/webui`** (in the TUI) or **`atomcode webui`** (CLI) launches a local browser UI as an alternative to the terminal interface — same agent, same sessions, rendered in your browser
-- **Loopback only** — the server binds to `127.0.0.1` and uses a one-time token; nothing is exposed to the network
+- **Loopback only (default)** — the in-process server binds to `127.0.0.1` and uses a one-time token; nothing is exposed to the network
 - **`/webui stop`** stops the in-process server (a later `/webui` restarts it)
+
+### Headless remote serve (multi-instance)
+
+For multi-project / LAN access without relying on a fixed default port and a manual `/webui`:
+
+```bash
+# Start in a project (custom host/port; access token by default)
+atomcode serve --host 0.0.0.0 --port 4096
+
+# Or pin a directory
+atomcode serve --host 0.0.0.0 --port 4097 --dir /path/to/other-project
+
+# Open the Web UI from another machine (treat the token URL as a password)
+atomcode attach http://192.168.x.x:4096 --token <token>
+```
+
+- **`--host` / `--port`** — run multiple serve instances (one port per project)
+- **`0.0.0.0`** — listen on all interfaces; tries IPv6 dual-stack `[::]` when possible
+- **Token by default** — protects the Web UI/API. Use only on trusted LAN / VPN / SSH tunnels. Optional `--no-token` (insecure)
+- Startup prints local/remote URLs and attach examples at the **bottom** of the log (after the API catalog)
 
 ### App Remote Access
 

@@ -2944,6 +2944,16 @@ fn spawn_runtime_owner_with_optional_agent(
                             let _ = done.send(Err(error));
                             continue;
                         }
+                        // The real-user submit boundary owns per-turn execution intent.
+                        // Update before forwarding (including steer) so a newly received
+                        // "do not compile/run scripts" instruction blocks later Bash calls
+                        // from an already-active turn without waiting for another LLM round.
+                        if let Some(runtime) = resources.as_ref() {
+                            runtime
+                                .parts
+                                .turn_execution_policy
+                                .update_from_user_text(&input.text);
+                        }
                         let receipt = if let Some(turn_id) = active_turn {
                             SubmitReceipt::Steered { generation, turn_id }
                         } else {
@@ -3936,7 +3946,13 @@ fn spawn_runtime_owner_with_optional_agent(
                                 crate::SessionMode::Fresh | crate::SessionMode::Disabled => None,
                             })
                             .is_some_and(|(current, target)| current.id == *target);
-                        if active_turn.is_some() && reuses_current_session {
+                        let changes_session = matches!(
+                            operation,
+                            ReconfigureKind::FreshSession
+                                | ReconfigureKind::ResumeSession
+                                | ReconfigureKind::ChangeDirectory
+                        );
+                        if active_turn.is_some() && (reuses_current_session || changes_session) {
                             resources = Some(runtime);
                             let _ = done.send(Err(RuntimeError::Busy));
                             continue;
@@ -4901,14 +4917,13 @@ fn spawn_runtime_owner_with_optional_agent(
                                 ));
                             }
                             AgentEvent::TurnComplete { reason } => {
-                                if let Some(warning) =
-                                    resources.as_ref().and_then(|runtime| {
-                                        runtime.parts.take_cost_persistence_warning()
-                                    })
-                                {
-                                    let _ = runtime_event_tx
-                                        .send(CodingRuntimeEvent::ControllerWarning(warning));
-                                }
+                                let persistence_status = resources.as_ref().and_then(|runtime| {
+                                    runtime.parts.snapshot_persistence_status()
+                                });
+                                emit_terminal_persistence_warnings(
+                                    persistence_status.as_ref(),
+                                    &runtime_event_tx,
+                                );
                                 turn_stats.duration = turn_started_at
                                     .take()
                                     .map(|started| started.elapsed())
@@ -6273,6 +6288,7 @@ async fn stop_current_agent(
 ) -> StopReport {
     let Some(mut agent) = agent.take() else {
         compactions.interrupt_all(reason, runtime_event_tx);
+        emit_terminal_persistence_warnings(persistence_status.as_ref(), runtime_event_tx);
         return StopReport {
             persistence_failure: persistence_status
                 .and_then(|status| status.take_uncertain_commit()),
@@ -6334,9 +6350,25 @@ async fn stop_current_agent(
         }
     }
     compactions.interrupt_all(reason, runtime_event_tx);
+    emit_terminal_persistence_warnings(persistence_status.as_ref(), runtime_event_tx);
     report.persistence_failure =
         persistence_status.and_then(|status| status.take_uncertain_commit());
     report
+}
+
+fn emit_terminal_persistence_warnings(
+    persistence_status: Option<&SnapshotPersistenceStatus>,
+    runtime_event_tx: &RuntimeEventEmitter,
+) {
+    let Some(status) = persistence_status else {
+        return;
+    };
+    if let Some(warning) = status.take_auxiliary_warning() {
+        let _ = runtime_event_tx.send(CodingRuntimeEvent::ControllerWarning(warning));
+    }
+    if let Some(warning) = status.take_cost_warning() {
+        let _ = runtime_event_tx.send(CodingRuntimeEvent::ControllerWarning(warning));
+    }
 }
 
 fn finish_stopped_native_turn(
@@ -6585,6 +6617,33 @@ impl Error for RuntimeUnavailable {}
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn terminal_persistence_warnings_are_emitted_once() {
+        let status = SnapshotPersistenceStatus::default();
+        status.report_auxiliary_warning("transcript write failed");
+        status.report_cost_warning("cost write failed");
+        let (raw, mut events) = mpsc::unbounded_channel();
+        let event_tx = RuntimeEventEmitter {
+            raw,
+            tagged: None,
+            generation: Arc::new(AtomicU64::new(0)),
+        };
+
+        emit_terminal_persistence_warnings(Some(&status), &event_tx);
+        emit_terminal_persistence_warnings(Some(&status), &event_tx);
+
+        assert!(matches!(
+            events.try_recv(),
+            Ok(CodingRuntimeEvent::ControllerWarning(message))
+                if message == "transcript write failed"
+        ));
+        assert!(matches!(
+            events.try_recv(),
+            Ok(CodingRuntimeEvent::ControllerWarning(message)) if message == "cost write failed"
+        ));
+        assert!(events.try_recv().is_err());
+    }
 
     struct TestProviderFactory {
         fail: bool,
@@ -7177,6 +7236,7 @@ mod tests {
         CodingRuntimeStart {
             agent: CodingAgentConfig::new("key", "https://example.test/v1", "test", "."),
             prepare: PrepareOptions {
+                request_user_input: true,
                 session: crate::SessionMode::Disabled,
                 skill_dirs: Some(Vec::new()),
                 plugin_skill_dirs: Vec::new(),
@@ -10326,7 +10386,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn reprepare_preflight_failure_does_not_stop_active_agent() {
+    async fn session_transitions_are_rejected_before_preflight_while_turn_is_active() {
         let (agent, mut kernel_commands, _kernel_events) = fake_agent();
         let (handle, controls) = coding_runtime_control_channel();
         let (runtime_tx, mut runtime_events) = mpsc::unbounded_channel();
@@ -10373,17 +10433,20 @@ mod tests {
         ));
 
         let missing_session_id = format!("missing-{}", uuid::Uuid::new_v4());
-        assert!(matches!(
+        assert_eq!(
             handle.resume_session(missing_session_id).await,
-            Err(RuntimeError::ReconfigureFailed(_))
-        ));
+            Err(RuntimeError::Busy)
+        );
+        assert_eq!(handle.fresh_session().await, Err(RuntimeError::Busy));
+        let other_dir = tempfile::tempdir().unwrap();
+        assert_eq!(
+            handle
+                .change_directory(other_dir.path().to_path_buf())
+                .await,
+            Err(RuntimeError::Busy)
+        );
         assert_eq!(handle.status().phase, RuntimePhase::InTurn);
-        assert!(matches!(
-            runtime_events.recv().await,
-            Some(CodingRuntimeEvent::Reconfiguring {
-                operation: ReconfigureKind::ResumeSession
-            })
-        ));
+        assert!(runtime_events.try_recv().is_err());
         assert!(kernel_commands.try_recv().is_err());
 
         handle.shutdown().await.unwrap();
@@ -10391,7 +10454,7 @@ mod tests {
 
     #[tokio::test]
     #[serial_test::serial(atomcode_home)]
-    async fn fresh_session_clears_held_loop_without_duplicate_terminal() {
+    async fn fresh_session_rejects_a_held_loop_without_cancelling_it() {
         let (agent, mut kernel_commands, kernel_events) = fake_agent();
         let (handle, controls) = coding_runtime_control_channel();
         let (runtime_tx, mut runtime_events) = mpsc::unbounded_channel();
@@ -10458,14 +10521,12 @@ mod tests {
             })
             .unwrap();
 
-        let changed = handle.fresh_session().await.unwrap();
-        assert_eq!(changed.generation, RuntimeGeneration(1));
-        assert!(matches!(
-            runtime_events.recv().await,
-            Some(CodingRuntimeEvent::Reconfiguring {
-                operation: ReconfigureKind::FreshSession
-            })
-        ));
+        assert_eq!(handle.fresh_session().await, Err(RuntimeError::Busy));
+        assert_eq!(handle.status().phase, RuntimePhase::InTurn);
+        assert!(runtime_events.try_recv().is_err());
+        assert!(kernel_commands.try_recv().is_err());
+
+        handle.stop_loop().await.unwrap();
         assert!(matches!(
             runtime_events.recv().await,
             Some(CodingRuntimeEvent::LoopChanged(LoopProgress {
@@ -10484,21 +10545,11 @@ mod tests {
             ))
         ));
         assert!(matches!(
-            runtime_events.recv().await,
-            Some(CodingRuntimeEvent::SessionChanged(SessionChanged {
-                generation: RuntimeGeneration(1),
-                ..
-            }))
-        ));
-        assert!(matches!(
-            runtime_events.recv().await,
-            Some(CodingRuntimeEvent::Reconfigured {
-                operation: ReconfigureKind::FreshSession
-            })
+            kernel_commands.recv().await,
+            Some(AgentCommand::Cancel)
         ));
         assert_eq!(handle.status().phase, RuntimePhase::Ready);
 
-        handle.stop_loop().await.unwrap();
         assert!(runtime_events.try_recv().is_err());
         handle.shutdown().await.unwrap();
     }
@@ -11226,7 +11277,18 @@ mod tests {
         assert_eq!(catalog.points.len(), 1);
         assert_eq!(catalog.points[0].prompt_number, 1);
         assert_eq!(catalog.points[0].prompt_preview, "first rewind prompt");
-        assert_eq!(catalog.code_unavailable, None);
+        assert!(catalog
+            .code_unavailable
+            .as_deref()
+            .is_some_and(|reason| reason.contains("temporarily disabled")));
+
+        let code_error = runtime
+            .handle
+            .rewind(catalog.points[0].turn_id, RewindScope::Code)
+            .await
+            .unwrap_err();
+        assert!(matches!(code_error, RuntimeError::CodeRewindUnavailable(_)));
+        assert_eq!(runtime.handle.status().phase, RuntimePhase::Ready);
 
         let result = runtime
             .handle
@@ -11302,6 +11364,7 @@ mod tests {
 
     #[tokio::test]
     #[serial_test::serial(atomcode_home)]
+    #[ignore = "workspace Rewind is intentionally disabled in v5.0.4"]
     async fn code_only_rewind_restores_workspace_but_keeps_conversation() {
         let (_home, _project, generated, runtime, point) = mutating_rewind_runtime(false).await;
 
@@ -11332,6 +11395,7 @@ mod tests {
 
     #[tokio::test]
     #[serial_test::serial(atomcode_home)]
+    #[ignore = "workspace Rewind is intentionally disabled in v5.0.4"]
     async fn combined_rewind_restores_workspace_and_conversation() {
         let (_home, _project, generated, runtime, point) = mutating_rewind_runtime(false).await;
 
@@ -11365,6 +11429,7 @@ mod tests {
 
     #[tokio::test]
     #[serial_test::serial(atomcode_home)]
+    #[ignore = "workspace Rewind is intentionally disabled in v5.0.4"]
     async fn code_rewind_preserves_workspace_changes_made_after_the_turn() {
         let (_home, _project, generated, runtime, point) = mutating_rewind_runtime(false).await;
         std::fs::write(&generated, "user changed this after the turn\n").unwrap();
@@ -11386,6 +11451,7 @@ mod tests {
 
     #[tokio::test]
     #[serial_test::serial(atomcode_home)]
+    #[ignore = "workspace Rewind is intentionally disabled in v5.0.4"]
     async fn combined_rewind_compensates_workspace_when_agent_rebuild_fails() {
         let (_home, _project, generated, runtime, point) = mutating_rewind_runtime(true).await;
 
@@ -11415,6 +11481,7 @@ mod tests {
 
     #[tokio::test]
     #[serial_test::serial(atomcode_home)]
+    #[ignore = "workspace Rewind is intentionally disabled in v5.0.4"]
     async fn cancelled_rewind_transaction_compensates_and_releases_runtime() {
         let (_home, _project, generated, runtime, point) = mutating_rewind_runtime(false).await;
         let catalog = runtime.handle.rewind_points().await.unwrap();
@@ -11459,6 +11526,7 @@ mod tests {
 
     #[tokio::test]
     #[serial_test::serial(atomcode_home)]
+    #[ignore = "workspace Rewind is intentionally disabled in v5.0.4"]
     async fn cancelled_begin_receiver_is_recovered_by_runtime_owner() {
         let (_home, _project, generated, runtime, point) = mutating_rewind_runtime(false).await;
         let catalog = runtime.handle.rewind_points().await.unwrap();
@@ -11500,6 +11568,7 @@ mod tests {
 
     #[tokio::test]
     #[serial_test::serial(atomcode_home)]
+    #[ignore = "workspace Rewind is intentionally disabled in v5.0.4"]
     async fn abandoned_rewind_recovers_after_undo_advances_generation() {
         let (_home, _project, _generated, runtime, point) = mutating_rewind_runtime(false).await;
         let catalog = runtime.handle.rewind_points().await.unwrap();
@@ -11551,6 +11620,7 @@ mod tests {
 
     #[tokio::test]
     #[serial_test::serial(atomcode_home)]
+    #[ignore = "workspace Rewind is intentionally disabled in v5.0.4"]
     async fn rewind_from_stale_catalog_is_not_reinterpreted_against_live_state() {
         let (_home, _project, _generated, runtime, point) = mutating_rewind_runtime(false).await;
         let mut stale = runtime.handle.rewind_points().await.unwrap();

@@ -105,8 +105,8 @@ pub struct ProviderConfig {
     pub pricing: Option<ProviderPricing>,
     /// Whether this model accepts image inputs on the wire (OpenAI
     /// `image_url` / Anthropic base64 `image` blocks). `None` = unset —
-    /// resolved by [`resolve_supports_vision`] (OpenAI/Anthropic protocol
-    /// defaults to true; other types fall back to the model-name heuristic).
+    /// resolved by [`resolve_supports_vision`] (opt-in: openai/claude/anthropic
+    /// default **false**; other types fall back to the model-name heuristic).
     ///
     /// TOML key is **`image_input`** on both legacy `[providers.*]` and new
     /// `[models.*]` entries. The older name `supports_vision` is still accepted
@@ -124,10 +124,12 @@ pub struct ProviderConfig {
 ///
 /// Priority:
 /// 1. Explicit `image_input` / `supports_vision` in config (`Some(true|false)`)
-/// 2. OpenAI-compatible / Anthropic Messages protocol → `true` (multimodal
-///    content is part of the API contract; base64 is sent with the current
-///    session model id — not gated on a model-name whitelist)
+/// 2. OpenAI-compatible / Anthropic Messages protocol → `false` (opt-in;
+///    avoids pure-text gateways 400ing on accidental multimodal payloads)
 /// 3. Other provider types (e.g. ollama) → model-name heuristic
+///
+/// When the main model accepts images, paste/send go straight to it and VL
+/// preprocessing is skipped — even if `vision_preprocessor_provider` is set.
 pub fn resolve_supports_vision(
     explicit: Option<bool>,
     provider_type: &str,
@@ -137,7 +139,7 @@ pub fn resolve_supports_vision(
         return v;
     }
     match provider_type {
-        "openai" | "claude" | "anthropic" => true,
+        "openai" | "claude" | "anthropic" => false,
         _ => crate::util::model_name_suggests_vision(model),
     }
 }
@@ -311,7 +313,7 @@ impl ResolvedModelConfig {
 impl ProviderConfig {
     /// True if this provider's active model can accept image inputs.
     /// Honors explicit `supports_vision` when set; otherwise OpenAI/Anthropic
-    /// protocol defaults to true, other types use the model-name heuristic.
+    /// protocol defaults to false (opt-in), other types use the model-name heuristic.
     pub fn accepts_images(&self) -> bool {
         resolve_supports_vision(self.supports_vision, &self.provider_type, &self.model)
     }
@@ -492,9 +494,7 @@ output_per_million = 0
 
     #[test]
     fn accepts_images_false_for_text_only_model() {
-        // OpenAI protocol defaults to accepting images when unset; text-only
-        // deployments must set image_input = false so paste/send refuse the
-        // doomed multimodal request before it hits the gateway.
+        // OpenAI protocol defaults to false when unset (opt-in multimodal).
         let toml_str = r#"
             type = "openai"
             model = "GLM-5.1"
@@ -504,7 +504,7 @@ output_per_million = 0
         "#;
         let cfg: ProviderConfig = toml::from_str(toml_str).expect("parse");
         assert!(!cfg.accepts_images());
-        // Unset + openai protocol → true (API multimodal contract).
+        // Unset + openai protocol → false.
         let open: ProviderConfig = toml::from_str(
             r#"
             type = "openai"
@@ -513,14 +513,26 @@ output_per_million = 0
         "#,
         )
         .expect("parse");
-        assert!(open.accepts_images());
+        assert!(!open.accepts_images());
+        // Explicit true still wins for custom VL gateways.
+        let vl: ProviderConfig = toml::from_str(
+            r#"
+            type = "openai"
+            model = "my-vl"
+            api_key = "sk-test"
+            image_input = true
+        "#,
+        )
+        .expect("parse");
+        assert!(vl.accepts_images());
     }
 
     #[test]
     fn accepts_images_true_via_heuristic_on_known_vision_model() {
+        // Non-OpenAI/Anthropic types still use the model-name heuristic.
         let toml_str = r#"
-            type = "claude"
-            model = "claude-sonnet-4-5"
+            type = "ollama"
+            model = "llava"
             api_key = "sk-test"
         "#;
         let cfg: ProviderConfig = toml::from_str(toml_str).expect("parse");
@@ -586,10 +598,10 @@ output_per_million = 0
     fn resolve_supports_vision_prefers_explicit_then_protocol() {
         assert!(resolve_supports_vision(Some(true), "openai", "deepseek-chat"));
         assert!(!resolve_supports_vision(Some(false), "openai", "gpt-4o"));
-        // Unset + OpenAI/Anthropic protocol → true (API multimodal contract).
-        assert!(resolve_supports_vision(None, "openai", "any-custom-model"));
-        assert!(resolve_supports_vision(None, "claude", "any-custom-model"));
-        assert!(resolve_supports_vision(None, "anthropic", "any-custom-model"));
+        // Unset + OpenAI/Anthropic protocol → false (opt-in).
+        assert!(!resolve_supports_vision(None, "openai", "any-custom-model"));
+        assert!(!resolve_supports_vision(None, "claude", "any-custom-model"));
+        assert!(!resolve_supports_vision(None, "anthropic", "any-custom-model"));
         // Ollama falls back to the name heuristic.
         assert!(!resolve_supports_vision(None, "ollama", "llama3"));
         assert!(resolve_supports_vision(None, "ollama", "llava"));

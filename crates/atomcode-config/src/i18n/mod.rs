@@ -621,6 +621,14 @@ mod tests {
         assert!(zh_hint.contains("Ctrl+Dx2"));
         assert!(en_hint.contains("Ctrl+A") && en_hint.contains("Ctrl+E"));
         assert!(zh_hint.contains("Ctrl+A") && zh_hint.contains("Ctrl+E"));
+        assert_eq!(
+            t_with(Locale::En, Msg::ProviderPanelAddModelRow),
+            "+ Add model"
+        );
+        assert_eq!(
+            t_with(Locale::ZhCn, Msg::ProviderPanelAddModelRow),
+            "＋ 添加模型"
+        );
 
         assert_eq!(
             t_with(Locale::En, Msg::ProviderPanelEmptyModels),
@@ -648,6 +656,14 @@ mod tests {
                 }
             ),
             "已保存模型“deepseek-chat”。"
+        );
+        assert_eq!(
+            t_with(Locale::En, Msg::ProviderPanelImageDirectWhileVlSet),
+            "Images go to this model; turn off image input to use VL."
+        );
+        assert_eq!(
+            t_with(Locale::ZhCn, Msg::ProviderPanelImageDirectWhileVlSet),
+            "贴图将直发本模型；要用 VL 请关闭「支持图片输入」。"
         );
 
         let en_row = t_with(Locale::En, Msg::ProviderPanelModelCount { count: 3 });

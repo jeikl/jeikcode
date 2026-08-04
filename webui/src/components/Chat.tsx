@@ -38,6 +38,7 @@ import {
 } from '../lib/slashCommands';
 import { resolvePendingAfterDecision } from '../lib/pendingPermission';
 import { beginModeSwitch, completeModeSwitch, failModeSwitch, initModeState } from '../lib/modeSwitch';
+import { randomUUID } from '../lib/randomId';
 import { Markdown } from './Markdown';
 import { ModelSelector } from './ModelSelector';
 import { ModeSelector } from './ModeSelector';
@@ -53,7 +54,16 @@ import {
   ensureActiveDescendantVisible,
   splitAtToken,
 } from '../lib/atMention';
-import { toolResultStatus, updateToolProgress, upsertToolPart, type ToolRow, type MsgPart } from '../lib/toolRows';
+import {
+  appendReasoningPart,
+  toolResultStatus,
+  updateToolProgress,
+  upsertToolPart,
+  type ToolRow,
+  type MsgPart,
+} from '../lib/toolRows';
+import { applySubtaskProgress, subtasksFromTaskArgs, subtaskCounts } from '../lib/subtasks';
+import { displayPath, pathBasename } from '../lib/displayPath';
 import { isInternalHistoryAssistantMessage, isInternalHistoryUserMessage } from '../lib/historyMessages';
 import {
   chatRecoveryPolicy,
@@ -90,9 +100,12 @@ interface QueuedMessage {
   approvalMode: ApprovalMode;
 }
 
-/** Concatenate all text segments (error-detection, skill-title, etc.). */
+/** Concatenate all text segments (error-detection, skill-title, search, etc.). */
 function messageText(m: Message): string {
-  return m.parts.reduce((acc, p) => (p.kind === 'text' ? acc + p.text : acc), '');
+  return m.parts.reduce((acc, p) => {
+    if (p.kind === 'text' || p.kind === 'reasoning') return acc + p.text;
+    return acc;
+  }, '');
 }
 
 /** Zero-pad a number to 2 digits — shared by formatMsgTime / formatMsgTimeFull. */
@@ -1674,13 +1687,29 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
         appendToLastAssistant(event.content);
         break;
 
+      case 'reasoning':
+        // Thinking / chain-of-thought stream — collapsible block in the UI.
+        setMessages((prev) => {
+          if (prev.length === 0) return prev;
+          const last = prev[prev.length - 1];
+          if (last.role !== 'assistant') return prev;
+          return [
+            ...prev.slice(0, -1),
+            { ...last, parts: appendReasoningPart(last.parts, event.content) },
+          ];
+        });
+        break;
+
       case 'tool_start': {
         const argsStr = formatArgs(event.arguments);
+        const subtasks =
+          event.name === 'task' ? subtasksFromTaskArgs(argsStr) ?? undefined : undefined;
         addToolToLastAssistant({
           id: event.id,
           name: event.name,
           args: argsStr,
           status: 'pending',
+          ...(subtasks ? { subtasks } : {}),
         });
         break;
       }
@@ -1694,9 +1723,22 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
           if (prev.length === 0) return prev;
           const last = prev[prev.length - 1];
           if (last.role !== 'assistant') return prev;
+          // Find the tool so we can fold progress into parallel subtask rows
+          // when this is a `task` fan-out (TUI subtask panel parity).
+          let patch: Partial<ToolRow> | undefined;
+          for (const p of last.parts) {
+            if (p.kind === 'tool' && p.tool.id === event.id && p.tool.subtasks) {
+              const next = applySubtaskProgress(p.tool.subtasks, event.progress);
+              if (next !== p.tool.subtasks) patch = { subtasks: next };
+              break;
+            }
+          }
           return [
             ...prev.slice(0, -1),
-            { ...last, parts: updateToolProgress(last.parts, event.id, event.progress) },
+            {
+              ...last,
+              parts: updateToolProgress(last.parts, event.id, event.progress, patch),
+            },
           ];
         });
         break;
@@ -1925,7 +1967,8 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
 
     const controller = new AbortController();
     abortRef.current = controller;
-    const requestId = crypto.randomUUID();
+    // Not crypto.randomUUID(): unavailable on http://LAN-IP (non-secure context).
+    const requestId = randomUUID();
     requestIdRef.current = requestId;
     const requestGeneration = sessionGenerationRef.current;
     let keepStopAlias = false;
@@ -2423,14 +2466,9 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [skillInsert]);
 
-  // 落地页副标题：项目名 + 缩写路径。
-  const cleanCwd = cwd.replace(/\/+$/, '');
-  const cwdIdx = cleanCwd.lastIndexOf('/');
-  const projName = cwdIdx >= 0 ? cleanCwd.slice(cwdIdx + 1) : cleanCwd;
-  const projPath =
-    cleanCwd.startsWith('/Users/') || cleanCwd.startsWith('/home/')
-      ? '~/' + cleanCwd.split('/').slice(3).join('/')
-      : cleanCwd;
+  // 落地页副标题：项目名 + 缩写路径（剥掉 Windows `\\?\` 扩展前缀）。
+  const projName = pathBasename(cwd);
+  const projPath = displayPath(cwd);
 
   // 输入框只渲染一份，按落地/常规两处择一挂载（避免两个 textarea 抢同一 ref）。
   const inputBox = (
@@ -3105,6 +3143,9 @@ function renderAssistantParts(parts: MsgPart[], search: string): VNode[] {
           ))}
         </div>,
       );
+    } else if (p.kind === 'reasoning') {
+      out.push(<ReasoningBlock key={`rs-${i}`} text={p.text} search={search} />);
+      i++;
     } else if (p.kind === 'notice') {
       out.push(
         <div class="msg-notice" key={`nt-${i}`}>
@@ -3125,6 +3166,36 @@ function renderAssistantParts(parts: MsgPart[], search: string): VNode[] {
     }
   }
   return out;
+}
+
+/** Collapsible thinking / reasoning block (chain-of-thought stream). */
+function ReasoningBlock({ text, search }: { text: string; search: string }) {
+  const t = useT();
+  // Default expanded while streaming (short / growing); collapse once settled
+  // if the user prefers — start open so live thinking is visible.
+  const [open, setOpen] = useState(true);
+  if (!text.trim()) return null;
+  return (
+    <div class={'reasoning-block' + (open ? ' is-open' : '')}>
+      <button
+        type="button"
+        class="reasoning-toggle"
+        onClick={() => setOpen((v) => !v)}
+        aria-expanded={open}
+      >
+        <span class="reasoning-icon" aria-hidden="true">
+          ✦
+        </span>
+        <span class="reasoning-label">{t('chat.thinking')}</span>
+        <span class={'reasoning-chevron' + (open ? ' expanded' : '')}>▾</span>
+      </button>
+      {open && (
+        <div class="reasoning-body">
+          {highlightText(text, search)}
+        </div>
+      )}
+    </div>
+  );
 }
 
 function highlightText(text: string, search: string) {
@@ -3398,6 +3469,7 @@ function ToolStatusIcon({ cls }: { cls: string }) {
 function ToolRowView({ tool }: { tool: ToolRow }) {
   const t = useT();
   const [expanded, setExpanded] = useState(false);
+  const hasSubtasks = !!(tool.subtasks && tool.subtasks.length > 0);
 
   let annotation: { cls: string; label: string } | null = null;
   if (tool.status === 'waiting_approval') {
@@ -3415,6 +3487,10 @@ function ToolRowView({ tool }: { tool: ToolRow }) {
   }
 
   const hasDetail = !!(tool.args || tool.output);
+  // When we have a parallel subtask panel, don't also show the alternating
+  // single-line progress (that was the unfriendly explore#1 / #3 flicker).
+  const showFlatProgress =
+    tool.status === 'pending' && !!tool.progress && !hasSubtasks;
 
   return (
     <div class="tool-body">
@@ -3432,7 +3508,8 @@ function ToolRowView({ tool }: { tool: ToolRow }) {
           <span class={'tool-chevron' + (expanded ? ' expanded' : '')}>▾</span>
         )}
       </div>
-      {tool.status === 'pending' && tool.progress && (
+      {hasSubtasks && <SubtaskPanel items={tool.subtasks!} />}
+      {showFlatProgress && (
         <div class="tool-progress" title={tool.progress}>{tool.progress}</div>
       )}
       {expanded && hasDetail && (
@@ -3451,6 +3528,50 @@ function ToolRowView({ tool }: { tool: ToolRow }) {
           )}
         </div>
       )}
+    </div>
+  );
+}
+
+/** Parallel sub-agent rows — TUI `SubtaskProgress` panel parity. */
+function SubtaskPanel({ items }: { items: import('../lib/subtasks').SubtaskItem[] }) {
+  const t = useT();
+  const { completed, running, pending, failed, total } = subtaskCounts(items);
+  // Prefer showing active/failed rows; completed ones stay visible so the
+  // panel still reads as a full fan-out (unlike TUI footer which hides done).
+  return (
+    <div class="subtask-panel">
+      <div class="subtask-panel-header">
+        {t('subtask.summary', {
+          done: String(completed),
+          total: String(total),
+          running: String(running),
+          pending: String(pending),
+          failed: String(failed),
+        })}
+      </div>
+      <div class="subtask-list">
+        {items.map((item) => (
+          <div class={'subtask-row status-' + item.status} key={item.label}>
+            <span class="subtask-status-dot" aria-hidden="true">
+              {item.status === 'completed'
+                ? '✓'
+                : item.status === 'failed'
+                  ? '✗'
+                  : item.status === 'running'
+                    ? '●'
+                    : '○'}
+            </span>
+            <span class="subtask-label">{item.label}</span>
+            {item.model && <span class="subtask-model">{item.model}</span>}
+            <span class="subtask-desc" title={item.description || item.activity}>
+              {item.activity || item.description || '—'}
+            </span>
+            {item.outputTokens > 0 && (
+              <span class="subtask-tokens">↑ {item.outputTokens}</span>
+            )}
+          </div>
+        ))}
+      </div>
     </div>
   );
 }

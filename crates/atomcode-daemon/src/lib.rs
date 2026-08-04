@@ -66,7 +66,9 @@ pub(crate) use telemetry_scope::daemon_scope;
 
 use axum::{
     extract::{DefaultBodyLimit, Path, Query, State},
-    http::{header, request::Parts as RequestParts, HeaderValue, Method, StatusCode},
+    http::{
+        header, request::Parts as RequestParts, HeaderName, HeaderValue, Method, StatusCode,
+    },
     response::{sse::Sse, IntoResponse, Json},
     routing::{delete, get, post},
     Router,
@@ -1148,10 +1150,21 @@ fn dangerous_tools_enabled() -> bool {
 }
 
 fn cors_layer() -> CorsLayer {
+    // Loopback-only was correct when the daemon only ever bound 127.0.0.1.
+    // `atomcode serve --host 0.0.0.0` (and LAN binds) serve the SPA from a
+    // private IP; some browsers/WebViews treat custom-header POSTs as CORS
+    // even on that host. Allow loopback + private-network origins so remote
+    // LAN clients can call the API. Public internet origins stay denied —
+    // token auth is the real gate for serve mode, not CORS.
     CorsLayer::new()
-        .allow_origin(AllowOrigin::predicate(is_loopback_origin))
+        .allow_origin(AllowOrigin::predicate(is_allowed_cors_origin))
         .allow_methods([Method::GET, Method::POST, Method::PATCH, Method::DELETE])
-        .allow_headers([header::CONTENT_TYPE])
+        .allow_headers([
+            header::CONTENT_TYPE,
+            header::AUTHORIZATION,
+            HeaderName::from_static("x-atomcode-client"),
+        ])
+        .allow_credentials(true)
 }
 
 /// Middleware that updates `last_activity` timestamp on every request except
@@ -1195,19 +1208,21 @@ fn resolve_client_mode(header: &str) -> SessionMode {
     }
 }
 
-fn is_loopback_origin(origin: &HeaderValue, _request_parts: &RequestParts) -> bool {
-    let Ok(origin) = origin.to_str() else {
-        return false;
-    };
+/// CORS allowlist for webui: loopback **or** RFC1918 / link-local private hosts.
+/// Used so LAN clients of `atomcode serve` are not blocked when a browser emits
+/// an Origin header for same-host API calls with custom headers.
+fn is_allowed_cors_origin(origin: &HeaderValue, _request_parts: &RequestParts) -> bool {
+    origin_authority(origin).is_some_and(|authority| {
+        is_loopback_authority(&authority) || is_private_network_authority(&authority)
+    })
+}
 
-    let Some(authority) = origin
+fn origin_authority(origin: &HeaderValue) -> Option<String> {
+    let origin = origin.to_str().ok()?;
+    let authority = origin
         .strip_prefix("http://")
-        .or_else(|| origin.strip_prefix("https://"))
-    else {
-        return false;
-    };
-
-    is_loopback_authority(authority)
+        .or_else(|| origin.strip_prefix("https://"))?;
+    Some(authority.to_string())
 }
 
 fn is_loopback_authority(authority: &str) -> bool {
@@ -1217,6 +1232,30 @@ fn is_loopback_authority(authority: &str) -> bool {
 
     let host = authority.split(':').next().unwrap_or(authority);
     matches!(host, "localhost" | "127.0.0.1" | "::1")
+}
+
+/// Host part of an Origin/authority is a private/LAN address (not public internet).
+fn is_private_network_authority(authority: &str) -> bool {
+    let host = if let Some(rest) = authority.strip_prefix('[') {
+        // IPv6 literal: [::ffff:192.168.0.1]:port or [fe80::1]:port
+        rest.split(']').next().unwrap_or(rest)
+    } else {
+        authority.split(':').next().unwrap_or(authority)
+    };
+    if let Ok(ip) = host.parse::<std::net::IpAddr>() {
+        return match ip {
+            std::net::IpAddr::V4(v4) => {
+                v4.is_private() || v4.is_link_local() || v4.is_loopback() || v4.is_unspecified()
+            }
+            std::net::IpAddr::V6(v6) => {
+                let seg0 = v6.segments()[0];
+                v6.is_loopback()
+                    || (seg0 & 0xfe00) == 0xfc00 // unique local fc00::/7
+                    || (seg0 & 0xffc0) == 0xfe80 // link-local fe80::/10
+            }
+        };
+    }
+    false
 }
 
 /// Whether this client can receive interactive approval prompts.
@@ -1580,24 +1619,29 @@ async fn health(State(state): State<AppState>) -> impl IntoResponse {
     })
 }
 
-/// Webui index route with one-time-token → HttpOnly-cookie handoff.
+/// Webui index route with token → cookie handoff (and SPA-visible bootstrap).
 ///
-/// `/webui` opens `http://host:port/?token=<uuid>`. Serving index.html
-/// straight from that URL would leave the token in the address bar and
-/// browser history, where a malicious extension could read it off
-/// `location.search` (CWE-598). Instead, when a valid `?token=` is
-/// present we move it into an HttpOnly `atomcode_webui` cookie and 302 to
-/// a token-less URL; the browser then loads the SPA cookie-only and every
-/// same-origin API/SSE request carries the cookie automatically.
+/// `/webui` / `atomcode serve` open `http://host:port/?token=<uuid>`.
 ///
-/// Non-token requests (the post-redirect load, SPA navigations, the
-/// VSCode/standalone daemon where `enforce_token=false`) fall straight
-/// through to the static asset server.
+/// Previously we 302'd immediately after setting an HttpOnly cookie, so the
+/// SPA never saw the token and relied on cookie-only auth. That works on
+/// local loopback browsers, but remote LAN clients (phones, other PCs,
+/// in-app WebViews) often fail to attach the cookie on subsequent API/SSE
+/// calls — the UI loads (static assets are public) while `/chat` and `/live`
+/// 401, leaving a blinking cursor with no response.
 ///
-/// `Secure` is intentionally omitted: the webui is served over plain HTTP
-/// on localhost/LAN, where a `Secure` cookie would never be sent.
-/// `HttpOnly` (blocks JS/extension reads) + `SameSite=Strict` (blocks
-/// cross-site sends) carry the protection.
+/// Current handoff:
+/// 1. Set HttpOnly cookie (`SameSite=Lax` — more reliable than Strict for
+///    top-level opens from chat apps / QR scanners on LAN).
+/// 2. Serve `index.html` **with** `?token=` still present so the SPA can
+///    copy it into `sessionStorage` + `Authorization: Bearer` (and then
+///    `history.replaceState` to strip the address bar — CWE-598 mitigation
+///    still applies client-side).
+///
+/// Auth accepts cookie **or** Bearer (see `require_webui_token`).
+///
+/// `Secure` is intentionally omitted: the webui is plain HTTP on
+/// localhost/LAN, where a `Secure` cookie would never be sent.
 async fn serve_webui_index(
     State(state): State<AppState>,
     uri: axum::http::Uri,
@@ -1606,23 +1650,18 @@ async fn serve_webui_index(
         if let Some(query) = uri.query() {
             if let Some(token) = first_query_value(query, "token") {
                 if !token.is_empty() && state.webui_tokens.is_valid(&token) {
-                    let rest = strip_query_key(query, "token");
-                    let location = if rest.is_empty() {
-                        "/".to_string()
-                    } else {
-                        format!("/?{rest}")
-                    };
+                    // SameSite=Lax: set on top-level navigations (QR / shared
+                    // link / chat app open) and sent on same-site fetches.
+                    // Strict blocked some in-app WebView → LAN flows.
                     let cookie = format!(
-                        "{}={}; Path=/; HttpOnly; SameSite=Strict",
+                        "{}={}; Path=/; HttpOnly; SameSite=Lax",
                         state.webui_cookie_name, token
                     );
-                    return axum::response::Response::builder()
-                        .status(StatusCode::FOUND)
-                        .header(header::LOCATION, location)
-                        .header(header::SET_COOKIE, cookie)
-                        .body(axum::body::Body::empty())
-                        .map(IntoResponse::into_response)
-                        .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response());
+                    let mut response = webui::serve_webui(uri).await;
+                    if let Ok(value) = HeaderValue::from_str(&cookie) {
+                        response.headers_mut().insert(header::SET_COOKIE, value);
+                    }
+                    return response;
                 }
             }
         }
@@ -1644,7 +1683,9 @@ fn first_query_value(query: &str, key: &str) -> Option<String> {
 }
 
 /// Drop every `key=…` pair from a raw query string, preserving the rest
-/// verbatim so `session` / `sync` survive the token-stripping redirect.
+/// verbatim. Used by unit tests; the SPA now strips `token` client-side after
+/// capture (see webui `captureWebuiToken`).
+#[cfg_attr(not(test), allow(dead_code))]
 fn strip_query_key(query: &str, key: &str) -> String {
     query
         .split('&')
@@ -4814,7 +4855,7 @@ async fn bind_scanning(
 
 /// 探测本机主用的非回环 IPv4（用 UDP connect 选路，不实际发包）。绑定非回环地址
 /// 时用于给出可供其它设备访问的 URL 提示；拿不到则返回 None。
-fn primary_lan_ipv4() -> Option<String> {
+pub fn primary_lan_ipv4() -> Option<String> {
     let sock = std::net::UdpSocket::bind("0.0.0.0:0").ok()?;
     // connect 仅让内核按路由表选定出口网卡，不会真的发包。
     sock.connect("8.8.8.8:80").ok()?;
@@ -4892,6 +4933,7 @@ pub async fn ensure_server_and_open(host: &str, port: u16, sync: bool) -> String
             prebound_listener: Some(listener),
             // webui 模式不需要 app user_id 校验。
             app_user_id: None,
+            startup_footer: None,
         };
         let task = tokio::spawn(async move {
             if let Err(e) = run_server(opts).await {
@@ -5049,6 +5091,7 @@ pub async fn ensure_app_server(
         working_dir_override: std::env::current_dir().ok(),
         prebound_listener: Some(listener),
         app_user_id: user_id,
+        startup_footer: None,
     };
     let task = tokio::spawn(async move {
         if let Err(e) = run_server(opts).await {
@@ -5439,6 +5482,11 @@ pub struct ServerOpts {
     pub prebound_listener: Option<tokio::net::TcpListener>,
     /// App 远程访问模式期望的 user_id。非空时 daemon 启用 `X-Atom-User-Id` 请求头校验。
     pub app_user_id: Option<String>,
+    /// Optional footer printed after bind / dual-stack notes (and after the API
+    /// endpoint list). Used by `atomcode serve` so client URLs and attach hints
+    /// stay at the bottom of startup output instead of scrolling above the API
+    /// catalog.
+    pub startup_footer: Option<String>,
 }
 
 /// Build and run the axum server until a shutdown signal is received.
@@ -5464,7 +5512,8 @@ pub async fn run_server(opts: ServerOpts) -> anyhow::Result<()> {
         quiet,
         working_dir_override,
         prebound_listener,
-        ..
+        app_user_id,
+        startup_footer,
     } = opts;
 
     // Step 1: Load config (R1.1, R1.5) — tolerate errors, fallback to default.
@@ -5562,7 +5611,7 @@ pub async fn run_server(opts: ServerOpts) -> anyhow::Result<()> {
         active_connections: active_connections.clone(),
         enforce_token: webui_tokens.is_some(),
         webui_tokens: webui_tokens.unwrap_or_default(),
-        app_user_id: opts.app_user_id.unwrap_or_default(),
+        app_user_id: app_user_id.unwrap_or_default(),
         pending_permissions: permission_bridge::PermissionResponders::new(),
         pending_user_inputs: permission_bridge::UserInputResponders::new(),
         bind_host: host.clone(),
@@ -5789,32 +5838,74 @@ pub async fn run_server(opts: ServerOpts) -> anyhow::Result<()> {
     // Step 9: Bind listener (R4.1 gate). 进程内 webui 已预先绑定并传入 listener
     // （拿到真实端口、支持动态端口），此处直接复用、跳过内部 bind；独立二进制
     // 走 bind 分支，bind 失败仍按 R4.4 发 OpenAtomcode 再退出。
-    let listener = match prebound_listener {
-        Some(l) => l,
-        None => match tokio::net::TcpListener::bind(&addr).await {
-            Ok(l) => l,
-            Err(e) => {
-                eprintln!("Fatal: failed to bind to {}: {}", addr, e);
-                // Step 12: On bind failure, still emit OpenAtomcode (R4.4) then exit
-                CurrentContext::scope(
-                    CurrentContext {
-                        mode: Some(startup_mode),
-                        repo_origin: Some(repo_origin.clone()),
-                        session_id: None,
-                        ..CurrentContext::default()
-                    },
-                    || async {
-                        telemetry.track(Event::OpenAtomcode {
-                            dangerously_skip_permissions: false,
-                        });
-                    },
-                )
-                .await;
-                telemetry.shutdown(Duration::from_millis(500)).await;
-                std::process::exit(1);
-            }
-        },
+    //
+    // When the requested host is IPv4 unspecified (`0.0.0.0`), also try to bind
+    // `[::]:port` so dual-stack hosts accept both v4 and v6 clients (IPv4-only
+    // `0.0.0.0` does not cover IPv6). Failure to bind v6 is non-fatal.
+    let (listener, dual_stack_v6) = match prebound_listener {
+        Some(l) => (l, None),
+        None => {
+            let primary = match tokio::net::TcpListener::bind(&addr).await {
+                Ok(l) => l,
+                Err(e) => {
+                    eprintln!("Fatal: failed to bind to {}: {}", addr, e);
+                    // Step 12: On bind failure, still emit OpenAtomcode (R4.4) then exit
+                    CurrentContext::scope(
+                        CurrentContext {
+                            mode: Some(startup_mode),
+                            repo_origin: Some(repo_origin.clone()),
+                            session_id: None,
+                            ..CurrentContext::default()
+                        },
+                        || async {
+                            telemetry.track(Event::OpenAtomcode {
+                                dangerously_skip_permissions: false,
+                            });
+                        },
+                    )
+                    .await;
+                    telemetry.shutdown(Duration::from_millis(500)).await;
+                    std::process::exit(1);
+                }
+            };
+            let v6 = if host == "0.0.0.0" {
+                let v6_addr = format!("[::]:{port}");
+                match tokio::net::TcpListener::bind(&v6_addr).await {
+                    Ok(l) => {
+                        if !quiet {
+                            println!("Also listening on http://{v6_addr} (IPv6 dual-stack)");
+                        }
+                        Some(l)
+                    }
+                    Err(e) => {
+                        if !quiet {
+                            eprintln!(
+                                "Note: IPv6 bind on {v6_addr} failed ({e}); serving IPv4 only"
+                            );
+                        }
+                        None
+                    }
+                }
+            } else {
+                None
+            };
+            (primary, v6)
+        }
     };
+
+    // Print client-facing serve hints last so they stay at the bottom of
+    // startup output (below the API catalog and dual-stack notes).
+    if let Some(footer) = startup_footer {
+        if !footer.is_empty() {
+            // Leading blank line separates from the API catalog above.
+            // Match format_serve_banner: connection info goes to stderr.
+            eprintln!();
+            eprint!("{footer}");
+            if !footer.ends_with('\n') {
+                eprintln!();
+            }
+        }
+    }
 
     // Steps 10-11: Enter CurrentContext scope and emit OpenAtomcode (R4.1, R4.2)
     CurrentContext::scope(
@@ -5832,7 +5923,20 @@ pub async fn run_server(opts: ServerOpts) -> anyhow::Result<()> {
     )
     .await;
 
-    // Step 13: Serve with graceful shutdown (R10.1-R10.5)
+    // Step 13: Serve with graceful shutdown (R10.1-R10.5).
+    // Optional second listener for IPv6 when dual-stack was requested.
+    if let Some(v6_listener) = dual_stack_v6 {
+        let app_v6 = app.clone();
+        let shutdown_rx_v6 = shutdown_rx.clone();
+        tokio::spawn(async move {
+            if let Err(e) = axum::serve(v6_listener, app_v6)
+                .with_graceful_shutdown(shutdown_signal(shutdown_rx_v6))
+                .await
+            {
+                tracing::error!(?e, "axum::serve (IPv6) error");
+            }
+        });
+    }
     axum::serve(listener, app)
         .with_graceful_shutdown(shutdown_signal(shutdown_rx))
         .await
@@ -7463,7 +7567,7 @@ mod tests {
         let origin = HeaderValue::from_str(origin).unwrap();
         let request = axum::http::Request::builder().body(()).unwrap();
         let (parts, _) = request.into_parts();
-        is_loopback_origin(&origin, &parts)
+        is_allowed_cors_origin(&origin, &parts)
     }
 
     #[test]
@@ -7472,6 +7576,15 @@ mod tests {
         assert!(origin_is_allowed("http://127.0.0.1:3000"));
         assert!(origin_is_allowed("http://[::1]:3000"));
         assert!(origin_is_allowed("https://localhost"));
+    }
+
+    #[test]
+    fn cors_allows_private_lan_origins() {
+        // Remote clients of `atomcode serve --host 0.0.0.0` load the SPA from
+        // a LAN IP; their Origin is that private host, not loopback.
+        assert!(origin_is_allowed("http://192.168.6.3:4096"));
+        assert!(origin_is_allowed("http://10.0.0.5:13456"));
+        assert!(origin_is_allowed("http://172.16.2.14:8080"));
     }
 
     #[test]
@@ -7621,8 +7734,11 @@ mod tests {
     }
 
     #[test]
-    fn cors_rejects_remote_and_opaque_origins() {
-        assert!(!origin_is_allowed("http://192.168.1.10:3000"));
+    fn cors_rejects_public_and_opaque_origins() {
+        // Public internet origins must not get CORS (protects loopback daemon
+        // from evil.com). Private LAN IPs are allowed — see above.
+        assert!(!origin_is_allowed("http://8.8.8.8:3000"));
+        assert!(!origin_is_allowed("https://evil.example"));
         assert!(!origin_is_allowed("http://localhost.evil.example"));
         assert!(!origin_is_allowed("null"));
         assert!(!origin_is_allowed("file://local/index.html"));

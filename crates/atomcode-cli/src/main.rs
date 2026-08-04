@@ -133,6 +133,268 @@ fn resolve_working_dir(cli_dir: Option<PathBuf>) -> PathBuf {
     }
 }
 
+fn resolve_serve_workdir(dir: Option<PathBuf>) -> Result<PathBuf, String> {
+    let path = resolve_working_dir(dir);
+    if !path.is_dir() {
+        return Err(format!("not a directory: {}", path.display()));
+    }
+    Ok(std::fs::canonicalize(&path).unwrap_or(path))
+}
+
+fn is_loopback_host(host: &str) -> bool {
+    matches!(host, "127.0.0.1" | "localhost" | "::1" | "[::1]")
+}
+
+/// Print serve listen / client / attach hints.
+///
+/// When `no_token`, the printed remote URL never includes `?token=`.
+/// For `0.0.0.0` / `::`, also print a LAN-facing remote URL when we can
+/// detect a primary non-loopback IPv4.
+///
+/// Returns the multi-line banner so callers can print it *after* the API
+/// endpoint catalog (see `ServerOpts::startup_footer`) and keep connection
+/// URLs at the bottom of startup output.
+fn format_serve_banner(
+    host: &str,
+    port: u16,
+    workdir: &std::path::Path,
+    token: Option<&str>,
+    no_token: bool,
+) -> String {
+    let display_host = if host == "0.0.0.0" || host == "::" {
+        "127.0.0.1"
+    } else {
+        host
+    };
+    let base_local = format!("http://{display_host}:{port}");
+    let remote_host = if host == "0.0.0.0" || host == "::" {
+        atomcode_daemon::primary_lan_ipv4()
+    } else if !is_loopback_host(host) {
+        Some(host.to_string())
+    } else {
+        None
+    };
+    let base_remote = remote_host
+        .as_ref()
+        .map(|h| format!("http://{h}:{port}"));
+
+    let with_token = |base: &str| -> String {
+        match token {
+            Some(t) if !t.is_empty() && !no_token => format!("{base}/?token={t}"),
+            _ => format!("{base}/"),
+        }
+    };
+    let client_local = with_token(&base_local);
+    let client_remote = base_remote.as_ref().map(|b| with_token(b));
+
+    let mut out = String::new();
+    use std::fmt::Write as _;
+    let _ = writeln!(out, "AtomCode serve");
+    // canonicalize() on Windows yields `\\?\E:\...` — strip for human banner.
+    let project_raw = workdir.display().to_string();
+    let project_display = project_raw
+        .strip_prefix(r"\\?\")
+        .or_else(|| project_raw.strip_prefix("//?/"))
+        .unwrap_or(project_raw.as_str());
+    let _ = writeln!(out, "  project : {project_display}");
+    let _ = writeln!(out, "  listen  : http://{host}:{port}");
+    if host == "0.0.0.0" {
+        let _ = writeln!(out, "           (IPv4 0.0.0.0 + try IPv6 [::] dual-stack)");
+    }
+    let _ = writeln!(out, "  local   : {client_local}");
+    if let Some(remote) = &client_remote {
+        let _ = writeln!(out, "  remote  : {remote}");
+    }
+    if !is_loopback_host(host) || host == "0.0.0.0" || host == "::" {
+        let _ = writeln!(out);
+        let _ = writeln!(
+            out,
+            "  ⚠ Bound for network access. Prefer a trusted LAN / VPN / SSH tunnel."
+        );
+        if no_token {
+            let _ = writeln!(out, "  ⚠ --no-token: API has no access token (INSECURE).");
+        } else {
+            let _ = writeln!(
+                out,
+                "  Token protects the web UI; treat the client URL like a password."
+            );
+        }
+    }
+    let _ = writeln!(out);
+    let attach_base = base_remote.as_deref().unwrap_or(base_local.as_str());
+    let _ = writeln!(out, "Attach from another machine:");
+    if let Some(t) = token.filter(|t| !t.is_empty() && !no_token) {
+        let _ = writeln!(out, "  atomcode attach {attach_base} --token {t}");
+        let _ = writeln!(out, "  atomcode attach {attach_base}/?token={t}");
+        let _ = writeln!(
+            out,
+            "  # or: ATOMCODE_SERVER_TOKEN={t} atomcode attach {attach_base}"
+        );
+    } else {
+        let _ = writeln!(out, "  atomcode attach {attach_base}");
+    }
+    let _ = writeln!(out, "SSH tunnel example:");
+    let _ = writeln!(out, "  ssh -L {port}:127.0.0.1:{port} user@remote-host");
+    let _ = writeln!(out, "  atomcode attach http://127.0.0.1:{port}");
+    let _ = writeln!(out);
+    let _ = writeln!(out, "Press Ctrl+C to stop.");
+    out
+}
+
+/// Normalize user input into `http(s)://host:port` base (no trailing slash, no path/query).
+fn normalize_attach_base(url: &str) -> Result<String, String> {
+    let trimmed = url.trim().trim_end_matches('/');
+    if trimmed.is_empty() {
+        return Err("URL is empty".into());
+    }
+    let with_scheme = if trimmed.contains("://") {
+        trimmed.to_string()
+    } else {
+        format!("http://{trimmed}")
+    };
+    let (scheme, rest) = with_scheme
+        .split_once("://")
+        .ok_or_else(|| format!("invalid URL: {url}"))?;
+    let authority = rest.split('/').next().unwrap_or(rest);
+    // Strip query from authority if someone passed host:port?token= (unusual).
+    let authority = authority.split('?').next().unwrap_or(authority);
+    if authority.is_empty() {
+        return Err(format!("invalid URL: {url}"));
+    }
+    Ok(format!("{scheme}://{authority}"))
+}
+
+/// Extract `token` query param from a full client URL when present.
+fn token_from_url(url: &str) -> Option<String> {
+    let trimmed = url.trim();
+    let q = trimmed.split_once('?')?.1;
+    for pair in q.split('&') {
+        let mut it = pair.splitn(2, '=');
+        match (it.next(), it.next()) {
+            (Some("token"), Some(v)) if !v.is_empty() => {
+                // percent-decode is unnecessary for our hex UUID tokens
+                return Some(v.to_string());
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+async fn attach_to_server(url: &str, token_arg: Option<&str>, no_open: bool) -> Result<(), String> {
+    let base = normalize_attach_base(url)?;
+    // Precedence: --token flag > ?token= in URL > ATOMCODE_SERVER_TOKEN env.
+    let token = token_arg
+        .map(|s| s.to_string())
+        .or_else(|| token_from_url(url))
+        .or_else(|| std::env::var("ATOMCODE_SERVER_TOKEN").ok())
+        .filter(|s| !s.is_empty());
+
+    let health_url = format!("{base}/health");
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(10))
+        .build()
+        .map_err(|e| format!("http client: {e}"))?;
+    let resp = client
+        .get(&health_url)
+        .send()
+        .await
+        .map_err(|e| format!("cannot reach {health_url}: {e}"))?;
+    if !resp.status().is_success() {
+        return Err(format!(
+            "server health check failed: HTTP {} from {health_url}",
+            resp.status()
+        ));
+    }
+    let body = resp.text().await.unwrap_or_default();
+    if !body.contains("atomcode") && !body.contains("ok") && !body.contains("OK") {
+        eprintln!("attach: warning: /health response unexpected: {body}");
+    }
+
+    let client_url = match &token {
+        Some(t) => format!("{base}/?token={t}"),
+        None => format!("{base}/"),
+    };
+
+    eprintln!("Connected to AtomCode server at {base}");
+    eprintln!("  UI: {client_url}");
+    if token.is_none() {
+        eprintln!(
+            "  (no token; if the server requires auth, pass --token or a full ?token= URL)"
+        );
+    }
+
+    if no_open {
+        eprintln!("  (--no-open: browser not launched)");
+        return Ok(());
+    }
+
+    match atomcode_auth::oauth::open_browser(&client_url) {
+        Ok(()) => {
+            eprintln!("  Opened browser. Close this process when finished (Ctrl+C).");
+            let _ = tokio::signal::ctrl_c().await;
+            Ok(())
+        }
+        Err(e) => {
+            eprintln!("  Could not open browser ({e}). Open the UI URL manually.");
+            Ok(())
+        }
+    }
+}
+
+/// Shared serve entry used by `atomcode serve` and top-level `--host/--port/--no-token`.
+async fn run_serve_mode(
+    host: String,
+    port: u16,
+    dir: Option<PathBuf>,
+    no_token: bool,
+    idle_timeout: u64,
+    no_telemetry: bool,
+    _telemetry: &atomcode_telemetry::Telemetry,
+) -> i32 {
+    let workdir = match resolve_serve_workdir(dir) {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("serve: {e}");
+            return 1;
+        }
+    };
+    if let Err(e) = std::env::set_current_dir(&workdir) {
+        eprintln!("serve: cannot cd to {}: {e}", workdir.display());
+        return 1;
+    }
+    let tokens = if no_token {
+        None
+    } else {
+        Some(atomcode_daemon::auth_token::WebuiTokenStore::new())
+    };
+    let mint = tokens.as_ref().map(|t| t.mint());
+    // Print after API endpoint catalog / bind notes so URLs stay at the bottom.
+    let startup_footer =
+        format_serve_banner(&host, port, &workdir, mint.as_deref(), no_token);
+    let res = atomcode_daemon::run_server(atomcode_daemon::ServerOpts {
+        host,
+        port,
+        cli_override: CliOverride {
+            disabled: no_telemetry,
+        },
+        idle_timeout_secs: idle_timeout,
+        startup_mode: atomcode_telemetry::SessionMode::Webui,
+        webui_tokens: tokens,
+        quiet: false,
+        working_dir_override: Some(workdir),
+        prebound_listener: None,
+        app_user_id: None,
+        startup_footer: Some(startup_footer),
+    })
+    .await;
+    if let Err(e) = res {
+        eprintln!("Fatal: serve error: {e:#}");
+        return 1;
+    }
+    0
+}
+
 /// Truncate a string to at most `max_chars` *characters* (not bytes), replacing
 /// any newlines with spaces and appending "..." when truncated.
 ///
@@ -315,6 +577,8 @@ fn build_i18n_command() -> clap::Command {
         .mut_subcommand("mcp", |s| s.about(t(Msg::CliAboutMcp).into_owned()))
         .mut_subcommand("daemon", |s| s.about(t(Msg::CliAboutDaemon).into_owned()))
         .mut_subcommand("webui", |s| s.about(t(Msg::CliAboutWebui).into_owned()))
+        .mut_subcommand("serve", |s| s.about(t(Msg::CliAboutServe).into_owned()))
+        .mut_subcommand("attach", |s| s.about(t(Msg::CliAboutAttach).into_owned()))
         .mut_subcommand("telemetry", |s| {
             s.about(t(Msg::CliAboutTelemetry).into_owned())
         })
@@ -489,6 +753,21 @@ struct Cli {
         default_value_t = false
     )]
     pub dangerously_skip_permissions: bool,
+
+    /// Headless serve: bind address (alias: `--hosts`). When set without a
+    /// subcommand (or with top-level `--port` / `--no-token`), starts serve
+    /// instead of the TUI.
+    /// Example: `atomcode --host 0.0.0.0 --port 4096 --no-token`
+    #[arg(long = "host", visible_alias = "hosts")]
+    pub host: Option<String>,
+
+    /// Headless serve: listen port (top-level shorthand for `serve --port`).
+    #[arg(long)]
+    pub port: Option<u16>,
+
+    /// Headless serve: disable webui access-token auth (INSECURE).
+    #[arg(long = "no-token", default_value_t = false)]
+    pub no_token: bool,
 }
 
 #[derive(Subcommand)]
@@ -519,6 +798,9 @@ enum Commands {
     Mcp(McpCli),
     /// Start the HTTP daemon for IDE integration (VS Code extension connects to this)
     Daemon {
+        /// Bind address (default: 127.0.0.1)
+        #[arg(long, default_value = "127.0.0.1")]
+        host: String,
         /// Port to listen on (default: 13456)
         #[arg(long, default_value = "13456")]
         port: u16,
@@ -538,6 +820,43 @@ enum Commands {
         /// 绑定地址（默认 127.0.0.1；用 0.0.0.0 暴露到局域网/外网，注意仅 token 保护、无 TLS）
         #[arg(long, default_value = "127.0.0.1")]
         host: String,
+    },
+    /// Headless AtomCode server for remote clients (web UI + HTTP API).
+    ///
+    /// Equivalent top-level form:
+    /// `atomcode --host 0.0.0.0 --port 4096 --no-token`
+    Serve {
+        /// Bind address. Use `0.0.0.0` so other machines can connect (also tries IPv6 `[::]`).
+        #[arg(long, visible_alias = "hosts", default_value = "0.0.0.0")]
+        host: String,
+        /// Listen port (default: 4096).
+        #[arg(long, default_value_t = 4096)]
+        port: u16,
+        /// Project directory to expose (default: current working directory).
+        #[arg(long, short = 'C', value_hint = clap::ValueHint::DirPath)]
+        dir: Option<PathBuf>,
+        /// Disable webui access-token auth (INSECURE — only for trusted private networks).
+        #[arg(long, default_value_t = false)]
+        no_token: bool,
+        /// Idle-shutdown timeout in seconds; 0 = never (default for serve).
+        #[arg(long, default_value_t = 0)]
+        idle_timeout: u64,
+    },
+    /// Attach a local client to a running AtomCode server.
+    ///
+    /// Token is optional (for `--no-token` servers). You may pass:
+    /// - `atomcode attach http://HOST:PORT`
+    /// - `atomcode attach http://HOST:PORT/?token=...`
+    /// - `atomcode attach http://HOST:PORT --token ...`
+    Attach {
+        /// Server base URL or full client link (may include `?token=`).
+        url: String,
+        /// Access token (overrides `?token=` in URL and `ATOMCODE_SERVER_TOKEN`).
+        #[arg(long, short = 't')]
+        token: Option<String>,
+        /// Do not open a browser; only print the client URL after health check.
+        #[arg(long, default_value_t = false)]
+        no_open: bool,
     },
     /// Telemetry controls
     Telemetry {
@@ -1205,12 +1524,13 @@ async fn run() -> Result<i32> {
                 // Fall through to TUI startup below
             }
             Commands::Daemon {
+                host,
                 port,
                 client,
                 idle_timeout,
             } => {
                 HEADLESS_MODE.store(true, Ordering::Relaxed);
-                eprintln!("Starting AtomCode daemon on port {}...", port);
+                eprintln!("Starting AtomCode daemon on {host}:{port}...");
                 eprintln!("Press Ctrl+C to stop.");
                 // Run the bundled server IN-PROCESS (same `run_server` the webui uses),
                 // instead of re-exec'ing into a separate `atomcode-daemon` binary that
@@ -1231,7 +1551,7 @@ async fn run() -> Result<i32> {
                     _ => atomcode_telemetry::SessionMode::Ide,
                 };
                 let res = atomcode_daemon::run_server(atomcode_daemon::ServerOpts {
-                    host: "127.0.0.1".to_string(),
+                    host,
                     port,
                     cli_override: CliOverride {
                         disabled: cli.no_telemetry,
@@ -1243,6 +1563,7 @@ async fn run() -> Result<i32> {
                     working_dir_override: None,
                     prebound_listener: None,
                     app_user_id: None,
+                    startup_footer: None,
                 })
                 .await;
                 telemetry
@@ -1265,6 +1586,47 @@ async fn run() -> Result<i32> {
                     .shutdown(std::time::Duration::from_millis(500))
                     .await;
                 return Ok(0);
+            }
+            Commands::Serve {
+                host,
+                port,
+                dir,
+                no_token,
+                idle_timeout,
+            } => {
+                HEADLESS_MODE.store(true, Ordering::Relaxed);
+                let code = run_serve_mode(
+                    host,
+                    port,
+                    dir,
+                    no_token,
+                    idle_timeout,
+                    cli.no_telemetry,
+                    &telemetry,
+                )
+                .await;
+                telemetry
+                    .shutdown(std::time::Duration::from_millis(500))
+                    .await;
+                return Ok(code);
+            }
+            Commands::Attach {
+                url,
+                token,
+                no_open,
+            } => {
+                HEADLESS_MODE.store(true, Ordering::Relaxed);
+                let code = match attach_to_server(&url, token.as_deref(), no_open).await {
+                    Ok(()) => 0,
+                    Err(e) => {
+                        eprintln!("attach: {e:#}");
+                        1
+                    }
+                };
+                telemetry
+                    .shutdown(std::time::Duration::from_millis(500))
+                    .await;
+                return Ok(code);
             }
             Commands::Telemetry { action } => {
                 HEADLESS_MODE.store(true, Ordering::Relaxed);
@@ -1360,6 +1722,29 @@ async fn run() -> Result<i32> {
                 return result;
             }
         }
+    }
+
+    // Top-level shorthand: `atomcode --host/--hosts --port [--no-token]`
+    // (no subcommand) → same as `atomcode serve ...`. Requires --host and/or --port
+    // so a lone flag cannot accidentally start a network server.
+    if cli.host.is_some() || cli.port.is_some() {
+        HEADLESS_MODE.store(true, Ordering::Relaxed);
+        let host = cli.host.clone().unwrap_or_else(|| "0.0.0.0".to_string());
+        let port = cli.port.unwrap_or(4096);
+        let code = run_serve_mode(
+            host,
+            port,
+            cli.dir.clone(),
+            cli.no_token,
+            0,
+            cli.no_telemetry,
+            &telemetry,
+        )
+        .await;
+        telemetry
+            .shutdown(std::time::Duration::from_millis(500))
+            .await;
+        return Ok(code);
     }
 
     // Default: start TUI
@@ -2574,6 +2959,12 @@ async fn handle_command(cmd: Commands, telemetry: &std::sync::Arc<Telemetry>) ->
         Commands::Webui { .. } => {
             unreachable!("Webui is handled inline in run() before handle_command")
         }
+        Commands::Serve { .. } => {
+            unreachable!("Serve is handled inline in run() before handle_command")
+        }
+        Commands::Attach { .. } => {
+            unreachable!("Attach is handled inline in run() before handle_command")
+        }
         Commands::Setup { .. } => {
             unreachable!("Setup is handled inline in run() before handle_command")
         }
@@ -3472,9 +3863,9 @@ mod tests {
         apply_cli_runtime_overrides, atomcode_log_path, close_thinking_chunk,
         format_thinking_chunk, format_verbose_tool_chunk, headless_completion_exit_code,
         headless_completion_notify_reason, is_completion_invocation, merge_startup_notices,
-        interactive_provider_bootstrap, print_shell_completion, resolve_working_dir,
-        runtime_config_from,
-        should_fork_busy_continue, truncate_log_line, Cli, Commands, DEFAULT_LOG_DIRECTIVES,
+        interactive_provider_bootstrap, normalize_attach_base, print_shell_completion,
+        resolve_working_dir, runtime_config_from, should_fork_busy_continue, token_from_url,
+        truncate_log_line, Cli, Commands, DEFAULT_LOG_DIRECTIVES,
     };
     use clap::Parser;
     use clap_complete::Shell;
@@ -3492,6 +3883,91 @@ mod tests {
             let parsed = Cli::try_parse_from(["atomcode", "completion", shell]).unwrap();
             assert!(matches!(parsed.command, Some(Commands::Completion(_))));
         }
+    }
+
+    #[test]
+    fn normalize_attach_base_strips_path_and_adds_scheme() {
+        assert_eq!(
+            normalize_attach_base("http://192.168.1.10:4096/foo?x=1").unwrap(),
+            "http://192.168.1.10:4096"
+        );
+        assert_eq!(
+            normalize_attach_base("127.0.0.1:4096").unwrap(),
+            "http://127.0.0.1:4096"
+        );
+        assert_eq!(
+            normalize_attach_base("https://dev.example:8443/").unwrap(),
+            "https://dev.example:8443"
+        );
+    }
+
+    #[test]
+    fn token_from_url_reads_query_param() {
+        assert_eq!(
+            token_from_url("http://192.168.1.10:4096/?token=abc123"),
+            Some("abc123".into())
+        );
+        assert_eq!(token_from_url("http://192.168.1.10:4096/"), None);
+        assert_eq!(
+            token_from_url("http://h:1/?foo=1&token=xyz"),
+            Some("xyz".into())
+        );
+    }
+
+    #[test]
+    fn serve_and_attach_are_registered_subcommands() {
+        let serve = Cli::try_parse_from([
+            "atomcode",
+            "serve",
+            "--host",
+            "0.0.0.0",
+            "--port",
+            "4096",
+            "--no-token",
+        ])
+        .unwrap();
+        assert!(matches!(
+            serve.command,
+            Some(Commands::Serve {
+                port: 4096,
+                no_token: true,
+                ..
+            })
+        ));
+        let serve_alias = Cli::try_parse_from([
+            "atomcode",
+            "serve",
+            "--hosts",
+            "0.0.0.0",
+            "--port",
+            "4096",
+        ])
+        .unwrap();
+        assert!(matches!(
+            serve_alias.command,
+            Some(Commands::Serve { .. })
+        ));
+        let attach =
+            Cli::try_parse_from(["atomcode", "attach", "http://127.0.0.1:4096", "--no-open"])
+                .unwrap();
+        assert!(matches!(
+            attach.command,
+            Some(Commands::Attach { no_open: true, .. })
+        ));
+        // Top-level shorthand flags (no subcommand).
+        let top = Cli::try_parse_from([
+            "atomcode",
+            "--hosts",
+            "0.0.0.0",
+            "--port",
+            "4096",
+            "--no-token",
+        ])
+        .unwrap();
+        assert!(top.command.is_none());
+        assert_eq!(top.host.as_deref(), Some("0.0.0.0"));
+        assert_eq!(top.port, Some(4096));
+        assert!(top.no_token);
     }
 
     #[test]

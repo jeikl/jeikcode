@@ -5486,6 +5486,10 @@ pub struct ServerOpts {
     /// endpoint list). Used by `atomcode serve` so client URLs and attach hints
     /// stay at the bottom of startup output instead of scrolling above the API
     /// catalog.
+    ///
+    /// Honors [`Self::quiet`]: when `quiet` is true the footer is not printed
+    /// (same rule as the API endpoint catalog), so callers cannot accidentally
+    /// pollute a TUI / embedded stderr by pairing footer text with quiet mode.
     pub startup_footer: Option<String>,
 }
 
@@ -5895,14 +5899,17 @@ pub async fn run_server(opts: ServerOpts) -> anyhow::Result<()> {
 
     // Print client-facing serve hints last so they stay at the bottom of
     // startup output (below the API catalog and dual-stack notes).
-    if let Some(footer) = startup_footer {
-        if !footer.is_empty() {
-            // Leading blank line separates from the API catalog above.
-            // Match format_serve_banner: connection info goes to stderr.
-            eprintln!();
-            eprint!("{footer}");
-            if !footer.ends_with('\n') {
+    // Respect quiet the same way the API catalog does.
+    if !quiet {
+        if let Some(footer) = startup_footer {
+            if !footer.is_empty() {
+                // Leading blank line separates from the API catalog above.
+                // Match format_serve_banner: connection info goes to stderr.
                 eprintln!();
+                eprint!("{footer}");
+                if !footer.ends_with('\n') {
+                    eprintln!();
+                }
             }
         }
     }
@@ -5925,22 +5932,32 @@ pub async fn run_server(opts: ServerOpts) -> anyhow::Result<()> {
 
     // Step 13: Serve with graceful shutdown (R10.1-R10.5).
     // Optional second listener for IPv6 when dual-stack was requested.
-    if let Some(v6_listener) = dual_stack_v6 {
+    // Keep a JoinHandle so if the primary (IPv4) serve returns for any reason
+    // (error or graceful), we abort the v6 task and do not leave a listener
+    // running while the process tears down.
+    let v6_task = if let Some(v6_listener) = dual_stack_v6 {
         let app_v6 = app.clone();
         let shutdown_rx_v6 = shutdown_rx.clone();
-        tokio::spawn(async move {
+        Some(tokio::spawn(async move {
             if let Err(e) = axum::serve(v6_listener, app_v6)
                 .with_graceful_shutdown(shutdown_signal(shutdown_rx_v6))
                 .await
             {
                 tracing::error!(?e, "axum::serve (IPv6) error");
             }
-        });
-    }
+        }))
+    } else {
+        None
+    };
     axum::serve(listener, app)
         .with_graceful_shutdown(shutdown_signal(shutdown_rx))
         .await
         .unwrap_or_else(|e| tracing::error!(?e, "axum::serve error"));
+
+    if let Some(handle) = v6_task {
+        handle.abort();
+        let _ = handle.await;
+    }
 
     // Step 14: Final telemetry flush before process exit (R10.2-R10.5)
     telemetry.shutdown(Duration::from_millis(500)).await;

@@ -1,7 +1,43 @@
 // Task 12 — API client for atomcode webui
 
-// Read the one-time token from URL; never persist to localStorage
-const token = new URLSearchParams(location.search).get('token') ?? '';
+// Serve / webui bootstrap: `/?token=<uuid>` is handed off via HttpOnly cookie
+// AND left visible on first paint so we can stash it for Authorization.
+// Remote LAN clients often fail to attach the cookie alone (in-app WebViews,
+// privacy mode) — Bearer from sessionStorage is the reliable path. Strip the
+// token from the address bar immediately so it does not linger (CWE-598).
+const TOKEN_STORAGE_KEY = 'atomcode_webui_token';
+
+function captureWebuiToken(): string {
+  let fromUrl = '';
+  try {
+    fromUrl = new URLSearchParams(location.search).get('token') ?? '';
+  } catch {
+    fromUrl = '';
+  }
+  if (fromUrl) {
+    try {
+      sessionStorage.setItem(TOKEN_STORAGE_KEY, fromUrl);
+    } catch {
+      /* private mode / quota — Authorization still works for this load */
+    }
+    try {
+      const url = new URL(location.href);
+      url.searchParams.delete('token');
+      const q = url.searchParams.toString();
+      history.replaceState(null, '', url.pathname + (q ? `?${q}` : '') + url.hash);
+    } catch {
+      /* ignore */
+    }
+    return fromUrl;
+  }
+  try {
+    return sessionStorage.getItem(TOKEN_STORAGE_KEY) ?? '';
+  } catch {
+    return '';
+  }
+}
+
+const token = captureWebuiToken();
 
 function authHeaders(): Record<string, string> {
   // X-AtomCode-Client lets the daemon tag telemetry as webui-originated
@@ -11,7 +47,20 @@ function authHeaders(): Record<string, string> {
   return h;
 }
 
-/** Current session token (from the page URL). */
+/**
+ * Same-origin fetch that always includes cookies (HttpOnly token handoff)
+ * and merges auth headers. Remote LAN clients need both cookie + Bearer.
+ */
+function apiFetch(input: RequestInfo | URL, init: RequestInit = {}): Promise<Response> {
+  const headers = new Headers(init.headers);
+  const auth = authHeaders();
+  for (const [k, v] of Object.entries(auth)) {
+    if (!headers.has(k)) headers.set(k, v);
+  }
+  return fetch(input, { ...init, credentials: 'include', headers });
+}
+
+/** Current session token (URL bootstrap or sessionStorage). */
 export function getToken(): string {
   return token;
 }
@@ -54,7 +103,7 @@ export interface ModelInfo {
 }
 
 export async function getModels(): Promise<ModelInfo[]> {
-  const r = await fetch('/models', { headers: authHeaders() });
+  const r = await apiFetch('/models', { headers: authHeaders() });
   if (!r.ok) throw new Error(`list models failed: ${r.status}`);
   const body: unknown = await r.json();
   if (!Array.isArray(body)) throw new Error('list models returned an invalid payload');
@@ -78,7 +127,7 @@ export interface StreamChatBody {
 }
 
 export async function stopChat(requestId: string): Promise<void> {
-  const resp = await fetch('/chat/stop', {
+  const resp = await apiFetch('/chat/stop', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', ...authHeaders() },
     body: JSON.stringify({ session_id: requestId }),
@@ -87,7 +136,7 @@ export async function stopChat(requestId: string): Promise<void> {
 }
 
 export async function getActiveChatSessions(): Promise<string[]> {
-  const resp = await fetch('/chat/active', { headers: authHeaders() });
+  const resp = await apiFetch('/chat/active', { headers: authHeaders() });
   if (!resp.ok) throw new Error(`active chats failed: ${resp.status}`);
   const body: unknown = await resp.json();
   if (!Array.isArray(body) || !body.every((entry) => typeof entry === 'string')) {
@@ -117,7 +166,7 @@ export async function streamChat(
   onEvent: (event: SSEEvent) => void,
   signal?: AbortSignal,
 ): Promise<void> {
-  const resp = await fetch('/chat', {
+  const resp = await apiFetch('/chat', {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
@@ -206,7 +255,7 @@ export async function respondPermission(
   decision: 'allow' | 'deny' | 'always_allow' | 'allow_persist',
   toolName?: string,
 ): Promise<{ success: boolean }> {
-  const resp = await fetch('/chat/permission', {
+  const resp = await apiFetch('/chat/permission', {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
@@ -278,7 +327,7 @@ export interface SessionDetail {
 // anywhere use searchSessions. This capped list is only for cross-project
 // lookups where 50 is enough (e.g. URL-restore of a recent session).
 export async function listSessions(): Promise<SessionMetaWithProject[]> {
-  const resp = await fetch('/sessions', { headers: authHeaders() });
+  const resp = await apiFetch('/sessions', { headers: authHeaders() });
   return resp.json();
 }
 
@@ -288,7 +337,7 @@ export async function listSessions(): Promise<SessionMetaWithProject[]> {
 // The endpoint returns bare SessionMeta; every row is in `projectHash`, so we
 // stamp it back on for the client's project-scoped dedup/filter.
 export async function listProjectSessions(projectHash: string): Promise<SessionMetaWithProject[]> {
-  const resp = await fetch(`/projects/${encodeURIComponent(projectHash)}/sessions`, {
+  const resp = await apiFetch(`/projects/${encodeURIComponent(projectHash)}/sessions`, {
     headers: authHeaders(),
   });
   if (!resp.ok) throw new Error(`list project sessions failed: ${resp.status}`);
@@ -299,7 +348,7 @@ export async function listProjectSessions(projectHash: string): Promise<SessionM
 // Cross-project session search by name, UNCAPPED. Backs the search modal so it
 // can find a session in ANY project (the sidebar list itself is per-project).
 export async function searchSessions(q: string): Promise<SessionMetaWithProject[]> {
-  const resp = await fetch(`/sessions/search?q=${encodeURIComponent(q)}`, {
+  const resp = await apiFetch(`/sessions/search?q=${encodeURIComponent(q)}`, {
     headers: authHeaders(),
   });
   if (!resp.ok) throw new Error(`search sessions failed: ${resp.status}`);
@@ -310,7 +359,7 @@ export async function searchSessions(q: string): Promise<SessionMetaWithProject[
 // URL-restore only has a short id from the address bar; the capped `/sessions`
 // can't locate an older session. Returns null when nothing matches.
 export async function resolveSession(id: string): Promise<SessionMetaWithProject | null> {
-  const resp = await fetch(`/sessions/resolve/${encodeURIComponent(id)}`, {
+  const resp = await apiFetch(`/sessions/resolve/${encodeURIComponent(id)}`, {
     headers: authHeaders(),
   });
   if (resp.status === 404) return null;
@@ -336,7 +385,7 @@ export async function createSession(
   if (title) body.title = title;
   // 仅在 webui 开启同步时让后端广播会话切换，使 sync 模式 TUI 跟随新建（issue #850）。
   if (sync) body.sync = true;
-  const resp = await fetch('/sessions', {
+  const resp = await apiFetch('/sessions', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', ...authHeaders() },
     body: JSON.stringify(body),
@@ -350,7 +399,7 @@ export async function renameSession(
   sessionId: string,
   name: string,
 ): Promise<void> {
-  const resp = await fetch(
+  const resp = await apiFetch(
     `/projects/${encodeURIComponent(projectHash)}/sessions/${encodeURIComponent(sessionId)}/rename`,
     {
       method: 'PATCH',
@@ -375,7 +424,7 @@ export async function deleteSession(
   projectHash: string,
   sessionId: string,
 ): Promise<void> {
-  const resp = await fetch(
+  const resp = await apiFetch(
     `/projects/${encodeURIComponent(projectHash)}/sessions/${encodeURIComponent(sessionId)}`,
     { method: 'DELETE', headers: authHeaders() },
   );
@@ -421,13 +470,13 @@ export interface ConfigInfo {
 }
 
 export async function getConfig(): Promise<ConfigInfo> {
-  const resp = await fetch('/config', { headers: authHeaders() });
+  const resp = await apiFetch('/config', { headers: authHeaders() });
   return resp.json();
 }
 
 /** Trigger a hot-reload of config from disk (POST /config/reload). */
 export async function postConfigReload(): Promise<void> {
-  const resp = await fetch('/config/reload', {
+  const resp = await apiFetch('/config/reload', {
     method: 'POST',
     headers: authHeaders(),
   });
@@ -447,7 +496,7 @@ export interface ProjectInfo {
 }
 
 export async function getProjects(): Promise<ProjectInfo[]> {
-  const resp = await fetch('/projects', { headers: authHeaders() });
+  const resp = await apiFetch('/projects', { headers: authHeaders() });
   if (!resp.ok) throw new Error(`list projects failed: ${resp.status}`);
   const body: unknown = await resp.json();
   if (!Array.isArray(body)) throw new Error('list projects returned an invalid payload');
@@ -468,7 +517,7 @@ export interface ProjectState {
 }
 
 export async function getProject(): Promise<ProjectState> {
-  const resp = await fetch('/project', { headers: authHeaders() });
+  const resp = await apiFetch('/project', { headers: authHeaders() });
   return resp.json();
 }
 
@@ -491,14 +540,14 @@ export interface McpStatusInfo {
 }
 
 export async function getMcpStatus(): Promise<McpStatusInfo> {
-  const resp = await fetch('/mcp/status', { headers: authHeaders() });
+  const resp = await apiFetch('/mcp/status', { headers: authHeaders() });
   if (!resp.ok) throw new Error(`mcp status failed: ${resp.status}`);
   return resp.json();
 }
 
 /** Trust the current project for MCP servers, then rebuild the MCP registry. */
 export async function postLiveMcpTrust(): Promise<{ ok: boolean; error?: string }> {
-  const resp = await fetch('/live/mcp/trust', {
+  const resp = await apiFetch('/live/mcp/trust', {
     method: 'POST',
     headers: authHeaders(),
   });
@@ -513,7 +562,7 @@ export interface SkillInfo {
 }
 
 export async function getSkills(): Promise<SkillInfo[]> {
-  const resp = await fetch('/skills', { headers: authHeaders() });
+  const resp = await apiFetch('/skills', { headers: authHeaders() });
   return resp.json();
 }
 
@@ -537,7 +586,7 @@ export interface TunnelStatus {
 }
 
 export async function getTunnelStatus(): Promise<TunnelStatus> {
-  const resp = await fetch('/tunnel/status', { headers: authHeaders() });
+  const resp = await apiFetch('/tunnel/status', { headers: authHeaders() });
   if (!resp.ok) throw new Error(`tunnel status failed: ${resp.status}`);
   return resp.json();
 }
@@ -555,7 +604,7 @@ export interface CreateProviderBody {
 }
 
 export async function createProvider(body: CreateProviderBody): Promise<unknown> {
-  const r = await fetch('/providers', {
+  const r = await apiFetch('/providers', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', ...authHeaders() },
     body: JSON.stringify(body),
@@ -565,7 +614,7 @@ export async function createProvider(body: CreateProviderBody): Promise<unknown>
 }
 
 export async function deleteProvider(name: string): Promise<void> {
-  const r = await fetch(`/providers/${encodeURIComponent(name)}`, { method: 'DELETE', headers: authHeaders() });
+  const r = await apiFetch(`/providers/${encodeURIComponent(name)}`, { method: 'DELETE', headers: authHeaders() });
   if (!r.ok) { const e = await r.json().catch(() => ({})); throw new Error((e as any).error || `HTTP ${r.status}`); }
 }
 
@@ -582,7 +631,7 @@ export interface UpdateProviderBody {
 
 /** PATCH /providers/:name —— 部分更新已有 provider（可改名：body.name 传新名）。 */
 export async function updateProvider(name: string, body: UpdateProviderBody): Promise<unknown> {
-  const r = await fetch(`/providers/${encodeURIComponent(name)}`, {
+  const r = await apiFetch(`/providers/${encodeURIComponent(name)}`, {
     method: 'PATCH',
     headers: { 'Content-Type': 'application/json', ...authHeaders() },
     body: JSON.stringify(body),
@@ -593,7 +642,7 @@ export async function updateProvider(name: string, body: UpdateProviderBody): Pr
 
 /** POST /providers/:name/default —— 设为默认 provider。 */
 export async function setDefaultProvider(name: string): Promise<unknown> {
-  const r = await fetch(`/providers/${encodeURIComponent(name)}/default`, {
+  const r = await apiFetch(`/providers/${encodeURIComponent(name)}/default`, {
     method: 'POST',
     headers: authHeaders(),
   });
@@ -611,7 +660,7 @@ export interface FsListResult {
 }
 
 export async function listDir(path: string): Promise<FsListResult> {
-  const resp = await fetch('/fs/list?path=' + encodeURIComponent(path), {
+  const resp = await apiFetch('/fs/list?path=' + encodeURIComponent(path), {
     headers: authHeaders(),
   });
   return resp.json();
@@ -620,7 +669,7 @@ export async function listDir(path: string): Promise<FsListResult> {
 // --- Create directory ---
 
 export async function mkdir(path: string): Promise<{ path: string }> {
-  const r = await fetch('/fs/mkdir', {
+  const r = await apiFetch('/fs/mkdir', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', ...authHeaders() },
     body: JSON.stringify({ path }),
@@ -642,7 +691,7 @@ export interface CdResponse {
  *  Always updates the live project state (so a webui switch survives refresh);
  *  `setDefault` also persists it as the configured default (across restarts). */
 export async function changeDir(path: string, setDefault = false): Promise<CdResponse> {
-  const resp = await fetch('/cd', {
+  const resp = await apiFetch('/cd', {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
@@ -655,7 +704,7 @@ export async function changeDir(path: string, setDefault = false): Promise<CdRes
 
 /** Delete a historical project and its sessions catalog. */
 export async function deleteProject(hash: string): Promise<void> {
-  const resp = await fetch(`/projects/${hash}`, {
+  const resp = await apiFetch(`/projects/${hash}`, {
     method: 'DELETE',
     headers: authHeaders(),
   });
@@ -671,7 +720,7 @@ export async function getSession(
   projectHash: string,
   sessionId: string,
 ): Promise<SessionDetail> {
-  const resp = await fetch(`/projects/${projectHash}/sessions/${sessionId}`, {
+  const resp = await apiFetch(`/projects/${projectHash}/sessions/${sessionId}`, {
     headers: authHeaders(),
   });
   if (!resp.ok) {
@@ -724,7 +773,7 @@ export async function streamLive(
   onActivity?: () => void,
 ): Promise<void> {
   const params = sessionId ? `?session_id=${encodeURIComponent(sessionId)}` : '';
-  const resp = await fetch(`/live${params}`, { headers: authHeaders(), signal });
+  const resp = await apiFetch(`/live${params}`, { headers: authHeaders(), signal });
   if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
   const reader = resp.body!.getReader();
   const decoder = new TextDecoder();
@@ -752,7 +801,7 @@ export async function postLiveMessage(
   provider?: string,
   sessionId?: string | null,
 ): Promise<void> {
-  const resp = await fetch('/live/message', {
+  const resp = await apiFetch('/live/message', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', ...authHeaders() },
     body: JSON.stringify({
@@ -768,7 +817,7 @@ export async function postLiveMessage(
 }
 
 export async function postLiveStop(): Promise<void> {
-  const resp = await fetch('/live/stop', {
+  const resp = await apiFetch('/live/stop', {
     method: 'POST',
     headers: authHeaders(),
   });
@@ -780,7 +829,7 @@ export async function postLiveStop(): Promise<void> {
 /** Sync-mode manual compaction: dispatch a compaction against the shared live
  *  runtime. `accepted:false` means no live runtime is bound (nothing to compact). */
 export async function postLiveCompact(): Promise<{ accepted: boolean }> {
-  const resp = await fetch('/live/compact', {
+  const resp = await apiFetch('/live/compact', {
     method: 'POST',
     headers: authHeaders(),
   });
@@ -793,7 +842,7 @@ export async function postLiveCompact(): Promise<{ accepted: boolean }> {
 export async function postLiveSwitchSession(
   sessionId: string,
 ): Promise<{ ok: boolean; activeTurn: boolean; error?: string }> {
-  const resp = await fetch('/live/switch_session', {
+  const resp = await apiFetch('/live/switch_session', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', ...authHeaders() },
     body: JSON.stringify({ session_id: sessionId }),
@@ -813,7 +862,7 @@ export async function postLiveProvider(
   provider: string,
   sessionId?: string | null,
 ): Promise<{ ok: boolean; activeTurn: boolean; error?: string }> {
-  const resp = await fetch('/live/provider', {
+  const resp = await apiFetch('/live/provider', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', ...authHeaders() },
     body: JSON.stringify({ provider, ...(sessionId ? { session_id: sessionId } : {}) }),
@@ -850,7 +899,7 @@ export async function postCommand(body: {
   project_hash?: string;
   provider?: string;
 }): Promise<CommandResult> {
-  const resp = await fetch('/command', {
+  const resp = await apiFetch('/command', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', ...authHeaders() },
     body: JSON.stringify(body),
@@ -863,7 +912,7 @@ export async function postCommand(body: {
  *  session state — the next turn's PermissionDecider follows it; broadcast to
  *  other tabs. */
 export async function postLiveMode(mode: ApprovalMode): Promise<ApprovalMode> {
-  const resp = await fetch('/approval_mode', {
+  const resp = await apiFetch('/approval_mode', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', ...authHeaders() },
     body: JSON.stringify({ mode }),
@@ -875,7 +924,7 @@ export async function postLiveMode(mode: ApprovalMode): Promise<ApprovalMode> {
 }
 
 export async function getApprovalMode(): Promise<ApprovalMode> {
-  const resp = await fetch('/approval_mode', { headers: authHeaders() });
+  const resp = await apiFetch('/approval_mode', { headers: authHeaders() });
   if (!resp.ok) throw new Error(`get mode failed: ${resp.status}`);
   const body = (await resp.json()) as ApprovalModeResponse;
   return body.mode;
@@ -888,7 +937,7 @@ export async function postLiveReasoningEffort(
   effort: string | null,
   provider?: string,
 ): Promise<void> {
-  const resp = await fetch('/live/reasoning_effort', {
+  const resp = await apiFetch('/live/reasoning_effort', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', ...authHeaders() },
     body: JSON.stringify({
@@ -905,7 +954,7 @@ export async function postLivePermission(
   decision: 'allow' | 'deny' | 'always_allow' | 'allow_persist',
   toolName?: string,
 ): Promise<{ accepted: boolean }> {
-  const resp = await fetch('/live/permission', {
+  const resp = await apiFetch('/live/permission', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', ...authHeaders() },
     body: JSON.stringify({ decision, tool_name: toolName }),
@@ -956,7 +1005,7 @@ export type UserInputAnswer =
 export async function postLiveUserInput(
   body: UserInputAnswer,
 ): Promise<{ accepted: boolean }> {
-  const resp = await fetch('/live/user-input', {
+  const resp = await apiFetch('/live/user-input', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', ...authHeaders() },
     body: JSON.stringify(body),
@@ -973,7 +1022,7 @@ export async function postChatUserInput(
   sessionId: string,
   body: UserInputAnswer,
 ): Promise<{ accepted: boolean }> {
-  const resp = await fetch('/chat/user-input', {
+  const resp = await apiFetch('/chat/user-input', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', ...authHeaders() },
     body: JSON.stringify({ session_id: sessionId, ...body }),

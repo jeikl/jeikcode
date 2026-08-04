@@ -1251,6 +1251,12 @@ Msg::CmdDescBackground => "在隔离的后台上下文中运行一次性任务�
         Msg::CliAboutMcp => "管理 .mcp.json 中的 MCP 服务器配置".into(),
         Msg::CliAboutDaemon => "启动用于 IDE 集成的 HTTP 守护进程".into(),
         Msg::CliAboutWebui => "启动本地浏览器 webui".into(),
+        Msg::CliAboutServe => {
+            "启动无界面 AtomCode 服务端，供远程 attach（Web UI + API）".into()
+        }
+        Msg::CliAboutAttach => {
+            "连接正在运行的 AtomCode 服务端（打开 Web UI）".into()
+        }
         Msg::CliAboutTelemetry => "遥测控制".into(),
         Msg::CliAboutPlugin => "管理技能/命令插件".into(),
         Msg::CliAboutUninstall => "卸载 AtomCode：移除二进制文件、PATH 编辑和数据".into(),

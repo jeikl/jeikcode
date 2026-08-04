@@ -1728,6 +1728,8 @@ pub enum Msg<'a> {
     CliAboutMcp,
     CliAboutDaemon,
     CliAboutWebui,
+    CliAboutServe,
+    CliAboutAttach,
     CliAboutTelemetry,
     CliAboutPlugin,
     CliAboutUninstall,

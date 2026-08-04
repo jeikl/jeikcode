@@ -218,6 +218,10 @@ fn format_serve_banner(
                 out,
                 "  Token protects the web UI; treat the client URL like a password."
             );
+            let _ = writeln!(
+                out,
+                "  Do not share the full ?token= link (chat, screenshots, history)."
+            );
         }
     }
     let _ = writeln!(out);
@@ -307,8 +311,23 @@ async fn attach_to_server(url: &str, token_arg: Option<&str>, no_open: bool) -> 
         ));
     }
     let body = resp.text().await.unwrap_or_default();
-    if !body.contains("atomcode") && !body.contains("ok") && !body.contains("OK") {
-        eprintln!("attach: warning: /health response unexpected: {body}");
+    let body_l = body.to_ascii_lowercase();
+    // HTTP 200 alone is not enough: reverse proxies sometimes return 200 HTML
+    // error pages. Reject clear non-JSON/HTML garbage; soft-warn on odd text.
+    let looks_like_html = body_l.contains("<!doctype") || body_l.contains("<html");
+    let looks_like_atomcode_health =
+        body_l.contains("atomcode") || body_l.contains("\"ok\"") || body.trim() == "ok" || body.trim() == "OK";
+    if looks_like_html && !looks_like_atomcode_health {
+        return Err(format!(
+            "server health check returned HTML, not AtomCode /health (from {health_url}): {}",
+            truncate_log_line(&body, 120)
+        ));
+    }
+    if !looks_like_atomcode_health {
+        eprintln!(
+            "attach: warning: /health response unexpected: {}",
+            truncate_log_line(&body, 160)
+        );
     }
 
     let client_url = match &token {

@@ -61,6 +61,13 @@ context_window = 64000
 # 新 schema 写在 [models.*] 上，键名是 image_input（旧名 supports_vision 仍可读）。
 # 省略时：openai/claude/anthropic 默认为 false（需显式开启）；也可在 /provider 切换。
 # 多模态模型请设为 true。开启后贴图直发本模型（不走 VL）；要用 VL 请关掉此项。
+#
+# 迁移说明（相对旧版「按模型名猜 vision」）：
+# - 旧逻辑靠名称启发式（gpt-4o / *-vl* 等），自定义网关模型名不含这些关键字时
+#   只会发出字面量 [Image #N]，不会发 base64 —— 这是 bug。
+# - 现改为配置驱动 opt-in：openai/claude/anthropic 未设置时默认 false，避免纯文本
+#   兼容网关误收多模态载荷。升级后请在需要贴图的模型上显式 image_input = true
+#   （或 /provider 打开「支持图片输入」）。CodingPlan 登录会按模型写入该字段。
 # image_input = true
 
 # DeepSeek V4 专属：推理历史回显策略

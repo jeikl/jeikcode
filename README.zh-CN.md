@@ -121,8 +121,28 @@ AtomCode 是一款住在你终端里的 AI 编码助手。用自然语言给它�
 ### Web UI
 
 - **`/webui`**（TUI 内）或 **`atomcode webui`**（命令行）会在浏览器里打开一个本地 Web 界面，作为终端界面之外的另一种选择——同一个 agent、同一份会话，渲染在浏览器中
-- **仅本地回环** —— server 绑定 `127.0.0.1` 并使用一次性 token，不对网络暴露
+- **仅本地回环** —— 默认 server 绑定 `127.0.0.1` 并使用一次性 token，不对网络暴露
 - **`/webui stop`** 停止进程内 server（之后再次 `/webui` 会重新启动）
+
+### 远程无头服务（多实例）
+
+适合多项目并行、局域网访问，无需依赖固定默认端口 + 手动 `/webui`：
+
+```bash
+# 在项目目录启动（自定义 host/port；默认带访问 token）
+atomcode serve --host 0.0.0.0 --port 4096
+
+# 或指定目录
+atomcode serve --host 0.0.0.0 --port 4097 --dir /path/to/other-project
+
+# 另一台机器打开 WebUI（把启动日志底部的 URL/token 当口令，勿外传）
+atomcode attach http://192.168.x.x:4096 --token <token>
+```
+
+- **`--host` / `--port`** —— 可同时跑多个 serve 实例（不同端口 = 不同项目）
+- **`0.0.0.0`** —— 监听所有网卡，并尽量 dual-stack 绑定 IPv6 `[::]`
+- **默认 token** —— 保护 WebUI/API；仅可信 LAN / VPN / SSH 隧道使用。可选 `--no-token`（不安全）
+- 启动日志底部打印 local/remote URL 与 attach 示例（在 API 列表之后）
 
 ### App 远程访问
 

@@ -170,6 +170,7 @@ async fn main() {
         prebound_listener: None,
         // 独立 daemon 模式不需要 app user_id 校验。
         app_user_id: None,
+        startup_footer: None,
     })
     .await
     {

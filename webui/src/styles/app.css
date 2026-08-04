@@ -749,6 +749,116 @@ body {
   white-space: nowrap;
 }
 
+/* === Reasoning / thinking block === */
+.reasoning-block {
+  margin: 0 0 10px;
+  border: 1px solid var(--app-border-color, rgba(127, 127, 127, 0.25));
+  border-radius: var(--corner-radius-small, 8px);
+  background: var(--app-list-hover-background, rgba(127, 127, 127, 0.06));
+  overflow: hidden;
+}
+.reasoning-toggle {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  padding: 7px 10px;
+  border: 0;
+  background: transparent;
+  color: var(--app-secondary-foreground);
+  font-size: 12px;
+  cursor: pointer;
+  text-align: left;
+}
+.reasoning-toggle:hover { color: var(--app-primary-foreground); }
+.reasoning-icon { opacity: 0.85; }
+.reasoning-label { font-weight: 600; letter-spacing: 0.01em; }
+.reasoning-chevron {
+  margin-left: auto;
+  font-size: 10px;
+  transition: transform 0.15s ease;
+}
+.reasoning-chevron.expanded { transform: rotate(180deg); }
+.reasoning-body {
+  padding: 0 12px 10px 28px;
+  color: var(--app-secondary-foreground);
+  font-size: 12.5px;
+  line-height: 1.55;
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-height: 280px;
+  overflow: auto;
+}
+
+/* === Parallel sub-agent (task fan-out) panel — TUI SubtaskProgress parity === */
+.subtask-panel {
+  margin: 2px 6px 8px 28px;
+  border: 1px solid var(--app-border-color, rgba(127, 127, 127, 0.2));
+  border-radius: var(--corner-radius-small, 8px);
+  background: var(--app-list-hover-background, rgba(127, 127, 127, 0.04));
+  overflow: hidden;
+}
+.subtask-panel-header {
+  padding: 5px 10px;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--app-secondary-foreground);
+  border-bottom: 1px solid var(--app-border-color, rgba(127, 127, 127, 0.15));
+}
+.subtask-list {
+  display: flex;
+  flex-direction: column;
+}
+.subtask-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 5px 10px;
+  font-size: 12px;
+  min-width: 0;
+  border-top: 1px solid transparent;
+}
+.subtask-row + .subtask-row {
+  border-top-color: var(--app-border-color, rgba(127, 127, 127, 0.1));
+}
+.subtask-status-dot {
+  flex-shrink: 0;
+  width: 1em;
+  text-align: center;
+  font-size: 11px;
+}
+.subtask-row.status-running .subtask-status-dot { color: var(--app-info-foreground, #3b82f6); }
+.subtask-row.status-completed .subtask-status-dot { color: var(--app-success-foreground, #16a34a); }
+.subtask-row.status-failed .subtask-status-dot { color: var(--app-error-foreground, #dc2626); }
+.subtask-row.status-pending .subtask-status-dot { color: var(--app-secondary-foreground); opacity: 0.6; }
+.subtask-label {
+  flex-shrink: 0;
+  font-weight: 600;
+  font-family: var(--app-monospace-font-family);
+  color: var(--app-primary-foreground);
+}
+.subtask-model {
+  flex-shrink: 0;
+  color: var(--app-secondary-foreground);
+  font-size: 11px;
+  opacity: 0.85;
+}
+.subtask-desc {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--app-secondary-foreground);
+}
+.subtask-tokens {
+  flex-shrink: 0;
+  font-size: 11px;
+  font-family: var(--app-monospace-font-family);
+  color: var(--app-secondary-foreground);
+  opacity: 0.8;
+}
+
 /* Leading tool-type icon (file / search / edit / terminal …). */
 .tool-type-icon {
   flex-shrink: 0;

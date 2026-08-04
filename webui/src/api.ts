@@ -5,7 +5,8 @@
 // Remote LAN clients often fail to attach the cookie alone (in-app WebViews,
 // privacy mode) — Bearer from sessionStorage is the reliable path. Strip the
 // token from the address bar immediately so it does not linger (CWE-598).
-const TOKEN_STORAGE_KEY = 'atomcode_webui_token';
+/** Shared sessionStorage key for the webui access token (api + LoginButton). */
+export const WEBUI_TOKEN_STORAGE_KEY = 'atomcode_webui_token';
 
 function captureWebuiToken(): string {
   let fromUrl = '';
@@ -16,7 +17,7 @@ function captureWebuiToken(): string {
   }
   if (fromUrl) {
     try {
-      sessionStorage.setItem(TOKEN_STORAGE_KEY, fromUrl);
+      sessionStorage.setItem(WEBUI_TOKEN_STORAGE_KEY, fromUrl);
     } catch {
       /* private mode / quota — Authorization still works for this load */
     }
@@ -31,7 +32,7 @@ function captureWebuiToken(): string {
     return fromUrl;
   }
   try {
-    return sessionStorage.getItem(TOKEN_STORAGE_KEY) ?? '';
+    return sessionStorage.getItem(WEBUI_TOKEN_STORAGE_KEY) ?? '';
   } catch {
     return '';
   }

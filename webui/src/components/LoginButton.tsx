@@ -4,26 +4,13 @@
 
 import { useEffect, useRef, useState } from 'preact/hooks';
 import { useSettings } from '../settings';
+// Shared capture in api.ts (sessionStorage + URL strip); one source of truth
+// for the Bearer token after ?token= handoff.
+import { getToken } from '../api';
 
-// Prefer shared capture from api.ts path: URL bootstrap → sessionStorage.
-// LoginButton is intentionally light; mirror the same key so remote clients
-// still authenticate after the address bar is stripped.
-const TOKEN_STORAGE_KEY = 'atomcode_webui_token';
-function readWebuiToken(): string {
-  try {
-    const fromUrl = new URLSearchParams(location.search).get('token') ?? '';
-    if (fromUrl) {
-      try { sessionStorage.setItem(TOKEN_STORAGE_KEY, fromUrl); } catch { /* ignore */ }
-      return fromUrl;
-    }
-    return sessionStorage.getItem(TOKEN_STORAGE_KEY) ?? '';
-  } catch {
-    return '';
-  }
-}
-const TOKEN = readWebuiToken();
 function authHeaders(): Record<string, string> {
-  return TOKEN ? { Authorization: 'Bearer ' + TOKEN } : {};
+  const token = getToken();
+  return token ? { Authorization: 'Bearer ' + token } : {};
 }
 
 export interface UserInfo {

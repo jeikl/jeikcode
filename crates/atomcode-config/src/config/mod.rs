@@ -152,7 +152,7 @@ pub struct Config {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub default_model: Option<String>,
     /// Per-turn datalog settings. Missing from older configs → defaults to
-    /// enabled=true, dir="$ATOMCODE_HOME/datalog" (project slug appended underneath).
+    /// enabled=false, dir="$ATOMCODE_HOME/datalog" (project slug appended underneath).
     ///
     /// `skip_serializing` intentionally suppresses serde's automatic output;
     /// `save()` writes this section manually with explanatory comments and
@@ -939,7 +939,7 @@ fn project_legacy_model(account_id: &str, p: &ProviderConfig) -> ModelProfileCon
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DatalogConfig {
     /// When false, `DatalogWriter` becomes a no-op and no files are created.
-    #[serde(default = "default_true")]
+    #[serde(default)]
     pub enabled: bool,
     /// Root directory under which datalog files are written. The per-project
     /// slug (`<basename>-<hash8>`) is always appended underneath, so two
@@ -1121,7 +1121,7 @@ pub fn request_user_input_enabled_from_env(env: Option<&str>) -> bool {
 impl Default for DatalogConfig {
     fn default() -> Self {
         Self {
-            enabled: true,
+            enabled: false,
             // Pre-fill the default root so it round-trips into config.toml on
             // first save — users see exactly where logs go without having to
             // discover that "unset == ~/.atomcode/datalog". Resolver still
@@ -1152,11 +1152,15 @@ impl Default for NotificationConfig {
 fn render_datalog_section(cfg: &DatalogConfig) -> String {
     let mut out = String::new();
     out.push_str("\n# Per-turn datalog. Each turn writes a markdown summary; each LLM\n");
-    out.push_str("# round writes a JSON request/response pair under `<dir>/<project>/llm/`.\n");
+    out.push_str("# round appends its final request to the paired JSONL file.\n");
+    out.push_str("# Logs contain raw prompts, responses, tool inputs and tool outputs; protect them\n");
+    out.push_str("# as sensitive data. AtomCode creates project directories/files as 0700/0600 on Unix.\n");
     out.push_str("# A per-project subdirectory is always appended under `dir` so multiple\n");
     out.push_str("# projects never share a bucket.\n");
     out.push_str("# - enabled = false        -> disable logging entirely\n");
-    out.push_str("# - dir = \"~/.atomcode/datalog\" -> default (follows $HOME, ignores /cd)\n");
+    out.push_str(
+        "# - dir = \"~/.atomcode/datalog\" -> default (follows $ATOMCODE_HOME, ignores /cd)\n",
+    );
     out.push_str("# - dir = \"/abs/path\"      -> absolute, fixed (unaffected by /cd)\n");
     out.push_str("# - dir = \"rel/path\"       -> joined with current working_dir, follows /cd\n");
     out.push_str("[datalog]\n");
@@ -2162,12 +2166,18 @@ model = "missing-type"
     fn render_datalog_section_default_emits_active_dir() {
         let rendered = render_datalog_section(&DatalogConfig::default());
         assert!(rendered.contains("[datalog]"));
-        assert!(rendered.contains("enabled = true"));
+        assert!(rendered.contains("enabled = false"));
         assert!(
             rendered.contains("\ndir = \"~/.atomcode/datalog\"\n"),
             "default must emit the resolved dir as a real, uncommented value: {}",
             rendered
         );
+    }
+
+    #[test]
+    fn omitted_datalog_config_defaults_to_disabled() {
+        let config: Config = toml::from_str("").unwrap();
+        assert!(!config.datalog.enabled);
     }
 
     #[test]
@@ -2561,11 +2571,11 @@ model = "missing-type"
 
     #[test]
     fn can_handle_attached_images_true_when_active_provider_accepts_images() {
-        // Explicit vision flag, or OpenAI protocol default (unset).
+        // Explicit vision flag required for openai-compatible (protocol default off).
         let cfg = cfg_with("any-custom-model", Some(true), None);
         assert!(cfg.can_handle_attached_images());
-        // Unset + openai protocol → true (API multimodal contract).
-        assert!(cfg_with("deepseek-v4-flash", None, None).can_handle_attached_images());
+        // Unset + openai protocol → false (opt-in).
+        assert!(!cfg_with("deepseek-v4-flash", None, None).can_handle_attached_images());
     }
 
     #[test]
@@ -2611,14 +2621,15 @@ model = "missing-type"
                 .image_attach_support(),
             S::PreprocessorUnresolvable("NoSuchProvider".to_string())
         );
-        // Explicit vision / protocol default → Supported regardless of preprocessor.
+        // Explicit vision → Supported regardless of preprocessor.
         assert_eq!(
             cfg_with("any-custom", Some(true), None).image_attach_support(),
             S::Supported
         );
+        // Unset openai → Unconfigured (protocol default is opt-in false).
         assert_eq!(
             cfg_with("any-custom", None, None).image_attach_support(),
-            S::Supported
+            S::Unconfigured
         );
     }
 

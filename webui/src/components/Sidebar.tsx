@@ -11,6 +11,7 @@ import { RenameDialog, DeleteDialog } from './SessionDialogs';
 import { useAuth } from './LoginButton';
 import { mergeOptimisticSession } from '../lib/sessionList';
 import { sessionMessagesToMarkdownLines } from '../lib/historyMessages';
+import { collapseHomePath as collapseHomePathShared, displayPath } from '../lib/displayPath';
 
 interface SidebarProps {
   activeSessionId: string | null;
@@ -92,13 +93,7 @@ function formatTime(ts: number, t: Translate): string {
 }
 
 function shortDir(p: string): string {
-  if (p.startsWith('/Users/') || p.startsWith('/home/')) {
-    const parts = p.split('/');
-    if (parts.length >= 3) {
-      return '~/' + parts.slice(3).join('/');
-    }
-  }
-  return p;
+  return displayPath(p);
 }
 
 /** Inline panel-collapse glyph (monochrome, uses currentColor). */
@@ -130,13 +125,9 @@ function ChevronDownIcon() {
   );
 }
 
-/** Collapse a home prefix to `~` for readability; leave everything else verbatim
- *  (temp dirs like /var/folders/… or /tmp/… stay as-is so they're identifiable). */
+/** Collapse a home prefix to `~` for readability; also strips Windows `\\?\`. */
 function collapseHomePath(p: string): string {
-  if (!p) return '';
-  return p
-    .replace(/^\/(?:Users|home)\/[^/]+/, '~')
-    .replace(/^[A-Za-z]:\\Users\\[^\\]+/, '~');
+  return collapseHomePathShared(p);
 }
 
 /** Folder glyph for the project selector. */

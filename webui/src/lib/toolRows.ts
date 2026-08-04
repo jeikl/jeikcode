@@ -9,6 +9,8 @@
 // separate, while a replayed event is coalesced. Mirrors the tuix
 // coalesce-by-call_id fix (commit 80d6540f).
 
+import type { SubtaskItem } from './subtasks';
+
 export interface ToolRow {
   id: string;
   name: string;
@@ -18,6 +20,12 @@ export interface ToolRow {
   output?: string;
   /** Ephemeral latest activity for a long-running tool. Replaced in place, never persisted. */
   progress?: string;
+  /**
+   * Parallel sub-agent rows for the `task` tool fan-out. Seeded from args and
+   * updated by progress events so explore#1 / explore#3 show side-by-side
+   * (TUI subtask panel parity) instead of alternating on one progress line.
+   */
+  subtasks?: SubtaskItem[];
 }
 
 /** One ordered conversation segment: a run of assistant text, one tool call, or a
@@ -25,6 +33,8 @@ export interface ToolRow {
  *  preserved so the text→tool→notice interleaving matches the TUI. */
 export type MsgPart =
   | { kind: 'text'; text: string }
+  /** Model reasoning / thinking stream — rendered as a collapsible block. */
+  | { kind: 'reasoning'; text: string }
   | { kind: 'tool'; tool: ToolRow }
   | { kind: 'notice'; text: string }
   | { kind: 'rate_limited'; text: string };
@@ -48,12 +58,29 @@ export function updateToolProgress(
   parts: MsgPart[],
   id: string,
   progress: string,
+  /** Optional full tool patch (e.g. updated subtasks list). */
+  patch?: Partial<ToolRow>,
 ): MsgPart[] {
   return parts.map((part) =>
     part.kind === 'tool' && part.tool.id === id
-      ? { kind: 'tool' as const, tool: { ...part.tool, progress } }
+      ? {
+          kind: 'tool' as const,
+          tool: { ...part.tool, progress, ...patch },
+        }
       : part,
   );
+}
+
+/** Append a reasoning delta to the last reasoning part, or start a new one. */
+export function appendReasoningPart(parts: MsgPart[], delta: string): MsgPart[] {
+  if (!delta) return parts;
+  const tail = parts[parts.length - 1];
+  if (tail && tail.kind === 'reasoning') {
+    const next = parts.slice();
+    next[next.length - 1] = { kind: 'reasoning', text: tail.text + delta };
+    return next;
+  }
+  return [...parts, { kind: 'reasoning', text: delta }];
 }
 
 export function toolResultStatus(success: boolean, output: string): ToolRow['status'] {

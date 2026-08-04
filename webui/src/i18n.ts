@@ -170,6 +170,8 @@ const zh = {
   'tool.incomplete': '未完成',
   'tool.args': '参数',
   'tool.output': '输出',
+  'chat.thinking': '思考过程',
+  'subtask.summary': '子代理 · {done}/{total} 完成 · {running} 运行中 · {pending} 等待 · {failed} 失败',
 
   // Settings panel
   'settings.title': '设置',
@@ -496,6 +498,8 @@ const en: Record<MsgKey, string> = {
   'tool.incomplete': 'Incomplete',
   'tool.args': 'Arguments',
   'tool.output': 'Output',
+  'chat.thinking': 'Thinking',
+  'subtask.summary': 'Subtasks · {done}/{total} done · {running} running · {pending} pending · {failed} failed',
 
   'settings.title': 'Settings',
   'settings.theme': 'Theme',

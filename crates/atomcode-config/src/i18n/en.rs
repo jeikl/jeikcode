@@ -1286,6 +1286,12 @@ Msg::CmdDescBackground => "Run a one-shot task in an isolated background context
         Msg::CliAboutMcp => "Manage MCP server entries in .mcp.json".into(),
         Msg::CliAboutDaemon => "Start the HTTP daemon for IDE integration".into(),
         Msg::CliAboutWebui => "Start the local browser webui".into(),
+        Msg::CliAboutServe => {
+            "Start a headless AtomCode server for remote attach (web UI + API)".into()
+        }
+        Msg::CliAboutAttach => {
+            "Attach a local client to a running AtomCode server (open web UI)".into()
+        }
         Msg::CliAboutTelemetry => "Telemetry controls".into(),
         Msg::CliAboutPlugin => "Manage skill/command plugins".into(),
         Msg::CliAboutUninstall => "Uninstall AtomCode: remove the binary, PATH edit, and data".into(),

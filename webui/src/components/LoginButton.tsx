@@ -5,7 +5,23 @@
 import { useEffect, useRef, useState } from 'preact/hooks';
 import { useSettings } from '../settings';
 
-const TOKEN = new URLSearchParams(location.search).get('token') ?? '';
+// Prefer shared capture from api.ts path: URL bootstrap → sessionStorage.
+// LoginButton is intentionally light; mirror the same key so remote clients
+// still authenticate after the address bar is stripped.
+const TOKEN_STORAGE_KEY = 'atomcode_webui_token';
+function readWebuiToken(): string {
+  try {
+    const fromUrl = new URLSearchParams(location.search).get('token') ?? '';
+    if (fromUrl) {
+      try { sessionStorage.setItem(TOKEN_STORAGE_KEY, fromUrl); } catch { /* ignore */ }
+      return fromUrl;
+    }
+    return sessionStorage.getItem(TOKEN_STORAGE_KEY) ?? '';
+  } catch {
+    return '';
+  }
+}
+const TOKEN = readWebuiToken();
 function authHeaders(): Record<string, string> {
   return TOKEN ? { Authorization: 'Bearer ' + TOKEN } : {};
 }
@@ -52,7 +68,7 @@ export function useAuth() {
 
   async function refresh(shouldApply: () => boolean = () => true) {
     try {
-      const r = await fetch('/auth/status', { headers: authHeaders() });
+      const r = await fetch('/auth/status', { headers: authHeaders(), credentials: 'include' });
       const s = await r.json();
       if (!shouldApply()) return;
       setLoggedIn(!!s.logged_in);
@@ -92,6 +108,7 @@ export function useAuth() {
       const r = await fetch('/auth/login/start', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', ...authHeaders() },
+        credentials: 'include',
         body: JSON.stringify({ open_browser: false }),
       });
       if (!r.ok) throw new Error(`Login start failed: ${r.status}`);
@@ -114,6 +131,7 @@ export function useAuth() {
           await fetch(`/auth/login/${encodeURIComponent(id)}`, {
             method: 'DELETE',
             headers: authHeaders(),
+            credentials: 'include',
           }).catch(() => undefined);
           stopPolling();
           return;
@@ -122,6 +140,7 @@ export function useAuth() {
           const response = await fetch(`/auth/login/${encodeURIComponent(id)}/poll`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json', ...authHeaders() },
+            credentials: 'include',
           });
           const result = await response.json().catch(() => ({}));
           if (!response.ok) {
@@ -167,7 +186,7 @@ export function useAuth() {
   async function doLogout() {
     stopPolling();
     try {
-      await fetch('/auth/logout', { method: 'POST', headers: authHeaders() });
+      await fetch('/auth/logout', { method: 'POST', headers: authHeaders(), credentials: 'include' });
     } catch {
       /* ignore */
     }

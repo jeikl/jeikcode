@@ -73,7 +73,6 @@ export function applySubtaskProgress(
   let model: string | undefined;
   let activity: string | undefined;
   let status: SubtaskStatus = 'running';
-  let started = false;
 
   if (first === '\u{25cb} queued') {
     label = parts[1] ?? '';
@@ -85,7 +84,6 @@ export function applySubtaskProgress(
     model = parts[1];
     activity = 'running';
     status = 'running';
-    started = true;
   } else if (first === '\u{2713} done') {
     label = parts[1] ?? '';
     model = parts[2];
@@ -131,8 +129,6 @@ export function applySubtaskProgress(
     model: model && model.length ? model : prev.model,
     outputTokens,
   };
-  // Touch started only for status transitions (no Instant in webui).
-  void started;
 
   if (
     next.status === prev.status &&

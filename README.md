@@ -129,20 +129,38 @@ Connect to any LLM that supports OpenAI's function-calling API:
 For multi-project / LAN access without relying on a fixed default port and a manual `/webui`:
 
 ```bash
-# Start in a project (custom host/port; access token by default)
+# Start in a project (custom host/port; random access token by default)
 atomcode serve --host 0.0.0.0 --port 4096
+
+# Fixed token (OpenAI-style API key) — same level as --host / --port
+atomcode serve --host 0.0.0.0 --port 4096 --token sk-my-secret
+# top-level shorthand:
+atomcode --host 0.0.0.0 --port 4096 --token sk-my-secret
 
 # Or pin a directory
 atomcode serve --host 0.0.0.0 --port 4097 --dir /path/to/other-project
 
-# Open the Web UI from another machine (treat the token URL as a password)
-atomcode attach http://192.168.x.x:4096 --token <token>
+# Open the Web UI from another machine (treat the token as a password)
+atomcode attach http://192.168.x.x:4096 --token sk-my-secret
+```
+
+OpenAI / Anthropic compatible clients use the **same** serve token as an API key:
+
+```bash
+export OPENAI_API_KEY=sk-my-secret
+export ANTHROPIC_API_KEY=sk-my-secret
+# OpenAI:    Authorization: Bearer sk-my-secret  (or api-key: …)
+# Anthropic: x-api-key: sk-my-secret
+# Python openai:    OpenAI(api_key=..., base_url="http://HOST:PORT/v1")
+# Python anthropic: Anthropic(api_key=..., base_url="http://HOST:PORT")
+# Model id from GET /v1/models is always account/model (e.g. AtomGit/GLM-5.2)
 ```
 
 - **`--host` / `--port`** — run multiple serve instances (one port per project)
+- **`--token <secret>`** — fixed access token for both OpenAI (`Bearer` / `api-key`) and Anthropic (`x-api-key`). Env: `ATOMCODE_SERVER_TOKEN`. When omitted, a random token is minted
 - **`0.0.0.0`** — listen on all interfaces; tries IPv6 dual-stack `[::]` when possible
-- **Token by default** — protects the Web UI/API. Use only on trusted LAN / VPN / SSH tunnels. Optional `--no-token` (insecure)
-- Startup prints local/remote URLs and attach examples at the **bottom** of the log (after the API catalog)
+- **Token by default** — protects the Web UI/API. Use only on trusted LAN / VPN / SSH tunnels. Optional `--no-token` (insecure; conflicts with `--token`)
+- Startup prints local/remote URLs, Bearer / `x-api-key` / `api-key` examples, and attach lines at the **bottom** of the log
 
 ### App Remote Access
 

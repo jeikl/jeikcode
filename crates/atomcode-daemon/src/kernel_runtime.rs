@@ -84,6 +84,17 @@ async fn start_native_runtime_with_session_bootstrap(
                     now,
                 );
                 meta.owner = atomcode_capabilities::session::StorageOwner::Native;
+                // OpenAI/Anthropic compat: name new sessions from the client `user`
+                // (user_title) so later requests can resume by the same title.
+                if let Some(title) = cfg
+                    .session_display_name
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|t| !t.is_empty())
+                {
+                    meta.name = title.to_string();
+                    meta.user_renamed = true;
+                }
                 meta.message_count = u32::try_from(snapshot.messages.len()).map_err(|_| {
                     atomcode_coding::RuntimeStartError::Prepare(std::io::Error::new(
                         std::io::ErrorKind::InvalidData,

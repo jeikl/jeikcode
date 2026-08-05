@@ -601,7 +601,10 @@ async fn prepare_with_plugin_hooks_reusing_lease(
     let mut snapshot_hook_handle = None;
     let mut snapshot_persistence_status = None;
     // Env / project-instructions / git context — unconditional (v1 parity: always present).
-    hooks.push(Arc::new(SessionContextHook::new(&cfg.working_dir)));
+    // Optional client system append (OpenAI/Anthropic compat) lands after AGENTS/glossary/db.
+    hooks.push(Arc::new(
+        SessionContextHook::new(&cfg.working_dir).with_extra_append(cfg.extra_system_append.clone()),
+    ));
     if opts.memory {
         hooks.push(Arc::new(MemoryHook::for_project(&cfg.working_dir)));
     }

@@ -36,11 +36,19 @@ const GIT_SECTION_SEP: &str = "\n\n=== GIT STATUS";
 
 /// Injects environment + project-instructions + git-status context; hot-reloads instruction
 /// tiers on every user turn.
+/// Header for optional client-supplied system text (OpenAI/Anthropic compat API).
+/// Appended after AGENTS / glossary / db packs so it sits at the bottom of the
+/// instruction stack without overriding project knowledge.
+pub const CLIENT_SYSTEM_HEADER: &str = "=== CLIENT SYSTEM INSTRUCTIONS ===";
+
 pub struct SessionContextHook {
     working_dir: PathBuf,
     /// Config root (`~/.atomcode`) for the GLOBAL instructions tier. Defaults to
     /// [`crate::paths::config_dir`]; the env honors `$ATOMCODE_HOME` there.
     home: PathBuf,
+    /// Optional client system prompt (e.g. from OpenAI/Anthropic `messages[].role=system`).
+    /// Appended after project instructions + knowledge packs, before the frozen git section.
+    extra_append: Option<String>,
 }
 
 impl SessionContextHook {
@@ -48,6 +56,7 @@ impl SessionContextHook {
         Self {
             working_dir: working_dir.into(),
             home: crate::paths::config_dir(),
+            extra_append: None,
         }
     }
 
@@ -56,7 +65,21 @@ impl SessionContextHook {
         Self {
             working_dir: working_dir.into(),
             home: home.into(),
+            extra_append: None,
         }
+    }
+
+    /// Append client-supplied system instructions after AGENTS.md / glossary / db packs.
+    pub fn with_extra_append(mut self, extra: Option<String>) -> Self {
+        self.extra_append = extra.and_then(|s| {
+            let t = s.trim();
+            if t.is_empty() {
+                None
+            } else {
+                Some(t.to_string())
+            }
+        });
+        self
     }
 
     /// Render the full context block. Always non-empty (the env sub-section is
@@ -68,13 +91,16 @@ impl SessionContextHook {
         }
     }
 
-    /// The NON-git portion — header + env + project instructions (+ glossary).
-    /// Re-read from disk on every call (hot-reload).
+    /// The NON-git portion — header + env + project instructions (+ glossary) + optional
+    /// client system append. Re-read from disk on every call (hot-reload).
     fn render_base(&self) -> String {
         let mut out = vec![CONTEXT_HEADER.to_string(), self.env_block()];
         let instr = render_instructions(&self.home, &self.working_dir);
         if !instr.is_empty() {
             out.push(instr);
+        }
+        if let Some(extra) = &self.extra_append {
+            out.push(format!("{CLIENT_SYSTEM_HEADER}\n{extra}"));
         }
         out.join("\n\n")
     }
@@ -248,6 +274,30 @@ mod tests {
             "env block always present"
         );
         assert!(ctx.text.contains("Platform:"));
+    }
+
+    #[tokio::test]
+    async fn client_system_append_lands_after_agents() {
+        let d = tempfile::tempdir().unwrap();
+        std::fs::write(d.path().join("AGENTS.md"), "project-rule-A").unwrap();
+        let hook = SessionContextHook::with_home(d.path(), d.path().join("nohome"))
+            .with_extra_append(Some("client-sys-B".into()));
+        let mut convo = Conversation::new();
+        convo.push(Message::system("persona"));
+        hook.session_start(&mut convo, false).await;
+        let ctx = &convo.messages[1].text;
+        let agents_pos = ctx.find("project-rule-A").expect("AGENTS body present");
+        let client_pos = ctx
+            .find("client-sys-B")
+            .expect("client system append present");
+        assert!(
+            client_pos > agents_pos,
+            "client system must follow AGENTS: {ctx}"
+        );
+        assert!(
+            ctx.contains(CLIENT_SYSTEM_HEADER),
+            "client system header present: {ctx}"
+        );
     }
 
     #[tokio::test]

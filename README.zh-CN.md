@@ -129,20 +129,38 @@ AtomCode 是一款住在你终端里的 AI 编码助手。用自然语言给它�
 适合多项目并行、局域网访问，无需依赖固定默认端口 + 手动 `/webui`：
 
 ```bash
-# 在项目目录启动（自定义 host/port；默认带访问 token）
+# 在项目目录启动（自定义 host/port；默认随机访问 token）
 atomcode serve --host 0.0.0.0 --port 4096
+
+# 固定 token（OpenAI 风格 API key），与 --host / --port 同级
+atomcode serve --host 0.0.0.0 --port 4096 --token sk-my-secret
+# 顶层简写：
+atomcode --host 0.0.0.0 --port 4096 --token sk-my-secret
 
 # 或指定目录
 atomcode serve --host 0.0.0.0 --port 4097 --dir /path/to/other-project
 
-# 另一台机器打开 WebUI（把启动日志底部的 URL/token 当口令，勿外传）
-atomcode attach http://192.168.x.x:4096 --token <token>
+# 另一台机器打开 WebUI（把 token 当口令，勿外传）
+atomcode attach http://192.168.x.x:4096 --token sk-my-secret
+```
+
+OpenAI / Anthropic 兼容客户端使用**同一** serve token 作为 API key：
+
+```bash
+export OPENAI_API_KEY=sk-my-secret
+export ANTHROPIC_API_KEY=sk-my-secret
+# OpenAI:    Authorization: Bearer sk-my-secret （或 api-key: …）
+# Anthropic: x-api-key: sk-my-secret
+# Python openai:    OpenAI(api_key=..., base_url="http://HOST:PORT/v1")
+# Python anthropic: Anthropic(api_key=..., base_url="http://HOST:PORT")
+# GET /v1/models 的 id 统一为 account/model（如 AtomGit/GLM-5.2）
 ```
 
 - **`--host` / `--port`** —— 可同时跑多个 serve 实例（不同端口 = 不同项目）
+- **`--token <secret>`** —— 固定访问 token，同时支持 OpenAI（`Bearer` / `api-key`）与 Anthropic（`x-api-key`）。环境变量：`ATOMCODE_SERVER_TOKEN`。省略时随机生成
 - **`0.0.0.0`** —— 监听所有网卡，并尽量 dual-stack 绑定 IPv6 `[::]`
-- **默认 token** —— 保护 WebUI/API；仅可信 LAN / VPN / SSH 隧道使用。可选 `--no-token`（不安全）
-- 启动日志底部打印 local/remote URL 与 attach 示例（在 API 列表之后）
+- **默认 token** —— 保护 WebUI/API；仅可信 LAN / VPN / SSH 隧道使用。可选 `--no-token`（不安全；与 `--token` 互斥）
+- 启动日志底部打印 local/remote URL、Bearer / `x-api-key` / `api-key` 示例与 attach 行
 
 ### App 远程访问
 

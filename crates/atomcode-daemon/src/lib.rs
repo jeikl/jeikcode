@@ -31,6 +31,7 @@ mod api_config;
 mod api_provider;
 pub mod approval_mode;
 mod commands;
+mod compat_api;
 pub(crate) mod kernel_runtime;
 pub mod legacy_convert;
 pub mod live_hub;
@@ -2914,23 +2915,84 @@ async fn get_models() -> impl IntoResponse {
     (StatusCode::OK, Json(models_from_config(&config))).into_response()
 }
 
+/// Public OpenAI/Anthropic-compatible model id: always `{account}/{wire_model}`.
+///
+/// Config catalog keys may still be legacy (`claude`), CodingPlan hyphenated
+/// (`AtomGit-GLM-5.2`), or already slash-form (`acc/ds`). Externally we always
+/// present and accept the stable `account/model` form so clients never see a mix
+/// of `provider-model` vs `provider/model`.
+pub fn public_compat_model_id(account: &str, wire_model: &str) -> String {
+    format!("{}/{}", account.trim(), wire_model.trim())
+}
+
 /// Resolve the model selection used by `/chat` through the unified config boundary.
 ///
 /// New-schema CodingPlan models live in `[models.*]` and therefore are not present in
 /// the legacy `config.providers` map. Keep the selection id intact for the runtime while
 /// projecting the flattened provider config needed by image preprocessing and runtime
 /// metadata.
-fn resolve_chat_provider(
+///
+/// Accepted `requested` forms (first match wins):
+/// 1. Exact catalog selection id (`AtomGit-GLM-5.2`, `claude`, `acc/ds`)
+/// 2. Public id `account/wire_model` (`AtomGit/GLM-5.2`, `claude/claude-opus-4-7`)
+/// 3. Wire model name alone (`GLM-5.2`, `claude-opus-4-7`)
+pub fn resolve_chat_provider(
     config: &Config,
     requested: Option<String>,
 ) -> anyhow::Result<(String, atomcode_config::config::provider::ProviderConfig)> {
-    let selection = requested
-        .or_else(|| config.effective_model_selection())
-        .ok_or_else(|| anyhow::anyhow!("no model selected"))?;
-    let provider = config
-        .provider_config_for_selection(&selection)
-        .ok_or_else(|| anyhow::anyhow!("Provider '{}' not found", selection))?;
-    Ok((selection, provider))
+    let Some(requested) = requested
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+    else {
+        let selection = config
+            .effective_model_selection()
+            .ok_or_else(|| anyhow::anyhow!("no model selected"))?;
+        let provider = config
+            .provider_config_for_selection(&selection)
+            .ok_or_else(|| anyhow::anyhow!("Provider '{}' not found", selection))?;
+        return Ok((selection, provider));
+    };
+
+    // Prefer exact selection id (logical model / legacy provider key).
+    if let Some(provider) = config.provider_config_for_selection(&requested) {
+        return Ok((requested, provider));
+    }
+
+    // Public id: first '/' splits account from wire model (wire may itself contain '/').
+    if let Some((account, model)) = requested.split_once('/') {
+        let account = account.trim();
+        let model = model.trim();
+        if !account.is_empty() && !model.is_empty() {
+            let mut entries: Vec<(String, _)> = config.logical_models().into_iter().collect();
+            entries.sort_by(|a, b| a.0.cmp(&b.0));
+            for (id, profile) in entries {
+                if profile.account == account && profile.model == model {
+                    if let Some(provider) = config.provider_config_for_selection(&id) {
+                        return Ok((id, provider));
+                    }
+                }
+            }
+        }
+    }
+
+    // Compat clients often send the wire model name (e.g. "glm-4.6") rather than
+    // AtomCode's selection id — match by ProviderConfig.model as well.
+    let mut ids: Vec<String> = config.logical_models().into_keys().collect();
+    ids.sort();
+    for id in ids {
+        if let Some(provider) = config.provider_config_for_selection(&id) {
+            if provider.model == requested {
+                return Ok((id, provider));
+            }
+        }
+    }
+    for (id, provider) in &config.providers {
+        if provider.model == requested {
+            return Ok((id.clone(), provider.clone()));
+        }
+    }
+
+    Err(anyhow::anyhow!("model '{requested}' not found"))
 }
 
 // ============== Streaming Chat API ==============
@@ -2962,10 +3024,17 @@ pub struct ChatRequest {
     /// to the current runtime mode set via `/approval_mode` or `/live/mode`.
     #[serde(default)]
     pub approval_mode: Option<crate::approval_mode::ApprovalMode>,
+    /// Optional client system text (OpenAI/Anthropic compat). Appended after
+    /// AGENTS.md / glossary / db packs in SESSION CONTEXT.
+    #[serde(default)]
+    pub extra_system_append: Option<String>,
+    /// Optional display name for a newly created session (OpenAI `user` / user_title).
+    #[serde(default)]
+    pub session_title: Option<String>,
 }
 
 /// One attached image from the webui (base64-encoded), mapped to core `ImagePart`.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 pub struct ImageInput {
     /// MIME type, e.g. "image/png".
     pub media_type: String,
@@ -2974,7 +3043,7 @@ pub struct ImageInput {
 }
 
 /// SSE event types for streaming chat
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 #[serde(tag = "type")]
 pub enum ChatEvent {
     /// Exact provider/model resolved for this request.
@@ -2998,10 +3067,12 @@ pub enum ChatEvent {
         name: String,
         arguments: String,
     },
-    /// Real-time tool output chunk
+    /// Real-time tool output chunk (stdout). `id` is the tool call id so parallel
+    /// tools can be attributed correctly on the OpenAI/Anthropic compat surface.
     #[serde(rename = "tool_output")]
-    ToolOutputChunk { chunk: String },
+    ToolOutputChunk { id: String, chunk: String },
     /// Ephemeral latest-wins tool activity; never persisted as output.
+    /// Used heavily by `task` subagents (per-child queued/running/done lines).
     #[serde(rename = "tool_progress")]
     ToolProgress { id: String, progress: String },
     /// Tool call completed
@@ -3816,7 +3887,10 @@ impl ChatRuntimeProjector {
                         progress: progress.to_string(),
                     }]
                 } else {
-                    vec![ChatEvent::ToolOutputChunk { chunk: message }]
+                    vec![ChatEvent::ToolOutputChunk {
+                        id: call_id,
+                        chunk: message,
+                    }]
                 }
             }
             Agent::ToolResult { result } => {
@@ -4272,6 +4346,8 @@ async fn process_chat_request(
     {
         let mut runtime_cfg =
             live_api::chat_runtime_config(&config, &provider_name, &working_dir, telemetry.clone());
+        runtime_cfg.extra_system_append = req.extra_system_append.clone();
+        runtime_cfg.session_display_name = req.session_title.clone();
         runtime_cfg.dangerously_skip_permissions = approval_mode
             == crate::approval_mode::ApprovalMode::Auto
             || (approval_mode == crate::approval_mode::ApprovalMode::Build
@@ -5280,13 +5356,23 @@ async fn get_tunnel_status(
     let pgy_reachable = matches!(state.bind_host.as_str(), "0.0.0.0" | "::")
         || pgy.ipv4.as_deref() == Some(state.bind_host.as_str());
 
-    // 复用请求自带的 token（与当前页面同一 token）拼远程 URL。Cookie 交接后
-    // SPA 的请求把 token 放在 HttpOnly Cookie 里而非 Authorization 头，所以两处都取。
+    // 复用请求自带的 token（与当前页面同一 token）拼远程 URL。
+    // 与 require_webui_token 一致：Bearer / x-api-key / api-key / cookie。
     let token = auth_token::token_from_header(
         headers
             .get(axum::http::header::AUTHORIZATION)
             .and_then(|h| h.to_str().ok()),
     )
+    .or_else(|| {
+        auth_token::token_from_x_api_key_header(
+            headers.get("x-api-key").and_then(|h| h.to_str().ok()),
+        )
+    })
+    .or_else(|| {
+        auth_token::token_from_api_key_header(
+            headers.get("api-key").and_then(|h| h.to_str().ok()),
+        )
+    })
     .or_else(|| {
         auth_token::token_from_cookie(
             headers
@@ -5672,6 +5758,32 @@ pub async fn run_server(opts: ServerOpts) -> anyhow::Result<()> {
         .route("/chat/active", get(active_chat_sessions))
         .route("/chat/permission", post(chat_permission))
         .route("/chat/user-input", post(chat_user_input))
+        // OpenAI / Anthropic compatible surface (same token gate as /chat).
+        .route("/v1/models", get(compat_api::openai_list_models))
+        // Catch-all so public ids like `AtomGit/GLM-5.2` work (not only one path segment).
+        .route("/v1/models/*id", get(compat_api::openai_get_model))
+        // Anthropic-shaped model list (same catalog; different JSON envelope).
+        .route(
+            "/v1/anthropic/models",
+            get(compat_api::anthropic_list_models),
+        )
+        .route(
+            "/v1/chat/completions",
+            post(compat_api::openai_chat_completions)
+                .layer(DefaultBodyLimit::max(CHAT_REQUEST_BODY_LIMIT_BYTES)),
+        )
+        .route(
+            "/v1/responses",
+            post(compat_api::openai_responses)
+                .layer(DefaultBodyLimit::max(CHAT_REQUEST_BODY_LIMIT_BYTES)),
+        )
+        .route(
+            "/v1/messages",
+            post(compat_api::anthropic_messages)
+                .layer(DefaultBodyLimit::max(CHAT_REQUEST_BODY_LIMIT_BYTES)),
+        )
+        .route("/v1/sessions", get(compat_api::list_sessions))
+        .route("/v1/sessions/:id", get(compat_api::get_session))
         .route(
             "/approval_mode",
             get(live_api::approval_mode_get).post(live_api::approval_mode_set),
@@ -5818,6 +5930,14 @@ pub async fn run_server(opts: ServerOpts) -> anyhow::Result<()> {
         println!("  GET    /sessions/search?q=<keyword>    - Search sessions by name");
         println!("  GET    /models                         - List available models");
         println!("  POST   /chat                           - Stream chat response (SSE)");
+        println!("  GET    /v1/models                      - OpenAI-compatible model list (id = account/model)");
+        println!("  GET    /v1/models/*id                  - OpenAI-compatible model get");
+        println!("  GET    /v1/anthropic/models            - Anthropic-compatible model list");
+        println!("  POST   /v1/chat/completions            - OpenAI Chat Completions");
+        println!("  POST   /v1/responses                   - OpenAI Responses API");
+        println!("  POST   /v1/messages                    - Anthropic Messages");
+        println!("  GET    /v1/sessions[?user=key]         - List sessions (by user session key)");
+        println!("  GET    /v1/sessions/:id                - Get session by id or user key");
         println!("  GET    /config                         - Get sanitized config");
         println!("  POST   /config/reload                  - Reload config from disk");
         println!("  GET    /providers                      - List providers");
@@ -6086,7 +6206,74 @@ mod tests {
         .unwrap();
 
         let error = resolve_chat_provider(&config, Some("missing".into())).unwrap_err();
-        assert_eq!(error.to_string(), "Provider 'missing' not found");
+        assert_eq!(error.to_string(), "model 'missing' not found");
+    }
+
+    #[test]
+    fn resolve_accepts_public_account_slash_model_id() {
+        // CodingPlan catalog keys are hyphenated; public API uses account/model.
+        let config: Config = serde_json::from_value(serde_json::json!({
+            "default_model": "AtomGit-GLM-5.2",
+            "provider_accounts": {
+                "AtomGit": {
+                    "provider": "openai",
+                    "base_url": "https://llm-api.atomgit.com/v1"
+                }
+            },
+            "models": {
+                "AtomGit-GLM-5.2": {
+                    "account": "AtomGit",
+                    "model": "GLM-5.2",
+                    "context_window": 128000
+                },
+                "AtomGit-deepseek-v4-flash": {
+                    "account": "AtomGit",
+                    "model": "deepseek-v4-flash",
+                    "context_window": 128000
+                }
+            }
+        }))
+        .unwrap();
+
+        assert_eq!(
+            public_compat_model_id("AtomGit", "GLM-5.2"),
+            "AtomGit/GLM-5.2"
+        );
+
+        // Public form
+        let (sel, p) =
+            resolve_chat_provider(&config, Some("AtomGit/GLM-5.2".into())).unwrap();
+        assert_eq!(sel, "AtomGit-GLM-5.2");
+        assert_eq!(p.model, "GLM-5.2");
+
+        // Legacy hyphen selection still works
+        let (sel2, _) =
+            resolve_chat_provider(&config, Some("AtomGit-deepseek-v4-flash".into())).unwrap();
+        assert_eq!(sel2, "AtomGit-deepseek-v4-flash");
+
+        // Wire model alone
+        let (sel3, _) =
+            resolve_chat_provider(&config, Some("deepseek-v4-flash".into())).unwrap();
+        assert_eq!(sel3, "AtomGit-deepseek-v4-flash");
+    }
+
+    #[test]
+    fn resolve_public_id_for_legacy_provider() {
+        let config: Config = serde_json::from_value(serde_json::json!({
+            "default_provider": "claude",
+            "providers": {
+                "claude": {
+                    "type": "claude",
+                    "model": "claude-opus-4-7"
+                }
+            }
+        }))
+        .unwrap();
+
+        let (sel, p) =
+            resolve_chat_provider(&config, Some("claude/claude-opus-4-7".into())).unwrap();
+        assert_eq!(sel, "claude");
+        assert_eq!(p.model, "claude-opus-4-7");
     }
 
     #[test]
@@ -6426,6 +6613,8 @@ mod tests {
             request_id: Some(request_id.into()),
             images: Vec::new(),
             approval_mode: Some(crate::approval_mode::ApprovalMode::Auto),
+            extra_system_append: None,
+            session_title: None,
         };
 
         let first = chat_stream(
@@ -6473,6 +6662,8 @@ mod tests {
                 request_id: Some("request-only-alias".into()),
                 images: Vec::new(),
                 approval_mode: Some(crate::approval_mode::ApprovalMode::Auto),
+                extra_system_append: None,
+                session_title: None,
             }),
         )
         .await
@@ -6726,6 +6917,8 @@ mod tests {
                 request_id: None,
                 images: Vec::new(),
                 approval_mode: Some(crate::approval_mode::ApprovalMode::Auto),
+                extra_system_append: None,
+                session_title: None,
             },
             event_tx,
             admission.cancellation,
@@ -7403,6 +7596,8 @@ mod tests {
                     data: "aW1hZ2U=".into(),
                 }],
                 approval_mode: Some(crate::approval_mode::ApprovalMode::Auto),
+                extra_system_append: None,
+                session_title: None,
             },
             event_tx,
             admission.cancellation,

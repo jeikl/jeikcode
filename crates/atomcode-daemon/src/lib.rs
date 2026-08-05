@@ -634,7 +634,7 @@ pub struct AppState {
     /// different localhost port would shadow the shared-jar cookie). See
     /// [`auth_token::webui_cookie_name`].
     pub webui_cookie_name: String,
-    /// Serve `--yolo`: auto-approve tools + auto-answer structured questions.
+    /// Serve `--yolo`: auto-approve tools and unmount `request_user_input`.
     /// When true, no permission / user-input modal can stall an API or WebUI turn.
     pub yolo: bool,
 }
@@ -5743,8 +5743,8 @@ pub struct ServerOpts {
     /// (same rule as the API endpoint catalog), so callers cannot accidentally
     /// pollute a TUI / embedded stderr by pairing footer text with quiet mode.
     pub startup_footer: Option<String>,
-    /// Headless YOLO: auto-approve every tool and auto-answer
-    /// `request_user_input` (never block the stream on a WebUI/TUI modal).
+    /// Headless YOLO: auto-approve every tool and hide `request_user_input`
+    /// (never block the stream on a WebUI/TUI modal).
     /// Intended for API automation (`atomcode serve --yolo`).
     pub yolo: bool,
 }
@@ -5779,9 +5779,14 @@ pub async fn run_server(opts: ServerOpts) -> anyhow::Result<()> {
     if yolo {
         // Global live approval mode → Auto so /live and /chat default the same.
         live_api::live_set_approval_mode(crate::approval_mode::ApprovalMode::Auto);
+        // Unmount `request_user_input` for this process (tool registry + persona
+        // both read ATOMCODE_REQUEST_USER_INPUT). Do NOT auto-answer questions —
+        // the model must not have a "ask user" tool under YOLO automation.
+        // SAFETY: serve is headless; setting process env here is intentional.
+        std::env::set_var("ATOMCODE_REQUEST_USER_INPUT", "0");
         if !quiet {
             eprintln!(
-                "serve: --yolo enabled (auto-approve tools; auto-answer request_user_input; no modal stalls)"
+                "serve: --yolo enabled (auto-approve tools; request_user_input tool hidden; no modal stalls)"
             );
         }
     }

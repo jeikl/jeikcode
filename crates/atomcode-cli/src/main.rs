@@ -457,7 +457,7 @@ async fn run_serve_mode(
         format_serve_banner(&host, port, &workdir, display_token.as_deref(), no_token);
     if yolo {
         eprintln!(
-            "serve: --yolo: auto-approve all tools; auto-answer request_user_input; no modal stalls"
+            "serve: --yolo: auto-approve all tools; request_user_input tool hidden; no modal stalls"
         );
     }
     let res = atomcode_daemon::run_server(atomcode_daemon::ServerOpts {
@@ -864,7 +864,7 @@ struct Cli {
     #[arg(long = "no-token", default_value_t = false, conflicts_with = "token")]
     pub no_token: bool,
 
-    /// Headless serve: YOLO mode — auto-approve every tool and auto-answer
+    /// Headless serve: YOLO mode — auto-approve every tool and hide
     /// `request_user_input` so API automation never stalls on a modal.
     #[arg(long = "yolo", default_value_t = false)]
     pub yolo: bool,
@@ -943,7 +943,7 @@ enum Commands {
         /// Disable webui access-token auth (INSECURE — only for trusted private networks).
         #[arg(long, default_value_t = false, conflicts_with = "token")]
         no_token: bool,
-        /// YOLO: auto-approve every tool and auto-answer `request_user_input`
+        /// YOLO: auto-approve every tool and hide `request_user_input`
         /// so OpenAI/API automation never stalls on a permission or question modal.
         #[arg(long, default_value_t = false)]
         yolo: bool,

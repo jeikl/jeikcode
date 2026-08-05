@@ -966,6 +966,23 @@ async fn run_compat_turn(
     let active_conns = state.active_connections.clone();
     active_conns.fetch_add(1, Ordering::Relaxed);
 
+    // API-owned turn: low-confirm automation. WebUI /chat/watch only observes
+    // the same event bus — no permission / user-input modals are emitted here.
+    // (`serve --yolo` is identical for API; it also forces native WebUI/TUI paths.)
+    let policy = crate::ChatTurnPolicy::resolve(
+        state.yolo,
+        crate::ChatTurnOrigin::Api,
+        SessionMode::Channel,
+        state.enforce_token,
+        &state.bind_host,
+    );
+    debug_assert_eq!(
+        policy.force_approval_mode,
+        Some(crate::approval_mode::ApprovalMode::Auto),
+        "API turns must force Auto approval"
+    );
+    debug_assert!(!policy.interactive_permission && !policy.interactive_user_input);
+
     let ctx = CurrentContext {
         mode: Some(SessionMode::Channel),
         session_id: chat_req
@@ -978,6 +995,8 @@ async fn run_compat_turn(
     let cleanup_chats = active_chats.clone();
     let cleanup_op = operation_id.clone();
     let err_tx = fan_tx.clone();
+    let interactive_permission = policy.interactive_permission;
+    let interactive_user_input = policy.interactive_user_input;
     tokio::spawn(async move {
         let result = CurrentContext::scope(ctx, || async move {
             process_chat_request(
@@ -990,10 +1009,8 @@ async fn run_compat_turn(
                 telemetry,
                 pending_permissions,
                 pending_user_inputs,
-                // Compat API: never interactive permission / user-input UI.
-                // Auto mode + missing user-input responder auto-answers (see live_api).
-                false,
-                false,
+                interactive_permission,
+                interactive_user_input,
                 terminal_sent_inner,
             )
             .await

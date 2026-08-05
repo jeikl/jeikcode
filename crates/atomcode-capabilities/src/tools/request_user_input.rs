@@ -134,6 +134,10 @@ fn answer_clause(resp: &UserInputResponse) -> String {
 /// question was declined, degrade to the same "no answer" guidance a single decline gives.
 pub fn format_batch_result(reqs: &[UserInputRequest], resps: &[UserInputResponse]) -> ToolResult {
     if resps.len() >= reqs.len() && resps.iter().all(|r| r.declined) {
+        // Prefer an explicit driver handoff message (e.g. YOLO residual → final answer).
+        if let Some(t) = resps.iter().find_map(|r| r.text.as_ref()).filter(|t| !t.is_empty()) {
+            return ok_result(t.clone());
+        }
         return ok_result(
             "No answer was provided. Proceed with your own best judgment; only ask again if you \
              are truly blocked.",
@@ -174,6 +178,13 @@ fn ok_result(msg: impl Into<String>) -> ToolResult {
 /// Map the user's answer to a tool result string.
 pub fn format_result(resp: &UserInputResponse) -> ToolResult {
     if resp.declined {
+        // Drivers may attach a handoff reason in `text` (e.g. residual call under
+        // YOLO/API: question already returned as the user-visible final answer).
+        // Prefer that over the generic "proceed with judgment" guidance so the
+        // model waits for the next user message instead of guessing.
+        if let Some(t) = resp.text.as_ref().filter(|t| !t.is_empty()) {
+            return ok_result(t.clone());
+        }
         return ok_result(
             "No answer was provided. Proceed with your own best judgment; only ask again if you \
              are truly blocked.",
@@ -379,6 +390,17 @@ mod tests {
             "No answer was provided. Proceed with your own best judgment; only ask again if you \
              are truly blocked.",
         );
+    }
+
+    #[test]
+    fn format_declined_prefers_handoff_text() {
+        let d = format_result(&UserInputResponse {
+            declined: true,
+            selected: vec![],
+            text: Some("wait for next message".into()),
+        });
+        assert!(!d.is_error);
+        assert_eq!(d.content, "wait for next message");
     }
 
     #[test]

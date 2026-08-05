@@ -50,54 +50,7 @@ pub(crate) fn live_set_approval_mode(mode: ApprovalMode) {
     *LIVE_APPROVAL_MODE.lock().unwrap_or_else(|e| e.into_inner()) = mode;
 }
 
-/// Build an automatic answer for `request_user_input` under YOLO/Auto so the
-/// turn never stalls on a modal (OpenCode-style "ask me a question" hang).
-///
-/// Prefers the first option label when present; otherwise empty allow text.
-pub(crate) fn auto_answer_user_input(payload: &serde_json::Value) -> serde_json::Value {
-    fn first_option_label(opt: &serde_json::Value) -> Option<String> {
-        opt.get("label")
-            .and_then(|v| v.as_str())
-            .or_else(|| opt.get("id").and_then(|v| v.as_str()))
-            .or_else(|| opt.get("value").and_then(|v| v.as_str()))
-            .map(str::to_string)
-            .or_else(|| opt.as_str().map(str::to_string))
-    }
 
-    fn answer_one(question: &serde_json::Value) -> serde_json::Value {
-        let selected = question
-            .get("options")
-            .and_then(|o| o.as_array())
-            .and_then(|opts| opts.first())
-            .and_then(first_option_label)
-            .into_iter()
-            .collect::<Vec<_>>();
-        serde_json::json!({
-            "declined": false,
-            "selected": selected,
-            "text": serde_json::Value::Null,
-        })
-    }
-
-    if let Some(questions) = payload.get("questions").and_then(|q| q.as_array()) {
-        if questions.len() > 1 {
-            let responses: Vec<_> = questions.iter().map(answer_one).collect();
-            return serde_json::json!({ "responses": responses });
-        }
-        if let Some(q) = questions.first() {
-            return answer_one(q);
-        }
-    }
-    // Flat single-question payload
-    if payload.get("options").is_some() {
-        return answer_one(payload);
-    }
-    serde_json::json!({
-        "declined": false,
-        "selected": [],
-        "text": "",
-    })
-}
 
 fn native_runtime_mode(mode: ApprovalMode) -> atomcode_coding::RuntimeMode {
     match mode {
@@ -564,17 +517,20 @@ pub(crate) async fn run_chat_turn_v2(
                 if request.kind
                     == atomcode_capabilities::tools::request_user_input::REQUEST_USER_INPUT_KIND =>
             {
-                // YOLO / Auto / no UI responder: never stall on a modal.
-                // Prefer first option(s); automation must keep streaming.
+                // Under YOLO the tool is unmounted (`ATOMCODE_REQUEST_USER_INPUT=0`).
+                // If a request still arrives (or Auto/API with no UI), never stall:
+                // decline immediately so the stream continues (do NOT pick option A).
                 if user_input_responders.is_none() || approval_mode == ApprovalMode::Auto {
-                    let auto = auto_answer_user_input(&request.payload);
-                    let _ = runtime_event_tx.send(CodingRuntimeEvent::Agent(
-                        atomcode_kernel::event::AgentEvent::TextDelta(
-                            "\n[auto] request_user_input auto-answered (YOLO/Auto — no modal)\n"
-                                .into(),
-                        ),
-                    ));
-                    let _ = handle.respond(request.id, auto).await;
+                    let _ = handle
+                        .respond(
+                            request.id,
+                            serde_json::json!({
+                                "declined": true,
+                                "selected": [],
+                                "text": "request_user_input is disabled in YOLO/API automation mode; continue without asking the user",
+                            }),
+                        )
+                        .await;
                     continue;
                 }
                 let responders = user_input_responders

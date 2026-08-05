@@ -171,6 +171,7 @@ async fn main() {
         // 独立 daemon 模式不需要 app user_id 校验。
         app_user_id: None,
         startup_footer: None,
+        yolo: false,
     })
     .await
     {

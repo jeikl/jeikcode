@@ -45,6 +45,60 @@ pub(crate) fn live_current_approval_mode() -> ApprovalMode {
     *LIVE_APPROVAL_MODE.lock().unwrap_or_else(|e| e.into_inner())
 }
 
+/// Force the process-wide live approval mode (used by `serve --yolo` → Auto).
+pub(crate) fn live_set_approval_mode(mode: ApprovalMode) {
+    *LIVE_APPROVAL_MODE.lock().unwrap_or_else(|e| e.into_inner()) = mode;
+}
+
+/// Build an automatic answer for `request_user_input` under YOLO/Auto so the
+/// turn never stalls on a modal (OpenCode-style "ask me a question" hang).
+///
+/// Prefers the first option label when present; otherwise empty allow text.
+pub(crate) fn auto_answer_user_input(payload: &serde_json::Value) -> serde_json::Value {
+    fn first_option_label(opt: &serde_json::Value) -> Option<String> {
+        opt.get("label")
+            .and_then(|v| v.as_str())
+            .or_else(|| opt.get("id").and_then(|v| v.as_str()))
+            .or_else(|| opt.get("value").and_then(|v| v.as_str()))
+            .map(str::to_string)
+            .or_else(|| opt.as_str().map(str::to_string))
+    }
+
+    fn answer_one(question: &serde_json::Value) -> serde_json::Value {
+        let selected = question
+            .get("options")
+            .and_then(|o| o.as_array())
+            .and_then(|opts| opts.first())
+            .and_then(first_option_label)
+            .into_iter()
+            .collect::<Vec<_>>();
+        serde_json::json!({
+            "declined": false,
+            "selected": selected,
+            "text": serde_json::Value::Null,
+        })
+    }
+
+    if let Some(questions) = payload.get("questions").and_then(|q| q.as_array()) {
+        if questions.len() > 1 {
+            let responses: Vec<_> = questions.iter().map(answer_one).collect();
+            return serde_json::json!({ "responses": responses });
+        }
+        if let Some(q) = questions.first() {
+            return answer_one(q);
+        }
+    }
+    // Flat single-question payload
+    if payload.get("options").is_some() {
+        return answer_one(payload);
+    }
+    serde_json::json!({
+        "declined": false,
+        "selected": [],
+        "text": "",
+    })
+}
+
 fn native_runtime_mode(mode: ApprovalMode) -> atomcode_coding::RuntimeMode {
     match mode {
         ApprovalMode::Plan => atomcode_coding::RuntimeMode::Plan,
@@ -477,8 +531,7 @@ pub(crate) async fn run_chat_turn_v2(
                 let _ = runtime_event_tx.send(event);
             }
             CodingRuntimeEvent::Request(request) if request.kind == APPROVAL_KIND => {
-                let _ = runtime_event_tx.send(CodingRuntimeEvent::Request(request.clone()));
-                if serde_json::from_value::<ApprovalRequest>(request.payload).is_err() {
+                if serde_json::from_value::<ApprovalRequest>(request.payload.clone()).is_err() {
                     let _ = handle.respond(request.id, serde_json::Value::Null).await;
                     continue;
                 }
@@ -493,6 +546,12 @@ pub(crate) async fn run_chat_turn_v2(
                         decision = rx.recv() => decision.unwrap_or(PermissionDecision::Deny),
                     },
                 };
+                // Only surface permission modals when we are actually waiting on a
+                // human (interactive responder). Auto / YOLO / missing-responder
+                // paths must not emit a WebUI card that looks like a stall.
+                if perm_rx.is_some() {
+                    let _ = runtime_event_tx.send(CodingRuntimeEvent::Request(request.clone()));
+                }
                 let response = match decision {
                     PermissionDecision::AllowOnce => ApprovalResponse::allow(),
                     PermissionDecision::AllowAlways => ApprovalResponse::allow_always(),
@@ -505,11 +564,22 @@ pub(crate) async fn run_chat_turn_v2(
                 if request.kind
                     == atomcode_capabilities::tools::request_user_input::REQUEST_USER_INPUT_KIND =>
             {
-                let Some(responders) = &user_input_responders else {
-                    let _ = runtime_event_tx.send(CodingRuntimeEvent::Request(request.clone()));
-                    let _ = handle.respond(request.id, serde_json::Value::Null).await;
+                // YOLO / Auto / no UI responder: never stall on a modal.
+                // Prefer first option(s); automation must keep streaming.
+                if user_input_responders.is_none() || approval_mode == ApprovalMode::Auto {
+                    let auto = auto_answer_user_input(&request.payload);
+                    let _ = runtime_event_tx.send(CodingRuntimeEvent::Agent(
+                        atomcode_kernel::event::AgentEvent::TextDelta(
+                            "\n[auto] request_user_input auto-answered (YOLO/Auto — no modal)\n"
+                                .into(),
+                        ),
+                    ));
+                    let _ = handle.respond(request.id, auto).await;
                     continue;
-                };
+                }
+                let responders = user_input_responders
+                    .as_ref()
+                    .expect("checked is_some above");
                 let (tx, rx) = tokio::sync::oneshot::channel();
                 responders.register(session_id.clone(), request.id, tx);
                 // Register before publishing the SSE event so a very fast browser answer

@@ -634,6 +634,9 @@ pub struct AppState {
     /// different localhost port would shadow the shared-jar cookie). See
     /// [`auth_token::webui_cookie_name`].
     pub webui_cookie_name: String,
+    /// Serve `--yolo`: auto-approve tools + auto-answer structured questions.
+    /// When true, no permission / user-input modal can stall an API or WebUI turn.
+    pub yolo: bool,
 }
 
 /// Cached MCP registry for a specific project directory.
@@ -4118,10 +4121,14 @@ async fn chat_stream(
     let telemetry = state.telemetry.clone();
     let pending_permissions = state.pending_permissions.clone();
     let pending_user_inputs = state.pending_user_inputs.clone();
-    let interactive_permission =
-        client_interactive_permission(client_mode, state.enforce_token, &state.bind_host);
+    // YOLO: never interactive — no permission / user-input modal can stall.
+    let interactive_permission = !state.yolo
+        && client_interactive_permission(client_mode, state.enforce_token, &state.bind_host);
     // Only the WebUI currently implements the typed `/chat/user-input` response endpoint.
-    let interactive_user_input = matches!(client_mode, SessionMode::Webui);
+    let interactive_user_input = !state.yolo && matches!(client_mode, SessionMode::Webui);
+    if state.yolo {
+        req.approval_mode = Some(crate::approval_mode::ApprovalMode::Auto);
+    }
 
     // Build CurrentContext for the spawned task (task_local doesn't auto-propagate across spawn)
     // Use the request's working_dir to detect repo_origin dynamically (not the
@@ -5167,6 +5174,7 @@ pub async fn ensure_server_and_open(host: &str, port: u16, sync: bool) -> String
             // webui 模式不需要 app user_id 校验。
             app_user_id: None,
             startup_footer: None,
+            yolo: false,
         };
         let task = tokio::spawn(async move {
             if let Err(e) = run_server(opts).await {
@@ -5325,6 +5333,7 @@ pub async fn ensure_app_server(
         prebound_listener: Some(listener),
         app_user_id: user_id,
         startup_footer: None,
+        yolo: false,
     };
     let task = tokio::spawn(async move {
         if let Err(e) = run_server(opts).await {
@@ -5734,6 +5743,10 @@ pub struct ServerOpts {
     /// (same rule as the API endpoint catalog), so callers cannot accidentally
     /// pollute a TUI / embedded stderr by pairing footer text with quiet mode.
     pub startup_footer: Option<String>,
+    /// Headless YOLO: auto-approve every tool and auto-answer
+    /// `request_user_input` (never block the stream on a WebUI/TUI modal).
+    /// Intended for API automation (`atomcode serve --yolo`).
+    pub yolo: bool,
 }
 
 /// Build and run the axum server until a shutdown signal is received.
@@ -5761,7 +5774,17 @@ pub async fn run_server(opts: ServerOpts) -> anyhow::Result<()> {
         prebound_listener,
         app_user_id,
         startup_footer,
+        yolo,
     } = opts;
+    if yolo {
+        // Global live approval mode → Auto so /live and /chat default the same.
+        live_api::live_set_approval_mode(crate::approval_mode::ApprovalMode::Auto);
+        if !quiet {
+            eprintln!(
+                "serve: --yolo enabled (auto-approve tools; auto-answer request_user_input; no modal stalls)"
+            );
+        }
+    }
 
     // Step 1: Load config (R1.1, R1.5) — tolerate errors, fallback to default.
     // Also seed the offline verdict + note ONCE from config + env here, before
@@ -5867,6 +5890,7 @@ pub async fn run_server(opts: ServerOpts) -> anyhow::Result<()> {
         // pre-binds via `bind_scanning` and passes its `local_addr` port), so two
         // instances get distinct cookie names.
         webui_cookie_name: auth_token::webui_cookie_name(port),
+        yolo,
     };
 
     // 公开路由（无需 token）：仅页面 + 静态资源 + 健康检查。页面必须可加载，
@@ -6726,6 +6750,7 @@ mod tests {
             bind_host: "127.0.0.1".into(),
             bind_port: 13456,
             webui_cookie_name: auth_token::webui_cookie_name(13456),
+            yolo: false,
         }
     }
 

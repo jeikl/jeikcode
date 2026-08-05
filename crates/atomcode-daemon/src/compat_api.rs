@@ -36,8 +36,8 @@ use tokio_stream::wrappers::UnboundedReceiverStream;
 
 use crate::approval_mode::ApprovalMode;
 use crate::{
-    process_chat_request, public_compat_model_id, resolve_chat_provider, ActiveChatAdmissionError,
-    AppState, ChatEvent, ChatRequest, ImageInput, SessionSummary,
+    fanout_chat_events, process_chat_request, public_compat_model_id, resolve_chat_provider,
+    ActiveChatAdmissionError, AppState, ChatEvent, ChatRequest, ImageInput, SessionSummary,
 };
 use atomcode_config::config::Config;
 use atomcode_telemetry::{CurrentContext, SessionMode};
@@ -939,9 +939,15 @@ async fn run_compat_turn(
         }
     };
 
-    let (tx, rx) = mpsc::unbounded_channel::<ChatEvent>();
+    let (client_tx, rx) = mpsc::unbounded_channel::<ChatEvent>();
     let operation_id = admission.operation_id.clone();
     let cancel_token = admission.cancellation;
+    let event_bus = state
+        .active_chats
+        .event_bus(&admission.operation_id)
+        .await
+        .expect("just admitted operation always has an event bus");
+    let fan_tx = fanout_chat_events(client_tx, event_bus);
     let active_chats = state.active_chats.clone();
     let mcp_cache = state.mcp_cache.clone();
     let telemetry = state.telemetry.clone();
@@ -963,12 +969,12 @@ async fn run_compat_turn(
 
     let cleanup_chats = active_chats.clone();
     let cleanup_op = operation_id.clone();
-    let err_tx = tx.clone();
+    let err_tx = fan_tx.clone();
     tokio::spawn(async move {
         let result = CurrentContext::scope(ctx, || async move {
             process_chat_request(
                 chat_req,
-                tx,
+                fan_tx,
                 cancel_token,
                 operation_id,
                 active_chats,

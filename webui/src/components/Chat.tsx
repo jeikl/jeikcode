@@ -27,7 +27,7 @@
 
 import { VNode } from 'preact';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'preact/hooks';
-import { streamChat, stopChat, cancelDetachedChat, getActiveChatSessions, SSEEvent, getSession, SessionMetaWithProject, getModels, ImageData, streamLive, postLiveMessage, postLiveStop, postLivePermission, postLiveProvider, postLiveMode, getApprovalMode, ApprovalMode, postLiveSwitchSession, LiveWireEvent, SessionMessage, getSkills, SkillInfo, listDir, changeDir, postConfigReload, postCommand, postLiveCompact, postLiveUserInput, postChatUserInput, type CommandResult, UserInputRequestEvent } from '../api';
+import { streamChat, stopChat, cancelDetachedChat, getActiveChatSessions, watchChatSession, SSEEvent, getSession, SessionMetaWithProject, getModels, ImageData, streamLive, postLiveMessage, postLiveStop, postLivePermission, postLiveProvider, postLiveMode, getApprovalMode, ApprovalMode, postLiveSwitchSession, LiveWireEvent, SessionMessage, getSkills, SkillInfo, listDir, changeDir, postConfigReload, postCommand, postLiveCompact, postLiveUserInput, postChatUserInput, type CommandResult, UserInputRequestEvent } from '../api';
 import {
   parseSlashCommand,
   buildCommandMap,
@@ -62,7 +62,13 @@ import {
   type ToolRow,
   type MsgPart,
 } from '../lib/toolRows';
-import { applySubtaskProgress, subtasksFromTaskArgs, subtaskCounts } from '../lib/subtasks';
+import {
+  applySubtaskProgress,
+  applySubtaskResultsFromOutput,
+  subtasksFromTaskArgs,
+  subtaskCounts,
+  taskArgsSummary,
+} from '../lib/subtasks';
 import { displayPath, pathBasename } from '../lib/displayPath';
 import { isInternalHistoryAssistantMessage, isInternalHistoryUserMessage } from '../lib/historyMessages';
 import {
@@ -324,6 +330,16 @@ function formatToolDetail(name: string, argsJson: string): string {
   const basename = (p: string) => p.split('/').pop() || p;
 
   switch (name) {
+    case 'task': {
+      // Prefer "4 个子代理" over dumping the whole tasks JSON in the header.
+      const summary = taskArgsSummary(argsJson);
+      if (summary) {
+        // Localize lightly without useT here (pure helper).
+        const n = (v.tasks as unknown[])?.length ?? 0;
+        return n > 0 ? `${n} subagents` : summary;
+      }
+      return '';
+    }
     case 'read_file':
     case 'edit_file':
     case 'write_file':
@@ -549,6 +565,132 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
   // 已为哪个 sessionId 触发过历史加载（或它是本 Chat 自建的会话）。用于避免
   // project_hash 迟到（刷新后由 App 异步回填）导致的重复加载 / 覆盖当前对话。
   const loadedForRef = useRef<string | null>(null);
+  // While another client (OpenAI API) owns `/chat/active`:
+  // 1) `GET /chat/watch` reattaches to the live event bus (real-time progress)
+  // 2) light history poll as a fallback for events missed before join
+  const detachedPollTimerRef = useRef<number | null>(null);
+  const detachedWatchAbortRef = useRef<AbortController | null>(null);
+  function stopDetachedHistoryPoll() {
+    if (detachedPollTimerRef.current != null) {
+      window.clearInterval(detachedPollTimerRef.current);
+      detachedPollTimerRef.current = null;
+    }
+    if (detachedWatchAbortRef.current) {
+      detachedWatchAbortRef.current.abort();
+      detachedWatchAbortRef.current = null;
+    }
+  }
+  function ensureAssistantBubbleForWatch() {
+    setMessages((prev) => {
+      if (prev.length > 0 && prev[prev.length - 1].role === 'assistant') {
+        return prev;
+      }
+      return [
+        ...prev,
+        { role: 'assistant' as const, parts: [], ts: Date.now() },
+      ];
+    });
+  }
+  function startDetachedHistoryPoll(
+    projectHash: string,
+    loadId: string,
+    loadGeneration: number,
+  ) {
+    stopDetachedHistoryPoll();
+    setHistoryHint(t('chat.detachedWatching'));
+    // Show running UI; send stays locked via recovery / requestId.
+    setBusy(true);
+    ensureAssistantBubbleForWatch();
+
+    // Live reattach via event bus fan-out.
+    const watchAbort = new AbortController();
+    detachedWatchAbortRef.current = watchAbort;
+    void watchChatSession(
+      loadId,
+      (event) => {
+        if (
+          activeIdRef.current !== loadId ||
+          sessionGenerationRef.current !== loadGeneration
+        ) {
+          return;
+        }
+        // Ignore the immediate not_active done if the race lost; poll will finish.
+        if (
+          event.type === 'done' &&
+          (event as { stop_reason?: string }).stop_reason === 'not_active'
+        ) {
+          return;
+        }
+        ensureAssistantBubbleForWatch();
+        handleEvent(event);
+        if (
+          event.type === 'done' ||
+          event.type === 'stopped' ||
+          event.type === 'error'
+        ) {
+          stopDetachedHistoryPoll();
+          if (requestIdRef.current === loadId) requestIdRef.current = null;
+          setHistoryHint(null);
+          setBusy(false);
+        }
+      },
+      watchAbort.signal,
+    ).catch((err) => {
+      if (err?.name === 'AbortError') return;
+      // Fall through to poll-only mode.
+      setHistoryHint(t('chat.detachedPolling'));
+    });
+
+    const tick = async () => {
+      if (
+        activeIdRef.current !== loadId ||
+        sessionGenerationRef.current !== loadGeneration
+      ) {
+        stopDetachedHistoryPoll();
+        return;
+      }
+      try {
+        const [session, activeIds] = await Promise.all([
+          getSession(projectHash, loadId),
+          getActiveChatSessions(),
+        ]);
+        if (
+          activeIdRef.current !== loadId ||
+          sessionGenerationRef.current !== loadGeneration
+        ) {
+          stopDetachedHistoryPoll();
+          return;
+        }
+        // Only apply history when we are NOT receiving a denser live stream
+        // (avoid clobbering in-progress tool rows). Prefer growing history.
+        if (session && Array.isArray(session.messages) && session.messages.length > 0) {
+          const loaded = sessionMessagesToDisplay(session.messages);
+          if (loaded.length > messagesRef.current.length) {
+            setMessages(loaded);
+            ensureAssistantBubbleForWatch();
+          }
+        }
+        const stillActive = activeIds.includes(loadId);
+        if (!stillActive) {
+          stopDetachedHistoryPoll();
+          if (requestIdRef.current === loadId) requestIdRef.current = null;
+          transitionChatRecovery({ type: 'authoritative_terminal' });
+          setHistoryHint(null);
+          setBusy(false);
+          // Final history hydrate
+          if (session && Array.isArray(session.messages)) {
+            setMessages(sessionMessagesToDisplay(session.messages));
+          }
+        }
+      } catch {
+        // Keep polling.
+      }
+    };
+    void tick();
+    detachedPollTimerRef.current = window.setInterval(() => {
+      void tick();
+    }, 2000);
+  }
   // Cache of session messages, used to preserve in-progress streaming turns when switching sessions.
   const messageCacheRef = useRef<Map<string, Message[]>>(new Map());
   // Mirror of messages state to read the latest value without dependency tracking.
@@ -556,6 +698,9 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
   useEffect(() => {
     messagesRef.current = messages;
   }, [messages]);
+  useEffect(() => {
+    return () => stopDetachedHistoryPoll();
+  }, []);
   // 实时（/live）总线对应的会话 id（来自 snapshot）。用于门控实时事件：仅当用户当前
   // 查看的就是这个实时会话时才把输出渲染进画布——否则用户从侧栏打开了别的历史会话，
   // 实时输出会串进错误页面、且刷新即消失（刷新会按真实会话重载）。
@@ -604,6 +749,7 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
       activeIdRef.current = sessionId;
       providerPinnedRef.current = false;
       loadedForRef.current = null;
+      stopDetachedHistoryPoll();
       optimisticFiredRef.current = false;
       pendingSelfEchoRef.current = null;
       // An existing session stays send-locked until `/chat/active` proves it
@@ -738,6 +884,9 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
             setQueued([]);
             nextHint = t('chat.detachedActive');
             pushCommandNotice(t('chat.detachedActive'));
+            // /chat has no SSE reattach: poll disk history while API/other-tab
+            // holds the active turn so the WebUI still "syncs" messages.
+            startDetachedHistoryPoll(projectHash, loadId, loadGeneration);
           } else if (requestIdRef.current === loadId) {
             requestIdRef.current = null;
           }
@@ -1017,13 +1166,19 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
         const parts: MsgPart[] = [];
         if (msg.content) parts.push({ kind: 'text', text: msg.content });
         for (const tc of msg.tool_calls ?? []) {
+          const rawArgs = tc.arguments || tc.display || '';
+          // Rebuild parallel subagent panel for `task` (same as live tool_start).
+          const subtasks =
+            tc.name === 'task' ? subtasksFromTaskArgs(rawArgs) ?? undefined : undefined;
           parts.push({
             kind: 'tool',
             tool: {
               id: tc.id,
               name: tc.name,
-              args: tc.arguments || tc.display || '',
+              // Keep raw JSON for expand/debug, but UI prefers subtasks panel.
+              args: rawArgs,
               status: 'done',
+              ...(subtasks ? { subtasks } : {}),
             },
           });
         }
@@ -1037,6 +1192,21 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
             if (p.kind === 'tool' && p.tool.id === result.call_id) {
               p.tool.output = result.summary;
               p.tool.status = toolResultStatus(result.success, result.summary);
+              // History path: fold `<task id=… state=completed>` into subtasks panel.
+              if (p.tool.subtasks && p.tool.subtasks.length > 0) {
+                p.tool.subtasks = applySubtaskResultsFromOutput(
+                  p.tool.subtasks,
+                  result.summary ?? '',
+                );
+              } else if (p.tool.name === 'task') {
+                const seeded = subtasksFromTaskArgs(p.tool.args);
+                if (seeded) {
+                  p.tool.subtasks = applySubtaskResultsFromOutput(
+                    seeded,
+                    result.summary ?? '',
+                  );
+                }
+              }
               break outer;
             }
           }
@@ -3486,18 +3656,33 @@ function ToolRowView({ tool }: { tool: ToolRow }) {
     annotation = { cls: 'warning', label: t('tool.incomplete') };
   }
 
-  const hasDetail = !!(tool.args || tool.output);
+  // With a subtask panel, the parallel rows are the primary UI — don't force
+  // users to expand raw JSON args / `<task id=…>` dumps after refresh.
+  const hasDetail = hasSubtasks
+    ? false
+    : !!(tool.args || tool.output);
   // When we have a parallel subtask panel, don't also show the alternating
   // single-line progress (that was the unfriendly explore#1 / #3 flicker).
   const showFlatProgress =
     tool.status === 'pending' && !!tool.progress && !hasSubtasks;
 
+  const counts = hasSubtasks ? subtaskCounts(tool.subtasks!) : null;
+  const headerDetail = counts
+    ? t('subtask.summary', {
+        done: String(counts.completed),
+        total: String(counts.total),
+        running: String(counts.running),
+        pending: String(counts.pending),
+        failed: String(counts.failed),
+      })
+    : abbreviateArgs(formatToolDetail(tool.name, tool.args));
+
   return (
     <div class="tool-body">
-      <div class="tool-header" onClick={() => setExpanded((e) => !e)}>
+      <div class="tool-header" onClick={() => hasDetail && setExpanded((e) => !e)}>
         <ToolTypeIcon name={tool.name} />
         <span class="tool-name">{displayToolName(tool.name)}</span>
-        <span class="tool-name-secondary">{abbreviateArgs(formatToolDetail(tool.name, tool.args))}</span>
+        <span class="tool-name-secondary">{headerDetail}</span>
         {annotation && (
           <span class={'tool-annotation ' + annotation.cls}>
             <ToolStatusIcon cls={annotation.cls} />

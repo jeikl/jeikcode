@@ -191,6 +191,15 @@ pub(super) struct CompatProjector {
     fc_item_ids: std::collections::HashMap<String, String>,
     response_id: String,
     session_key: Option<String>,
+    /// Last emitted OpenAI `reasoning_content` did not end with `\n`.
+    /// Used so tool/subagent timeline lines don't glue onto model thinking.
+    reasoning_needs_nl: bool,
+    /// Stable order of subagent rows in the live panel.
+    subagent_order: Vec<String>,
+    /// Latest short status text per subagent label (without `子代理 ` prefix).
+    subagent_status: std::collections::HashMap<String, String>,
+    /// How many terminal rows the last panel paint occupied (for ANSI cursor-up).
+    subagent_panel_rows: usize,
 }
 
 impl CompatProjector {
@@ -239,7 +248,166 @@ impl CompatProjector {
             fc_item_ids: Default::default(),
             response_id: id,
             session_key,
+            reasoning_needs_nl: false,
+            subagent_order: Vec::new(),
+            subagent_status: Default::default(),
+            subagent_panel_rows: 0,
         }
+    }
+
+    fn note_reasoning_tail(&mut self, text: &str) {
+        self.reasoning_needs_nl = !text.is_empty() && !text.ends_with('\n');
+    }
+
+    /// Emit a standalone progress line into `reasoning_content`.
+    ///
+    /// Always uses a **leading** `\n` so lines stay separated even when the client
+    /// trims trailing newlines from each SSE delta (common in OpenAI-style UIs).
+    fn openai_progress_chunk(&mut self, line: &str) -> SseChunk {
+        // Tool start/done close the subagent panel (leave final rows on screen).
+        self.subagent_panel_rows = 0;
+        let body = line.trim_matches(|c| c == '\n' || c == '\r');
+        let text = if self.reasoning_needs_nl {
+            format!("\n\n{body}\n")
+        } else {
+            format!("\n{body}\n")
+        };
+        self.reasoning_needs_nl = false;
+        self.openai_chunk(json!({ "reasoning_content": text }), None)
+    }
+
+    /// True when `detail` looks like streamed answer/tree dump, not a short action.
+    fn is_content_dump(detail: &str) -> bool {
+        let t = detail.trim();
+        if t.is_empty() {
+            return false;
+        }
+        if t.contains('\n') || t.chars().count() > 72 {
+            return true;
+        }
+        let first = t.chars().next().unwrap_or(' ');
+        matches!(first, '#' | '├' | '│' | '└' | '`' | '*' | '-' | '—')
+            || t.starts_with("##")
+            || t.starts_with("```")
+            || t.contains("目录树")
+            || t.starts_with("import ")
+            || t.starts_with("for ")
+            || t.starts_with("time.sleep")
+    }
+
+    /// Short action-oriented status only (never dump file trees / long prose).
+    fn subagent_status_text(state: &str, detail: &str) -> String {
+        let d = detail.trim();
+        let useful = !d.is_empty() && !Self::is_content_dump(d);
+        let one = if useful {
+            d.split_whitespace().collect::<Vec<_>>().join(" ")
+        } else {
+            String::new()
+        };
+        // Prefer verb phrases; drop pure content dumps → generic state.
+        let raw = match state {
+            "queued" => {
+                if one.is_empty() {
+                    "排队中".into()
+                } else {
+                    format!("排队中 · {one}")
+                }
+            }
+            "running" => {
+                if one.is_empty() {
+                    "运行中".into()
+                } else if one.starts_with("正在")
+                    || one.starts_with("准备")
+                    || one.starts_with("已完成")
+                    || one.contains("执行")
+                    || one.contains("分析")
+                {
+                    one
+                } else {
+                    // e.g. partial answer text — keep generic
+                    "运行中".into()
+                }
+            }
+            "completed" => "完成".into(),
+            "failed" => {
+                if one.is_empty() {
+                    "失败".into()
+                } else {
+                    format!("失败 · {one}")
+                }
+            }
+            other => {
+                if one.is_empty() {
+                    other.to_string()
+                } else {
+                    one
+                }
+            }
+        };
+        const MAX: usize = 48;
+        if raw.chars().count() > MAX {
+            let mut s: String = raw.chars().take(MAX).collect();
+            s.push('…');
+            s
+        } else {
+            raw
+        }
+    }
+
+    /// Paint the full subagent panel (one row each) with ANSI cursor-up redraw.
+    ///
+    /// Multi-subagent concurrent updates cannot use a single `\r` (they stomp each
+    /// other). Instead we keep N fixed rows and rewrite the whole block in place:
+    ///
+    /// ```text
+    /// 子代理 explore#1: 正在执行 list_directory
+    /// 子代理 worker#2:  正在执行 bash find …
+    /// 子代理 worker#3:  完成
+    /// ```
+    fn openai_subagent_panel_chunk(
+        &mut self,
+        label: &str,
+        state: &str,
+        detail: &str,
+    ) -> Option<SseChunk> {
+        let status = Self::subagent_status_text(state, detail);
+        // Content-dump ticks while running: keep previous status (or "运行中").
+        let status = if Self::is_content_dump(detail) && state == "running" {
+            self.subagent_status
+                .get(label)
+                .cloned()
+                .unwrap_or_else(|| "运行中".into())
+        } else {
+            status
+        };
+        if self.subagent_status.get(label).map(String::as_str) == Some(status.as_str()) {
+            return None;
+        }
+        if !self.subagent_order.iter().any(|x| x == label) {
+            self.subagent_order.push(label.to_string());
+        }
+        self.subagent_status.insert(label.to_string(), status);
+
+        let mut body = String::new();
+        if self.subagent_panel_rows > 0 {
+            // Move cursor to the first row of the existing panel.
+            body.push_str(&format!("\x1b[{}A", self.subagent_panel_rows));
+        } else {
+            // Open a new panel below current output.
+            body.push('\n');
+        }
+        for id in &self.subagent_order {
+            let st = self
+                .subagent_status
+                .get(id)
+                .map(String::as_str)
+                .unwrap_or("…");
+            // \r start of line, \x1b[K clear to EOL, then newline.
+            body.push_str(&format!("\r子代理 {id}: {st}\x1b[K\n"));
+        }
+        self.subagent_panel_rows = self.subagent_order.len();
+        self.reasoning_needs_nl = false;
+        Some(self.openai_chunk(json!({ "reasoning_content": body }), None))
     }
 
     fn tool_index_for(&mut self, call_id: &str) -> usize {
@@ -371,11 +539,21 @@ impl CompatProjector {
         match event {
             ChatEvent::ReasoningDelta { content } => {
                 self.ensure_openai_started(&mut out);
+                // After a tool/subagent timeline line we already ended with `\n`.
+                // Mid-stream model thinking is left as-is for continuity.
+                self.note_reasoning_tail(&content);
                 out.push(self.openai_chunk(json!({"reasoning_content": content}), None));
             }
             ChatEvent::TextDelta { content } => {
                 self.ensure_openai_started(&mut out);
-                out.push(self.openai_chunk(json!({"content": content}), None));
+                // Separate answer from reasoning/tool timeline.
+                let text = if self.reasoning_needs_nl {
+                    self.reasoning_needs_nl = false;
+                    format!("\n{content}")
+                } else {
+                    content
+                };
+                out.push(self.openai_chunk(json!({"content": text}), None));
             }
             ChatEvent::ToolBatchStarted { calls } => {
                 self.ensure_openai_started(&mut out);
@@ -383,6 +561,7 @@ impl CompatProjector {
                 let mut items = Vec::new();
                 for c in &calls {
                     self.remember_tool(&c.id, &c.name);
+                    out.push(self.openai_progress_chunk(&format!("正在调用 {}", c.name)));
                     items.push(self.chat_tool_item(
                         &c.id,
                         Some(&c.name),
@@ -412,6 +591,7 @@ impl CompatProjector {
             ChatEvent::ToolCallStarted { id, name, arguments } => {
                 self.ensure_openai_started(&mut out);
                 self.remember_tool(&id, &name);
+                out.push(self.openai_progress_chunk(&format!("正在调用 {name}")));
                 let item = self.chat_tool_item(
                     &id,
                     Some(&name),
@@ -463,6 +643,31 @@ impl CompatProjector {
                         "tokens": p.tokens,
                     })]
                 });
+                // Mirror subagent progress: one row per subagent, refresh via \r.
+                if let Some(p) = parsed.as_ref() {
+                    let detail = if let Some(d) = p.description.as_ref().filter(|s| !s.is_empty()) {
+                        d.clone()
+                    } else if p.message.is_empty() {
+                        String::new()
+                    } else {
+                        let raw = p.message.as_str();
+                        raw.rsplit(" \u{b7} ")
+                            .next()
+                            .unwrap_or(raw)
+                            .trim()
+                            .to_string()
+                    };
+                    if let Some(chunk) =
+                        self.openai_subagent_panel_chunk(&p.label, p.state, &detail)
+                    {
+                        out.push(chunk);
+                    }
+                } else if !progress.is_empty() {
+                    // Non-subagent tool progress: keep sparse single lines.
+                    let label = name.as_deref().unwrap_or("tool");
+                    let one = progress.split_whitespace().collect::<Vec<_>>().join(" ");
+                    out.push(self.openai_progress_chunk(&format!("  · {label}: {one}")));
+                }
                 let item = self.chat_tool_item(
                     &id,
                     name.as_deref(),
@@ -491,6 +696,13 @@ impl CompatProjector {
             } => {
                 self.ensure_openai_started(&mut out);
                 self.remember_tool(&id, &name);
+                let status = if success { "完成" } else { "失败" };
+                let extra = if duration_ms > 0 {
+                    format!(" ({duration_ms}ms)")
+                } else {
+                    String::new()
+                };
+                out.push(self.openai_progress_chunk(&format!("工具 {name} {status}{extra}")));
                 let item = self.chat_tool_item(
                     &id,
                     Some(&name),
@@ -1139,6 +1351,88 @@ mod tests {
         assert!(joined.contains("\"index\":1"));
         assert!(joined.contains("\"output_delta\":\"A\""));
         assert!(joined.contains("\"output_delta\":\"B\""));
+    }
+
+    /// Extract OpenAI chat `delta.reasoning_content` strings from projected chunks.
+    fn reasoning_texts(chunks: &[SseChunk]) -> Vec<String> {
+        let mut out = Vec::new();
+        for c in chunks {
+            let Ok(v) = serde_json::from_str::<Value>(&c.data) else {
+                continue;
+            };
+            let Some(rc) = v
+                .pointer("/choices/0/delta/reasoning_content")
+                .and_then(|x| x.as_str())
+            else {
+                continue;
+            };
+            out.push(rc.to_string());
+        }
+        out
+    }
+
+    #[test]
+    fn openai_subagent_panel_redraws_in_place() {
+        // Concurrent subagents: each update rewrites the whole panel via CSI-A
+        // (cursor up) instead of appending a new history line.
+        let mut p = CompatProjector::openai_chat("c".into(), "m".into(), 1, None);
+        let mut all = Vec::new();
+        all.extend(p.project(ChatEvent::ToolCallStarted {
+            id: "call_task".into(),
+            name: "task".into(),
+            arguments: "{}".into(),
+        }));
+        for (id, msg) in [
+            ("explore#1", "排队中 · 搜目录"),
+            ("worker#2", "排队中 · 找 py"),
+            ("explore#1", "正在执行 list_directory"),
+            ("worker#2", "正在执行 bash find"),
+            // content dump must NOT become a new stacked status
+            ("explore#1", "## E:/Desktop 目录树\n├── a.lnk"),
+            ("explore#1", "正在分析结果"),
+            ("worker#2", "完成"),
+        ] {
+            let progress = if msg == "完成" {
+                format!("\u{2713} done \u{b7} {id} \u{b7} auto")
+            } else {
+                format!("\u{21bb} {id} \u{b7} auto \u{b7} {msg}")
+            };
+            all.extend(p.project(ChatEvent::ToolProgress {
+                id: "call_task".into(),
+                progress,
+            }));
+        }
+
+        let texts = reasoning_texts(&all);
+        let panel_chunks: Vec<&String> = texts
+            .iter()
+            .filter(|t| t.contains("子代理 "))
+            .collect();
+        assert!(
+            !panel_chunks.is_empty(),
+            "expected panel chunks: {texts:?}"
+        );
+        // Later updates (after first panel paint) must include cursor-up CSI.
+        let with_cup = panel_chunks
+            .iter()
+            .filter(|t| t.contains("\x1b["))
+            .count();
+        assert!(
+            with_cup >= 1,
+            "expected ANSI cursor-up panel redraw: {panel_chunks:?}"
+        );
+        // Directory tree dump must not appear as a status row.
+        let joined = texts.join("");
+        assert!(
+            !joined.contains("目录树") && !joined.contains("├──"),
+            "content dump leaked into panel: {joined}"
+        );
+        // Both agents appear in the latest panel snapshot.
+        let last = panel_chunks.last().unwrap();
+        assert!(
+            last.contains("explore#1") && last.contains("worker#2"),
+            "panel should list both agents: {last}"
+        );
     }
 
     #[test]

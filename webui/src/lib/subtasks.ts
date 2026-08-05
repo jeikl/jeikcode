@@ -163,3 +163,102 @@ export function subtaskCounts(items: SubtaskItem[]): {
   }
   return { completed, running, pending, failed, total: items.length };
 }
+
+/**
+ * After reload, `task` tool output is often persisted as XML-ish blocks:
+ *   `<task id="worker#1" model="auto" state="completed">…</task>`
+ * Fold those into the parallel subtask panel so history matches the live view
+ * (instead of dumping raw JSON args + XML output).
+ */
+export function applySubtaskResultsFromOutput(
+  items: SubtaskItem[],
+  output: string,
+): SubtaskItem[] {
+  if (!items.length || !output) return items;
+
+  // Prefer opening tags with attributes; also accept self-closing / bare.
+  const tagRe = /<task\b([^>]*)>/gi;
+  let copy = items;
+  let changed = false;
+  let match: RegExpExecArray | null;
+  while ((match = tagRe.exec(output)) !== null) {
+    const attrs = match[1] ?? '';
+    const id = /(?:^|\s)id="([^"]+)"/i.exec(attrs)?.[1]
+      ?? /(?:^|\s)id='([^']+)'/i.exec(attrs)?.[1];
+    if (!id) continue;
+    const stateRaw = (
+      /(?:^|\s)state="([^"]+)"/i.exec(attrs)?.[1]
+      ?? /(?:^|\s)state='([^']+)'/i.exec(attrs)?.[1]
+      ?? 'completed'
+    ).toLowerCase();
+    const model =
+      /(?:^|\s)model="([^"]+)"/i.exec(attrs)?.[1]
+      ?? /(?:^|\s)model='([^']+)'/i.exec(attrs)?.[1]
+      ?? '';
+
+    const status: SubtaskStatus =
+      stateRaw === 'failed' || stateRaw === 'error'
+        ? 'failed'
+        : stateRaw === 'running' || stateRaw === 'in_progress'
+          ? 'running'
+          : stateRaw === 'pending' || stateRaw === 'queued'
+            ? 'pending'
+            : 'completed';
+
+    let idx = copy.findIndex((item) => item.label === id);
+    if (idx < 0) {
+      // Args seed as explore#1 / worker#1; output id may match either form.
+      idx = copy.findIndex(
+        (item) =>
+          item.label.endsWith(`#${id}`) ||
+          id.endsWith(item.label) ||
+          item.label.replace(/^.*#/, '') === id.replace(/^.*#/, ''),
+      );
+    }
+    if (idx < 0) continue;
+
+    const prev = copy[idx]!;
+    const activity =
+      status === 'completed'
+        ? 'completed'
+        : status === 'failed'
+          ? 'failed'
+          : status === 'running'
+            ? 'running'
+            : prev.activity;
+    if (
+      prev.status === status &&
+      (model ? prev.model === model : true) &&
+      prev.activity === activity
+    ) {
+      continue;
+    }
+    if (copy === items) copy = items.slice();
+    copy[idx] = {
+      ...prev,
+      status,
+      model: model || prev.model,
+      activity,
+    };
+    changed = true;
+  }
+
+  // If output exists but no tags matched, and every row is still pending,
+  // mark all completed (legacy summaries without structured tags).
+  if (!changed && output.trim() && items.every((i) => i.status === 'pending')) {
+    return items.map((i) => ({
+      ...i,
+      status: 'completed' as const,
+      activity: 'completed',
+    }));
+  }
+
+  return changed ? copy : items;
+}
+
+/** Compact header detail for `task` (avoid dumping full JSON in the tool row). */
+export function taskArgsSummary(argsJson: string): string {
+  const items = subtasksFromTaskArgs(argsJson);
+  if (!items || items.length === 0) return '';
+  return `${items.length} subagents`;
+}

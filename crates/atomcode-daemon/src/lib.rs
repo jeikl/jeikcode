@@ -1327,6 +1327,97 @@ fn client_interactive_permission(
         ) && is_loopback_authority(bind_host))
 }
 
+/// Who owns a `/chat` turn and which interaction policy applies.
+///
+/// Product rules (serve):
+/// - **API** (OpenAI/Anthropic `/v1/*`): low-confirm — Auto tools; no permission /
+///   user-input modals; residual `request_user_input` → final-answer handoff so the
+///   client replies in the **next** message. WebUI `/chat/watch` is an **observer**
+///   of this policy (must not open extra modals).
+/// - **Native** (WebUI / TUI / IDE / channel **sending** their own message): full
+///   interactive UX when the client can answer (`/chat/permission`, WebUI
+///   `/chat/user-input`), honoring Build / AcceptEdits / Auto like local AtomCode.
+/// - **Yolo** (`serve --yolo`): every path follows automation — Auto, no modals,
+///   `request_user_input` unmounted process-wide.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ChatTurnOrigin {
+    /// OpenAI / Anthropic compatible HTTP API.
+    Api,
+    /// WebUI, TUI-attached clients, channel, VSCode, etc. sending their own turn.
+    Native,
+}
+
+/// Resolved interaction flags for one chat turn.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct ChatTurnPolicy {
+    pub origin: ChatTurnOrigin,
+    /// Wait on `/chat/permission` (Build / AcceptEdits + capable client).
+    pub interactive_permission: bool,
+    /// Wait on WebUI `/chat/user-input` for `request_user_input`.
+    pub interactive_user_input: bool,
+    /// When set, force this approval mode for the turn (API / YOLO → Auto).
+    pub force_approval_mode: Option<crate::approval_mode::ApprovalMode>,
+}
+
+impl ChatTurnPolicy {
+    /// `serve --yolo`: all surfaces share automation policy.
+    pub fn yolo() -> Self {
+        Self {
+            origin: ChatTurnOrigin::Api,
+            interactive_permission: false,
+            interactive_user_input: false,
+            force_approval_mode: Some(crate::approval_mode::ApprovalMode::Auto),
+        }
+    }
+
+    /// OpenAI/Anthropic `/v1/*` (and any pure automation chat entry).
+    pub fn api_automation() -> Self {
+        Self {
+            origin: ChatTurnOrigin::Api,
+            interactive_permission: false,
+            interactive_user_input: false,
+            force_approval_mode: Some(crate::approval_mode::ApprovalMode::Auto),
+        }
+    }
+
+    /// WebUI / channel / IDE own message — native interactive when client allows.
+    pub fn native(
+        client_mode: SessionMode,
+        enforce_token: bool,
+        bind_host: &str,
+    ) -> Self {
+        Self {
+            origin: ChatTurnOrigin::Native,
+            interactive_permission: client_interactive_permission(
+                client_mode,
+                enforce_token,
+                bind_host,
+            ),
+            // Only WebUI implements the typed user-input response endpoint today.
+            interactive_user_input: matches!(client_mode, SessionMode::Webui),
+            force_approval_mode: None,
+        }
+    }
+
+    /// Resolve policy for a daemon chat entry.
+    /// YOLO wins over origin; otherwise API vs native as requested.
+    pub fn resolve(
+        yolo: bool,
+        origin: ChatTurnOrigin,
+        client_mode: SessionMode,
+        enforce_token: bool,
+        bind_host: &str,
+    ) -> Self {
+        if yolo {
+            return Self::yolo();
+        }
+        match origin {
+            ChatTurnOrigin::Api => Self::api_automation(),
+            ChatTurnOrigin::Native => Self::native(client_mode, enforce_token, bind_host),
+        }
+    }
+}
+
 fn effective_chat_approval_mode(
     request_mode: Option<crate::approval_mode::ApprovalMode>,
 ) -> crate::approval_mode::ApprovalMode {
@@ -4121,13 +4212,20 @@ async fn chat_stream(
     let telemetry = state.telemetry.clone();
     let pending_permissions = state.pending_permissions.clone();
     let pending_user_inputs = state.pending_user_inputs.clone();
-    // YOLO: never interactive — no permission / user-input modal can stall.
-    let interactive_permission = !state.yolo
-        && client_interactive_permission(client_mode, state.enforce_token, &state.bind_host);
-    // Only the WebUI currently implements the typed `/chat/user-input` response endpoint.
-    let interactive_user_input = !state.yolo && matches!(client_mode, SessionMode::Webui);
-    if state.yolo {
-        req.approval_mode = Some(crate::approval_mode::ApprovalMode::Auto);
+    // POST /chat is always a *native* owner turn (WebUI / channel / IDE).
+    // Observers of API turns use GET /chat/watch and do not enter here.
+    // YOLO forces automation on every surface; otherwise honor native UX.
+    let policy = ChatTurnPolicy::resolve(
+        state.yolo,
+        ChatTurnOrigin::Native,
+        client_mode,
+        state.enforce_token,
+        &state.bind_host,
+    );
+    let interactive_permission = policy.interactive_permission;
+    let interactive_user_input = policy.interactive_user_input;
+    if let Some(mode) = policy.force_approval_mode {
+        req.approval_mode = Some(mode);
     }
 
     // Build CurrentContext for the spawned task (task_local doesn't auto-propagate across spawn)
@@ -6307,6 +6405,56 @@ mod fs_list_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn chat_turn_policy_api_is_low_confirm() {
+        let p = ChatTurnPolicy::resolve(
+            false,
+            ChatTurnOrigin::Api,
+            SessionMode::Channel,
+            true,
+            "0.0.0.0",
+        );
+        assert_eq!(p.origin, ChatTurnOrigin::Api);
+        assert!(!p.interactive_permission);
+        assert!(!p.interactive_user_input);
+        assert_eq!(
+            p.force_approval_mode,
+            Some(crate::approval_mode::ApprovalMode::Auto)
+        );
+    }
+
+    #[test]
+    fn chat_turn_policy_webui_native_is_interactive() {
+        let p = ChatTurnPolicy::resolve(
+            false,
+            ChatTurnOrigin::Native,
+            SessionMode::Webui,
+            true, // token-protected → interactive permission
+            "0.0.0.0",
+        );
+        assert_eq!(p.origin, ChatTurnOrigin::Native);
+        assert!(p.interactive_permission);
+        assert!(p.interactive_user_input);
+        assert!(p.force_approval_mode.is_none());
+    }
+
+    #[test]
+    fn chat_turn_policy_yolo_overrides_native_webui() {
+        let p = ChatTurnPolicy::resolve(
+            true,
+            ChatTurnOrigin::Native,
+            SessionMode::Webui,
+            true,
+            "127.0.0.1",
+        );
+        assert!(!p.interactive_permission);
+        assert!(!p.interactive_user_input);
+        assert_eq!(
+            p.force_approval_mode,
+            Some(crate::approval_mode::ApprovalMode::Auto)
+        );
+    }
 
     #[test]
     fn chat_resolves_new_schema_model_selection() {

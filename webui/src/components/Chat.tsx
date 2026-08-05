@@ -622,7 +622,10 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
           return;
         }
         ensureAssistantBubbleForWatch();
-        handleEvent(event);
+        // Observer of another client's turn (typically OpenAI/API). Follow API
+        // low-confirm policy: stream text/tools only — never open permission or
+        // user-input modals the observer cannot (and should not) own.
+        handleEvent(event, { observerOnly: true });
         if (
           event.type === 'done' ||
           event.type === 'stopped' ||
@@ -1844,7 +1847,11 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
     });
   }
 
-  function handleEvent(event: SSEEvent) {
+  /** @param opts.observerOnly When true (GET /chat/watch on another client's turn),
+   *  follow API low-confirm: render stream only — no permission / user-input modals.
+   *  Own WebUI sends use the default (native interactive). */
+  function handleEvent(event: SSEEvent, opts?: { observerOnly?: boolean }) {
+    const observerOnly = opts?.observerOnly === true;
     switch (event.type) {
       case 'runtime_info':
         setProvider(event.provider);
@@ -1933,6 +1940,8 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
         break;
 
       case 'permission_request':
+        // Observer of API (or other non-owned) turn: no modal — API auto-approves.
+        if (observerOnly) break;
         // Mark the tool row as waiting for approval
         updateToolInLastAssistant(event.call_id, {
           status: 'waiting_approval',
@@ -1941,6 +1950,8 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
         break;
 
       case 'user_input_request':
+        // Observer: API residual path already streams the question as final text.
+        if (observerOnly) break;
         setUserInputReq(event);
         break;
 

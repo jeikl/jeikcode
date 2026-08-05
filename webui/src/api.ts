@@ -147,6 +147,83 @@ export async function getActiveChatSessions(): Promise<string[]> {
 }
 
 /**
+ * Reattach to a turn started by another client (OpenAI API / another tab).
+ * Same SSE `ChatEvent` frames as `POST /chat`.
+ */
+export async function watchChatSession(
+  sessionId: string,
+  onEvent: (event: SSEEvent) => void,
+  signal?: AbortSignal,
+): Promise<void> {
+  const resp = await apiFetch(
+    `/chat/watch?session_id=${encodeURIComponent(sessionId)}`,
+    { headers: authHeaders(), signal },
+  );
+  if (!resp.ok) {
+    throw new Error(`HTTP ${resp.status} ${resp.statusText}`);
+  }
+  const reader = resp.body!.getReader();
+  const decoder = new TextDecoder();
+  let buffer = '';
+  let terminalSeen = false;
+
+  const emit = (event: SSEEvent) => {
+    if (event.type === 'done' || event.type === 'stopped' || event.type === 'error') {
+      terminalSeen = true;
+    }
+    onEvent(event);
+  };
+
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    buffer += decoder.decode(value, { stream: true });
+    const parts = buffer.split('\n\n');
+    buffer = parts.pop() ?? '';
+    for (const part of parts) {
+      const dataLine = part.split('\n').find((line) => line.startsWith('data:'));
+      if (!dataLine) continue;
+      const jsonStr = dataLine.slice('data:'.length).trim();
+      if (!jsonStr) continue;
+      try {
+        emit(JSON.parse(jsonStr) as SSEEvent);
+      } catch {
+        /* keep-alive */
+      }
+    }
+  }
+
+  if (buffer.trim()) {
+    const dataLine = buffer.split('\n').find((line) => line.startsWith('data:'));
+    if (dataLine) {
+      const jsonStr = dataLine.slice('data:'.length).trim();
+      if (jsonStr) {
+        try {
+          emit(JSON.parse(jsonStr) as SSEEvent);
+        } catch {
+          /* ignore */
+        }
+      }
+    }
+  }
+
+  if (signal?.aborted) {
+    const error = new Error('chat watch aborted');
+    error.name = 'AbortError';
+    throw error;
+  }
+  if (!terminalSeen) {
+    onEvent({
+      type: 'done',
+      tokens: 0,
+      tool_calls: 0,
+      session_id: sessionId,
+      stop_reason: 'watch_closed',
+    } as SSEEvent);
+  }
+}
+
+/**
  * Detach a local `/chat` stream without orphaning its daemon operation.
  *
  * Session switches cannot keep consuming the old SSE response, but aborting

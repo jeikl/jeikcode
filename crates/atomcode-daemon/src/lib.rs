@@ -345,6 +345,10 @@ struct ActiveChatOperation {
     aliases: Vec<String>,
     cancellation: CancellationToken,
     stopped: bool,
+    /// Fan-out bus so WebUI (or other observers) can `GET /chat/watch` and
+    /// reattach to a turn started by OpenAI/API clients without owning the
+    /// primary SSE response.
+    event_bus: tokio::sync::broadcast::Sender<ChatEvent>,
 }
 
 #[derive(Default)]
@@ -391,6 +395,8 @@ impl ActiveChatRegistry {
 
         let operation_id = uuid::Uuid::new_v4().to_string();
         let cancellation = CancellationToken::new();
+        // Capacity: lagging watchers drop oldest; primary SSE is separate.
+        let (event_bus, _) = tokio::sync::broadcast::channel(512);
         let mut aliases = Vec::with_capacity(2);
         for alias in [session_id, request_id].into_iter().flatten() {
             if !aliases.iter().any(|existing| existing == alias) {
@@ -407,6 +413,7 @@ impl ActiveChatRegistry {
                 aliases,
                 cancellation: cancellation.clone(),
                 stopped: false,
+                event_bus,
             },
         );
 
@@ -414,6 +421,28 @@ impl ActiveChatRegistry {
             operation_id,
             cancellation,
         })
+    }
+
+    /// Clone the turn's event bus (for fan-out from the producer task).
+    async fn event_bus(&self, operation_id: &str) -> Option<tokio::sync::broadcast::Sender<ChatEvent>> {
+        self.inner
+            .read()
+            .await
+            .operations
+            .get(operation_id)
+            .map(|op| op.event_bus.clone())
+    }
+
+    /// Subscribe to live events for an **already-running** session turn.
+    /// Returns `None` when the session is not in the active-chat registry.
+    async fn subscribe(
+        &self,
+        session_id: &str,
+    ) -> Option<tokio::sync::broadcast::Receiver<ChatEvent>> {
+        let index = self.inner.read().await;
+        let operation_id = index.aliases.get(session_id)?;
+        let operation = index.operations.get(operation_id)?;
+        Some(operation.event_bus.subscribe())
     }
 
     /// Bind the runtime's canonical session id after a first-turn session has
@@ -532,6 +561,24 @@ const DANGEROUS_TOOLS_ENV: &str = "ATOMCODE_DAEMON_ENABLE_DANGEROUS_TOOLS";
 /// RAII guard that decrements `active_connections` on drop, ensuring the counter
 /// is always decremented even if the SSE client disconnects abruptly (TCP RST).
 struct SseConnectionGuard(Arc<std::sync::atomic::AtomicUsize>);
+
+/// Bridge a producer channel so every `ChatEvent` reaches both the primary SSE
+/// client **and** any `/chat/watch` subscribers on the turn's broadcast bus.
+pub(crate) fn fanout_chat_events(
+    primary: mpsc::UnboundedSender<ChatEvent>,
+    bus: tokio::sync::broadcast::Sender<ChatEvent>,
+) -> mpsc::UnboundedSender<ChatEvent> {
+    let (tx, mut rx) = mpsc::unbounded_channel::<ChatEvent>();
+    tokio::spawn(async move {
+        while let Some(event) = rx.recv().await {
+            // Watchers may lag or be absent — never fail the primary turn.
+            let _ = bus.send(event.clone());
+            // Primary may disconnect (browser closed); keep fanning to watchers.
+            let _ = primary.send(event);
+        }
+    });
+    tx
+}
 impl Drop for SseConnectionGuard {
     fn drop(&mut self) {
         self.0.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
@@ -4054,9 +4101,16 @@ async fn chat_stream(
         }
     };
 
-    let (tx, rx) = mpsc::unbounded_channel::<ChatEvent>();
-    let operation_id = admission.operation_id;
+    let (client_tx, rx) = mpsc::unbounded_channel::<ChatEvent>();
+    let operation_id = admission.operation_id.clone();
     let cancel_token = admission.cancellation;
+    let event_bus = state
+        .active_chats
+        .event_bus(&admission.operation_id)
+        .await
+        .expect("just admitted operation always has an event bus");
+    // Fan-out so /chat/watch (WebUI reattach) sees the same events as this SSE.
+    let fan_tx = fanout_chat_events(client_tx.clone(), event_bus);
 
     // Clone state for the spawned task
     let active_chats = state.active_chats.clone();
@@ -4087,7 +4141,7 @@ async fn chat_stream(
     let chat_session_id = session_uuid.map(|u| u.to_string()).unwrap_or_default();
     let cleanup_op = operation_id.clone();
     let cleanup_chats = active_chats.clone();
-    let inner_event_tx = tx.clone();
+    let inner_event_tx = fan_tx.clone();
     let terminal_sent = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let inner_terminal_sent = terminal_sent.clone();
 
@@ -4114,7 +4168,7 @@ async fn chat_stream(
         });
         finalize_chat_task(
             inner,
-            &tx,
+            &fan_tx,
             &cleanup_chats,
             &cleanup_op,
             &chat_session_id,
@@ -4445,6 +4499,109 @@ struct StopChatRequest {
 struct StopChatResponse {
     success: bool,
     message: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct ChatWatchQuery {
+    session_id: String,
+}
+
+/// GET /chat/watch?session_id=… — reattach to a turn owned by another client.
+///
+/// Emits the same `ChatEvent` JSON SSE frames as `POST /chat`, so the WebUI can
+/// stream progress for OpenAI/API-started turns instead of only polling history.
+async fn chat_watch(
+    State(state): State<AppState>,
+    axum::extract::Query(q): axum::extract::Query<ChatWatchQuery>,
+) -> axum::response::Response {
+    let session_id = q.session_id.trim().to_string();
+    if session_id.is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(ApiError {
+                success: false,
+                error: "session_id is required".into(),
+                code: Some("missing_session_id".into()),
+                retryable: Some(false),
+            }),
+        )
+            .into_response();
+    }
+
+    let bus_rx = match state.active_chats.subscribe(&session_id).await {
+        Some(rx) => rx,
+        None => {
+            // Not active: tell the client immediately so it can fall back to history.
+            let (tx, rx) = mpsc::unbounded_channel::<ChatEvent>();
+            let _ = tx.send(ChatEvent::Done {
+                tokens: 0,
+                tool_calls: 0,
+                session_id: session_id.clone(),
+                stop_reason: Some("not_active".into()),
+                message: Some("no active chat operation for this session".into()),
+            });
+            drop(tx);
+            let stream = UnboundedReceiverStream::new(rx).map(|event| {
+                let json = serde_json::to_string(&event).unwrap_or_default();
+                Ok::<_, std::convert::Infallible>(
+                    axum::response::sse::Event::default().data(json),
+                )
+            });
+            return Sse::new(stream)
+                .keep_alive(
+                    axum::response::sse::KeepAlive::new()
+                        .interval(Duration::from_secs(15))
+                        .text("ping"),
+                )
+                .into_response();
+        }
+    };
+
+    let (tx, rx) = mpsc::unbounded_channel::<ChatEvent>();
+    let mut bus_rx = bus_rx;
+    tokio::spawn(async move {
+        loop {
+            match bus_rx.recv().await {
+                Ok(event) => {
+                    let terminal = matches!(
+                        event,
+                        ChatEvent::Done { .. } | ChatEvent::Error { .. } | ChatEvent::Stopped
+                    );
+                    if tx.send(event).is_err() {
+                        break;
+                    }
+                    if terminal {
+                        break;
+                    }
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
+                    // Dropped some events; keep listening for live tail.
+                    continue;
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+            }
+        }
+    });
+
+    let active_conns = state.active_connections.clone();
+    active_conns.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let stream = UnboundedReceiverStream::new(rx).map(|event| {
+        let json = serde_json::to_string(&event).unwrap_or_default();
+        Ok::<_, std::convert::Infallible>(axum::response::sse::Event::default().data(json))
+    });
+    let conn_guard = SseConnectionGuard(active_conns);
+    let guarded = stream.chain(futures::stream::once(async move {
+        drop(conn_guard);
+        Ok(axum::response::sse::Event::default().comment("bye"))
+    }));
+
+    Sse::new(guarded)
+        .keep_alive(
+            axum::response::sse::KeepAlive::new()
+                .interval(Duration::from_secs(15))
+                .text("ping"),
+        )
+        .into_response()
 }
 
 /// POST /chat/stop - Stop a running chat session
@@ -5756,6 +5913,8 @@ pub async fn run_server(opts: ServerOpts) -> anyhow::Result<()> {
         )
         .route("/chat/stop", post(stop_chat))
         .route("/chat/active", get(active_chat_sessions))
+        // Reattach to a turn started by another client (OpenAI API / another tab).
+        .route("/chat/watch", get(chat_watch))
         .route("/chat/permission", post(chat_permission))
         .route("/chat/user-input", post(chat_user_input))
         // OpenAI / Anthropic compatible surface (same token gate as /chat).

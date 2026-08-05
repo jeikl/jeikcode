@@ -50,7 +50,99 @@ pub(crate) fn live_set_approval_mode(mode: ApprovalMode) {
     *LIVE_APPROVAL_MODE.lock().unwrap_or_else(|e| e.into_inner()) = mode;
 }
 
+/// Format a `request_user_input` payload as a user-visible final answer so API
+/// clients can reply in the **next** message (A/B/C/D or free text) instead of
+/// hanging on a modal. Used when the tool is unmounted (YOLO) or no UI responder
+/// is available.
+pub(crate) fn format_user_input_as_final_answer(payload: &serde_json::Value) -> String {
+    fn one_question(q: &serde_json::Value, index: Option<usize>) -> String {
+        let header = q
+            .get("header")
+            .and_then(|v| v.as_str())
+            .unwrap_or("需要你的确认");
+        let question = q
+            .get("question")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        let mut out = String::new();
+        if let Some(i) = index {
+            out.push_str(&format!("### 问题 {}\n", i + 1));
+        }
+        if !header.is_empty() {
+            out.push_str(&format!("**{header}**\n\n"));
+        }
+        if !question.is_empty() {
+            out.push_str(question);
+            out.push_str("\n\n");
+        }
+        if let Some(opts) = q.get("options").and_then(|o| o.as_array()) {
+            const LETTERS: &[&str] = &["A", "B", "C", "D", "E", "F", "G", "H"];
+            for (i, opt) in opts.iter().enumerate() {
+                let letter = LETTERS.get(i).copied().unwrap_or("?");
+                let label = opt
+                    .get("label")
+                    .and_then(|v| v.as_str())
+                    .or_else(|| opt.get("id").and_then(|v| v.as_str()))
+                    .or_else(|| opt.as_str())
+                    .unwrap_or("(选项)");
+                let desc = opt
+                    .get("description")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                if desc.is_empty() {
+                    out.push_str(&format!("- **{letter}.** {label}\n"));
+                } else {
+                    out.push_str(&format!("- **{letter}.** {label} — {desc}\n"));
+                }
+            }
+            out.push('\n');
+        }
+        out
+    }
 
+    let mut body = String::from(
+        "【需要你的回复才能继续】\n\n当前为自动化/API 模式，无法弹出确认框。请阅读下方问题后，**再发一条消息**回复选项字母（如 `A`）或你的选择说明。\n\n",
+    );
+
+    if let Some(questions) = payload.get("questions").and_then(|q| q.as_array()) {
+        if questions.is_empty() {
+            body.push_str(&one_question(payload, None));
+        } else if questions.len() == 1 {
+            body.push_str(&one_question(&questions[0], None));
+        } else {
+            for (i, q) in questions.iter().enumerate() {
+                body.push_str(&one_question(q, Some(i)));
+                body.push('\n');
+            }
+        }
+    } else {
+        body.push_str(&one_question(payload, None));
+    }
+
+    body.push_str("---\n请直接回复本会话（同一 `user`）继续。");
+    body
+}
+
+/// Build a `declined: true` tool response for residual `request_user_input`.
+/// Batch payloads (`questions` array len > 1) use `{ responses: [...] }`;
+/// single-question payloads use the flat `UserInputResponse` shape.
+pub(crate) fn residual_user_input_decline(
+    payload: &serde_json::Value,
+    handoff: &str,
+) -> serde_json::Value {
+    let one = serde_json::json!({
+        "declined": true,
+        "selected": [],
+        "text": handoff,
+    });
+    if let Some(qs) = payload.get("questions").and_then(|q| q.as_array()) {
+        if qs.len() > 1 {
+            let responses: Vec<serde_json::Value> = qs.iter().map(|_| one.clone()).collect();
+            return serde_json::json!({ "responses": responses });
+        }
+    }
+    one
+}
 
 fn native_runtime_mode(mode: ApprovalMode) -> atomcode_coding::RuntimeMode {
     match mode {
@@ -517,20 +609,23 @@ pub(crate) async fn run_chat_turn_v2(
                 if request.kind
                     == atomcode_capabilities::tools::request_user_input::REQUEST_USER_INPUT_KIND =>
             {
-                // Under YOLO the tool is unmounted (`ATOMCODE_REQUEST_USER_INPUT=0`).
-                // If a request still arrives (or Auto/API with no UI), never stall:
-                // decline immediately so the stream continues (do NOT pick option A).
-                if user_input_responders.is_none() || approval_mode == ApprovalMode::Auto {
-                    let _ = handle
-                        .respond(
-                            request.id,
-                            serde_json::json!({
-                                "declined": true,
-                                "selected": [],
-                                "text": "request_user_input is disabled in YOLO/API automation mode; continue without asking the user",
-                            }),
-                        )
-                        .await;
+                // No interactive responder (API / YOLO / headless): never stall on a
+                // modal. Residual tool calls (tool unmounted under YOLO, or still
+                // mounted for non-WebUI) are declined immediately, but the question
+                // is first emitted as the **final answer** (A/B/C/D) so the client
+                // can reply in the next user message.
+                if user_input_responders.is_none() {
+                    let final_answer = format_user_input_as_final_answer(&request.payload);
+                    let _ = runtime_event_tx.send(CodingRuntimeEvent::Agent(
+                        atomcode_kernel::event::AgentEvent::TextDelta(final_answer),
+                    ));
+                    // `declined: true` + handoff text: format_result surfaces the text
+                    // so the model waits instead of "proceed with best judgment".
+                    let handoff = "The question was returned to the user as the final answer. \
+                        Do not continue or guess — end this turn and wait for their next \
+                        message (they will reply with A/B/C/D or free text).";
+                    let value = residual_user_input_decline(&request.payload, handoff);
+                    let _ = handle.respond(request.id, value).await;
                     continue;
                 }
                 let responders = user_input_responders
@@ -2468,6 +2563,76 @@ mod tests {
             crate::kernel_runtime::coding_config_from_runtime(&runtime).request_timeout,
             None
         );
+    }
+
+    #[test]
+    fn format_user_input_as_final_answer_lists_abcd_options() {
+        let payload = serde_json::json!({
+            "header": "部署方式",
+            "question": "选哪种？",
+            "mode": "single",
+            "options": [
+                { "label": "Docker", "description": "容器" },
+                { "label": "裸机" }
+            ]
+        });
+        let text = format_user_input_as_final_answer(&payload);
+        assert!(text.contains("再发一条消息"), "must ask user to send next message");
+        assert!(text.contains("部署方式"));
+        assert!(text.contains("选哪种"));
+        assert!(text.contains("**A.** Docker"));
+        assert!(text.contains("**B.** 裸机"));
+    }
+
+    #[test]
+    fn format_user_input_as_final_answer_batch_questions() {
+        let payload = serde_json::json!({
+            "questions": [
+                {
+                    "header": "Q1",
+                    "question": "first?",
+                    "mode": "single",
+                    "options": [{ "label": "Yes" }, { "label": "No" }]
+                },
+                {
+                    "header": "Q2",
+                    "question": "second?",
+                    "mode": "text"
+                }
+            ]
+        });
+        let text = format_user_input_as_final_answer(&payload);
+        assert!(text.contains("### 问题 1"));
+        assert!(text.contains("### 问题 2"));
+        assert!(text.contains("**A.** Yes"));
+    }
+
+    #[test]
+    fn residual_user_input_decline_is_declined_true() {
+        let single = residual_user_input_decline(
+            &serde_json::json!({
+                "header": "H",
+                "question": "Q?",
+                "mode": "text"
+            }),
+            "wait for next message",
+        );
+        assert_eq!(single["declined"], true);
+        assert_eq!(single["text"], "wait for next message");
+        assert!(single.get("responses").is_none());
+
+        let batch = residual_user_input_decline(
+            &serde_json::json!({
+                "questions": [
+                    { "header": "A", "question": "1?", "mode": "text" },
+                    { "header": "B", "question": "2?", "mode": "text" }
+                ]
+            }),
+            "wait for next message",
+        );
+        assert!(batch["responses"].as_array().unwrap().len() == 2);
+        assert_eq!(batch["responses"][0]["declined"], true);
+        assert_eq!(batch["responses"][1]["text"], "wait for next message");
     }
 
     #[tokio::test]

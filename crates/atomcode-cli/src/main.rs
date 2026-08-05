@@ -408,6 +408,7 @@ async fn run_serve_mode(
     dir: Option<PathBuf>,
     no_token: bool,
     fixed_token: Option<String>,
+    yolo: bool,
     idle_timeout: u64,
     no_telemetry: bool,
     _telemetry: &atomcode_telemetry::Telemetry,
@@ -454,6 +455,11 @@ async fn run_serve_mode(
     // Print after API endpoint catalog / bind notes so URLs stay at the bottom.
     let startup_footer =
         format_serve_banner(&host, port, &workdir, display_token.as_deref(), no_token);
+    if yolo {
+        eprintln!(
+            "serve: --yolo: auto-approve all tools; auto-answer request_user_input; no modal stalls"
+        );
+    }
     let res = atomcode_daemon::run_server(atomcode_daemon::ServerOpts {
         host,
         port,
@@ -468,6 +474,7 @@ async fn run_serve_mode(
         prebound_listener: None,
         app_user_id: None,
         startup_footer: Some(startup_footer),
+        yolo,
     })
     .await;
     if let Err(e) = res {
@@ -856,6 +863,11 @@ struct Cli {
     /// Headless serve: disable webui access-token auth (INSECURE).
     #[arg(long = "no-token", default_value_t = false, conflicts_with = "token")]
     pub no_token: bool,
+
+    /// Headless serve: YOLO mode — auto-approve every tool and auto-answer
+    /// `request_user_input` so API automation never stalls on a modal.
+    #[arg(long = "yolo", default_value_t = false)]
+    pub yolo: bool,
 }
 
 #[derive(Subcommand)]
@@ -931,6 +943,10 @@ enum Commands {
         /// Disable webui access-token auth (INSECURE — only for trusted private networks).
         #[arg(long, default_value_t = false, conflicts_with = "token")]
         no_token: bool,
+        /// YOLO: auto-approve every tool and auto-answer `request_user_input`
+        /// so OpenAI/API automation never stalls on a permission or question modal.
+        #[arg(long, default_value_t = false)]
+        yolo: bool,
         /// Idle-shutdown timeout in seconds; 0 = never (default for serve).
         #[arg(long, default_value_t = 0)]
         idle_timeout: u64,
@@ -1657,6 +1673,7 @@ async fn run() -> Result<i32> {
                     prebound_listener: None,
                     app_user_id: None,
                     startup_footer: None,
+                    yolo: false,
                 })
                 .await;
                 telemetry
@@ -1686,6 +1703,7 @@ async fn run() -> Result<i32> {
                 dir,
                 token,
                 no_token,
+                yolo,
                 idle_timeout,
             } => {
                 HEADLESS_MODE.store(true, Ordering::Relaxed);
@@ -1695,6 +1713,7 @@ async fn run() -> Result<i32> {
                     dir,
                     no_token,
                     token,
+                    yolo,
                     idle_timeout,
                     cli.no_telemetry,
                     &telemetry,
@@ -1832,6 +1851,7 @@ async fn run() -> Result<i32> {
             cli.dir.clone(),
             cli.no_token,
             cli.token.clone(),
+            cli.yolo,
             0,
             cli.no_telemetry,
             &telemetry,

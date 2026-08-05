@@ -898,10 +898,18 @@ async fn run_compat_turn(
     // Client `user` is the session key:
     //   user=alice_a  → resume or create session named "alice_a"
     //   user=alice-b  → different key → different session
-    //   (omit user)   → ephemeral new session every request
+    //   (omit user)   → stable default key "default" (automation-friendly)
+    let session_key_raw = turn
+        .session_key
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .unwrap_or("default");
     let (session_id, session_key) =
-        resolve_session_for_key(&working_dir, turn.session_key.as_deref());
+        resolve_session_for_key(&working_dir, Some(session_key_raw));
 
+    // Always Auto for OpenAI/Anthropic API; serve --yolo additionally disables
+    // interactive user-input modals process-wide via AppState.yolo.
     let chat_req = ChatRequest {
         message: turn.message,
         working_dir: Some(working_dir),
@@ -909,13 +917,13 @@ async fn run_compat_turn(
         session_id,
         request_id: None,
         images: turn.images,
-        // Headless API: auto-approve tools (no interactive WebUI).
         approval_mode: Some(ApprovalMode::Auto),
         extra_system_append: turn.system_append,
         // On create, native runtime names the session exactly as this key
         // (`user_renamed=true`) so later lookups by `user` stay stable.
         session_title: session_key.clone(),
     };
+
 
     let admission = match state
         .active_chats
@@ -982,7 +990,8 @@ async fn run_compat_turn(
                 telemetry,
                 pending_permissions,
                 pending_user_inputs,
-                // No interactive permission UI for compat clients.
+                // Compat API: never interactive permission / user-input UI.
+                // Auto mode + missing user-input responder auto-answers (see live_api).
                 false,
                 false,
                 terminal_sent_inner,

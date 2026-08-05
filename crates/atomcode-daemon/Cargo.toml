@@ -52,6 +52,9 @@ tokio-util = "0.7"
 regex = "1"
 tracing = "0.1"
 sha2 = "0.10"
+base64 = "0.22"
+# Image URL fetch for OpenAI/Anthropic compat (`image_url` / url sources).
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 # 远程访问二维码（/tunnel/status 的 SVG）
 qrcode = { version = "0.14", default-features = false, features = ["svg"] }
 

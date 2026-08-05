@@ -241,6 +241,45 @@ fn format_serve_banner(
     let _ = writeln!(out, "  ssh -L {port}:127.0.0.1:{port} user@remote-host");
     let _ = writeln!(out, "  atomcode attach http://127.0.0.1:{port}");
     let _ = writeln!(out);
+    let _ = writeln!(out, "OpenAI / Anthropic compatible API:");
+    let _ = writeln!(out, "  GET  {base_local}/v1/models");
+    let _ = writeln!(out, "  POST {base_local}/v1/chat/completions");
+    let _ = writeln!(out, "  POST {base_local}/v1/responses");
+    let _ = writeln!(out, "  POST {base_local}/v1/messages");
+    let _ = writeln!(out, "  GET  {base_local}/v1/sessions?user=<key>");
+    let _ = writeln!(out);
+    if let Some(t) = token.filter(|t| !t.is_empty() && !no_token) {
+        let _ = writeln!(out, "Auth (OpenAI + Anthropic API-key style):");
+        let _ = writeln!(out, "  Authorization: Bearer {t}     # OpenAI SDK");
+        let _ = writeln!(out, "  x-api-key: {t}                # Anthropic SDK");
+        let _ = writeln!(out, "  # or:  api-key: {t}           # Azure OpenAI");
+        let _ = writeln!(out, "  export OPENAI_API_KEY={t}");
+        let _ = writeln!(out, "  export ANTHROPIC_API_KEY={t}");
+        let _ = writeln!(
+            out,
+            "  # OpenAI: OpenAI(api_key=..., base_url=\"{base_local}/v1\")"
+        );
+        let _ = writeln!(
+            out,
+            "  # Anthropic: Anthropic(api_key=..., base_url=\"{base_local}\")"
+        );
+        let _ = writeln!(
+            out,
+            "  # atomcode-sdk: AtomCodeClient(\"{base_local}\", token=\"{t}\")"
+        );
+        let _ = writeln!(
+            out,
+            "  # OpenAI `user` field = AtomCode session key (e.g. alice_1 / chat-2)"
+        );
+    } else if no_token {
+        let _ = writeln!(out, "Auth: disabled (--no-token)");
+    } else {
+        let _ = writeln!(
+            out,
+            "  (Bearer / x-api-key / api-key = serve token; OpenAI `user` = session key)"
+        );
+    }
+    let _ = writeln!(out);
     let _ = writeln!(out, "Press Ctrl+C to stop.");
     out
 }
@@ -361,12 +400,14 @@ async fn attach_to_server(url: &str, token_arg: Option<&str>, no_open: bool) -> 
     }
 }
 
-/// Shared serve entry used by `atomcode serve` and top-level `--host/--port/--no-token`.
+/// Shared serve entry used by `atomcode serve` and top-level
+/// `--host/--port/--token/--no-token`.
 async fn run_serve_mode(
     host: String,
     port: u16,
     dir: Option<PathBuf>,
     no_token: bool,
+    fixed_token: Option<String>,
     idle_timeout: u64,
     no_telemetry: bool,
     _telemetry: &atomcode_telemetry::Telemetry,
@@ -382,15 +423,37 @@ async fn run_serve_mode(
         eprintln!("serve: cannot cd to {}: {e}", workdir.display());
         return 1;
     }
-    let tokens = if no_token {
-        None
+    if no_token && fixed_token.as_ref().is_some_and(|t| !t.trim().is_empty()) {
+        eprintln!("serve: --token and --no-token are mutually exclusive");
+        return 1;
+    }
+    // Token store:
+    // - --no-token → None (auth off)
+    // - --token SECRET → register fixed secret (OpenAI-style API key)
+    // - default → mint a random one-shot token
+    let (tokens, display_token) = if no_token {
+        (None, None)
     } else {
-        Some(atomcode_daemon::auth_token::WebuiTokenStore::new())
+        let store = atomcode_daemon::auth_token::WebuiTokenStore::new();
+        let display = if let Some(fixed) = fixed_token {
+            let fixed = fixed.trim().to_string();
+            if fixed.is_empty() {
+                eprintln!("serve: --token must not be empty");
+                return 1;
+            }
+            if !store.register(&fixed) {
+                eprintln!("serve: failed to register --token");
+                return 1;
+            }
+            fixed
+        } else {
+            store.mint()
+        };
+        (Some(store), Some(display))
     };
-    let mint = tokens.as_ref().map(|t| t.mint());
     // Print after API endpoint catalog / bind notes so URLs stay at the bottom.
     let startup_footer =
-        format_serve_banner(&host, port, &workdir, mint.as_deref(), no_token);
+        format_serve_banner(&host, port, &workdir, display_token.as_deref(), no_token);
     let res = atomcode_daemon::run_server(atomcode_daemon::ServerOpts {
         host,
         port,
@@ -774,9 +837,9 @@ struct Cli {
     pub dangerously_skip_permissions: bool,
 
     /// Headless serve: bind address (alias: `--hosts`). When set without a
-    /// subcommand (or with top-level `--port` / `--no-token`), starts serve
+    /// subcommand (or with top-level `--port` / `--token` / `--no-token`), starts serve
     /// instead of the TUI.
-    /// Example: `atomcode --host 0.0.0.0 --port 4096 --no-token`
+    /// Example: `atomcode --host 0.0.0.0 --port 4096 --token sk-my-secret`
     #[arg(long = "host", visible_alias = "hosts")]
     pub host: Option<String>,
 
@@ -784,8 +847,14 @@ struct Cli {
     #[arg(long)]
     pub port: Option<u16>,
 
+    /// Headless serve: fixed access token (OpenAI + Anthropic API key).
+    /// Clients: `Authorization: Bearer`, `x-api-key`, or `api-key`.
+    /// Mutually exclusive with `--no-token`. When omitted, a random token is minted.
+    #[arg(long = "token", env = "ATOMCODE_SERVER_TOKEN")]
+    pub token: Option<String>,
+
     /// Headless serve: disable webui access-token auth (INSECURE).
-    #[arg(long = "no-token", default_value_t = false)]
+    #[arg(long = "no-token", default_value_t = false, conflicts_with = "token")]
     pub no_token: bool,
 }
 
@@ -843,7 +912,7 @@ enum Commands {
     /// Headless AtomCode server for remote clients (web UI + HTTP API).
     ///
     /// Equivalent top-level form:
-    /// `atomcode --host 0.0.0.0 --port 4096 --no-token`
+    /// `atomcode --host 0.0.0.0 --port 4096 --token sk-my-secret`
     Serve {
         /// Bind address. Use `0.0.0.0` so other machines can connect (also tries IPv6 `[::]`).
         #[arg(long, visible_alias = "hosts", default_value = "0.0.0.0")]
@@ -854,8 +923,13 @@ enum Commands {
         /// Project directory to expose (default: current working directory).
         #[arg(long, short = 'C', value_hint = clap::ValueHint::DirPath)]
         dir: Option<PathBuf>,
+        /// Fixed access token (OpenAI + Anthropic API key). Clients use
+        /// `Authorization: Bearer`, `x-api-key`, or `api-key`.
+        /// Mutually exclusive with `--no-token`. When omitted, a random token is minted.
+        #[arg(long, env = "ATOMCODE_SERVER_TOKEN")]
+        token: Option<String>,
         /// Disable webui access-token auth (INSECURE — only for trusted private networks).
-        #[arg(long, default_value_t = false)]
+        #[arg(long, default_value_t = false, conflicts_with = "token")]
         no_token: bool,
         /// Idle-shutdown timeout in seconds; 0 = never (default for serve).
         #[arg(long, default_value_t = 0)]
@@ -1610,6 +1684,7 @@ async fn run() -> Result<i32> {
                 host,
                 port,
                 dir,
+                token,
                 no_token,
                 idle_timeout,
             } => {
@@ -1619,6 +1694,7 @@ async fn run() -> Result<i32> {
                     port,
                     dir,
                     no_token,
+                    token,
                     idle_timeout,
                     cli.no_telemetry,
                     &telemetry,
@@ -1743,7 +1819,7 @@ async fn run() -> Result<i32> {
         }
     }
 
-    // Top-level shorthand: `atomcode --host/--hosts --port [--no-token]`
+    // Top-level shorthand: `atomcode --host/--hosts --port [--token|--no-token]`
     // (no subcommand) → same as `atomcode serve ...`. Requires --host and/or --port
     // so a lone flag cannot accidentally start a network server.
     if cli.host.is_some() || cli.port.is_some() {
@@ -1755,6 +1831,7 @@ async fn run() -> Result<i32> {
             port,
             cli.dir.clone(),
             cli.no_token,
+            cli.token.clone(),
             0,
             cli.no_telemetry,
             &telemetry,
@@ -3950,9 +4027,39 @@ mod tests {
             Some(Commands::Serve {
                 port: 4096,
                 no_token: true,
+                token: None,
                 ..
             })
         ));
+        let serve_fixed = Cli::try_parse_from([
+            "atomcode",
+            "serve",
+            "--host",
+            "127.0.0.1",
+            "--port",
+            "4096",
+            "--token",
+            "sk-fixed-secret",
+        ])
+        .unwrap();
+        assert!(matches!(
+            serve_fixed.command,
+            Some(Commands::Serve {
+                port: 4096,
+                no_token: false,
+                token: Some(ref t),
+                ..
+            }) if t == "sk-fixed-secret"
+        ));
+        // --token and --no-token conflict
+        assert!(Cli::try_parse_from([
+            "atomcode",
+            "serve",
+            "--token",
+            "x",
+            "--no-token",
+        ])
+        .is_err());
         let serve_alias = Cli::try_parse_from([
             "atomcode",
             "serve",
@@ -3987,6 +4094,18 @@ mod tests {
         assert_eq!(top.host.as_deref(), Some("0.0.0.0"));
         assert_eq!(top.port, Some(4096));
         assert!(top.no_token);
+        let top_tok = Cli::try_parse_from([
+            "atomcode",
+            "--host",
+            "0.0.0.0",
+            "--port",
+            "4096",
+            "--token",
+            "sk-abc",
+        ])
+        .unwrap();
+        assert_eq!(top_tok.token.as_deref(), Some("sk-abc"));
+        assert!(!top_tok.no_token);
     }
 
     #[test]

@@ -61,6 +61,20 @@ impl WebuiTokenStore {
         token
     }
 
+    /// 登记一个调用方指定的固定 token（`atomcode serve --token …`）。
+    ///
+    /// 空串 / 纯空白被拒绝并返回 `false`。已存在的 token 再次 register 仍返回 `true`
+    ///（幂等）。客户端把同一字符串当作 OpenAI `api_key` / Anthropic `api_key`
+    ///（`Authorization: Bearer` 或 `x-api-key` / `api-key`）。
+    pub fn register(&self, token: &str) -> bool {
+        let token = token.trim();
+        if token.is_empty() {
+            return false;
+        }
+        self.inner.write().unwrap().insert(token.to_string());
+        true
+    }
+
     /// 校验 token 是否有效。空串始终无效。
     pub fn is_valid(&self, token: &str) -> bool {
         if token.is_empty() {
@@ -71,17 +85,50 @@ impl WebuiTokenStore {
 }
 
 /// 从 `Authorization` 头解析 Bearer token（大小写不敏感前缀）。
+///
+/// - OpenAI 官方 SDK：`Authorization: Bearer <api_key>`
+/// - 部分网关 / 代理：裸 `Authorization: <api_key>`（无 scheme）
 pub fn token_from_header(value: Option<&str>) -> Option<String> {
     let v = value?;
     let rest = v
         .strip_prefix("Bearer ")
-        .or_else(|| v.strip_prefix("bearer "))?;
+        .or_else(|| v.strip_prefix("bearer "))
+        // Some clients send the raw key without a scheme.
+        .or_else(|| {
+            if v.contains(' ') {
+                None
+            } else {
+                Some(v)
+            }
+        })?;
     let rest = rest.trim();
     if rest.is_empty() {
         None
     } else {
         Some(rest.to_string())
     }
+}
+
+/// 从裸 API-key 类请求头解析 token（值即 key 本身）。
+///
+/// 用于：
+/// - OpenAI / Azure：`api-key: <key>`
+/// - Anthropic 官方 SDK：`x-api-key: <key>`
+///
+/// HTTP 层会折叠 header 名大小写；本函数只处理**值**。
+pub fn token_from_api_key_header(value: Option<&str>) -> Option<String> {
+    let v = value?.trim();
+    if v.is_empty() {
+        None
+    } else {
+        Some(v.to_string())
+    }
+}
+
+/// Anthropic 官方 SDK 形：`x-api-key: <api_key>`（别名，语义同 [`token_from_api_key_header`]）。
+#[inline]
+pub fn token_from_x_api_key_header(value: Option<&str>) -> Option<String> {
+    token_from_api_key_header(value)
 }
 
 /// 从 `Cookie` 头解析 `atomcode_webui=<token>`。Cookie 是 `/?token=` 交接后
@@ -102,7 +149,13 @@ pub fn token_from_cookie(value: Option<&str>, cookie_name: &str) -> Option<Strin
     None
 }
 
-/// Axum 中间件：校验 `Authorization: Bearer <token>` 是否为有效的 webui token。
+/// Axum 中间件：校验请求是否携带有效的 serve / webui access token。
+///
+/// 接受（按优先级）：
+/// 1. `Authorization: Bearer <token>` — OpenAI SDK / curl / 部分 Anthropic 网关
+/// 2. `x-api-key: <token>` — Anthropic 官方 SDK
+/// 3. `api-key: <token>` — Azure OpenAI / 部分 OpenAI 兼容客户端
+/// 4. HttpOnly webui cookie（`/?token=` 交接后）
 ///
 /// 签名与 `activity_tracker_middleware`（同 crate）保持一致——
 /// `axum::extract::Request` + `axum::middleware::Next`，适用于 axum 0.7。
@@ -116,21 +169,26 @@ pub async fn require_webui_token(
         // 独立 daemon / VSCode 实例：不强制 token，保持原行为。
         return Ok(next.run(req).await);
     }
-    // Accept the token from either the `Authorization: Bearer` header
-    // (programmatic clients, legacy URL-token front-ends) OR the HttpOnly
-    // `atomcode_webui` cookie set by the `/?token=` handoff. Header wins
-    // when both are present.
     let header = req
         .headers()
         .get(AUTHORIZATION)
         .and_then(|h| h.to_str().ok());
+    // Anthropic: x-api-key；OpenAI Azure: api-key
+    let x_api_key = req
+        .headers()
+        .get("x-api-key")
+        .and_then(|h| h.to_str().ok());
+    let api_key = req
+        .headers()
+        .get("api-key")
+        .and_then(|h| h.to_str().ok());
     let cookie = req.headers().get(COOKIE).and_then(|h| h.to_str().ok());
     // Read THIS instance's port-scoped cookie name so a sibling `/webui` on a
     // different localhost port (which shares the cookie jar) can't shadow us.
-    // Use THIS instance's pre-resolved port-scoped cookie name (computed once on
-    // AppState) so a sibling `/webui` on another localhost port can't shadow us.
-    let token =
-        token_from_header(header).or_else(|| token_from_cookie(cookie, &state.webui_cookie_name));
+    let token = token_from_header(header)
+        .or_else(|| token_from_x_api_key_header(x_api_key))
+        .or_else(|| token_from_api_key_header(api_key))
+        .or_else(|| token_from_cookie(cookie, &state.webui_cookie_name));
     match token {
         Some(tok) if state.webui_tokens.is_valid(&tok) => Ok(next.run(req).await),
         _ => Err(StatusCode::UNAUTHORIZED),
@@ -186,8 +244,38 @@ mod tests {
             token_from_header(Some("bearer abc123")),
             Some("abc123".to_string())
         );
-        assert_eq!(token_from_header(Some("abc123")), None);
+        // OpenAI-style raw api_key without scheme (some proxies).
+        assert_eq!(
+            token_from_header(Some("sk-fixed-token")),
+            Some("sk-fixed-token".to_string())
+        );
+        assert_eq!(token_from_header(Some("Basic x")), None);
         assert_eq!(token_from_header(None), None);
+    }
+
+    #[test]
+    fn extracts_api_key_header() {
+        assert_eq!(
+            token_from_api_key_header(Some("  my-secret  ")),
+            Some("my-secret".to_string())
+        );
+        assert_eq!(token_from_api_key_header(Some("")), None);
+        assert_eq!(token_from_api_key_header(None), None);
+    }
+
+    #[test]
+    fn extracts_anthropic_x_api_key_header() {
+        // Anthropic official SDK sends x-api-key (same value parsing as api-key).
+        assert_eq!(
+            token_from_x_api_key_header(Some("sk-ant-fixed")),
+            Some("sk-ant-fixed".to_string())
+        );
+        assert_eq!(
+            token_from_x_api_key_header(Some("  sk-ant-fixed  ")),
+            Some("sk-ant-fixed".to_string())
+        );
+        assert_eq!(token_from_x_api_key_header(Some("")), None);
+        assert_eq!(token_from_x_api_key_header(None), None);
     }
 
     #[test]
@@ -195,6 +283,17 @@ mod tests {
         let store = WebuiTokenStore::new();
         let tok = store.mint();
         assert!(store.is_valid(&tok), "freshly minted token must validate");
+    }
+
+    #[test]
+    fn registers_fixed_token() {
+        let store = WebuiTokenStore::new();
+        assert!(store.register("sk-my-fixed-key"));
+        assert!(store.is_valid("sk-my-fixed-key"));
+        assert!(store.register("sk-my-fixed-key"), "register is idempotent");
+        assert!(!store.register(""));
+        assert!(!store.register("   "));
+        assert!(!store.is_valid("other"));
     }
 
     #[test]

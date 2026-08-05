@@ -189,6 +189,9 @@ pub struct CodingAgentConfig {
     /// `supports_vision` + protocol defaults (see
     /// [`atomcode_config::config::provider::resolve_supports_vision`]).
     pub supports_vision: bool,
+    /// Optional client-supplied system text (OpenAI/Anthropic compat API).
+    /// Appended after AGENTS.md / glossary / db packs in the SESSION CONTEXT block.
+    pub extra_system_append: Option<String>,
     /// Full provider registry used to resolve task-tool fast/capable tiers.
     pub subagent_config: Option<Arc<atomcode_config::config::Config>>,
     /// Swap-aware, lazily-built FAST-tier provider for the `task` tool. `None` ⇒ the fast
@@ -241,6 +244,13 @@ pub struct CodingRuntimeConfig {
     /// Whether the resolved model accepts image inputs (see
     /// [`CodingAgentConfig::supports_vision`]).
     pub supports_vision: bool,
+    /// Optional client-supplied system text (OpenAI/Anthropic compat API).
+    /// Appended after AGENTS.md / glossary / db packs in the SESSION CONTEXT block.
+    pub extra_system_append: Option<String>,
+    /// Optional display name for a freshly created session (e.g. OpenAI `user` /
+    /// user_title). Applied only when the native runtime creates the session meta;
+    /// existing sessions keep their stored name.
+    pub session_display_name: Option<String>,
 }
 
 impl CodingRuntimeConfig {
@@ -314,6 +324,8 @@ impl CodingRuntimeConfig {
             round_cap_checkpoint: false,
             pricing,
             supports_vision: r.map(|r| r.accepts_images()).unwrap_or(false),
+            extra_system_append: None,
+            session_display_name: None,
         }
     }
 
@@ -342,6 +354,7 @@ impl CodingRuntimeConfig {
         config.user_agent = self.user_agent.clone();
         config.skip_tls_verify = self.skip_tls_verify;
         config.supports_vision = self.supports_vision;
+        config.extra_system_append = self.extra_system_append.clone();
         config.loop_max_rounds = self.loop_max_rounds;
         config.max_rounds = self.turn_max_rounds;
         config.subagent_config = self.subagent_config.clone();
@@ -618,6 +631,7 @@ impl CodingAgentConfig {
             // Opt-in multimodal (matches resolve_supports_vision protocol default).
             // Callers that load from config overwrite this via `accepts_images()`.
             supports_vision: false,
+            extra_system_append: None,
             subagent_config: None,
             subagent_fast_provider: None,
             subagent_capable_provider: None,

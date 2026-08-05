@@ -331,6 +331,8 @@ pub(crate) fn chat_runtime_config(
             atomcode_coding::resolve_provider_pricing(provider_name, provider)
         }),
         supports_vision: p.map(|provider| provider.accepts_images()).unwrap_or(false),
+        extra_system_append: None,
+        session_display_name: None,
     }
 }
 

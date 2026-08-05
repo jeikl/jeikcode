@@ -131,7 +131,11 @@ fn build_coding_agent_from_tools(
         // Approval runs after all argument rewriting.
         .middleware(Arc::new(ApprovalMiddleware::in_memory()))
         // Env / project-instructions / git context at session start (after persona).
-        .hook(Arc::new(SessionContextHook::new(cfg.working_dir.clone())))
+        // Optional client system append (OpenAI/Anthropic compat) after AGENTS/glossary/db.
+        .hook(Arc::new(
+            SessionContextHook::new(cfg.working_dir.clone())
+                .with_extra_append(cfg.extra_system_append.clone()),
+        ))
         .hook(turn_execution_policy.clone())
         .hook(Arc::new(VerifyCadenceHook::with_execution_policy(
             cfg.working_dir.clone(),

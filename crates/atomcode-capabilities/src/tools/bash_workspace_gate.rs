@@ -51,6 +51,19 @@ use super::resolve_path;
 use super::sensitive_path::path_is_sensitive;
 use super::write_approval::{canonical_dir_key, path_in_temp_dir, path_in_workspace};
 
+/// Truncate a command for the diagnostic log at a char boundary (CJK-safe).
+fn log_truncate_bash(command: &str, max: usize) -> String {
+    if command.chars().count() <= max {
+        return command.to_string();
+    }
+    let mut out = String::with_capacity(max + 3);
+    for ch in command.chars().take(max) {
+        out.push(ch);
+    }
+    out.push('…');
+    out
+}
+
 /// A token that contains an unexpanded shell expansion (`$var`, `$(...)`, backtick) whose value —
 /// and thus whether it escapes the workspace — cannot be known statically.
 fn has_dynamic_token(t: &str) -> bool {
@@ -700,10 +713,20 @@ impl ToolMiddleware for BashWorkspaceGate {
         let Some(command) = bash_command(&call.arguments) else {
             return BeforeOutcome::Proceed; // unparseable args — bash tool / risk flow handles it
         };
+        tracing::info!(
+            command = %log_truncate_bash(&command, 300),
+            "bash gate: bash tool call"
+        );
 
         let targets = match scan_destructive_bash(&command) {
-            BashScan::NotDestructive => return BeforeOutcome::Proceed,
-            BashScan::Unresolvable => return self.prompt_unremembered(call, tool, rt).await,
+            BashScan::NotDestructive => {
+                tracing::info!(command = %log_truncate_bash(&command, 300), "bash gate: NotDestructive -> auto-Proceed (no approval)");
+                return BeforeOutcome::Proceed;
+            }
+            BashScan::Unresolvable => {
+                tracing::warn!(command = %log_truncate_bash(&command, 300), "bash gate: Unresolvable destructive -> prompting driver");
+                return self.prompt_unremembered(call, tool, rt).await;
+            }
             BashScan::Targets(t) => t,
         };
 
@@ -728,6 +751,7 @@ impl ToolMiddleware for BashWorkspaceGate {
             .iter()
             .any(|t| path_is_sensitive(&resolve_path(t, &cwd)))
         {
+            tracing::warn!(command = %log_truncate_bash(&command, 300), "bash gate: sensitive target -> prompting driver");
             return self.prompt_unremembered(call, tool, rt).await;
         }
 
@@ -781,6 +805,7 @@ impl ToolMiddleware for BashWorkspaceGate {
         // All targets in-workspace → unchanged behavior (single-file rm stays Safe→runs; a
         // recursive rm is Risky and still reaches ApprovalMiddleware after this Proceed).
         if all_in_workspace {
+            tracing::info!(command = %log_truncate_bash(&command, 300), "bash gate: all targets in workspace -> Proceed (reaches ApprovalMiddleware if Risky)");
             return BeforeOutcome::Proceed;
         }
 
@@ -790,10 +815,12 @@ impl ToolMiddleware for BashWorkspaceGate {
         // command ride along (`rm /granted/x && mv ws_file /tmp/stolen`). Empty keys (FS-timeout
         // fallback) → never auto-allow → prompt (fail-closed).
         if !out_keys.is_empty() && out_keys.iter().all(|k| self.store.is_granted(k)) {
+            tracing::info!(command = %log_truncate_bash(&command, 300), "bash gate: previously granted this session -> Allow");
             return BeforeOutcome::Allow {
                 reason: Some("previously granted this session".into()),
             };
         }
+        tracing::warn!(command = %log_truncate_bash(&command, 300), "bash gate: out-of-workspace target -> prompting driver");
         match self.prompt(call, tool, rt).await {
             PermissionDecision::AllowOnce => BeforeOutcome::Allow {
                 reason: Some("approved once".into()),

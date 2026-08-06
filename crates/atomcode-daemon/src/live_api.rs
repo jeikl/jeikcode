@@ -23,6 +23,19 @@ use tokio_util::sync::CancellationToken;
 #[cfg(test)]
 use std::sync::OnceLock;
 
+/// Truncate a value for the file-sink diagnostic log at a char boundary (CJK-safe).
+fn log_truncate_live(value: &str, max: usize) -> String {
+    if value.chars().count() <= max {
+        return value.to_string();
+    }
+    let mut out = String::with_capacity(max + 3);
+    for ch in value.chars().take(max) {
+        out.push(ch);
+    }
+    out.push('…');
+    out
+}
+
 pub(crate) use crate::approval_mode::ApprovalMode;
 
 pub(crate) fn fallback_approval_decision(mode: ApprovalMode) -> PermissionDecision {
@@ -580,6 +593,19 @@ pub(crate) async fn run_chat_turn_v2(
                     let _ = handle.respond(request.id, serde_json::Value::Null).await;
                     continue;
                 }
+                tracing::warn!(
+                    has_interactive_responder = perm_rx.is_some(),
+                    approval_mode = ?approval_mode,
+                    payload = %log_truncate_live(&request.payload.to_string(), 300),
+                    "run_chat_turn_v2: approval round-trip (perm_rx Some => permission_request emitted & waits for WebUI; None => fallback decision)"
+                );
+                // Surface the permission modal BEFORE waiting for the decision.
+                // The WebUI card is what prompts the human to POST /chat/permission,
+                // which resolves `rx` below — emitting it after the await would
+                // deadlock every interactive Build turn (busy cursor, no card).
+                if perm_rx.is_some() {
+                    let _ = runtime_event_tx.send(CodingRuntimeEvent::Request(request.clone()));
+                }
                 let decision = match &mut perm_rx {
                     None => fallback_approval_decision(approval_mode),
                     Some(rx) => tokio::select! {
@@ -591,12 +617,6 @@ pub(crate) async fn run_chat_turn_v2(
                         decision = rx.recv() => decision.unwrap_or(PermissionDecision::Deny),
                     },
                 };
-                // Only surface permission modals when we are actually waiting on a
-                // human (interactive responder). Auto / YOLO / missing-responder
-                // paths must not emit a WebUI card that looks like a stall.
-                if perm_rx.is_some() {
-                    let _ = runtime_event_tx.send(CodingRuntimeEvent::Request(request.clone()));
-                }
                 let response = match decision {
                     PermissionDecision::AllowOnce => ApprovalResponse::allow(),
                     PermissionDecision::AllowAlways => ApprovalResponse::allow_always(),
@@ -2129,6 +2149,7 @@ mod tests {
         crate::MessageInfo {
             role: "user".into(),
             content: "识别一下".into(),
+            reasoning: None,
             synthetic: false,
             internal_origin: None,
             tool_calls: None,

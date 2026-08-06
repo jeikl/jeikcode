@@ -982,6 +982,12 @@ async fn run_compat_turn(
         "API turns must force Auto approval"
     );
     debug_assert!(!policy.interactive_permission && !policy.interactive_user_input);
+    tracing::info!(
+        yolo = state.yolo,
+        enforce_token = state.enforce_token,
+        session_key = %session_key_raw,
+        "compat turn: API policy (Auto approval, no permission/user-input modals)"
+    );
 
     let ctx = CurrentContext {
         mode: Some(SessionMode::Channel),

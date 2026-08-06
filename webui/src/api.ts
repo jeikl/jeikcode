@@ -68,6 +68,7 @@ export function getToken(): string {
 
 export type SSEEvent =
   | { type: 'runtime_info'; provider: string; model: string }
+  | { type: 'user'; content: string; session_id?: string }
   | { type: 'text'; content: string }
   | { type: 'reasoning'; content: string }
   | { type: 'tool_start'; id: string; name: string; arguments: unknown }
@@ -377,6 +378,10 @@ export interface ToolResultInfo {
 export interface SessionMessage {
   role: 'system' | 'user' | 'assistant' | 'tool';
   content: string;
+  /** Model reasoning/thinking for assistant messages (persisted losslessly;
+   *  previously dropped at the API boundary so a reload lost all earlier
+   *  thinking). Rendered as a collapsible thinking block before the text. */
+  reasoning?: string;
   synthetic?: boolean;
   internal_origin?: string;
   internalOrigin?: string;

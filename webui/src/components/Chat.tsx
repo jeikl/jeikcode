@@ -579,6 +579,9 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
       detachedWatchAbortRef.current.abort();
       detachedWatchAbortRef.current = null;
     }
+    // 一并清待机 watch：升级时它的 abort 已交给 detachedWatchAbortRef（上方
+    // 已 abort），纯空闲态时仅存在于 idleWatchAbortRef，这里兜底。
+    stopIdleWatch();
   }
   function ensureAssistantBubbleForWatch() {
     setMessages((prev) => {
@@ -631,10 +634,8 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
           event.type === 'stopped' ||
           event.type === 'error'
         ) {
-          stopDetachedHistoryPoll();
-          if (requestIdRef.current === loadId) requestIdRef.current = null;
-          setHistoryHint(null);
-          setBusy(false);
+          // 回合结束:回空闲态重新待机,保证下一个 API turn 仍能被推到。
+          settleToIdleWatch(projectHash, loadId, loadGeneration);
         }
       },
       watchAbort.signal,
@@ -644,6 +645,21 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
       setHistoryHint(t('chat.detachedPolling'));
     });
 
+    startDetachedTick(projectHash, loadId, loadGeneration);
+  }
+  // ── Detached tick ── 2s 兜底:watch 实时流连着时只 append-only 补帧 (不抹
+  // 流式增量),watch 断开时整体替换;同时监测 stillActive 终结回合。供
+  // startDetachedHistoryPoll (切入已活跃会话) 与 startIdleWatch (原地升级)
+  // 共用。
+  function startDetachedTick(
+    projectHash: string,
+    loadId: string,
+    loadGeneration: number,
+  ) {
+    if (detachedPollTimerRef.current != null) {
+      window.clearInterval(detachedPollTimerRef.current);
+      detachedPollTimerRef.current = null;
+    }
     const tick = async () => {
       if (
         activeIdRef.current !== loadId ||
@@ -664,26 +680,45 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
           stopDetachedHistoryPoll();
           return;
         }
-        // Only apply history when we are NOT receiving a denser live stream
-        // (avoid clobbering in-progress tool rows). Prefer growing history.
         if (session && Array.isArray(session.messages) && session.messages.length > 0) {
           const loaded = sessionMessagesToDisplay(session.messages);
           if (loaded.length > messagesRef.current.length) {
-            setMessages(loaded);
-            ensureAssistantBubbleForWatch();
+            if (detachedWatchAbortRef.current) {
+              setMessages((prev) => {
+                const base = prev.length;
+                if (loaded.length <= base) return prev;
+                const tail = loaded.slice(base);
+                const last = prev[prev.length - 1];
+                if (
+                  last &&
+                  last.role === 'assistant' &&
+                  (!last.parts || last.parts.length === 0) &&
+                  tail.length > 0 &&
+                  tail[0].role === 'assistant'
+                ) {
+                  return [
+                    ...prev.slice(0, -1),
+                    loaded[base],
+                    ...loaded.slice(base + 1),
+                  ];
+                }
+                return [...prev, ...tail];
+              });
+            } else {
+              setMessages(loaded);
+              ensureAssistantBubbleForWatch();
+            }
           }
         }
         const stillActive = activeIds.includes(loadId);
         if (!stillActive) {
-          stopDetachedHistoryPoll();
-          if (requestIdRef.current === loadId) requestIdRef.current = null;
           transitionChatRecovery({ type: 'authoritative_terminal' });
-          setHistoryHint(null);
-          setBusy(false);
-          // Final history hydrate
           if (session && Array.isArray(session.messages)) {
             setMessages(sessionMessagesToDisplay(session.messages));
           }
+          // 回空闲态重新待机,让下一个 API turn 仍能被推到(watch 中途死掉时
+          // 由 tick 兜底检测到回合结束,同样要重挂 idle watch)。
+          settleToIdleWatch(projectHash, loadId, loadGeneration);
         }
       } catch {
         // Keep polling.
@@ -693,6 +728,122 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
     detachedPollTimerRef.current = window.setInterval(() => {
       void tick();
     }, 2000);
+  }
+  // 空闲态（已就绪、非 sync、非 busy）维持待机 watch 连接
+  // 让 daemon 在 API/native turn admit 的瞬间把该连接接入 fan-out
+  // （event-driven push），避免「停留在会话上、对端起 turn 后 WebUI 无感知
+  // 只能刷新才看见」。收到首个 turn 事件即原地升级为观察模式渲染，共用同一
+  // watch 连接（无事件丢失），done 退回空闲并重新进入待机。
+  const idleWatchAbortRef = useRef<AbortController | null>(null);
+  function stopIdleWatch() {
+    if (idleWatchAbortRef.current) {
+      idleWatchAbortRef.current.abort();
+      idleWatchAbortRef.current = null;
+    }
+  }
+  // 回合结束（done/stopped/error）后回到空闲待机态:清掉 detached 状态并立即
+  // 重新挂上 idle watch,让下一个 API turn 一 admit 就被 push 过来。
+  // 必须在同一同步块里把 busyRef 同步清掉——`setBusy` 是异步的,直接调
+  // `startIdleWatch` 会被上一轮的 `busyRef.current === true` 入口守卫挡掉,
+  // 导致第一轮结束后 watch 失联、第二轮无法同步。
+  function settleToIdleWatch(
+    projectHash: string,
+    loadId: string,
+    loadGeneration: number,
+  ) {
+    stopDetachedHistoryPoll();
+    if (requestIdRef.current === loadId) requestIdRef.current = null;
+    // 观察结束回空闲:recovery 状态机复位,否则 allowSend/allowQueueDrain 会一直
+    // 停在 detached_active(false),输入框被锁住。
+    transitionChatRecovery({ type: 'authoritative_terminal' });
+    setHistoryHint(null);
+    setBusy(false);
+    busyRef.current = false;
+    // API turn 已落盘:通知 App 刷新侧栏(消息数/自动命名标题),新建会话才会出现。
+    onLiveTurnDone?.();
+    startIdleWatch(projectHash, loadId, loadGeneration);
+  }
+  function startIdleWatch(
+    projectHash: string,
+    loadId: string,
+    loadGeneration: number,
+  ) {
+    if (syncRef.current || busyRef.current) return;
+    stopIdleWatch();
+    const abort = new AbortController();
+    idleWatchAbortRef.current = abort;
+    let activated = false;
+    let terminalSeen = false;
+    // eslint-disable-next-line no-console
+    console.log('[idleWatch] start for', loadId, 'gen', loadGeneration);
+    void watchChatSession(
+      loadId,
+      (event) => {
+        if (
+          activeIdRef.current !== loadId ||
+          sessionGenerationRef.current !== loadGeneration
+        ) {
+          return;
+        }
+        // 本端自己的 /chat turn 正在流式(abortRef 非空 = 本端 POST /chat 在途):
+        // 主流 streamChat 已在渲染,待机 watch 只是被 admit 接入 fan-out 的冗余
+        // 观察者——跳过渲染与升级,否则 user 回显/text 增量会双份(「连续发了两三条」)。
+        // 本回合结束 forwarder 断开 → 流关闭 → .then() 重新待机,不丢下一个 API turn。
+        if (abortRef.current) {
+          return;
+        }
+        if (
+          event.type === 'done' &&
+          (event as { stop_reason?: string }).stop_reason === 'not_active'
+        ) {
+          return;
+        }
+        if (!activated) {
+          // eslint-disable-next-line no-console
+          console.log('[idleWatch] first event → upgrade to detached', loadId, event.type);
+          activated = true;
+          idleWatchAbortRef.current = null;
+          detachedWatchAbortRef.current = abort;
+          transitionChatRecovery({ type: 'active_check_succeeded', active: true });
+          requestIdRef.current = loadId;
+          setHistoryHint(t('chat.detachedWatching'));
+          setBusy(true);
+          startDetachedTick(projectHash, loadId, loadGeneration);
+          // API turn 已 admit(会话已建):通知 App 刷新侧栏,让新建会话实时出现。
+          onLiveTurnDone?.();
+        }
+        ensureAssistantBubbleForWatch();
+        handleEvent(event, { observerOnly: true });
+        if (
+          event.type === 'done' ||
+          event.type === 'stopped' ||
+          event.type === 'error'
+        ) {
+          terminalSeen = true;
+          // 回合结束:回空闲态重新待机,保证下一个 API turn 一 admit 就被推到。
+          settleToIdleWatch(projectHash, loadId, loadGeneration);
+        }
+      },
+      abort.signal,
+    ).then(() => {
+      // 连接在未收到终端事件的情况下被服务端关闭(Live-dying 竞态 / daemon
+      // 重启 / 网络断)。若当前还是这条连接的 controller,说明没人接手——
+      // 回到空闲态重新待机,别让下一个 turn 失联。
+      if (idleWatchAbortRef.current === abort || detachedWatchAbortRef.current === abort) {
+        idleWatchAbortRef.current = null;
+        if (activated && !terminalSeen) {
+          settleToIdleWatch(projectHash, loadId, loadGeneration);
+        } else {
+          // 本端自己的 turn 刚结束:busy 可能尚未复位(流关闭与 /chat done 处理
+          // 竞态),直接绕过 busy 守卫重新待机;待机连接不会干扰 busy 状态管理。
+          busyRef.current = false;
+          startIdleWatch(projectHash, loadId, loadGeneration);
+        }
+      }
+    }).catch((err) => {
+      if (err?.name === 'AbortError') return;
+      // 静默失败：不阻塞空闲态使用，下一次会话聚焦/刷新会重建。
+    });
   }
   // Cache of session messages, used to preserve in-progress streaming turns when switching sessions.
   const messageCacheRef = useRef<Map<string, Message[]>>(new Map());
@@ -909,6 +1060,14 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
 
         setHistoryHint(nextHint);
         setLoading(false);
+        // 空闲态（非 active、非 sync）：维持待机 watch，收到对端 turn 推送即升级。
+        if (
+          activeResult.status === 'fulfilled' &&
+          !activeResult.value.includes(loadId) &&
+          !syncRef.current
+        ) {
+          startIdleWatch(projectHash, loadId, loadGeneration);
+        }
       });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [sessionId, activeSession?.project_hash]);
@@ -1165,8 +1324,9 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
       } else if (msg.role === 'assistant') {
         if (isInternalHistoryAssistantMessage(msg)) continue;
         // Text comes first (the LLM speaks, then calls tools), so the part
-        // order for a persisted round is [text, tool, tool, …].
+        // order for a persisted round is [reasoning?, text, tool, tool, …].
         const parts: MsgPart[] = [];
+        if (msg.reasoning) parts.push({ kind: 'reasoning', text: msg.reasoning });
         if (msg.content) parts.push({ kind: 'text', text: msg.content });
         for (const tc of msg.tool_calls ?? []) {
           const rawArgs = tc.arguments || tc.display || '';
@@ -1860,6 +2020,39 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
         pushCommandNotice(event.text);
         break;
 
+      case 'user': {
+        // API turn 的用户消息:daemon 在 admit 后发来,观察者据此实时看到用户发了
+        // 什么(不必等 turn 边界磁盘落盘)。不要重复:有 pendingSelfEcho 时(本端
+        // 乐观发)不追加,但观察者模式没有 self-echo,这里直接 append。
+        const userText = stripVisionAnnotation(event.content);
+        if (pendingSelfEchoRef.current && pendingSelfEchoRef.current === userText) {
+          pendingSelfEchoRef.current = null;
+          break;
+        }
+        setMessages((prev) => {
+          // 去重:末条已是同样文本的 user 则不重复 append(防 stale 重放)。
+          const last = prev[prev.length - 1];
+          if (last && last.role === 'user') {
+            const lastText = last.parts.find((p) => p.kind === 'text') as
+              | { kind: 'text'; text: string }
+              | undefined;
+            if (lastText && lastText.text === userText) return prev;
+          }
+          // 观察者升级/进入时,`ensureAssistantBubbleForWatch` 可能已先补了一个
+          // 空 assistant 占位(它在 runtime_info 等更早的事件上执行)。把它摘掉,
+          // 保证顺序是「用户消息 → 回复」,而不是一个空气泡悬在用户消息上方。
+          let base = prev;
+          if (last && last.role === 'assistant' && (!last.parts || last.parts.length === 0)) {
+            base = prev.slice(0, -1);
+          }
+          return [
+            ...base,
+            { role: 'user', parts: [{ kind: 'text', text: userText }], ts: Date.now() },
+          ];
+        });
+        break;
+      }
+
       case 'text':
         appendToLastAssistant(event.content);
         break;
@@ -2079,7 +2272,11 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
     approvalMode: ApprovalMode = modeState.confirmedMode,
   ) {
     if (!chatRecoveryPolicy(chatRecoveryRef.current).allowSend) {
-      pushCommandNotice(t('chat.recoveryBlocked'));
+      pushCommandNotice(
+        chatRecoveryRef.current === 'detached_active'
+          ? t('chat.detachedSendBlocked')
+          : t('chat.recoveryBlocked'),
+      );
       return;
     }
     // Actually sending a message (immediate OR drained from the queue) re-engages
@@ -2145,6 +2342,10 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
       { role: 'user', parts: [{ kind: 'text', text }], images: images.length ? images : undefined, ts: now },
       { role: 'assistant', parts: [], ts: now },
     ]);
+    // 与 sync 路径一致:记录本端乐观插入的文本,`/chat` 流的 `user` 回显据此去重
+    // (否则回显会再 append 一条用户消息、把末尾 assistant 占位挤掉,导致 text 增量
+    // 被 appendToLastAssistant 丢弃——「发了 2-3 条 + 回复不流式」)。回显匹配后清空。
+    pendingSelfEchoRef.current = text;
 
     const controller = new AbortController();
     abortRef.current = controller;
@@ -2209,6 +2410,9 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
       }
     } finally {
       if (abortRef.current === controller) abortRef.current = null;
+      // 回显匹配后已清空;若中途失败/中止从未收到回显,兜底清掉,避免残留值
+      // 误吞后续对端(API/别的 tab)发来的同文本用户消息。
+      pendingSelfEchoRef.current = null;
       if (
         requestIdRef.current === requestId &&
         sessionGenerationRef.current === requestGeneration &&
@@ -2239,7 +2443,11 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
     }
 
     if (!chatRecoveryPolicy(chatRecoveryRef.current).allowSend) {
-      pushCommandNotice(t('chat.recoveryBlocked'));
+      pushCommandNotice(
+        chatRecoveryRef.current === 'detached_active'
+          ? t('chat.detachedSendBlocked')
+          : t('chat.recoveryBlocked'),
+      );
       return;
     }
 

@@ -1658,6 +1658,21 @@ body {
 .session-item.active .session-item-name { font-weight: 600; }
 .session-item-meta { font-size: 11px; color: var(--app-secondary-foreground); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; width: 100%; }
 
+/* 运行中圈圈：行右侧、kebab 旁的小 spinner，指示该会话正在执行 turn。 */
+.session-item-running {
+  flex-shrink: 0;
+  width: 10px;
+  height: 10px;
+  margin-right: 2px;
+  border: 2px solid var(--app-spinner-foreground, var(--app-brand));
+  border-top-color: transparent;
+  border-radius: 50%;
+  animation: session-item-spin 0.8s linear infinite;
+}
+@keyframes session-item-spin {
+  to { transform: rotate(360deg); }
+}
+
 /* Kebab (⋮) button — appears on hover or while its menu is open. */
 .session-item-kebab {
   flex-shrink: 0;

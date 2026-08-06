@@ -4,7 +4,7 @@
 
 import { useEffect, useRef, useState } from 'preact/hooks';
 import { createPortal } from 'preact/compat';
-import { listSessions, listProjectSessions, searchSessions, getSkills, getMcpStatus, postLiveMcpTrust, getSession, getProjects, SkillInfo, McpStatusInfo, SessionMetaWithProject, ProjectInfo } from '../api';
+import { listSessions, listProjectSessions, searchSessions, getSkills, getMcpStatus, postLiveMcpTrust, getSession, getProjects, getActiveChatSessions, SkillInfo, McpStatusInfo, SessionMetaWithProject, ProjectInfo } from '../api';
 import { useT, useSettings, SettingsSection, Theme } from '../settings';
 import { MsgKey, Lang } from '../i18n';
 import { RenameDialog, DeleteDialog } from './SessionDialogs';
@@ -309,6 +309,9 @@ export function Sidebar({
   const loginIdleLabel = auth.expired ? auth.labels.expired : auth.labels.signIn;
   const [sessions, setSessions] = useState<SessionMetaWithProject[]>([]);
   const [loading, setLoading] = useState(true);
+  // 活跃（正在运行 turn）的会话 id，来自 GET /chat/active；配合 5s 轮询，
+  // 让「哪个会话正在执行」实时显示在侧栏行右侧的圈圈里。
+  const [activeIds, setActiveIds] = useState<string[]>([]);
   const sessionListBodyRef = useRef<HTMLDivElement | null>(null);
   const activeSessionItemRef = useRef<HTMLDivElement | null>(null);
   // Selection is an explicit navigation intent, unlike a background reload.
@@ -378,9 +381,10 @@ export function Sidebar({
   // without this it can land last and clobber the correct per-project list with
   // the capped one. Only the newest load's response is applied.
   const loadEpochRef = useRef(0);
-  function loadSessions() {
+  function loadSessions(silent = false) {
     const epoch = ++loadEpochRef.current;
-    setLoading(true);
+    // 静默轮询（页面可见 5s 兜底刷新）不碰 loading 状态，避免空列表闪烁。
+    if (!silent) setLoading(true);
     // The sidebar shows ONE project's full history. Fetch that bucket directly
     // (uncapped) once we know its hash; `/sessions` caps at 50 across ALL
     // projects, which starves a busy project of its own older sessions. Before
@@ -401,12 +405,38 @@ export function Sidebar({
         if (epoch === loadEpochRef.current) setSessions([]);
       })
       .finally(() => {
-        if (epoch === loadEpochRef.current) setLoading(false);
+        if (epoch === loadEpochRef.current && !silent) setLoading(false);
       });
   }
 
   useEffect(() => {
     loadSessions();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [reloadKey, viewProjectHash]);
+
+  // 页面可见时周期刷新侧栏：API（OpenAI/Anthropic）在其他会话/其他端发起的
+  // turn 不会经过本端的 /chat 或 /live，WebUI 无法感知 → 新建会话不出现。
+  // 5s 轮询兜底，让 API 新建/更新的会话实时浮现，无需手动刷新。仅页面可见时
+  // 运行，后台标签页不耗请求。
+  useEffect(() => {
+    let visible = !document.hidden;
+    const refresh = () => {
+      if (!visible) return;
+      loadSessions(true);
+      getActiveChatSessions()
+        .then(setActiveIds)
+        .catch(() => {});
+    };
+    const onVisibility = () => {
+      visible = !document.hidden;
+      if (visible) refresh();
+    };
+    document.addEventListener('visibilitychange', onVisibility);
+    const id = window.setInterval(refresh, 5000);
+    return () => {
+      document.removeEventListener('visibilitychange', onVisibility);
+      window.clearInterval(id);
+    };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [reloadKey, viewProjectHash]);
 
@@ -991,6 +1021,17 @@ export function Sidebar({
     return cwdNorm ? normDir(s.working_dir) === cwdNorm : true;
   };
   const inCwd = merged.filter(inScope);
+  // 活跃（正在运行）会话置顶：优先显示「正在执行的会话」，其余保持 daemon
+  // 返回的 updated_at 倒序（活跃会话最新被触碰，也在靠前）。
+  const activeSet = new Set(activeIds);
+  if (activeSet.size > 0) {
+    inCwd.sort((a, b) => {
+      const aAct = activeSet.has(a.id) ? 1 : 0;
+      const bAct = activeSet.has(b.id) ? 1 : 0;
+      if (aAct !== bAct) return bAct - aAct;
+      return (b.updated_at || b.created_at || 0) - (a.updated_at || a.created_at || 0);
+    });
+  }
 
   const q = query.trim().toLowerCase();
   const filtered = q
@@ -1015,6 +1056,7 @@ export function Sidebar({
 
   const renderItem = (s: SessionMetaWithProject) => {
     const active = s.id === activeSessionId;
+    const running = activeSet.has(s.id);
     const label = s.name || s.id.slice(0, 8);
     const dir = shortDir(s.working_dir);
     return (
@@ -1024,6 +1066,7 @@ export function Sidebar({
         class={
           'session-item' +
           (active ? ' active' : '') +
+          (running ? ' running' : '') +
           (menuFor === s.id ? ' menu-open' : '')
         }
       >
@@ -1033,6 +1076,13 @@ export function Sidebar({
             {formatTime(s.updated_at || s.created_at, t)}
           </span>
         </button>
+        {running && (
+          <span
+            class="session-item-running"
+            title={t('sidebar.running')}
+            aria-label={t('sidebar.running')}
+          />
+        )}
         <button
           class="session-item-kebab"
           onClick={(e) => openItemMenu(e as unknown as MouseEvent, s.id)}

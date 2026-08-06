@@ -349,12 +349,24 @@ struct ActiveChatOperation {
     /// reattach to a turn started by OpenAI/API clients without owning the
     /// primary SSE response.
     event_bus: tokio::sync::broadcast::Sender<ChatEvent>,
+    /// The user message admitted for this turn, recorded right when it is
+    /// pushed to the conversation. `tokio::broadcast` does not replay history,
+    /// so a `/chat/watch` observer that attaches *after* the turn started would
+    /// otherwise never see the user's own message until the turn-boundary disk
+    /// snapshot lands. Late subscribers replay this instead.
+    admitted_user: Option<String>,
 }
 
 #[derive(Default)]
 struct ActiveChatIndex {
     operations: HashMap<String, ActiveChatOperation>,
     aliases: HashMap<String, String>,
+    /// `/chat/watch` observers that arrived while the session had NO active
+    /// turn. They stay parked here until a turn is admitted for this session
+    /// (`admit` drains and converts them to live broadcast subscribers), so the
+    /// WebUI gets a push the moment an API turn starts instead of having to
+    /// poll. Keyed by session id (the `session_id` alias the watcher used).
+    standby_watchers: HashMap<String, Vec<mpsc::UnboundedSender<ChatEvent>>>,
 }
 
 /// Atomic admission and identity-aware cleanup for background `/chat` turns.
@@ -371,6 +383,13 @@ struct ActiveChatRegistry {
 struct ActiveChatAdmission {
     operation_id: String,
     cancellation: CancellationToken,
+}
+
+/// Outcome of `subscribe_or_standby`: either attach to a running turn now
+/// (`Live`) or park until a turn is admitted for this session (`Standby`).
+enum WatchOutcome {
+    Live(tokio::sync::broadcast::Receiver<ChatEvent>),
+    Standby,
 }
 
 #[derive(Debug)]
@@ -397,6 +416,8 @@ impl ActiveChatRegistry {
         let cancellation = CancellationToken::new();
         // Capacity: lagging watchers drop oldest; primary SSE is separate.
         let (event_bus, _) = tokio::sync::broadcast::channel(512);
+        // Clone for waking standby watchers (the original moves into the operation).
+        let bus_for_drain = event_bus.clone();
         let mut aliases = Vec::with_capacity(2);
         for alias in [session_id, request_id].into_iter().flatten() {
             if !aliases.iter().any(|existing| existing == alias) {
@@ -414,8 +435,18 @@ impl ActiveChatRegistry {
                 cancellation: cancellation.clone(),
                 stopped: false,
                 event_bus,
+                admitted_user: None,
             },
         );
+
+        // Wake any `/chat/watch` observers parked waiting for this session to
+        // start a turn (event-driven push instead of client polling).
+        if let Some(sid) = session_id {
+            let drained = Self::drain_standby_locked(&mut index, sid, &bus_for_drain);
+            if drained > 0 {
+                eprintln!("[admit] session {sid} drained {drained} standby watcher(s) to live fan-out");
+            }
+        }
 
         Ok(ActiveChatAdmission {
             operation_id,
@@ -433,16 +464,94 @@ impl ActiveChatRegistry {
             .map(|op| op.event_bus.clone())
     }
 
-    /// Subscribe to live events for an **already-running** session turn.
-    /// Returns `None` when the session is not in the active-chat registry.
-    async fn subscribe(
+    /// Subscribe to a session's turn **if one is already running**, otherwise
+    /// park the caller as a standby watcher so `admit` can wake it the instant an
+    /// API/native turn starts for this session. This is the event-driven path
+    /// that lets the WebUI observe an API turn without polling: the watch
+    /// connection stays open (SSE keepalive) while idle and is converted to a
+    /// live broadcast subscriber the moment a turn is admitted.
+    async fn subscribe_or_standby(
         &self,
         session_id: &str,
-    ) -> Option<tokio::sync::broadcast::Receiver<ChatEvent>> {
-        let index = self.inner.read().await;
-        let operation_id = index.aliases.get(session_id)?;
-        let operation = index.operations.get(operation_id)?;
-        Some(operation.event_bus.subscribe())
+        standby_tx: &mpsc::UnboundedSender<ChatEvent>,
+    ) -> WatchOutcome {
+        let mut index = self.inner.write().await;
+        if let Some(operation_id) = index.aliases.get(session_id).cloned() {
+            if let Some(operation) = index.operations.get(&operation_id) {
+                return WatchOutcome::Live(operation.event_bus.subscribe());
+            }
+        }
+        index
+            .standby_watchers
+            .entry(session_id.to_string())
+            .or_default()
+            .push(standby_tx.clone());
+        WatchOutcome::Standby
+    }
+
+    /// Record the user message admitted for this turn so a *late* `/chat/watch`
+    /// subscriber (one that attaches after the broadcast, and therefore missed
+    /// the live `ChatEvent::User`) can replay it. The bus itself never replays.
+    async fn record_user_message(&self, operation_id: &str, content: String) {
+        if let Some(op) = self.inner.write().await.operations.get_mut(operation_id) {
+            op.admitted_user = Some(content);
+        }
+    }
+
+    /// Resolve a session alias to its currently-admitted operation id.
+    async fn operation_for_session(&self, session_id: &str) -> Option<String> {
+        self.inner.read().await.aliases.get(session_id).cloned()
+    }
+
+    /// The user message admitted for `operation_id`, if the turn has already
+    /// recorded one (i.e. the turn started before this watcher subscribed).
+    async fn admitted_user_message(&self, operation_id: &str) -> Option<String> {
+        self.inner
+            .read()
+            .await
+            .operations
+            .get(operation_id)
+            .and_then(|op| op.admitted_user.clone())
+    }
+
+    /// Drain (wake) all standby watchers parked for `session_id`, converting
+    /// each to a live broadcast subscriber on `bus`. Called from `admit` while
+    /// still holding the write lock so no watcher can be added between the
+    /// alias insert and the drain.
+    fn drain_standby_locked(
+        index: &mut ActiveChatIndex,
+        session_id: &str,
+        bus: &tokio::sync::broadcast::Sender<ChatEvent>,
+    ) -> usize {
+        if let Some(watchers) = index.standby_watchers.remove(session_id) {
+            let n = watchers.len();
+            for tx in watchers {
+                let mut rx = bus.subscribe();
+                tokio::spawn(async move {
+                    loop {
+                        match rx.recv().await {
+                            Ok(event) => {
+                                let terminal = matches!(
+                                    event,
+                                    ChatEvent::Done { .. } | ChatEvent::Error { .. } | ChatEvent::Stopped
+                                );
+                                if tx.send(event).is_err() {
+                                    break;
+                                }
+                                if terminal {
+                                    break;
+                                }
+                            }
+                            Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                            Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                        }
+                    }
+                });
+            }
+            n
+        } else {
+            0
+        }
     }
 
     /// Bind the runtime's canonical session id after a first-turn session has
@@ -562,6 +671,20 @@ const DANGEROUS_TOOLS_ENV: &str = "ATOMCODE_DAEMON_ENABLE_DANGEROUS_TOOLS";
 /// is always decremented even if the SSE client disconnects abruptly (TCP RST).
 struct SseConnectionGuard(Arc<std::sync::atomic::AtomicUsize>);
 
+/// Truncate a value for diagnostic logging, cutting at a char boundary so a
+/// multi-byte (CJK etc.) argument never panics `&s[..n]`.
+fn log_truncate(value: &str, max: usize) -> String {
+    if value.chars().count() <= max {
+        return value.to_string();
+    }
+    let mut out = String::with_capacity(max + 3);
+    for ch in value.chars().take(max) {
+        out.push(ch);
+    }
+    out.push('…');
+    out
+}
+
 /// Bridge a producer channel so every `ChatEvent` reaches both the primary SSE
 /// client **and** any `/chat/watch` subscribers on the turn's broadcast bus.
 pub(crate) fn fanout_chat_events(
@@ -571,6 +694,52 @@ pub(crate) fn fanout_chat_events(
     let (tx, mut rx) = mpsc::unbounded_channel::<ChatEvent>();
     tokio::spawn(async move {
         while let Some(event) = rx.recv().await {
+            // Diagnostic tail: every tool call, approval round-trip, model
+            // question and turn terminal lands in `<atomcode_dir>/logs/atomcode.log`
+            // so approval-flow issues can be diagnosed from the file.
+            match &event {
+                ChatEvent::ToolCallStarted { name, arguments, .. } => {
+                    tracing::info!(
+                        tool = %name,
+                        args = %log_truncate(arguments, 300),
+                        "chat: tool call started"
+                    );
+                }
+                ChatEvent::PermissionRequest {
+                    tool_name, call_id, ..
+                } => {
+                    tracing::warn!(
+                        tool = %tool_name,
+                        call_id = %call_id,
+                        "chat: PERMISSION REQUEST emitted (approval round-trip)"
+                    );
+                }
+                ChatEvent::UserInputRequest { .. } => {
+                    tracing::warn!(
+                        "chat: user_input_request emitted (model asked a structured question)"
+                    );
+                }
+                ChatEvent::ToolCallResult {
+                    name, success, ..
+                } => {
+                    tracing::info!(tool = %name, success, "chat: tool result");
+                }
+                ChatEvent::Done {
+                    session_id,
+                    stop_reason,
+                    ..
+                } => {
+                    tracing::info!(
+                        session_id = %session_id,
+                        stop_reason = ?stop_reason,
+                        "chat: turn done"
+                    );
+                }
+                ChatEvent::Stopped => {
+                    tracing::info!("chat: turn stopped");
+                }
+                _ => {}
+            }
             // Watchers may lag or be absent — never fail the primary turn.
             let _ = bus.send(event.clone());
             // Primary may disconnect (browser closed); keep fanning to watchers.
@@ -770,6 +939,14 @@ pub struct ToolResultInfo {
 pub struct MessageInfo {
     pub role: String,
     pub content: String,
+    /// The model's reasoning/thinking for an ASSISTANT message — persisted
+    /// losslessly in the kernel `Message.reasoning` but until now dropped at
+    /// the API boundary, so a WebUI reload lost all earlier thinking and only
+    /// showed whatever reasoning streamed in after the refresh. Now serialized
+    /// so history (getSession / session detail) can re-render the full chain
+    /// of thought.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning: Option<String>,
     /// True when a `Role::User` message was injected by the agent/runtime rather
     /// than authored by the human. UI clients use this to avoid rendering
     /// internal reminders as user input bubbles.
@@ -893,6 +1070,7 @@ impl MessageInfo {
         Self {
             role: role.into(),
             content,
+            reasoning: msg.reasoning.clone(),
             synthetic: msg.synthetic,
             internal_origin: msg.internal_origin.clone(),
             tool_calls,
@@ -2266,6 +2444,7 @@ fn merge_catalog_session_messages_for_display(
                 }
                 .into(),
                 content: entry.text.clone(),
+                reasoning: None,
                 synthetic: false,
                 internal_origin: None,
                 tool_calls: None,
@@ -2292,6 +2471,7 @@ fn merge_catalog_session_messages_for_display(
                 }
                 .into(),
                 content: entry.text.clone(),
+                reasoning: None,
                 synthetic: false,
                 internal_origin: None,
                 tool_calls: None,
@@ -3190,6 +3370,16 @@ pub enum ChatEvent {
     /// Exact provider/model resolved for this request.
     #[serde(rename = "runtime_info")]
     RuntimeInfo { provider: String, model: String },
+    /// User message admitted for this turn. Emitted once right after the user
+    /// message is pushed to the conversation, so `/chat/watch` observers (WebUI
+    /// detached) render the user's own message in real time instead of only
+    /// seeing it after disk persistence at the turn boundary.
+    #[serde(rename = "user")]
+    User {
+        content: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        session_id: Option<String>,
+    },
     /// Tool batch started (all tools in this assistant turn)
     #[serde(rename = "tool_batch")]
     ToolBatchStarted {
@@ -4227,6 +4417,15 @@ async fn chat_stream(
     if let Some(mode) = policy.force_approval_mode {
         req.approval_mode = Some(mode);
     }
+    tracing::info!(
+        client_mode = ?client_mode,
+        yolo = state.yolo,
+        enforce_token = state.enforce_token,
+        interactive_permission,
+        interactive_user_input,
+        approval_mode = ?req.approval_mode,
+        "chat_stream: native turn policy"
+    );
 
     // Build CurrentContext for the spawned task (task_local doesn't auto-propagate across spawn)
     // Use the request's working_dir to detect repo_origin dynamically (not the
@@ -4453,10 +4652,26 @@ async fn process_chat_request(
 
         let mut conv = conversation.lock().await;
         if images.is_empty() {
-            conv.push(Message::user(runtime_text));
+            conv.push(Message::user(runtime_text.clone()));
         } else {
-            conv.push(Message::user_with_images(runtime_text, images));
+            conv.push(Message::user_with_images(runtime_text.clone(), images));
         }
+        drop(conv);
+        // Emit the admitted user message to the fan-out bus so `/chat/watch`
+        // observers (WebUI detached) render it in real time, instead of only
+        // seeing it after turn-boundary disk persistence.
+        //
+        // Record it FIRST: broadcast has no replay window, so late watchers
+        // (connected after this send) get the message back from
+        // `chat_watch`'s Live replay. A watcher attaching between the record
+        // and the send may receive both — the WebUI dedups identical user text.
+        active_chats
+            .record_user_message(&operation_id, runtime_text.clone())
+            .await;
+        let _ = event_tx.send(ChatEvent::User {
+            content: runtime_text,
+            session_id: Some(session_id.clone()),
+        });
     }
     // Interactive approval bridged over HTTP: interactive local clients (WebUI,
     // channel, VSCode, JetBrains) in Build and Accept Edits modes route
@@ -4466,6 +4681,14 @@ async fn process_chat_request(
     // modes and never depend on an approver.
     let registered_permission_responder =
         interactive_permission && approval_mode_requires_responder(approval_mode);
+    tracing::info!(
+        approval_mode = ?approval_mode,
+        interactive_permission,
+        interactive_user_input,
+        registered_permission_responder,
+        session_id = %session_id,
+        "chat turn: permission responder registration"
+    );
     // Native runtime observations stay native until this daemon driver projects
     // them to the HTTP ChatEvent wire model.
     let (runtime_event_tx, mut runtime_event_rx) = mpsc::unbounded_channel::<CodingRuntimeEvent>();
@@ -4633,60 +4856,53 @@ async fn chat_watch(
             .into_response();
     }
 
-    let bus_rx = match state.active_chats.subscribe(&session_id).await {
-        Some(rx) => rx,
-        None => {
-            // Not active: tell the client immediately so it can fall back to history.
-            let (tx, rx) = mpsc::unbounded_channel::<ChatEvent>();
-            let _ = tx.send(ChatEvent::Done {
-                tokens: 0,
-                tool_calls: 0,
-                session_id: session_id.clone(),
-                stop_reason: Some("not_active".into()),
-                message: Some("no active chat operation for this session".into()),
-            });
-            drop(tx);
-            let stream = UnboundedReceiverStream::new(rx).map(|event| {
-                let json = serde_json::to_string(&event).unwrap_or_default();
-                Ok::<_, std::convert::Infallible>(
-                    axum::response::sse::Event::default().data(json),
-                )
-            });
-            return Sse::new(stream)
-                .keep_alive(
-                    axum::response::sse::KeepAlive::new()
-                        .interval(Duration::from_secs(15))
-                        .text("ping"),
-                )
-                .into_response();
-        }
-    };
-
     let (tx, rx) = mpsc::unbounded_channel::<ChatEvent>();
-    let mut bus_rx = bus_rx;
-    tokio::spawn(async move {
-        loop {
-            match bus_rx.recv().await {
-                Ok(event) => {
-                    let terminal = matches!(
-                        event,
-                        ChatEvent::Done { .. } | ChatEvent::Error { .. } | ChatEvent::Stopped
-                    );
-                    if tx.send(event).is_err() {
-                        break;
-                    }
-                    if terminal {
-                        break;
-                    }
+    match state.active_chats.subscribe_or_standby(&session_id, &tx).await {
+        WatchOutcome::Live(mut bus_rx) => {
+            eprintln!("[chat_watch] session {session_id} LIVE (turn already running)");
+            // A turn is already running for this session: forward its events.
+            // First replay the turn's admitted user message — this watcher
+            // subscribed after the live `ChatEvent::User` was broadcast, so
+            // without the replay the WebUI would only see the streamed reply
+            // and never the user's own message until the turn-boundary
+            // snapshot lands on disk.
+            if let Some(operation_id) = state
+                .active_chats
+                .operation_for_session(&session_id)
+                .await
+            {
+                if let Some(content) = state
+                    .active_chats
+                    .admitted_user_message(&operation_id)
+                    .await
+                {
+                    let _ = tx.send(ChatEvent::User {
+                        content,
+                        session_id: Some(session_id.clone()),
+                    });
                 }
-                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
-                    // Dropped some events; keep listening for live tail.
-                    continue;
-                }
-                Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
             }
+            tokio::spawn(async move {
+                loop {
+                    match bus_rx.recv().await {
+                        Ok(event) => {
+                            let terminal = matches!(
+                                event,
+                                ChatEvent::Done { .. } | ChatEvent::Error { .. } | ChatEvent::Stopped
+                            );
+                            if tx.send(event).is_err() { break; }
+                            if terminal { break; }
+                        }
+                        Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                        Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                    }
+                }
+            });
         }
-    });
+        WatchOutcome::Standby => {
+            eprintln!("[chat_watch] session {session_id} STANDBY (parking until a turn is admitted)");
+        }
+    }
 
     let active_conns = state.active_connections.clone();
     active_conns.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -8202,6 +8418,7 @@ mod tests {
             MessageInfo {
                 role: role.into(),
                 content: String::new(),
+                reasoning: None,
                 synthetic: false,
                 internal_origin: None,
                 tool_calls: None,

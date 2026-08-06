@@ -20,6 +20,19 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::sync::{Arc, Mutex};
 
+/// Truncate tool args for the diagnostic log at a char boundary (CJK-safe).
+fn log_truncate_approval(value: &str, max: usize) -> String {
+    if value.chars().count() <= max {
+        return value.to_string();
+    }
+    let mut out = String::with_capacity(max + 3);
+    for ch in value.chars().take(max) {
+        out.push(ch);
+    }
+    out.push('…');
+    out
+}
+
 /// The default `AgentEvent::Request.kind` of an approval round-trip — what a driver
 /// matches on to render the approval prompt (overridable via
 /// [`ApprovalMiddleware::with_kind`]).
@@ -252,6 +265,12 @@ impl ToolMiddleware for ApprovalMiddleware {
         if self.store.is_granted(&key) {
             return BeforeOutcome::Proceed;
         }
+        tracing::warn!(
+            tool = %tool.name(),
+            risk = ?tool.risk(&call.arguments),
+            args = %log_truncate_approval(&call.arguments, 300),
+            "approval middleware: risky tool -> round-trip APPROVAL_KIND (driver decides)"
+        );
         match request_approval_decision(rt, &self.kind, call, tool.name()).await {
             Err(degraded) => degraded, // Null → fail closed (channel failure, not a user deny).
             Ok(PermissionDecision::AllowOnce) => BeforeOutcome::Proceed,

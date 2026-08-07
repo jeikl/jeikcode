@@ -190,4 +190,22 @@ mod tests {
         assert!(r.is_error);
         assert!(r.content.contains("Directory not found"), "{}", r.content);
     }
+
+    /// Still an error, but it must carry the recovery clue — otherwise the model just guesses
+    /// a different wrong path next turn (see `not_found_hint`).
+    #[tokio::test]
+    async fn missing_dir_error_carries_the_nearest_existing_ancestor() {
+        let d = tempfile::tempdir().unwrap();
+        std::fs::write(d.path().join("settings.gradle"), "").unwrap();
+        let r = ListDirTool
+            .execute(r#"{"path":"app/src/main"}"#, &ctx(d.path()))
+            .await;
+        assert!(r.is_error);
+        assert!(
+            r.content.contains("Nearest existing directory"),
+            "{}",
+            r.content
+        );
+        assert!(r.content.contains("settings.gradle"), "{}", r.content);
+    }
 }

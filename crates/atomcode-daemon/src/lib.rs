@@ -355,6 +355,11 @@ struct ActiveChatOperation {
     /// otherwise never see the user's own message until the turn-boundary disk
     /// snapshot lands. Late subscribers replay this instead.
     admitted_user: Option<String>,
+    /// Full turn event log for late joiners (page refresh mid-stream). Broadcast
+    /// has no history; without this buffer a reattached WebUI only paints deltas
+    /// *after* subscribe and loses thinking/text/tools already streamed.
+    /// Consecutive text/reasoning deltas are coalesced to bound memory.
+    replay: Arc<std::sync::Mutex<Vec<ChatEvent>>>,
 }
 
 #[derive(Default)]
@@ -436,6 +441,7 @@ impl ActiveChatRegistry {
                 stopped: false,
                 event_bus,
                 admitted_user: None,
+                replay: Arc::new(std::sync::Mutex::new(Vec::new())),
             },
         );
 
@@ -444,7 +450,11 @@ impl ActiveChatRegistry {
         if let Some(sid) = session_id {
             let drained = Self::drain_standby_locked(&mut index, sid, &bus_for_drain);
             if drained > 0 {
-                eprintln!("[admit] session {sid} drained {drained} standby watcher(s) to live fan-out");
+                tracing::debug!(
+                    session_id = %sid,
+                    drained,
+                    "chat: drained standby watchers to live fan-out"
+                );
             }
         }
 
@@ -464,6 +474,42 @@ impl ActiveChatRegistry {
             .map(|op| op.event_bus.clone())
     }
 
+    /// Event bus + shared replay log for a turn (fan-out records into `replay`).
+    async fn event_bus_with_replay(
+        &self,
+        operation_id: &str,
+    ) -> Option<(
+        tokio::sync::broadcast::Sender<ChatEvent>,
+        Arc<std::sync::Mutex<Vec<ChatEvent>>>,
+    )> {
+        self.inner
+            .read()
+            .await
+            .operations
+            .get(operation_id)
+            .map(|op| (op.event_bus.clone(), op.replay.clone()))
+    }
+
+    /// Snapshot of events so far for a late `/chat/watch` joiner.
+    /// Holds the replay lock while creating the broadcast subscription so no
+    /// event can land only on the bus (missed by both snapshot and subscriber).
+    async fn subscribe_live_with_replay(
+        &self,
+        session_id: &str,
+    ) -> Option<(Vec<ChatEvent>, tokio::sync::broadcast::Receiver<ChatEvent>)> {
+        let index = self.inner.read().await;
+        let operation_id = index.aliases.get(session_id)?.clone();
+        let operation = index.operations.get(&operation_id)?;
+        let guard = operation
+            .replay
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let snapshot = guard.clone();
+        let rx = operation.event_bus.subscribe();
+        drop(guard);
+        Some((snapshot, rx))
+    }
+
     /// Subscribe to a session's turn **if one is already running**, otherwise
     /// park the caller as a standby watcher so `admit` can wake it the instant an
     /// API/native turn starts for this session. This is the event-driven path
@@ -481,11 +527,15 @@ impl ActiveChatRegistry {
                 return WatchOutcome::Live(operation.event_bus.subscribe());
             }
         }
-        index
+        // One standby slot per session: WebUI reconnect/refresh used to pile up
+        // many dead parkers (drained 4+), spamming admit logs and wasting tasks.
+        // Drop prior standby senders; their SSE side closes when the channel dies.
+        let entry = index
             .standby_watchers
             .entry(session_id.to_string())
-            .or_default()
-            .push(standby_tx.clone());
+            .or_default();
+        entry.clear();
+        entry.push(standby_tx.clone());
         WatchOutcome::Standby
     }
 
@@ -685,11 +735,48 @@ fn log_truncate(value: &str, max: usize) -> String {
     out
 }
 
+/// Append `event` to the turn replay log, coalescing consecutive text/reasoning
+/// deltas so a long stream does not allocate one Vec entry per token.
+fn push_chat_replay(buf: &mut Vec<ChatEvent>, event: ChatEvent) {
+    match (&event, buf.last_mut()) {
+        (
+            ChatEvent::TextDelta { content },
+            Some(ChatEvent::TextDelta {
+                content: prev,
+            }),
+        ) => {
+            prev.push_str(content);
+        }
+        (
+            ChatEvent::ReasoningDelta { content },
+            Some(ChatEvent::ReasoningDelta {
+                content: prev,
+            }),
+        ) => {
+            prev.push_str(content);
+        }
+        (
+            ChatEvent::ToolOutputChunk { id, chunk },
+            Some(ChatEvent::ToolOutputChunk {
+                id: prev_id,
+                chunk: prev,
+            }),
+        ) if id == prev_id => {
+            prev.push_str(chunk);
+        }
+        _ => buf.push(event),
+    }
+}
+
 /// Bridge a producer channel so every `ChatEvent` reaches both the primary SSE
 /// client **and** any `/chat/watch` subscribers on the turn's broadcast bus.
+///
+/// When `replay` is set, each event is also recorded (coalesced) so late watchers
+/// can rehydrate the full turn after a browser refresh.
 pub(crate) fn fanout_chat_events(
     primary: mpsc::UnboundedSender<ChatEvent>,
     bus: tokio::sync::broadcast::Sender<ChatEvent>,
+    replay: Option<Arc<std::sync::Mutex<Vec<ChatEvent>>>>,
 ) -> mpsc::UnboundedSender<ChatEvent> {
     let (tx, mut rx) = mpsc::unbounded_channel::<ChatEvent>();
     tokio::spawn(async move {
@@ -740,8 +827,19 @@ pub(crate) fn fanout_chat_events(
                 }
                 _ => {}
             }
-            // Watchers may lag or be absent — never fail the primary turn.
-            let _ = bus.send(event.clone());
+            // Record + broadcast under the same lock as `subscribe_live_with_replay`
+            // so a late joiner cannot miss an event that is not in the snapshot
+            // and also not received on the new subscription (or get it twice).
+            if let Some(ref replay) = replay {
+                let mut guard = replay
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                push_chat_replay(&mut guard, event.clone());
+                // Watchers may lag or be absent — never fail the primary turn.
+                let _ = bus.send(event.clone());
+            } else {
+                let _ = bus.send(event.clone());
+            }
             // Primary may disconnect (browser closed); keep fanning to watchers.
             let _ = primary.send(event);
         }
@@ -3370,6 +3468,11 @@ pub enum ChatEvent {
     /// Exact provider/model resolved for this request.
     #[serde(rename = "runtime_info")]
     RuntimeInfo { provider: String, model: String },
+    /// Canonical native session identity for this operation. Emitted as soon as
+    /// the daemon has allocated or resolved the session, before provider work can
+    /// delay the first turn. Clients must use this id for every later request.
+    #[serde(rename = "session_assigned")]
+    SessionAssigned { session_id: String },
     /// User message admitted for this turn. Emitted once right after the user
     /// message is pushed to the conversation, so `/chat/watch` observers (WebUI
     /// detached) render the user's own message in real time instead of only
@@ -3481,6 +3584,10 @@ pub enum ChatEvent {
     /// `Error` so clients render a muted notice instead of a red error.
     #[serde(rename = "warning")]
     Warning { message: String },
+    /// Auxiliary session persistence failed. Clients must display this outside
+    /// the assistant message timeline.
+    #[serde(rename = "persistence_warning")]
+    PersistenceWarning { message: String },
     /// Rate-limit hit: provider has throttled requests. Carries display-ready reset
     /// time and label so the client can render a countdown notice.
     #[serde(rename = "rate_limited")]
@@ -3511,6 +3618,7 @@ pub(crate) fn stop_reason_wire(reason: atomcode_kernel::event::StopReason) -> &'
         StopReason::Timeout => "timeout",
         StopReason::Cancelled => "cancelled",
         StopReason::PromptRejected => "prompt_rejected",
+        StopReason::PolicyDenied => "policy_denied",
         StopReason::RateLimited => "rate_limited",
         _ => "unknown",
     }
@@ -3532,6 +3640,17 @@ mod chat_event_type_tests {
         assert_eq!(json["provider"], "main");
         assert_eq!(json["model"], "model-x");
         assert!(json.get("config_revision").is_none());
+    }
+
+    #[test]
+    fn session_assignment_is_an_additive_non_terminal_event() {
+        let json = serde_json::to_value(ChatEvent::SessionAssigned {
+            session_id: "session-1".into(),
+        })
+        .unwrap();
+
+        assert_eq!(json["type"], "session_assigned");
+        assert_eq!(json["session_id"], "session-1");
     }
 
     #[test]
@@ -3661,6 +3780,10 @@ mod chat_event_type_tests {
             (
                 atomcode_kernel::event::StopReason::ToolLoopDetected,
                 "tool_loop_detected",
+            ),
+            (
+                atomcode_kernel::event::StopReason::PolicyDenied,
+                "policy_denied",
             ),
         ] {
             let mut projector = ChatRuntimeProjector::default();
@@ -4179,6 +4302,9 @@ impl ChatRuntimeProjector {
             CodingRuntimeEvent::ControllerWarning(message) => {
                 vec![ChatEvent::Warning { message }]
             }
+            CodingRuntimeEvent::PersistenceWarning(message) => {
+                vec![ChatEvent::PersistenceWarning { message }]
+            }
             CodingRuntimeEvent::CompactionStarted { .. }
             | CodingRuntimeEvent::CompactionFinished { .. }
             | CodingRuntimeEvent::RuntimeStopped(_)
@@ -4393,8 +4519,14 @@ async fn chat_stream(
         .event_bus(&admission.operation_id)
         .await
         .expect("just admitted operation always has an event bus");
-    // Fan-out so /chat/watch (WebUI reattach) sees the same events as this SSE.
-    let fan_tx = fanout_chat_events(client_tx.clone(), event_bus);
+    // Fan-out so /chat/watch (WebUI reattach) sees the same events as this SSE,
+    // including a full replay log for mid-turn page refresh.
+    let replay = state
+        .active_chats
+        .event_bus_with_replay(&admission.operation_id)
+        .await
+        .map(|(_, r)| r);
+    let fan_tx = fanout_chat_events(client_tx.clone(), event_bus, replay);
 
     // Clone state for the spawned task
     let active_chats = state.active_chats.clone();
@@ -4595,24 +4727,26 @@ async fn process_chat_request(
         .working_dir
         .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
 
-    let (session_id, initial_messages) = if let Some(ref session_id_str) = req.session_id {
-        let project_bucket = NativeSessionManager::project_hash(&working_dir);
-        let session = crate::legacy_convert::load_catalog_session_view_in_project(
-            &project_bucket,
-            session_id_str,
-        )?
-        .ok_or_else(|| {
-            anyhow::anyhow!(
-                "session {session_id_str:?} not found in project bucket {project_bucket}"
-            )
-        })?;
-        (session.meta.id, session.snapshot.messages)
-    } else {
-        (uuid::Uuid::new_v4().to_string(), Vec::new())
-    };
+    let (session_id, initial_messages, is_new_session) =
+        if let Some(ref session_id_str) = req.session_id {
+            let project_bucket = NativeSessionManager::project_hash(&working_dir);
+            let session = crate::legacy_convert::load_catalog_session_view_in_project(
+                &project_bucket,
+                session_id_str,
+            )?
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "session {session_id_str:?} not found in project bucket {project_bucket}"
+                )
+            })?;
+            (session.meta.id, session.snapshot.messages, false)
+        } else {
+            (uuid::Uuid::new_v4().to_string(), Vec::new(), true)
+        };
     active_chats
         .bind_session(&operation_id, &session_id)
         .await?;
+    publish_chat_session_assignment(&working_dir, &session_id, is_new_session, &event_tx)?;
 
     // Key used to route interactive permission decisions back to this turn's
     // decider. We use the *actual* session id (not req.session_id, which may be
@@ -4808,6 +4942,39 @@ async fn process_chat_request(
     Ok(())
 }
 
+/// Publish a `/chat` session identity only after a newly allocated native
+/// aggregate is durable. Existing sessions already crossed this boundary when
+/// they were loaded above. Keeping persistence and notification in one helper
+/// prevents clients from binding an id that a later request cannot resume.
+fn publish_chat_session_assignment(
+    working_dir: &std::path::Path,
+    session_id: &str,
+    is_new_session: bool,
+    event_tx: &mpsc::UnboundedSender<ChatEvent>,
+) -> anyhow::Result<()> {
+    if is_new_session {
+        let manager = NativeSessionManager::for_project(working_dir);
+        let lease = manager.acquire_lease(session_id)?;
+        let now = atomcode_capabilities::session::now_ms();
+        let mut meta = atomcode_capabilities::session::SessionMeta::new(
+            session_id,
+            working_dir.to_string_lossy(),
+            now,
+        );
+        meta.owner = atomcode_capabilities::session::StorageOwner::Native;
+        manager.commit_native_import(
+            &lease,
+            Some(&atomcode_kernel::message::SessionSnapshot::new(Vec::new())),
+            Some(&atomcode_capabilities::session::PresentationFile::default()),
+            &meta,
+        )?;
+    }
+    let _ = event_tx.send(ChatEvent::SessionAssigned {
+        session_id: session_id.to_string(),
+    });
+    Ok(())
+}
+
 /// Build system prompt for daemon/API mode.
 ///
 /// Aligned with TUI's `AgentLoop::build_system_prompt` to provide the same
@@ -4857,50 +5024,107 @@ async fn chat_watch(
     }
 
     let (tx, rx) = mpsc::unbounded_channel::<ChatEvent>();
-    match state.active_chats.subscribe_or_standby(&session_id, &tx).await {
-        WatchOutcome::Live(mut bus_rx) => {
-            eprintln!("[chat_watch] session {session_id} LIVE (turn already running)");
-            // A turn is already running for this session: forward its events.
-            // First replay the turn's admitted user message — this watcher
-            // subscribed after the live `ChatEvent::User` was broadcast, so
-            // without the replay the WebUI would only see the streamed reply
-            // and never the user's own message until the turn-boundary
-            // snapshot lands on disk.
-            if let Some(operation_id) = state
-                .active_chats
-                .operation_for_session(&session_id)
-                .await
-            {
-                if let Some(content) = state
-                    .active_chats
-                    .admitted_user_message(&operation_id)
-                    .await
-                {
-                    let _ = tx.send(ChatEvent::User {
-                        content,
-                        session_id: Some(session_id.clone()),
-                    });
+    // Prefer atomic snapshot+subscribe when a turn is live so a mid-stream
+    // browser refresh gets the full thinking/text/tool history, not only
+    // deltas after reconnect.
+    if let Some((snapshot, mut bus_rx)) = state
+        .active_chats
+        .subscribe_live_with_replay(&session_id)
+        .await
+    {
+        tracing::debug!(
+            session_id = %session_id,
+            replay_events = snapshot.len(),
+            "chat_watch: LIVE with replay"
+        );
+        tokio::spawn(async move {
+            for event in snapshot {
+                let terminal = matches!(
+                    event,
+                    ChatEvent::Done { .. } | ChatEvent::Error { .. } | ChatEvent::Stopped
+                );
+                if tx.send(event).is_err() {
+                    return;
+                }
+                if terminal {
+                    return;
                 }
             }
-            tokio::spawn(async move {
-                loop {
-                    match bus_rx.recv().await {
-                        Ok(event) => {
-                            let terminal = matches!(
-                                event,
-                                ChatEvent::Done { .. } | ChatEvent::Error { .. } | ChatEvent::Stopped
-                            );
-                            if tx.send(event).is_err() { break; }
-                            if terminal { break; }
+            loop {
+                match bus_rx.recv().await {
+                    Ok(event) => {
+                        let terminal = matches!(
+                            event,
+                            ChatEvent::Done { .. }
+                                | ChatEvent::Error { .. }
+                                | ChatEvent::Stopped
+                        );
+                        if tx.send(event).is_err() {
+                            break;
                         }
-                        Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
-                        Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                        if terminal {
+                            break;
+                        }
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                }
+            }
+        });
+    } else {
+        match state.active_chats.subscribe_or_standby(&session_id, &tx).await {
+            WatchOutcome::Live(mut bus_rx) => {
+                // Race: turn admitted between the two lookups — no replay buffer
+                // snapshot, fall back to live-only + admitted user message.
+                tracing::debug!(
+                    session_id = %session_id,
+                    "chat_watch: LIVE race fallback (no snapshot)"
+                );
+                if let Some(operation_id) = state
+                    .active_chats
+                    .operation_for_session(&session_id)
+                    .await
+                {
+                    if let Some(content) = state
+                        .active_chats
+                        .admitted_user_message(&operation_id)
+                        .await
+                    {
+                        let _ = tx.send(ChatEvent::User {
+                            content,
+                            session_id: Some(session_id.clone()),
+                        });
                     }
                 }
-            });
-        }
-        WatchOutcome::Standby => {
-            eprintln!("[chat_watch] session {session_id} STANDBY (parking until a turn is admitted)");
+                tokio::spawn(async move {
+                    loop {
+                        match bus_rx.recv().await {
+                            Ok(event) => {
+                                let terminal = matches!(
+                                    event,
+                                    ChatEvent::Done { .. }
+                                        | ChatEvent::Error { .. }
+                                        | ChatEvent::Stopped
+                                );
+                                if tx.send(event).is_err() {
+                                    break;
+                                }
+                                if terminal {
+                                    break;
+                                }
+                            }
+                            Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                            Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                        }
+                    }
+                });
+            }
+            WatchOutcome::Standby => {
+                tracing::debug!(
+                    session_id = %session_id,
+                    "chat_watch: STANDBY until next admit"
+                );
+            }
         }
     }
 
@@ -5227,6 +5451,10 @@ async fn mcp_reload(State(state): State<AppState>) -> Json<serde_json::Value> {
 /// Wait for the first shutdown signal (Ctrl-C, SIGTERM on Unix, or watch channel).
 /// Once received, log and return so that `axum::serve(...).with_graceful_shutdown(...)`
 /// can begin draining in-flight connections. (R10.1, R7.2, R7.3)
+///
+/// After the first signal, arm a **force-exit** path: a second Ctrl+C or a 10s
+/// timeout kills the process. Large monorepos / stuck tool tasks used to make
+/// graceful drain hang so Ctrl+C appeared to do nothing.
 async fn shutdown_signal(mut shutdown_rx: watch::Receiver<bool>) {
     let ctrl_c = async {
         tokio::signal::ctrl_c().await.ok();
@@ -5254,10 +5482,33 @@ async fn shutdown_signal(mut shutdown_rx: watch::Receiver<bool>) {
     };
 
     tokio::select! {
-        _ = ctrl_c => { tracing::info!("Received Ctrl-C, starting graceful shutdown"); }
-        _ = terminate => { tracing::info!("Received SIGTERM, starting graceful shutdown"); }
-        _ = http_shutdown => { tracing::info!("Received /shutdown request, starting graceful shutdown"); }
+        _ = ctrl_c => {
+            eprintln!("Shutting down... (Ctrl+C again to force exit)");
+            tracing::info!("Received Ctrl-C, starting graceful shutdown");
+        }
+        _ = terminate => {
+            eprintln!("Shutting down (SIGTERM)...");
+            tracing::info!("Received SIGTERM, starting graceful shutdown");
+        }
+        _ = http_shutdown => {
+            tracing::info!("Received /shutdown request, starting graceful shutdown");
+        }
     }
+
+    // Force-exit arm: do not block returning from this future (graceful drain
+    // needs to start). Second Ctrl+C or 10s hang → hard exit.
+    tokio::spawn(async {
+        tokio::select! {
+            _ = tokio::signal::ctrl_c() => {
+                eprintln!("Forced exit (second interrupt)");
+                std::process::exit(130);
+            }
+            _ = tokio::time::sleep(std::time::Duration::from_secs(10)) => {
+                eprintln!("Graceful shutdown timed out after 10s; forcing exit");
+                std::process::exit(1);
+            }
+        }
+    });
 }
 
 /// Install a panic hook that emits a scrubbed `Event::Panic` telemetry event
@@ -7121,6 +7372,45 @@ mod tests {
             webui_cookie_name: auth_token::webui_cookie_name(13456),
             yolo: false,
         }
+    }
+
+    #[test]
+    fn new_chat_assignment_is_sent_only_after_the_native_aggregate_is_durable() {
+        let home = ScopedChatHome::new();
+        let working_dir = home._dir.path().join("project");
+        std::fs::create_dir_all(&working_dir).unwrap();
+        let session_id = "11111111-1111-4111-8111-111111111111";
+        let (event_tx, mut event_rx) = mpsc::unbounded_channel();
+
+        publish_chat_session_assignment(&working_dir, session_id, true, &event_tx).unwrap();
+
+        let manager = NativeSessionManager::for_project(&working_dir);
+        let loaded = manager.load_native_session(session_id).unwrap();
+        assert!(loaded.snapshot.messages.is_empty());
+        assert!(matches!(
+            event_rx.try_recv(),
+            Ok(ChatEvent::SessionAssigned { session_id: assigned }) if assigned == session_id
+        ));
+    }
+
+    #[test]
+    fn failed_new_chat_persistence_does_not_publish_a_session_id() {
+        let home = ScopedChatHome::new();
+        let working_dir = home._dir.path().join("project");
+        std::fs::create_dir_all(&working_dir).unwrap();
+        let sessions_root = NativeSessionManager::sessions_root();
+        std::fs::write(&sessions_root, b"block session directory creation").unwrap();
+        let (event_tx, mut event_rx) = mpsc::unbounded_channel();
+
+        let result = publish_chat_session_assignment(
+            &working_dir,
+            "22222222-2222-4222-8222-222222222222",
+            true,
+            &event_tx,
+        );
+
+        assert!(result.is_err());
+        assert!(event_rx.try_recv().is_err());
     }
 
     #[tokio::test(flavor = "current_thread")]

@@ -89,6 +89,14 @@ dist/
 docs/superpowers
 .mcp.json
 
+# Local archives / downloads — never track (release packs, zig toolchains, etc.)
+*.zip
+*.7z
+*.rar
+
+# Local cross-compile toolchains (zig, wrappers) — machine-local only
+/tools/
+
 # v2 (kernel-spike) local design specs / backlog — working docs kept on disk for
 # the contributor, NEVER committed (turn-end auto-commit would otherwise sweep them).
 docs/c1-assembly-spec.md

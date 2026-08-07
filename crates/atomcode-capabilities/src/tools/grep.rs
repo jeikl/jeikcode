@@ -286,6 +286,29 @@ mod tests {
         assert!(r.content.contains("a.rs:2:"), "{}", r.content);
     }
 
+    /// The real-world shape (a Windows user, 2026-08-05): a Gradle project whose `app/` has no
+    /// `src/`. The model grepped `app/src`, got a bare "path not found", and spent the next
+    /// three turns guessing deeper paths. The error must name where the tree actually stops.
+    #[tokio::test]
+    async fn missing_path_error_carries_the_nearest_existing_ancestor() {
+        let d = tempfile::tempdir().unwrap();
+        std::fs::create_dir(d.path().join("app")).unwrap();
+        std::fs::write(d.path().join("app/build.gradle"), "").unwrap();
+        let r = GrepTool
+            .execute(
+                r#"{"pattern":"Serial","path":"app/src/main/java"}"#,
+                &ctx(d.path()),
+            )
+            .await;
+        assert!(r.is_error, "{}", r.content);
+        assert!(
+            r.content.contains("Nearest existing directory"),
+            "{}",
+            r.content
+        );
+        assert!(r.content.contains("build.gradle"), "{}", r.content);
+    }
+
     // Issue #722 parity (v2): weak models send max_results/context as a string ("50")
     // or float (50.0 / "3.0") instead of an integer; the args must still deserialize.
     #[test]

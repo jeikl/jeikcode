@@ -530,6 +530,14 @@ pub enum Msg<'a> {
     },
 
     // ── Dir picker ──
+    DirPickerTitle {
+        n: usize,
+        total: usize,
+    },
+    DirPickerHint,
+    DirPickerEmptyPath {
+        query: &'a str,
+    },
     DirCurrent,
     DirNotExists {
         path: &'a str,

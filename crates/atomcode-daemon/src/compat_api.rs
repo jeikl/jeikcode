@@ -955,7 +955,12 @@ async fn run_compat_turn(
         .event_bus(&admission.operation_id)
         .await
         .expect("just admitted operation always has an event bus");
-    let fan_tx = fanout_chat_events(client_tx, event_bus);
+    let replay = state
+        .active_chats
+        .event_bus_with_replay(&admission.operation_id)
+        .await
+        .map(|(_, r)| r);
+    let fan_tx = fanout_chat_events(client_tx, event_bus, replay);
     let active_chats = state.active_chats.clone();
     let mcp_cache = state.mcp_cache.clone();
     let telemetry = state.telemetry.clone();

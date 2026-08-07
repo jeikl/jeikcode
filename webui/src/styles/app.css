@@ -1059,6 +1059,91 @@ body {
 }
 
 /* Centered responsive input column (input box + cwd breadcrumb below it; see --app-content-max-width). */
+/* Detached / recovery banner above the transcript (history still visible). */
+.history-banner {
+  flex-shrink: 0;
+  margin: 0 0 12px;
+  padding: 8px 12px;
+  border: 1px solid var(--app-border-color, rgba(127, 127, 127, 0.22));
+  border-radius: var(--corner-radius-small, 8px);
+  background: var(--app-list-hover-background, rgba(127, 127, 127, 0.08));
+  color: var(--app-secondary-foreground);
+  font-size: 12.5px;
+  line-height: 1.45;
+}
+
+/* === Session todo panel (sticky above composer — TUI active_todos parity) ===
+   Width matches .input-wrap / .timeline-inner (--app-content-max-width). */
+.session-todo-panel {
+  flex-shrink: 0;
+  width: 100%;
+  margin: 0 0 8px;
+  border: 1px solid var(--app-border-color, rgba(127, 127, 127, 0.22));
+  border-radius: var(--corner-radius-small, 8px);
+  background: var(--app-list-hover-background, rgba(127, 127, 127, 0.05));
+  overflow: hidden;
+  max-height: 180px;
+  display: flex;
+  flex-direction: column;
+  box-sizing: border-box;
+}
+/* Frozen under an assistant reply (timeline column already max-width constrained). */
+.session-todo-panel.is-embedded {
+  margin: 10px 0 0;
+  max-height: 220px;
+}
+.session-todo-header {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 6px 12px;
+  border-bottom: 1px solid var(--app-border-color, rgba(127, 127, 127, 0.15));
+  font-size: 12px;
+}
+.session-todo-title {
+  font-weight: 600;
+  color: var(--app-primary-foreground);
+}
+.session-todo-summary {
+  margin-left: auto;
+  color: var(--app-secondary-foreground);
+  font-size: 11px;
+}
+.session-todo-list {
+  overflow: auto;
+  padding: 4px 0;
+}
+.session-todo-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 4px 12px;
+  font-size: 12.5px;
+  line-height: 1.4;
+  min-width: 0;
+}
+.session-todo-glyph {
+  flex-shrink: 0;
+  width: 1.1em;
+  text-align: center;
+  margin-top: 1px;
+}
+.session-todo-row.status-completed .session-todo-glyph {
+  color: var(--app-success-foreground, #16a34a);
+}
+.session-todo-row.status-in_progress .session-todo-glyph {
+  color: var(--app-info-foreground, #3b82f6);
+}
+.session-todo-row.status-pending .session-todo-glyph {
+  color: var(--app-secondary-foreground);
+  opacity: 0.65;
+}
+.session-todo-row.status-completed .session-todo-content {
+  color: var(--app-secondary-foreground);
+  text-decoration: line-through;
+  opacity: 0.85;
+}
+
 .input-wrap {
   width: 100%;
   max-width: var(--app-content-max-width);

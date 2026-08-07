@@ -1,6 +1,13 @@
 import { test } from 'node:test';
 import assert from 'node:assert';
-import { toolResultStatus, updateToolProgress, upsertToolPart, type MsgPart, type ToolRow } from './toolRows.ts';
+import {
+  toolResultStatus,
+  updateToolProgress,
+  upsertToolPart,
+  withTrailingTodoList,
+  type MsgPart,
+  type ToolRow,
+} from './toolRows.ts';
 
 const tool = (id: string, over: Partial<ToolRow> = {}): ToolRow => ({
   id,
@@ -59,4 +66,29 @@ test('non-tool parts and ordering are preserved', () => {
 
 test('partial review result is incomplete rather than a clean success or generic failure', () => {
   assert.equal(toolResultStatus(false, 'Code review incomplete (MaxRounds)'), 'incomplete');
+});
+
+test('withTrailingTodoList appends or replaces a trailing todo_list part', () => {
+  const items = [
+    { content: 'a', status: 'completed' as const },
+    { content: 'b', status: 'pending' as const },
+  ];
+  const base: MsgPart[] = [
+    { kind: 'text', text: 'done' },
+    { kind: 'tool', tool: tool('t1', { name: 'todowrite' }) },
+  ];
+  const once = withTrailingTodoList(base, items);
+  assert.equal(once.length, 3);
+  assert.equal(once[2]!.kind, 'todo_list');
+  if (once[2]!.kind === 'todo_list') {
+    assert.equal(once[2].items.length, 2);
+    assert.equal(once[2].items[0]!.content, 'a');
+  }
+  const twice = withTrailingTodoList(once, [{ content: 'only', status: 'in_progress' }]);
+  assert.equal(twice.filter((p) => p.kind === 'todo_list').length, 1);
+  assert.equal(twice[twice.length - 1]!.kind, 'todo_list');
+  if (twice[twice.length - 1]!.kind === 'todo_list') {
+    assert.equal(twice[twice.length - 1].items[0]!.content, 'only');
+  }
+  assert.deepEqual(withTrailingTodoList(once, []), base);
 });

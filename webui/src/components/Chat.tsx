@@ -59,6 +59,7 @@ import {
   toolResultStatus,
   updateToolProgress,
   upsertToolPart,
+  withTrailingTodoList,
   type ToolRow,
   type MsgPart,
 } from '../lib/toolRows';
@@ -69,6 +70,13 @@ import {
   subtaskCounts,
   taskArgsSummary,
 } from '../lib/subtasks';
+import {
+  foldTodoToolCall,
+  isTodoTool,
+  reduceTodosFromCalls,
+  todoCounts,
+  type TodoItem,
+} from '../lib/todos';
 import { displayPath, pathBasename } from '../lib/displayPath';
 import { isInternalHistoryAssistantMessage, isInternalHistoryUserMessage } from '../lib/historyMessages';
 import {
@@ -105,6 +113,25 @@ interface Message {
   ts?: number;
   /** Browser-local correlation for an optimistic /live submission. Never persisted. */
   pendingSteerId?: string;
+}
+
+/**
+ * Freeze a todo snapshot onto the last assistant message's trailing `todo_list`
+ * part. Used when the user starts the next turn (sticky → history) and when
+ * caching a session that still has a live sticky panel.
+ */
+function freezeTodosIntoLastAssistant(msgs: Message[], items: TodoItem[]): Message[] {
+  if (!items.length) return msgs;
+  for (let i = msgs.length - 1; i >= 0; i--) {
+    if (msgs[i]!.role !== 'assistant') continue;
+    const next = msgs.slice();
+    next[i] = {
+      ...msgs[i]!,
+      parts: withTrailingTodoList(msgs[i]!.parts, items),
+    };
+    return next;
+  }
+  return msgs;
 }
 
 interface QueuedMessage {
@@ -525,6 +552,9 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
   }
   const [tokens, setTokens] = useState<TokenUsage | null>(null);
   const [historyHint, setHistoryHint] = useState<string | null>(null);
+  const [activeTodos, setActiveTodos] = useState<TodoItem[] | null>(null);
+  const activeTodosRef = useRef<TodoItem[] | null>(null);
+  activeTodosRef.current = activeTodos;
   // Auxiliary persistence failures belong to application chrome, not the
   // assistant transcript. Replacing this value also deduplicates repeated
   // failures for the same session/path.
@@ -645,6 +675,8 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
       if (prev.length === 0) return prev;
       const last = prev[prev.length - 1];
       if (last.role !== 'assistant') return prev;
+      // Only drop empty placeholder — never wipe painted thinking/text/tools.
+      if (last.parts && last.parts.length > 0) return prev;
       return prev.slice(0, -1);
     });
   }
@@ -843,7 +875,7 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
         // 主流 streamChat 已在渲染,待机 watch 只是被 admit 接入 fan-out 的冗余
         // 观察者——跳过渲染与升级,否则 user 回显/text 增量会双份(「连续发了两三条」)。
         // 本回合结束 forwarder 断开 → 流关闭 → .then() 重新待机,不丢下一个 API turn。
-        if (abortRef.current) {
+        if (abortRef.current || busyRef.current) {
           return;
         }
         if (
@@ -963,7 +995,12 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
       const detachedRequestId = requestIdRef.current;
       const detachedController = abortRef.current;
       if (prevId && messagesRef.current.length > 0) {
-        messageCacheRef.current.set(prevId, messagesRef.current);
+        const sticky = activeTodosRef.current;
+        const cached =
+          sticky && sticky.length > 0
+            ? freezeTodosIntoLastAssistant(messagesRef.current, sticky)
+            : messagesRef.current;
+        messageCacheRef.current.set(prevId, cached);
       }
 
       activeIdRef.current = sessionId;
@@ -1000,6 +1037,9 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
       onPermissionResolved?.(null);
 
       const cached = sessionId ? messageCacheRef.current.get(sessionId) : undefined;
+      // Sticky is live-only; history restores frozen todo_list under assistants.
+      setActiveTodos(null);
+      activeTodosRef.current = null;
       if (cached && cached.length > 0) {
         setMessages(cached);
       } else {
@@ -1378,10 +1418,48 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
   }, [sync]);
 
   // ── Shared history → display conversion (reused by session load AND live snapshot) ──
+    /**
+   * Freeze the live sticky todo list onto the last assistant reply and clear
+   * the sticky region. Called when the user starts the *next* turn so the prior
+   * plan becomes part of that reply's transcript chrome (bottom of the bubble).
+   */
+  function commitActiveTodosIntoLastAssistant() {
+    const items = activeTodosRef.current;
+    if (!items || items.length === 0) {
+      setActiveTodos(null);
+      activeTodosRef.current = null;
+      return;
+    }
+    // Clear sticky first so the next paint never shows both sticky + frozen.
+    activeTodosRef.current = null;
+    setActiveTodos(null);
+    setMessages((prev) => freezeTodosIntoLastAssistant(prev, items));
+  }
+
   function sessionMessagesToDisplay(msgs: SessionMessage[]): Message[] {
     const loaded: Message[] = [];
+    // Per-assistant-turn todo calls so each reply freezes its own plan.
+    let turnTodoCalls: { name: string; args: string }[] = [];
+    const flushTurnTodos = () => {
+      if (turnTodoCalls.length === 0 || loaded.length === 0) {
+        turnTodoCalls = [];
+        return;
+      }
+      const list = reduceTodosFromCalls(turnTodoCalls);
+      turnTodoCalls = [];
+      if (list.length === 0) return;
+      for (let i = loaded.length - 1; i >= 0; i--) {
+        if (loaded[i]!.role !== 'assistant') continue;
+        loaded[i] = {
+          ...loaded[i]!,
+          parts: withTrailingTodoList(loaded[i]!.parts, list),
+        };
+        break;
+      }
+    };
     for (const msg of msgs) {
       if (msg.role === 'user') {
+        flushTurnTodos();
         if (isInternalHistoryUserMessage(msg.content ?? '', msg.synthetic)) continue;
         loaded.push({
           role: 'user',
@@ -1412,6 +1490,9 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
               ...(subtasks ? { subtasks } : {}),
             },
           });
+          if (isTodoTool(tc.name)) {
+            turnTodoCalls.push({ name: tc.name, args: rawArgs });
+          }
         }
         loaded.push({ role: 'assistant', parts, ts: msg.created_at });
       } else if (msg.role === 'tool' && msg.tool_result) {
@@ -1445,6 +1526,7 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
       }
       // system messages: skip
     }
+    flushTurnTodos();
     return loaded;
   }
 
@@ -1597,7 +1679,7 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
     }
 
     switch (e.type) {
-      case 'user': {
+            case 'user': {
         const lifecycle = reduceLiveLifecycle(liveLifecycleRef.current, {
           type: 'input_accepted',
         });
@@ -1789,6 +1871,9 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
       const detail = await getSession(projectHash, id);
       if (activeIdRef.current === id) {
         setMessages(sessionMessagesToDisplay(detail.messages));
+        // History freezes todos under each assistant; sticky is live-only.
+        setActiveTodos(null);
+        activeTodosRef.current = null;
       }
     } catch { /* refresh failure is non-fatal; the notice still gives feedback */ }
   }
@@ -1818,18 +1903,7 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
   function switchProvider(name: string) {
     providerPinnedRef.current = true;
     if (!sync) {
-      // Non-sync WebUI (`serve` /chat): still persist default so the *next*
-      // turn uses the new model. Clear any stuck recovery/busy placeholder
-      // that can freeze the composer after a mid-turn model click.
       setProvider(name);
-      if (busyRef.current && !requestIdRef.current && !abortRef.current) {
-        setBusy(false);
-        busyRef.current = false;
-        transitionChatRecovery({ type: 'authoritative_terminal' });
-      }
-      void setDefaultProvider(name).catch(() => {
-        /* non-fatal: local UI already shows the selection */
-      });
       return;
     }
     const previous = provider;
@@ -2107,8 +2181,7 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
   }
 
   /** @param opts.observerOnly When true (GET /chat/watch on another client's turn),
-   *  follow API low-confirm: render stream only — no permission / user-input modals.
-   *  Own WebUI sends use the default (native interactive). */
+   *  follow API low-confirm: render stream only — no permission / user-input modals. */
   function handleEvent(event: SSEEvent, opts?: { observerOnly?: boolean }) {
     const observerOnly = opts?.observerOnly === true;
     switch (event.type) {
@@ -2129,26 +2202,38 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
         break;
 
       case 'user': {
-        // API turn 的用户消息:daemon 在 admit 后发来,观察者据此实时看到用户发了
-        // 什么(不必等 turn 边界磁盘落盘)。不要重复:有 pendingSelfEcho 时(本端
-        // 乐观发)不追加,但观察者模式没有 self-echo,这里直接 append。
+        // Fan-out / `/chat/watch` admitted-user event. Own `/chat` turns also
+        // receive this on the primary SSE after we added fanout — must not
+        // re-append or drop the optimistic empty assistant (that made text /
+        // reasoning appends no-op while sticky todos still updated).
         const userText = stripVisionAnnotation(event.content);
-        if (pendingSelfEchoRef.current && pendingSelfEchoRef.current === userText) {
-          pendingSelfEchoRef.current = null;
+        const echoIdx = pendingSelfEchoRef.current.findIndex((p) => p.text === userText);
+        if (echoIdx >= 0) {
+          pendingSelfEchoRef.current.splice(echoIdx, 1);
           break;
         }
         setMessages((prev) => {
-          // 去重:末条已是同样文本的 user 则不重复 append(防 stale 重放)。
           const last = prev[prev.length - 1];
+          // Already the trailing user bubble.
           if (last && last.role === 'user') {
             const lastText = last.parts.find((p) => p.kind === 'text') as
               | { kind: 'text'; text: string }
               | undefined;
             if (lastText && lastText.text === userText) return prev;
           }
-          // 观察者升级/进入时,`ensureAssistantBubbleForWatch` 可能已先补了一个
-          // 空 assistant 占位(它在 runtime_info 等更早的事件上执行)。把它摘掉,
-          // 保证顺序是「用户消息 → 回复」,而不是一个空气泡悬在用户消息上方。
+          // Optimistic pattern: […, user(same), assistant(empty|streaming)] —
+          // keep the placeholder so subsequent text/reasoning/tool land on it.
+          if (last && last.role === 'assistant') {
+            const prevUser = prev[prev.length - 2];
+            if (prevUser && prevUser.role === 'user') {
+              const prevText = prevUser.parts.find((p) => p.kind === 'text') as
+                | { kind: 'text'; text: string }
+                | undefined;
+              if (prevText && prevText.text === userText) return prev;
+            }
+          }
+          // Observer upgrade may have pre-inserted an empty assistant before
+          // the user event — drop only that orphan, not a real reply bubble.
           let base = prev;
           if (last && last.role === 'assistant' && (!last.parts || last.parts.length === 0)) {
             base = prev.slice(0, -1);
@@ -2189,6 +2274,9 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
           status: 'pending',
           ...(subtasks ? { subtasks } : {}),
         });
+        if (isTodoTool(event.name)) {
+          setActiveTodos((cur) => foldTodoToolCall(cur, event.name, argsStr));
+        }
         break;
       }
 
@@ -2391,6 +2479,8 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
       );
       return;
     }
+    // Next user turn: freeze sticky todos under prior assistant, clear sticky.
+    commitActiveTodosIntoLastAssistant();
     // Actually sending a message (immediate OR drained from the queue) re-engages
     // auto-follow — the user wants to see their message + the reply. Placed HERE, not in
     // sendMessage, so merely QUEUEING a message while reading history doesn't yank them.
@@ -2479,6 +2569,7 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
 
     // ── Normal path ──
     setBusy(true);
+    busyRef.current = true;
     // 消息发出后延迟刷新侧栏列表，给后端落盘时间；
     // done 事件中 onSessionId 会再刷一次确保更新。
     setTimeout(() => onLiveTurnDone?.(), 200);
@@ -2490,10 +2581,6 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
       { role: 'user', parts: [{ kind: 'text', text }], images: images.length ? images : undefined, ts: now },
       { role: 'assistant', parts: [], ts: now },
     ]);
-    // 与 sync 路径一致:记录本端乐观插入的文本,`/chat` 流的 `user` 回显据此去重
-    // (否则回显会再 append 一条用户消息、把末尾 assistant 占位挤掉,导致 text 增量
-    // 被 appendToLastAssistant 丢弃——「发了 2-3 条 + 回复不流式」)。回显匹配后清空。
-    pendingSelfEchoRef.current = text;
 
     const controller = new AbortController();
     abortRef.current = controller;
@@ -2501,6 +2588,9 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
     const requestId = randomUUID();
     requestIdRef.current = requestId;
     const requestGeneration = sessionGenerationRef.current;
+    // Fan-out / primary SSE User echo: register optimistic text so handleEvent
+    // does not append a second user bubble or drop the empty assistant.
+    pendingSelfEchoRef.current.push({ id: requestId, text });
     let keepStopAlias = false;
 
     try {
@@ -2558,9 +2648,7 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
       }
     } finally {
       if (abortRef.current === controller) abortRef.current = null;
-      // 回显匹配后已清空;若中途失败/中止从未收到回显,兜底清掉,避免残留值
-      // 误吞后续对端(API/别的 tab)发来的同文本用户消息。
-      pendingSelfEchoRef.current = null;
+      pendingSelfEchoRef.current = pendingSelfEchoRef.current.filter((p) => p.id !== requestId);
       if (
         requestIdRef.current === requestId &&
         sessionGenerationRef.current === requestGeneration &&
@@ -3293,6 +3381,9 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
     );
   }
 
+  const stickyTodoPanel =
+    activeTodos && activeTodos.length > 0 ? <SessionTodoPanel items={activeTodos} /> : null;
+
   return (
     <>
       {/* Message timeline */}
@@ -3312,6 +3403,12 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
               {historyHint}
               <div class="sub">{t('chat.continueHint')}</div>
             </div>
+          </div>
+        )}
+
+        {messages.length > 0 && historyHint && (
+          <div class="history-banner" role="status">
+            {historyHint}
           </div>
         )}
 
@@ -3568,6 +3665,7 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
       )}
       <div class="input-container">
         <div class="input-wrap">
+          {stickyTodoPanel}
           {inputBox}
           {inputSubbar}
         </div>
@@ -3725,8 +3823,15 @@ function renderAssistantParts(parts: MsgPart[], search: string): VNode[] {
         </div>,
       );
       i++;
-    } else {
+    } else if (p.kind === 'todo_list') {
+      out.push(
+        <SessionTodoPanel key={`td-${i}`} items={p.items} embedded />,
+      );
+      i++;
+    } else if (p.kind === 'text') {
       if (p.text) out.push(<Markdown key={`tx-${i}`} content={p.text} search={search} />);
+      i++;
+    } else {
       i++;
     }
   }
@@ -3759,6 +3864,49 @@ function ReasoningBlock({ text, search }: { text: string; search: string }) {
           {highlightText(text, search)}
         </div>
       )}
+    </div>
+  );
+}
+
+/**
+ * Todo panel — sticky above the composer (live turn) or embedded at the
+ * bottom of a frozen assistant reply (after the user advanced).
+ */
+function SessionTodoPanel({
+  items,
+  embedded = false,
+}: {
+  items: TodoItem[];
+  embedded?: boolean;
+}) {
+  const t = useT();
+  const { completed, inProgress, total } = todoCounts(items);
+  return (
+    <div
+      class={'session-todo-panel' + (embedded ? ' is-embedded' : '')}
+      role="region"
+      aria-label={t('todo.panelTitle')}
+    >
+      <div class="session-todo-header">
+        <span class="session-todo-title">{t('todo.panelTitle')}</span>
+        <span class="session-todo-summary">
+          {t('todo.summary', {
+            done: String(completed),
+            active: String(inProgress),
+            total: String(total),
+          })}
+        </span>
+      </div>
+      <div class="session-todo-list">
+        {items.map((item, i) => (
+          <div class={'session-todo-row status-' + item.status} key={i}>
+            <span class="session-todo-glyph" aria-hidden="true">
+              {item.status === 'completed' ? '✓' : item.status === 'in_progress' ? '•' : '○'}
+            </span>
+            <span class="session-todo-content">{item.content}</span>
+          </div>
+        ))}
+      </div>
     </div>
   );
 }

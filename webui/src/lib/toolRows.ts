@@ -10,6 +10,7 @@
 // coalesce-by-call_id fix (commit 80d6540f).
 
 import type { SubtaskItem } from './subtasks';
+import type { TodoItem } from './todos';
 
 export interface ToolRow {
   id: string;
@@ -37,7 +38,19 @@ export type MsgPart =
   | { kind: 'reasoning'; text: string }
   | { kind: 'tool'; tool: ToolRow }
   | { kind: 'notice'; text: string }
-  | { kind: 'rate_limited'; text: string };
+  | { kind: 'rate_limited'; text: string }
+  /**
+   * Frozen session todo list attached to the previous assistant reply when
+   * the user starts the next turn. Live updates use the sticky panel instead.
+   */
+  | { kind: 'todo_list'; items: TodoItem[] };
+
+/** Append or replace a trailing `todo_list` part on an assistant message. */
+export function withTrailingTodoList(parts: MsgPart[], items: TodoItem[]): MsgPart[] {
+  const without = parts.filter((p) => p.kind !== 'todo_list');
+  if (items.length === 0) return without;
+  return [...without, { kind: 'todo_list', items: items.map((i) => ({ ...i })) }];
+}
 
 /**
  * Append `tool` as a new tool part, OR — when a tool part with the SAME `tool.id`

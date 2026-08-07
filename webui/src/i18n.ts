@@ -347,6 +347,8 @@ const zh = {
   'cmd.todo.desc': '显示当前待办清单',
   'cmd.todo.header': '当前待办：',
   'cmd.todo.empty': '暂无待办',
+  'todo.panelTitle': '待办清单',
+  'todo.summary': '{done}/{total} 完成 · {active} 进行中',
 
   // Common
   'common.readonly': '只读',
@@ -679,6 +681,8 @@ const en: Record<MsgKey, string> = {
   'cmd.todo.desc': 'Show the current todo list',
   'cmd.todo.header': 'Current todos:',
   'cmd.todo.empty': 'No todos',
+  'todo.panelTitle': 'Todo list',
+  'todo.summary': '{done}/{total} done · {active} in progress',
 
   'common.readonly': 'Read-only',
   'common.cancel': 'Cancel',

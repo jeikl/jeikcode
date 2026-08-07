@@ -27,7 +27,7 @@
 
 import { VNode } from 'preact';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'preact/hooks';
-import { streamChat, stopChat, cancelDetachedChat, getActiveChatSessions, watchChatSession, SSEEvent, getSession, SessionMetaWithProject, getModels, ImageData, streamLive, postLiveMessage, postLiveStop, postLivePermission, postLiveProvider, postLiveMode, getApprovalMode, ApprovalMode, postLiveSwitchSession, LiveWireEvent, SessionMessage, getSkills, SkillInfo, listDir, changeDir, postConfigReload, postCommand, postLiveCompact, postLiveUserInput, postChatUserInput, type CommandResult, UserInputRequestEvent } from '../api';
+import { streamChat, stopChat, cancelDetachedChat, getActiveChatSessions, watchChatSession, SSEEvent, getSession, SessionMetaWithProject, getModels, ImageData, streamLive, postLiveMessage, postLiveStop, postLivePermission, postLiveProvider, postLiveMode, getApprovalMode, ApprovalMode, postLiveSwitchSession, LiveWireEvent, SessionMessage, getSkills, SkillInfo, listDir, changeDir, postConfigReload, postCommand, postLiveCompact, postLiveUserInput, postChatUserInput, setDefaultProvider, type CommandResult, UserInputRequestEvent } from '../api';
 import {
   parseSlashCommand,
   buildCommandMap,
@@ -81,11 +81,17 @@ import {
   liveSnapshotQueueDisposition,
   reduceChatRecovery,
   reduceLiveLifecycle,
+  resolveUserInputRequest,
   restoreLiveSnapshot,
   syncAttachDisposition,
   type ChatRecoveryEvent,
   type ChatRecoveryState,
 } from '../lib/chatTerminal';
+import {
+  acknowledgeLiveSteers,
+  pendingSteersToDraft,
+  type PendingLiveSteer,
+} from '../lib/liveSteer';
 
 interface Message {
   role: 'user' | 'assistant' | 'system';
@@ -97,6 +103,8 @@ interface Message {
    *  type stays backward-compatible with the few code paths that build a
    *  Message literal without a clock (e.g. the queued-placeholder). */
   ts?: number;
+  /** Browser-local correlation for an optimistic /live submission. Never persisted. */
+  pendingSteerId?: string;
 }
 
 interface QueuedMessage {
@@ -487,8 +495,40 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
     setQueuedState(next);
   }
   const queueIdRef = useRef(0);
+  // Inputs accepted by the live runtime as in-turn steers but not yet folded at
+  // a kernel round boundary. Unlike `queued`, these already belong to the active
+  // turn and must be recovered if that turn is cancelled before acknowledgement.
+  const [pendingSteers, setPendingSteersState] = useState<PendingLiveSteer[]>([]);
+  const pendingSteersRef = useRef(pendingSteers);
+  pendingSteersRef.current = pendingSteers;
+  function setPendingSteers(
+    update: PendingLiveSteer[] | ((current: PendingLiveSteer[]) => PendingLiveSteer[]),
+  ) {
+    const next = typeof update === 'function' ? update(pendingSteersRef.current) : update;
+    pendingSteersRef.current = next;
+    setPendingSteersState(next);
+  }
+  function restorePendingSteers(includeSubmitting = true) {
+    const pending = pendingSteersRef.current.filter(
+      (item) => includeSubmitting || item.confirmed,
+    );
+    if (pending.length === 0) return;
+    const draft = pendingSteersToDraft(pending);
+    const pendingIds = new Set(pending.map((item) => item.id));
+    setMessages((current) => current.filter((message) => !(
+      message.pendingSteerId !== undefined && pendingIds.has(message.pendingSteerId)
+    )));
+    setInput((current) => [draft.text, current].filter(Boolean).join('\n'));
+    setPendingImages((current) => [...draft.images, ...current]);
+    setPendingSteers((current) => current.filter((item) => !pendingIds.has(item.id)));
+    pushCommandNotice(t('chat.steerRecovered'));
+  }
   const [tokens, setTokens] = useState<TokenUsage | null>(null);
   const [historyHint, setHistoryHint] = useState<string | null>(null);
+  // Auxiliary persistence failures belong to application chrome, not the
+  // assistant transcript. Replacing this value also deduplicates repeated
+  // failures for the same session/path.
+  const [persistenceWarning, setPersistenceWarning] = useState<string | null>(null);
   // 正在拉取某会话历史：用于抑制落地页，避免切到「有内容的会话」时先闪一下落地页。
   const [loading, setLoading] = useState(false);
   const [provider, setProvider] = useState<string | null>(null);
@@ -594,6 +634,20 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
       ];
     });
   }
+  /**
+   * Drop a trailing in-flight assistant row before consuming a full `/chat/watch`
+   * replay. Mid-turn refresh used to keep a half-rendered bubble and then only
+   * append *new* deltas from the bus (no history), so earlier thinking/text
+   * vanished. Server now replays the whole turn; start from a clean assistant.
+   */
+  function dropTrailingAssistantForWatchReplay() {
+    setMessages((prev) => {
+      if (prev.length === 0) return prev;
+      const last = prev[prev.length - 1];
+      if (last.role !== 'assistant') return prev;
+      return prev.slice(0, -1);
+    });
+  }
   function startDetachedHistoryPoll(
     projectHash: string,
     loadId: string,
@@ -603,6 +657,8 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
     setHistoryHint(t('chat.detachedWatching'));
     // Show running UI; send stays locked via recovery / requestId.
     setBusy(true);
+    // Full turn will be rebuilt from watch replay (user + thinking + text + tools).
+    dropTrailingAssistantForWatchReplay();
     ensureAssistantBubbleForWatch();
 
     // Live reattach via event bus fan-out.
@@ -774,8 +830,6 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
     idleWatchAbortRef.current = abort;
     let activated = false;
     let terminalSeen = false;
-    // eslint-disable-next-line no-console
-    console.log('[idleWatch] start for', loadId, 'gen', loadGeneration);
     void watchChatSession(
       loadId,
       (event) => {
@@ -799,8 +853,6 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
           return;
         }
         if (!activated) {
-          // eslint-disable-next-line no-console
-          console.log('[idleWatch] first event → upgrade to detached', loadId, event.type);
           activated = true;
           idleWatchAbortRef.current = null;
           detachedWatchAbortRef.current = abort;
@@ -808,6 +860,9 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
           requestIdRef.current = loadId;
           setHistoryHint(t('chat.detachedWatching'));
           setBusy(true);
+          // Rebuild the in-flight assistant from the live stream (or full
+          // replay if this connection is a mid-turn reattach).
+          dropTrailingAssistantForWatchReplay();
           startDetachedTick(projectHash, loadId, loadGeneration);
           // API turn 已 admit(会话已建):通知 App 刷新侧栏,让新建会话实时出现。
           onLiveTurnDone?.();
@@ -869,7 +924,7 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
   // Turns are serialized (hub `turn_active`), so the next `user` echo after a send
   // is this tab's own; a peer's message (different text, or after the ref clears)
   // still appends normally.
-  const pendingSelfEchoRef = useRef<string | null>(null);
+  const pendingSelfEchoRef = useRef<Array<{ id: string; text: string }>>([]);
   // Artifact (code block) streaming: the daemon's ArtifactDetector strips fenced
   // code blocks from TextDelta and emits them as artifact_start / content / end.
   // These refs accumulate the language tag and code body for each artifact so
@@ -894,6 +949,17 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
         pushCommandNotice(t('cmd.session.busy'));
         return;
       }
+      // A correlated steer still belongs to the session being left. Recover it
+      // while that session is authoritative and reject this switch once; moving
+      // the draft after `activeIdRef` changes would leak it into another chat.
+      if (pendingSteersRef.current.length > 0) {
+        const pendingOwnerId = prevId ?? liveSessionIdRef.current;
+        if (pendingOwnerId) {
+          restorePendingSteers();
+          onSessionId(pendingOwnerId);
+          return;
+        }
+      }
       const detachedRequestId = requestIdRef.current;
       const detachedController = abortRef.current;
       if (prevId && messagesRef.current.length > 0) {
@@ -905,7 +971,7 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
       loadedForRef.current = null;
       stopDetachedHistoryPoll();
       optimisticFiredRef.current = false;
-      pendingSelfEchoRef.current = null;
+      pendingSelfEchoRef.current = [];
       // An existing session stays send-locked until `/chat/active` proves it
       // has no detached operation. Its canonical id is already a safe stop
       // alias, including while the discovery request is pending or unavailable.
@@ -945,6 +1011,7 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
       setMatchIdx(0);
       setTokens(null);
       setHistoryHint(null);
+      setPersistenceWarning(null);
       // 切到一个有 id 的会话 → 进入「加载中」，先抑制落地页（避免闪屏）；
       // 无 id（新建）则不加载、直接落地。
       setLoading(sessionId != null && !cached);
@@ -1221,6 +1288,7 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
       if (attempt > 6) {
         stopLiveStream();
         liveLifecycleRef.current = createLiveLifecycleState();
+        restorePendingSteers();
         setSync(false);
         setBusy(false);
         setQueued([]);
@@ -1391,6 +1459,7 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
       case 'tool_result': return { type: 'tool_result', id: e.id, name: e.name, output: e.output, success: e.success, duration_ms: e.duration_ms };
       case 'tokens': return { type: 'tokens', prompt: e.prompt, completion: e.completion, total: e.total };
       case 'warning': return { type: 'warning', message: e.message };
+      case 'persistence_warning': return { type: 'persistence_warning', message: e.message };
       case 'rate_limited': return { type: 'rate_limited', reset_at_display: e.reset_at_display, reset_label: e.reset_label, secs_until_reset: e.secs_until_reset, auto_resuming: e.auto_resuming, server_message: e.server_message ?? null };
       // NOTE: no artifact_* mapping. This is safe today because the /sync live
       // wire forwards raw TextDelta with the ``` fences intact (see to_wire in
@@ -1508,6 +1577,7 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
         setSearchOpen(false);
         setTokens(null);
         setHistoryHint(null);
+        setPersistenceWarning(null);
       }
       if (sync) {
         stopLiveStream();
@@ -1536,8 +1606,11 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
         // Dedup THIS tab's own echo: we already optimistically appended it on send
         // (leaving the landing page instantly). Consume the marker and skip the
         // re-append; a peer's message still falls through and renders.
-        if (pendingSelfEchoRef.current !== null && e.text === pendingSelfEchoRef.current) {
-          pendingSelfEchoRef.current = null;
+        const ownEchoIndex = e.client_input_id
+          ? pendingSelfEchoRef.current.findIndex((pending) => pending.id === e.client_input_id)
+          : pendingSelfEchoRef.current[0]?.text === e.text ? 0 : -1;
+        if (ownEchoIndex >= 0) {
+          pendingSelfEchoRef.current.splice(ownEchoIndex, 1);
           break;
         }
         // Append the peer's user message + empty assistant placeholder
@@ -1560,6 +1633,9 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
         liveLifecycleRef.current = lifecycle.state;
         setBusy(lifecycle.state.running);
         if (lifecycle.terminal) {
+          // A submit whose HTTP receipt is still in flight may belong to the
+          // next turn; only confirmed steers are recoverable at this terminal.
+          restorePendingSteers(false);
           if (lifecycle.terminal.discardQueued) {
             setQueued([]);
             pushNoticeToLastAssistant(t('chat.incomplete', { msg: lifecycle.terminal.detail }));
@@ -1571,6 +1647,14 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
           // turn 完成后 session 已落盘，通知 App 刷新侧栏列表。
           onLiveTurnDone?.();
         }
+        break;
+      }
+      case 'steered': {
+        setPendingSteers((pending) => acknowledgeLiveSteers(
+          pending,
+          e.inputs,
+          e.client_input_ids,
+        ));
         break;
       }
       case 'error': {
@@ -1592,6 +1676,10 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
       case 'user_input_request': {
         // Show the UserInputCard for the bound live runtime.
         setUserInputReq(e);
+        break;
+      }
+      case 'user_input_resolved': {
+        setUserInputReq((current) => resolveUserInputRequest(current, e.request_id));
         break;
       }
       default: {
@@ -1730,7 +1818,18 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
   function switchProvider(name: string) {
     providerPinnedRef.current = true;
     if (!sync) {
+      // Non-sync WebUI (`serve` /chat): still persist default so the *next*
+      // turn uses the new model. Clear any stuck recovery/busy placeholder
+      // that can freeze the composer after a mid-turn model click.
       setProvider(name);
+      if (busyRef.current && !requestIdRef.current && !abortRef.current) {
+        setBusy(false);
+        busyRef.current = false;
+        transitionChatRecovery({ type: 'authoritative_terminal' });
+      }
+      void setDefaultProvider(name).catch(() => {
+        /* non-fatal: local UI already shows the selection */
+      });
       return;
     }
     const previous = provider;
@@ -2016,6 +2115,15 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
       case 'runtime_info':
         setProvider(event.provider);
         break;
+      case 'session_assigned':
+        // Bind a brand-new `/chat` conversation before model/provider work can
+        // fail or the SSE transport can disappear. Mark the current canvas as
+        // already loaded so the App state update cannot replace the optimistic
+        // first turn with an empty history fetch.
+        activeIdRef.current = event.session_id;
+        loadedForRef.current = event.session_id;
+        onSessionId(event.session_id);
+        break;
       case 'command_output':
         pushCommandNotice(event.text);
         break;
@@ -2195,6 +2303,10 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
         pushNoticeToLastAssistant(t('chat.warning', { msg: event.message }));
         break;
 
+      case 'persistence_warning':
+        setPersistenceWarning(event.message);
+        break;
+
       case 'rate_limited': {
         // 限流暂停：渲染成暗色中性卡片，非红色 error 样式；保留已完成内容，不结束回合。
         // auto_resuming=true → WaitAndRetry (kernel will sleep then retry)
@@ -2299,26 +2411,62 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
       //    only arrives after VL preprocessing, so waiting for it leaves the
       //    sender stuck on the empty page). Our own echo is deduped in the `user`
       //    case via `pendingSelfEchoRef`.
+      const steering = busyRef.current;
       setBusy(true);
       const now = Date.now();
-      pendingSelfEchoRef.current = text;
+      const pendingSteer: PendingLiveSteer = {
+        id: crypto.randomUUID(),
+        text,
+        images: images.length ? images : undefined,
+        confirmed: false,
+      };
+      pendingSelfEchoRef.current.push({ id: pendingSteer.id, text });
       setMessages((prev) => [
         ...prev,
-        { role: 'user', parts: [{ kind: 'text', text }], images: images.length ? images : undefined, ts: now },
-        { role: 'assistant', parts: [], ts: now },
+        {
+          role: 'user',
+          parts: [{ kind: 'text', text }],
+          images: images.length ? images : undefined,
+          ts: now,
+          pendingSteerId: pendingSteer.id,
+        },
+        { role: 'assistant', parts: [], ts: now, pendingSteerId: pendingSteer.id },
       ]);
+      // Register before the HTTP round-trip. A very fast round boundary can
+      // emit `steered` on SSE before the submit response reaches this tab.
+      setPendingSteers((pending) => [...pending, pendingSteer]);
       try {
-        await postLiveMessage(
+        const receipt = await postLiveMessage(
           text,
           images.length ? images : undefined,
           provider ?? undefined,
           activeIdRef.current,
+          pendingSteer.id,
         );
+        // The receipt is authoritative. The browser's busy flag can race a
+        // terminal event, so reconcile pending ownership in either direction.
+        if (receipt.disposition === 'started') {
+          setPendingSteers((pending) => pending.filter((item) => item.id !== pendingSteer.id));
+        } else {
+          setPendingSteers((pending) => pending.map((item) => (
+            item.id === pendingSteer.id ? { ...item, confirmed: true } : item
+          )));
+          if (!liveLifecycleRef.current.running) restorePendingSteers(false);
+        }
       } catch (error) {
         // Roll back the optimistic append — the send never reached the server.
-        pendingSelfEchoRef.current = null;
-        setMessages((prev) => prev.slice(0, -2));
-        setBusy(false);
+        const echoIndex = pendingSelfEchoRef.current.findIndex(
+          (pending) => pending.id === pendingSteer.id,
+        );
+        if (echoIndex >= 0) pendingSelfEchoRef.current.splice(echoIndex, 1);
+        setMessages((prev) => prev.filter((message) => message.pendingSteerId !== pendingSteer.id));
+        setPendingSteers((pending) => pending.filter((item) => item.id !== pendingSteer.id));
+        if (steering) {
+          setInput((current) => [text, current].filter(Boolean).join('\n'));
+          setPendingImages((current) => [...images, ...current]);
+        } else {
+          setBusy(false);
+        }
         setQueued([]);
         setHistoryHint(t('chat.connError', { msg: String(error) }));
         return;
@@ -2458,8 +2606,14 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
     if (textareaRef.current) textareaRef.current.style.height = 'auto';
     setHistoryHint(null);
 
-    // AI 执行中：排队，待当前回合 done 后由 drain effect 依次自动发送。
+    // Sync mode shares the native runtime, so an active-turn submit is an
+    // authoritative steer. The legacy /chat path has no steer transport and
+    // intentionally keeps its next-turn queue semantics.
     if (busy) {
+      if (sync) {
+        void deliver(text, images);
+        return;
+      }
       setQueued((q) => [
         ...q,
         {
@@ -3000,14 +3154,14 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
           <div class="input-turn-controls">
             {busy || recoveryPolicy.allowStop ? (
               <>
-                {/* 执行中仍可发送：按下即排队，当前回合结束后自动发出。 */}
+                {/* /live folds this into the active turn; /chat queues it for the next turn. */}
                 {recoveryPolicy.allowSend && (input.trim() || pendingImages.length > 0) && (
                   <button
                     class="btn-send"
                     onClick={sendMessage}
                     disabled={Boolean(modeState.pendingMode)}
-                    title={t('chat.queue')}
-                    aria-label={t('chat.queue')}
+                    title={sync ? t('chat.steer') : t('chat.queue')}
+                    aria-label={sync ? t('chat.steer') : t('chat.queue')}
                   >
                     ↑
                   </button>
@@ -3293,6 +3447,14 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
           </div>
         ))}
 
+        {pendingSteers.some((item) => item.confirmed) && (
+          <div class="steer-pending-status" role="status">
+            {t('chat.steerPending', {
+              count: pendingSteers.filter((item) => item.confirmed).length,
+            })}
+          </div>
+        )}
+
         <div ref={bottomRef} />
         </div>
       </div>
@@ -3390,6 +3552,20 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
       )}
 
       {/* Floating input */}
+      {persistenceWarning && (
+        <div class="persistence-warning" role="status">
+          <span aria-hidden="true">⚠</span>
+          <span>{persistenceWarning}</span>
+          <button
+            type="button"
+            class="persistence-warning-dismiss"
+            aria-label="Dismiss"
+            onClick={() => setPersistenceWarning(null)}
+          >
+            ×
+          </button>
+        </div>
+      )}
       <div class="input-container">
         <div class="input-wrap">
           {inputBox}

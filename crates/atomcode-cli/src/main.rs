@@ -560,6 +560,36 @@ fn close_thinking_chunk(out: &mut String, open: &mut bool) {
 /// scan.
 fn is_dev_mode() -> bool {
     std::env::args().skip(1).any(|a| a == "--dev")
+        || std::env::var_os("ATOMCODE_NO_UPDATE").is_some()
+        || std::env::var_os("ATOMCODE_DEV").is_some()
+}
+
+/// Peek `auto_update` from the user config **before** clap/config load.
+///
+/// `apply_pending_upgrade` runs at process start — historically it ignored
+/// `auto_update = false`, so a self-built binary still got replaced by a
+/// staged official release (slow/corrupt TUI on large machines). Default
+/// remains "allow upgrade" if the file is missing or unreadable.
+fn config_auto_update_enabled() -> bool {
+    let path = Config::default_path();
+    let Ok(raw) = std::fs::read_to_string(path) else {
+        return true;
+    };
+    // Prefer the last assignment (TOML allows only one, but be defensive).
+    for line in raw.lines().rev() {
+        let line = line.trim();
+        if line.starts_with('#') {
+            continue;
+        }
+        if let Some(rest) = line.strip_prefix("auto_update") {
+            let rest = rest.trim_start();
+            if let Some(rest) = rest.strip_prefix('=') {
+                let v = rest.trim().trim_matches('"');
+                return !matches!(v, "false" | "False" | "0" | "no" | "off");
+            }
+        }
+    }
+    true
 }
 
 /// True when the currently-running binary's filename ends in `.bak`.
@@ -1382,8 +1412,17 @@ async fn async_main() {
     // slash command inside the TUI — that's user-initiated and fine.
     let is_backup = is_running_as_backup();
     let dev_mode = is_dev_mode();
+    let auto_update_cfg = config_auto_update_enabled();
     if dev_mode {
-        eprintln!("[dev] auto-update disabled");
+        eprintln!("[dev] auto-update disabled (--dev / ATOMCODE_NO_UPDATE)");
+    } else if !auto_update_cfg {
+        // Drop staged official packages so a later accidental re-enable cannot
+        // overwrite a self-built binary the user is actively developing.
+        let staged = atomcode_updater::staged_dir();
+        if staged.exists() {
+            let _ = std::fs::remove_dir_all(&staged);
+            eprintln!("[auto_update=false] cleared staged upgrade at {}", staged.display());
+        }
     }
 
     // Bootstrap: if a prior session staged an upgrade, apply it NOW — before
@@ -1393,7 +1432,11 @@ async fn async_main() {
     // normal. On failure we log and carry on with the current binary; the
     // circuit-breaker in `apply_pending_upgrade` ensures a broken release
     // can't wedge this loop indefinitely.
-    if !is_backup && !dev_mode {
+    //
+    // Honor `auto_update = false` here too (not only for the detached stager):
+    // self-built / forked binaries must not be silently replaced by official
+    // releases — that was freezing TUI input on large monorepos after upgrade.
+    if !is_backup && !dev_mode && auto_update_cfg {
         let stage_start = std::time::Instant::now();
         // Capture current version BEFORE applying upgrade, so we can pass it to the re-exec'd child
         let current_version = format!("v{}", env!("CARGO_PKG_VERSION"));
@@ -1427,7 +1470,7 @@ async fn async_main() {
             total_ms = process_start.elapsed().as_millis() as u64,
             "startup stage completed"
         );
-    } // end `if !is_backup`
+    } // end upgrade bootstrap
 
     // Set a minimal pre-telemetry panic hook (replaced after telemetry init in run()).
     std::panic::set_hook(Box::new(|info| {
@@ -1825,6 +1868,18 @@ async fn run() -> Result<i32> {
                 .await
                 .map(|_| 0);
             }
+            Commands::Schedule(sub) => {
+                // Handled here (not via the generic `other` arm) so the executor's
+                // exit code survives: `schedule run` returns 0/1/130 and the OS
+                // scheduler keys failure detection on it. The generic arm collapses
+                // every Ok to 0, which would report every scheduled run as success.
+                HEADLESS_MODE.store(true, Ordering::Relaxed);
+                let code = schedule_cmd::handle_schedule(sub).await?;
+                telemetry
+                    .shutdown(std::time::Duration::from_millis(500))
+                    .await;
+                return Ok(code);
+            }
             other => {
                 let result = handle_command(other, &telemetry).await.map(|_| 0);
                 // Flush any events emitted by the subcommand (e.g. login_success)
@@ -1997,7 +2052,7 @@ async fn run() -> Result<i32> {
         total_ms = run_start.elapsed().as_millis() as u64,
         "optional metadata refresh detached from startup"
     );
-    let runtime_cfg = runtime_config_from(
+    let mut runtime_cfg = runtime_config_from(
         &config,
         &working_dir,
         cli.provider.as_deref(),
@@ -2007,6 +2062,7 @@ async fn run() -> Result<i32> {
         // fail-closed timeout so an unanswered approval can't park the run forever.
         !is_headless,
     );
+    runtime_cfg.next_prompt_suggestions = !is_headless;
     let model_name = runtime_cfg.model.clone();
     let provider_bootstrap = if is_headless {
         atomcode_coding::ProviderBootstrap::Required
@@ -2096,6 +2152,7 @@ async fn run() -> Result<i32> {
                 // event loop). `spawn_deferred_tui_runtime` is only ever the
                 // in-TUI respawn factory, so this is never a headless path.
                 runtime_cfg.round_cap_checkpoint = true;
+                runtime_cfg.next_prompt_suggestions = true;
                 spawn_deferred_tui_runtime(runtime_cfg, session)
             },
         )
@@ -2831,7 +2888,10 @@ pub(crate) async fn run_native_headless(
                 exit_code = 1;
             }
             CodingRuntimeEvent::Agent(KernelEvent::Warning(message))
-            | CodingRuntimeEvent::ControllerWarning(message) => eprintln!("[warning] {message}"),
+            | CodingRuntimeEvent::ControllerWarning(message)
+            | CodingRuntimeEvent::PersistenceWarning(message) => {
+                eprintln!("[warning] {message}")
+            }
             CodingRuntimeEvent::Agent(KernelEvent::RateLimited {
                 reset_at_display,
                 reset_label,
@@ -3190,8 +3250,8 @@ async fn handle_command(cmd: Commands, telemetry: &std::sync::Arc<Telemetry>) ->
             unreachable!("completion is handled before runtime startup")
         }
         Commands::Hooks(subcmd) => handle_hooks(subcmd).await,
-        Commands::Schedule(sub) => {
-            schedule_cmd::handle_schedule(sub).await.map(|_| ())
+        Commands::Schedule(_) => {
+            unreachable!("Schedule is handled inline in run() so its exit code survives")
         }
         Commands::Askpass { .. } => {
             unreachable!("__askpass is handled early in run() before handle_command")

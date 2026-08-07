@@ -239,6 +239,28 @@ mod tests {
         }
     }
 
+    /// Same recovery clue as `grep`/`list_directory` — glob failed on the identical guessed
+    /// path in the reported session.
+    #[tokio::test]
+    async fn missing_base_dir_error_carries_the_nearest_existing_ancestor() {
+        let d = tempfile::tempdir().unwrap();
+        std::fs::create_dir(d.path().join("app")).unwrap();
+        std::fs::write(d.path().join("app/build.gradle"), "").unwrap();
+        let r = GlobTool
+            .execute(
+                r#"{"pattern":"**/*.java","path":"app/src/main/java"}"#,
+                &ctx(d.path()),
+            )
+            .await;
+        assert!(r.is_error, "{}", r.content);
+        assert!(
+            r.content.contains("Nearest existing directory"),
+            "{}",
+            r.content
+        );
+        assert!(r.content.contains("build.gradle"), "{}", r.content);
+    }
+
     #[tokio::test]
     async fn matches_recursive_pattern() {
         let d = tempfile::tempdir().unwrap();

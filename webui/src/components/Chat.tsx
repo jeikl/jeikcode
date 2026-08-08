@@ -717,6 +717,10 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
         // low-confirm policy: stream text/tools only — never open permission or
         // user-input modals the observer cannot (and should not) own.
         handleEvent(event, { observerOnly: true });
+        if (atBottomRef.current) {
+          const el = scrollRef.current;
+          if (el) el.scrollTop = el.scrollHeight;
+        }
         if (
           event.type === 'done' ||
           event.type === 'stopped' ||
@@ -871,11 +875,11 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
         ) {
           return;
         }
-        // 本端自己的 /chat turn 正在流式(abortRef 非空 = 本端 POST /chat 在途):
-        // 主流 streamChat 已在渲染,待机 watch 只是被 admit 接入 fan-out 的冗余
-        // 观察者——跳过渲染与升级,否则 user 回显/text 增量会双份(「连续发了两三条」)。
-        // 本回合结束 forwarder 断开 → 流关闭 → .then() 重新待机,不丢下一个 API turn。
-        if (abortRef.current || busyRef.current) {
+        // Only skip when THIS tab owns POST /chat (abortRef set). Do NOT gate on
+        // busyRef: observer activation calls setBusy(true), and a busy-gate would
+        // drop every later text/reasoning/tool event — API turns then show only
+        // the user bubble until refresh (sidebar spinner still works via /chat/active).
+        if (abortRef.current) {
           return;
         }
         if (
@@ -892,6 +896,10 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
           requestIdRef.current = loadId;
           setHistoryHint(t('chat.detachedWatching'));
           setBusy(true);
+          busyRef.current = true;
+          // Follow the live API turn at the bottom of the timeline.
+          atBottomRef.current = true;
+          setShowJumpBtn(false);
           // Rebuild the in-flight assistant from the live stream (or full
           // replay if this connection is a mid-turn reattach).
           dropTrailingAssistantForWatchReplay();
@@ -901,6 +909,12 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
         }
         ensureAssistantBubbleForWatch();
         handleEvent(event, { observerOnly: true });
+        // Keep the main scroller pinned while we are following (user can scroll
+        // up mid-turn to release via recomputeAtBottom).
+        if (atBottomRef.current) {
+          const el = scrollRef.current;
+          if (el) el.scrollTop = el.scrollHeight;
+        }
         if (
           event.type === 'done' ||
           event.type === 'stopped' ||

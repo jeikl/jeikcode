@@ -6756,6 +6756,21 @@ fn run_coding_plan_blocking(
 /// then sees `is_logged_in() == true` and skips its own `auth::login`
 /// path — that path prints to stdout and is reserved for CLI callers.
 pub(crate) fn run_login_flow(renderer: &mut dyn Renderer, ctx: &mut LoopCtx) -> Result<()> {
+    // Source/self-built binaries cannot sign AtomGit gateway requests. Running
+    // OAuth + claim here only writes auth.toml / partial config and then fails
+    // every provider reload — leaving the TUI unable to add custom providers.
+    // Fail fast and point at /provider (or the official build).
+    if !atomcode_capabilities::provider::signer_available() {
+        renderer.render(UiLine::Error(
+            t(Msg::CmdProviderUnsupportedBuild).into_owned(),
+        ));
+        renderer.render(UiLine::CommandOutput(
+            t(Msg::ProviderInitSourceBuild).into_owned(),
+        ));
+        renderer.flush();
+        return Ok(());
+    }
+
     // Phase 1: pre-flight login if needed.
     if !atomcode_auth::is_logged_in() {
         if let Err(e) = run_oauth_with_renderer(renderer, ctx)

@@ -205,12 +205,16 @@ pub struct Config {
     /// Network behavior shared by every outbound HTTP client.
     #[serde(default, skip_serializing)]
     pub network: NetworkConfig,
-    /// When true (default), atomcode polls for new releases every hour
-    /// while running and stages any newer version it finds. The stage is
-    /// applied on the next startup (see `self_update::apply_pending_upgrade`).
-    /// Set to `false` to disable auto-staging entirely; `/upgrade` still
-    /// works manually. Missing from older configs → defaults to `true`.
-    #[serde(default = "default_true")]
+    /// When true, atomcode polls for new releases every hour while running
+    /// and stages any newer version it finds. The stage is applied on the
+    /// next startup (see `self_update::apply_pending_upgrade`).
+    ///
+    /// **Default is `false`.** Auto-applying official packages over a running
+    /// TUI (especially self-built / source binaries) has repeatedly frozen
+    /// input and left half-migrated config. Opt in with `auto_update = true`;
+    /// `/upgrade` still works manually either way. Missing from older configs
+    /// → defaults to `false` (safe).
+    #[serde(default)]
     pub auto_update: bool,
     /// Telemetry configuration. Missing from older configs → defaults to
     /// enabled=None (consent-pending), endpoint=None (use the built-in default).
@@ -529,7 +533,7 @@ impl Default for Config {
             datalog: Default::default(),
             notifications: Default::default(),
             network: Default::default(),
-            auto_update: true,
+            auto_update: false,
             telemetry: Default::default(),
             lsp: Default::default(),
             auto_commit: false,
@@ -1841,6 +1845,19 @@ mod tests {
     }
 
     #[test]
+    fn auto_update_defaults_to_false_when_missing() {
+        assert!(
+            !Config::default().auto_update,
+            "Default::default must not auto-upgrade"
+        );
+        // Missing key in TOML must also stay off (serde default for bool).
+        let cfg: Config = toml::from_str("default_provider = \"x\"").unwrap();
+        assert!(!cfg.auto_update);
+        let cfg_on: Config = toml::from_str("auto_update = true").unwrap();
+        assert!(cfg_on.auto_update);
+    }
+
+    #[test]
     fn tolerant_load_skips_only_the_invalid_provider() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("config.toml");
@@ -2841,14 +2858,14 @@ model = "missing-type"
     fn explicit_runtime_model_overrides_persisted_default_for_image_support() {
         use super::ImageAttachSupport as S;
 
-        let vision_default = cfg_with("claude-sonnet-4-5", None);
+        let vision_default = cfg_with("claude-sonnet-4-5", None, None);
         assert_eq!(
             vision_default.image_attach_support_for_model("deepseek-v4-flash"),
             S::Unconfigured,
             "a text-only runtime must not inherit vision support from the default"
         );
 
-        let text_default = cfg_with("deepseek-v4-flash", None);
+        let text_default = cfg_with("deepseek-v4-flash", None, None);
         assert_eq!(
             text_default.image_attach_support_for_model("qwen3-vl-plus"),
             S::Supported,

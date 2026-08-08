@@ -2,10 +2,10 @@
 //! USE it (callers). `Safe`.
 
 use super::index::CodeIndex;
-use super::{canonical, display_path, err, ok, resolve_path};
+use super::{canonical, display_path, err, graph_tool_desc, load_graph, ok, resolve_path};
 use crate::tool_feedback::{format_path_not_found, parse_tool_args};
 use async_trait::async_trait;
-use atomcode_kernel::tool::{Tool, ToolContext, ToolResult};
+use atomcode_kernel::tool::{ProgressSink, Tool, ToolContext, ToolResult};
 use serde::Deserialize;
 use serde_json::json;
 use std::collections::HashSet;
@@ -33,8 +33,10 @@ impl Tool for FileDependenciesTool {
         "file_dependencies"
     }
     fn description(&self) -> &str {
-        "Show a file's dependencies: which files it USES (its symbols' callees) and which \
-         files USE it (callers). Relative paths resolve against the working directory."
+        graph_tool_desc!(
+            "Show a file's dependencies: which files it USES (its symbols' callees) and which \
+             files USE it (callers). Relative paths resolve against the working directory."
+        )
     }
     fn parameters_schema(&self) -> serde_json::Value {
         json!({
@@ -54,13 +56,20 @@ impl Tool for FileDependenciesTool {
         let root = ctx.working_dir.clone();
         let file = resolve_path(&a.file, &ctx.working_dir);
         let display = a.file.clone();
-        tokio::task::spawn_blocking(move || render(&index, &root, &file, &display))
+        let progress = ctx.progress.clone();
+        tokio::task::spawn_blocking(move || render(&index, &root, &file, &display, &progress))
             .await
             .unwrap_or_else(|_| err("file_dependencies: task failed"))
     }
 }
 
-fn render(index: &CodeIndex, root: &Path, file: &Path, display: &str) -> ToolResult {
+fn render(
+    index: &CodeIndex,
+    root: &Path,
+    file: &Path,
+    display: &str,
+    progress: &ProgressSink,
+) -> ToolResult {
     if !file.exists() {
         return err(format_path_not_found(
             "file_dependencies",
@@ -69,7 +78,7 @@ fn render(index: &CodeIndex, root: &Path, file: &Path, display: &str) -> ToolRes
             root,
         ));
     }
-    let g = index.get(root);
+    let g = load_graph(index, root, progress);
     let croot = canonical(root);
     let root: &Path = &croot;
     let cfile = canonical(file);

@@ -286,6 +286,13 @@ fn load_config_file(path: &Path, source: McpConfigSource) -> Result<Vec<McpServe
     let content = std::fs::read_to_string(path)
         .with_context(|| format!("Failed to read MCP config from {}", path.display()))?;
 
+    // Empty / whitespace-only project files are common (editor created a stub).
+    // Treat them as "no config at this level" so user-level `~/.atomcode/mcp.json`
+    // still loads instead of failing the whole merge.
+    if content.trim().is_empty() {
+        return Ok(Vec::new());
+    }
+
     let raw: McpConfigFile = serde_json::from_str(&strip_json_comments(&content))
         .with_context(|| format!("Failed to parse MCP config from {}", path.display()))?;
 
@@ -896,6 +903,17 @@ mod tests {
         let error = load_mcp_config(project.path()).unwrap_err();
 
         assert!(error.to_string().contains("Failed to parse MCP config"));
+    }
+
+    #[test]
+    fn empty_project_mcp_json_is_ignored_not_error() {
+        // An empty project stub must not block user-level servers from loading.
+        let project = tempfile::tempdir().unwrap();
+        std::fs::write(project.path().join(".mcp.json"), "").unwrap();
+        let configs = load_mcp_config(project.path()).expect("empty project file is ok");
+        // No project servers; user servers may or may not exist depending on host.
+        // The important part: load succeeds (does not Err).
+        let _ = configs;
     }
 
     #[test]

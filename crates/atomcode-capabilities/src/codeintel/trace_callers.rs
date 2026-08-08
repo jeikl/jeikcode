@@ -1,10 +1,10 @@
 //! `trace_callers` — reverse call graph (who calls a symbol), BFS to a depth. `Safe`.
 
 use super::index::CodeIndex;
-use super::{canonical, display_path, err, ok};
+use super::{canonical, display_path, err, graph_tool_desc, load_graph, ok};
 use crate::tool_feedback::{parse_tool_args, similar_symbol_names};
 use async_trait::async_trait;
-use atomcode_kernel::tool::{Tool, ToolContext, ToolResult};
+use atomcode_kernel::tool::{ProgressSink, Tool, ToolContext, ToolResult};
 use serde::Deserialize;
 use serde_json::json;
 use std::path::Path;
@@ -33,8 +33,10 @@ impl Tool for TraceCallersTool {
         "trace_callers"
     }
     fn description(&self) -> &str {
-        "Trace all callers of a symbol (reverse call graph), BFS up to a depth. Shows the \
-         caller chain with depth + defining file. Example: {\"symbol\":\"process\",\"depth\":3}."
+        graph_tool_desc!(
+            "Trace all callers of a symbol (reverse call graph), BFS up to a depth. Shows the \
+             caller chain with depth + defining file. Example: {\"symbol\":\"process\",\"depth\":3}."
+        )
     }
     fn parameters_schema(&self) -> serde_json::Value {
         json!({
@@ -59,14 +61,21 @@ impl Tool for TraceCallersTool {
         let index = self.index.clone();
         let root = ctx.working_dir.clone();
         let symbol = a.symbol.clone();
-        tokio::task::spawn_blocking(move || render(&index, &root, &symbol, depth))
+        let progress = ctx.progress.clone();
+        tokio::task::spawn_blocking(move || render(&index, &root, &symbol, depth, &progress))
             .await
             .unwrap_or_else(|_| err("trace_callers: task failed"))
     }
 }
 
-fn render(index: &CodeIndex, root: &Path, symbol: &str, depth: usize) -> ToolResult {
-    let g = index.get(root);
+fn render(
+    index: &CodeIndex,
+    root: &Path,
+    symbol: &str,
+    depth: usize,
+    progress: &ProgressSink,
+) -> ToolResult {
+    let g = load_graph(index, root, progress);
     let croot = canonical(root);
     let root: &Path = &croot;
     let matches = g.find_by_name(symbol);

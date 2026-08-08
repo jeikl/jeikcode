@@ -2,10 +2,10 @@
 //! dependent files + total. `Safe`.
 
 use super::index::CodeIndex;
-use super::{canonical, display_path, err, ok, resolve_path};
+use super::{canonical, display_path, err, graph_tool_desc, load_graph, ok, resolve_path};
 use crate::tool_feedback::{format_path_not_found, parse_tool_args};
 use async_trait::async_trait;
-use atomcode_kernel::tool::{Tool, ToolContext, ToolResult};
+use atomcode_kernel::tool::{ProgressSink, Tool, ToolContext, ToolResult};
 use serde::Deserialize;
 use serde_json::json;
 use std::collections::HashSet;
@@ -33,9 +33,11 @@ impl Tool for BlastRadiusTool {
         "blast_radius"
     }
     fn description(&self) -> &str {
-        "Estimate the blast radius of changing a file: direct dependents (depth 1), \
-         indirect dependents (depth 2-3), and total impacted file count. Relative paths \
-         resolve against the working directory."
+        graph_tool_desc!(
+            "Estimate the blast radius of changing a file: direct dependents (depth 1), \
+             indirect dependents (depth 2-3), and total impacted file count. Relative paths \
+             resolve against the working directory."
+        )
     }
     fn parameters_schema(&self) -> serde_json::Value {
         json!({
@@ -55,17 +57,24 @@ impl Tool for BlastRadiusTool {
         let root = ctx.working_dir.clone();
         let file = resolve_path(&a.file, &ctx.working_dir);
         let display = a.file.clone();
-        tokio::task::spawn_blocking(move || render(&index, &root, &file, &display))
+        let progress = ctx.progress.clone();
+        tokio::task::spawn_blocking(move || render(&index, &root, &file, &display, &progress))
             .await
             .unwrap_or_else(|_| err("blast_radius: task failed"))
     }
 }
 
-fn render(index: &CodeIndex, root: &Path, file: &Path, display: &str) -> ToolResult {
+fn render(
+    index: &CodeIndex,
+    root: &Path,
+    file: &Path,
+    display: &str,
+    progress: &ProgressSink,
+) -> ToolResult {
     if !file.exists() {
         return err(format_path_not_found("blast_radius", display, file, root));
     }
-    let g = index.get(root);
+    let g = load_graph(index, root, progress);
     let croot = canonical(root);
     let root: &Path = &croot;
     let cfile = canonical(file);
@@ -164,8 +173,9 @@ mod tests {
         };
         let r = tool.execute(r#"{"file":"ghost.rs"}"#, &ctx).await;
         assert!(r.is_error);
+        // Missing path is rejected before the graph is consulted.
         assert!(
-            r.content.contains("not found in the code graph"),
+            r.content.contains("does not exist") || r.content.contains("not found"),
             "{}",
             r.content
         );

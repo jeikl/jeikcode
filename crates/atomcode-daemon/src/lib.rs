@@ -1105,6 +1105,44 @@ fn strip_vision_marker(raw: &str) -> (String, bool) {
     }
 }
 
+/// Compact preview of a tool result for history UI. Prefer head+tail over first-line-only
+/// so multi-row tables / JSON don't look empty after refresh. Already-compacted stubs
+/// (single line starting with `[` and containing ` lines`) are returned as-is (capped).
+fn tool_result_summary(text: &str) -> String {
+    const CAP: usize = 240;
+    let line_count = text.lines().count();
+    let first = text.lines().next().unwrap_or("");
+    // Compaction stubs / short single-line results: keep as one line.
+    if line_count <= 1 {
+        return if first.chars().count() > CAP {
+            format!("{}…", first.chars().take(CAP.saturating_sub(1)).collect::<String>())
+        } else {
+            first.to_string()
+        };
+    }
+    let head: String = first.chars().take(80).collect();
+    let tail: String = text
+        .lines()
+        .last()
+        .unwrap_or("")
+        .chars()
+        .take(80)
+        .collect();
+    let summary = if tail.is_empty() || tail == head {
+        format!("{line_count} lines | head: {head}")
+    } else {
+        format!("{line_count} lines | head: {head} | tail: {tail}")
+    };
+    if summary.chars().count() > CAP {
+        format!(
+            "{}…",
+            summary.chars().take(CAP.saturating_sub(1)).collect::<String>()
+        )
+    } else {
+        summary
+    }
+}
+
 impl MessageInfo {
     fn from_kernel(msg: &atomcode_kernel::message::Message) -> Self {
         use atomcode_kernel::message::Role;
@@ -1127,16 +1165,12 @@ impl MessageInfo {
                 .collect()
         });
         let tool_result = (msg.role == Role::Tool).then(|| {
-            let first_line = msg.text.lines().next().unwrap_or("");
-            let summary = if first_line.len() > 100 {
-                format!("{}...", first_line.chars().take(97).collect::<String>())
-            } else {
-                first_line.to_string()
-            };
             ToolResultInfo {
                 call_id: msg.tool_call_id.clone().unwrap_or_default(),
                 success: !msg.is_error,
-                summary,
+                // Head+tail summary (not first-line-only) so WebUI history doesn't look
+                // empty after multi-line SQL/table outputs. Full text remains in `content`.
+                summary: tool_result_summary(&msg.text),
                 line_count: msg.text.lines().count(),
             }
         });

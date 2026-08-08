@@ -33,18 +33,22 @@ impl Tool for UseSkillTool {
     }
     fn description(&self) -> &str {
         "Invoke a named skill (a reusable prompt/workflow template) and return its content \
-         with your arguments substituted. The name must exactly match a skill listed under \
-         '=== AVAILABLE SKILLS ===' in the system prompt or returned by list_skills. Never invent \
-         or guess a skill name. Trigger a skill when the task matches its listed description — \
-         not only when the user names it. list_skills shows any lower-priority skills omitted \
-         from the prompt catalog."
+         with your arguments substituted, plus the skill's install path and bundled file list. \
+         The name must exactly match a skill listed under '=== AVAILABLE SKILLS ===' in the \
+         system prompt or returned by list_skills. Never invent or guess a skill name. Trigger \
+         a skill when the task matches its listed description — not only when the user names it. \
+         list_skills shows any lower-priority skills omitted from the prompt catalog. For \
+         instruction-only skills, omit `arguments` or pass an empty string."
     }
     fn parameters_schema(&self) -> serde_json::Value {
         json!({
             "type": "object",
             "properties": {
                 "name": { "type": "string", "description": "Exact skill name from AVAILABLE SKILLS or list_skills; never invent a name" },
-                "arguments": { "type": "string", "description": "Arguments passed to the skill (optional)" }
+                "arguments": {
+                    "type": "string",
+                    "description": "Optional parameters only when the skill template uses $ARGUMENTS / $0. Leave empty for instruction-only skills — do not paste the whole user task here."
+                }
             },
             "required": ["name"]
         })
@@ -76,8 +80,12 @@ impl Tool for UseSkillTool {
             }
         };
         let arguments = a.arguments.unwrap_or_default();
-        // expand may run `!`cmd`` shell blocks → keep off the async runtime.
-        match tokio::task::spawn_blocking(move || skill.expand(&arguments, "")).await {
+        // expand_for_injection may run `!`cmd`` shell blocks → keep off the async runtime.
+        // Must use expand_for_injection (not bare expand) so the model always receives the
+        // skill base directory + bundled file list — matching Grok/OpenCode and the TUI
+        // slash-command path (expand_for_injection).
+        match tokio::task::spawn_blocking(move || skill.expand_for_injection(&arguments, "")).await
+        {
             Ok(content) => ok(content),
             Err(_) => err("use_skill: expansion task failed"),
         }
@@ -106,16 +114,21 @@ impl Tool for ListSkillsTool {
         json!({ "type": "object", "properties": {} })
     }
     async fn execute(&self, _args: &str, _ctx: &ToolContext) -> ToolResult {
-        let skills = self.registry.list();
+        let skills: Vec<_> = self.registry.all().collect();
         if skills.is_empty() {
             return ok("No skills are loaded.".to_string());
         }
         let mut out = format!("Available skills ({}):\n", skills.len());
-        for (name, desc) in &skills {
-            if desc.is_empty() {
-                out.push_str(&format!("- {name}\n"));
+        for s in skills {
+            let loc = if s.is_directory_skill() {
+                format!(" @ {}", s.display_location())
             } else {
-                out.push_str(&format!("- {name}: {desc}\n"));
+                String::new()
+            };
+            if s.description.is_empty() {
+                out.push_str(&format!("- {}{loc}\n", s.name));
+            } else {
+                out.push_str(&format!("- {}{loc}: {}\n", s.name, s.description));
             }
         }
         ok(out)
@@ -151,7 +164,49 @@ mod tests {
             .execute(r#"{"name":"greet","arguments":"world"}"#, &ctx())
             .await;
         assert!(!r.is_error, "{}", r.content);
-        assert_eq!(r.content, "Hello world!");
+        // Envelope wraps the expanded body (path-bearing injection).
+        assert!(r.content.contains("Hello world!"), "{}", r.content);
+        assert!(r.content.contains("<skill name="), "{}", r.content);
+    }
+
+    #[tokio::test]
+    async fn use_skill_directory_skill_returns_base_dir_and_files() {
+        let base = Box::leak(Box::new(tempfile::tempdir().unwrap()));
+        let skill_dir = base.path().join("multi-db");
+        std::fs::create_dir_all(skill_dir.join("scripts")).unwrap();
+        std::fs::write(
+            skill_dir.join("SKILL.md"),
+            "---\ndescription: >\n  连接公司内部数据库\n---\nRun ${SKILL_DIR}/scripts/db_executor.py\n",
+        )
+        .unwrap();
+        std::fs::write(skill_dir.join("scripts/db_executor.py"), "print(1)\n").unwrap();
+        let reg = Arc::new(SkillRegistry::load(&[base.path().to_path_buf()]));
+        let tool = UseSkillTool::new(reg);
+        let r = tool.execute(r#"{"name":"multi-db"}"#, &ctx()).await;
+        assert!(!r.is_error, "{}", r.content);
+        assert!(r.content.contains("Base directory for this skill:"), "{}", r.content);
+        assert!(r.content.contains("db_executor.py"), "{}", r.content);
+        assert!(
+            r.content.contains("连接公司内部数据库")
+                || r.content.contains("description=\"连接"),
+            "description must not be bare '>': {}",
+            r.content
+        );
+        // ${SKILL_DIR} expanded inside body (absolute path + scripts/…).
+        assert!(
+            r.content.contains("scripts/db_executor.py")
+                || r.content.contains("scripts\\db_executor.py"),
+            "{}",
+            r.content
+        );
+        // System-reminder documents the tokens with backticks; only the body must expand.
+        let body_start = r.content.find("Run ").unwrap_or(0);
+        let body = &r.content[body_start..];
+        assert!(
+            !body.contains("${SKILL_DIR}"),
+            "body must expand SKILL_DIR: {}",
+            body
+        );
     }
 
     #[tokio::test]
@@ -197,6 +252,28 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn list_skills_includes_location_for_directory_skills() {
+        let base = Box::leak(Box::new(tempfile::tempdir().unwrap()));
+        let skill_dir = base.path().join("review");
+        std::fs::create_dir_all(&skill_dir).unwrap();
+        std::fs::write(
+            skill_dir.join("SKILL.md"),
+            "---\ndescription: review code\n---\nbody\n",
+        )
+        .unwrap();
+        let tool = ListSkillsTool::new(Arc::new(SkillRegistry::load(&[base
+            .path()
+            .to_path_buf()])));
+        let r = tool.execute("{}", &ctx()).await;
+        assert!(r.content.contains("review"), "{}", r.content);
+        assert!(
+            r.content.contains("@ ") || r.content.contains("path"),
+            "directory skills should surface location: {}",
+            r.content
+        );
+    }
+
+    #[tokio::test]
     async fn list_skills_empty() {
         let tool = ListSkillsTool::new(Arc::new(SkillRegistry::new()));
         let r = tool.execute("{}", &ctx()).await;
@@ -231,7 +308,16 @@ mod tests {
             .execute(&format!(r#"{{"name":"{plugin_ns}:td-explore"}}"#), &ctx())
             .await;
         assert!(!r.is_error, "qualified lookup failed: {}", r.content);
-        assert!(r.content.contains("Explore body"), "{}", r.content);
+        assert!(
+            r.content.contains("Explore body"),
+            "expanded body missing: {}",
+            r.content
+        );
+        assert!(
+            r.content.contains("<skill name=") && r.content.contains("path=\""),
+            "injection must include path-bearing envelope: {}",
+            r.content
+        );
 
         // the loose user skill is still separately reachable (no namespace collision)
         let r2 = tool.execute(r#"{"name":"setup"}"#, &ctx()).await;

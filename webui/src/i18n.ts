@@ -292,6 +292,7 @@ const zh = {
   // Copy button
   'copy.copy': '复制',
   'copy.copied': '已复制',
+  'copy.failed': '复制失败（浏览器权限或非 HTTPS）。请手动选择文本复制。',
 
   // Slash commands
   'cmd.plan.desc': '切换到 Plan 模式（只读探索）',
@@ -308,6 +309,8 @@ const zh = {
   'cmd.review.desc': '使用只读审查 Agent 审查改动',
   'cmd.help.title': '可用命令：',
   'cmd.mode.done': '已切换到 {mode} 模式',
+  'cmd.mode.failed': '模式切换失败（运行时忙碌或连接异常）。请停止当前回合后重试。',
+  'cmd.mode.rejected': '未能切换到 {requested}，当前仍为 {confirmed}。运行中的回合可能阻止了切换。',
   'cmd.model.openHint': '请点击底部模型选择器以切换模型',
   'cmd.model.syncBusy': '请先停止当前任务，再切换模型',
   'cmd.resume.openHint': '请点击侧栏按钮恢复历史会话',
@@ -626,6 +629,7 @@ const en: Record<MsgKey, string> = {
   // Copy button
   'copy.copy': 'Copy',
   'copy.copied': 'Copied',
+  'copy.failed': 'Copy failed (clipboard permission or non-HTTPS). Select text manually.',
 
   // Slash commands
   'cmd.plan.desc': 'Switch to Plan mode (read-only exploration)',
@@ -642,6 +646,8 @@ const en: Record<MsgKey, string> = {
   'cmd.review.desc': 'Review changes with the read-only reviewer',
   'cmd.help.title': 'Available commands:',
   'cmd.mode.done': 'Switched to {mode} mode',
+  'cmd.mode.failed': 'Mode switch failed (runtime busy or connection error). Stop the turn and retry.',
+  'cmd.mode.rejected': 'Could not switch to {requested}; still on {confirmed}. An active turn may block the switch.',
   'cmd.model.openHint': 'Click the model selector below to switch models',
   'cmd.model.syncBusy': 'Stop the running task before switching the model',
   'cmd.resume.openHint': 'Click the sidebar button to resume a session',

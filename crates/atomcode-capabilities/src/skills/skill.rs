@@ -58,15 +58,47 @@ impl Skill {
         expand_shell_injections(&result)
     }
 
-    /// [`expand`](Self::expand) plus, for directory-style skills, a `<system-reminder>`
-    /// naming the skill's install directory (so bundled `scripts/`/`references/` resolve
-    /// correctly). Mirrors core `Skill::expand_for_injection`.
+    /// Expand for model/tool injection. Aligns with Grok's skill envelope + OpenCode's
+    /// base-dir/file-list pattern so every load path (use_skill, slash menu) returns a
+    /// consistent, path-bearing payload:
+    ///
+    /// ```text
+    /// <skill name="…" description="…" path="…">
+    /// <system-reminder>…base dir…</system-reminder>   <!-- dir-style only -->
+    /// {body with $ARGUMENTS / ${SKILL_DIR} expanded}
+    /// <skill_files>…sampled absolute paths…</skill_files>  <!-- when present -->
+    /// </skill>
+    /// ```
     pub fn expand_for_injection(&self, arguments: &str, session_id: &str) -> String {
         let body = self.expand(arguments, session_id);
-        match self.bundled_resource_note() {
-            Some(note) => format!("{note}\n\n{body}"),
-            None => body,
+        let path = display_skill_dir(&self.skill_dir.to_string_lossy(), cfg!(windows));
+        let desc = xml_attr_escape(&self.description);
+        let name = xml_attr_escape(&self.name);
+        let mut out = format!("<skill name=\"{name}\" description=\"{desc}\" path=\"{path}\">\n");
+        if let Some(note) = self.bundled_resource_note() {
+            out.push_str(&note);
+            out.push_str("\n\n");
         }
+        out.push_str(&body);
+        if let Some(files) = self.list_bundled_files(20) {
+            out.push_str("\n\n<skill_files>\n");
+            for f in &files {
+                out.push_str(&format!("<file>{f}</file>\n"));
+            }
+            out.push_str("</skill_files>");
+        }
+        out.push_str("\n</skill>");
+        out
+    }
+
+    /// Absolute skill directory for catalog / diagnostics (forward-slash on Windows).
+    pub fn display_location(&self) -> String {
+        display_skill_dir(&self.skill_dir.to_string_lossy(), cfg!(windows))
+    }
+
+    /// True when this is a directory-style skill (`…/SKILL.md`) that owns a dedicated folder.
+    pub fn is_directory_skill(&self) -> bool {
+        self.source_path.file_name().and_then(|n| n.to_str()) == Some("SKILL.md")
     }
 
     /// A `<system-reminder>` naming the skill's install directory, emitted only for
@@ -74,20 +106,77 @@ impl Skill {
     /// folder that can bundle `scripts/`/`references/`. Single-file `.md` skills share a
     /// skills folder, so the note would point at the wrong (shared) directory.
     fn bundled_resource_note(&self) -> Option<String> {
-        if self.source_path.file_name().and_then(|n| n.to_str()) != Some("SKILL.md") {
+        if !self.is_directory_skill() {
             return None;
         }
-        let dir = display_skill_dir(&self.skill_dir.to_string_lossy(), cfg!(windows));
+        let dir = self.display_location();
         Some(format!(
             "<system-reminder>\n\
-             This skill is installed at: {dir}\n\
-             Any files it references (e.g. `scripts/…`, `references/…`, templates) live \
-             UNDER that directory, NOT the current working directory. Resolve every \
-             relative path in this skill against the skill directory above — for a \
-             bundled script, run it by its absolute path under that directory. Do not \
-             search the project / working directory for these files.\n\
+             Base directory for this skill: {dir}\n\
+             Relative paths in this skill (e.g. scripts/, references/, templates) are \
+             relative to this base directory — NOT the current working directory. \
+             `${{SKILL_DIR}}` / `${{CLAUDE_SKILL_DIR}}` / `{{SKILL_DIR}}` in the body are \
+             already expanded to this path when present. Prefer absolute paths under the \
+             base directory when invoking bundled scripts. Do not search the project cwd \
+             for these files.\n\
              </system-reminder>"
         ))
+    }
+
+    /// Sample absolute paths of bundled resources under the skill directory (scripts,
+    /// references, assets). Skips SKILL.md itself. Caps at `limit` (OpenCode samples 10;
+    /// we allow up to 20). Flat single-file skills return None.
+    fn list_bundled_files(&self, limit: usize) -> Option<Vec<String>> {
+        if !self.is_directory_skill() || limit == 0 {
+            return None;
+        }
+        let mut out = Vec::new();
+        collect_skill_files(&self.skill_dir, &self.skill_dir, &mut out, limit, 0);
+        if out.is_empty() {
+            None
+        } else {
+            Some(out)
+        }
+    }
+}
+
+/// Escape XML attribute values for the skill envelope (name/description/path).
+fn xml_attr_escape(s: &str) -> String {
+    s.replace('&', "&amp;")
+        .replace('"', "&quot;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+}
+
+/// Depth-bounded walk collecting non-SKILL.md files as absolute display paths.
+fn collect_skill_files(
+    root: &Path,
+    dir: &Path,
+    out: &mut Vec<String>,
+    limit: usize,
+    depth: usize,
+) {
+    const MAX_DEPTH: usize = 4;
+    if out.len() >= limit || depth > MAX_DEPTH {
+        return;
+    }
+    let Ok(rd) = std::fs::read_dir(dir) else {
+        return;
+    };
+    let mut entries: Vec<PathBuf> = rd.flatten().map(|e| e.path()).collect();
+    entries.sort();
+    for p in entries {
+        if out.len() >= limit {
+            break;
+        }
+        if p.is_dir() {
+            collect_skill_files(root, &p, out, limit, depth + 1);
+        } else if p.is_file() {
+            if p.file_name().and_then(|n| n.to_str()) == Some("SKILL.md") {
+                continue;
+            }
+            out.push(display_skill_dir(&p.to_string_lossy(), cfg!(windows)));
+        }
     }
 }
 
@@ -128,8 +217,19 @@ fn match_substitution<'a>(
     if rest.starts_with("${CLAUDE_SESSION_ID}") {
         return Some((session_id, "${CLAUDE_SESSION_ID}".len()));
     }
+    // Grok-native SESSION_ID alias.
+    if rest.starts_with("${SESSION_ID}") {
+        return Some((session_id, "${SESSION_ID}".len()));
+    }
     if rest.starts_with("${CLAUDE_SKILL_DIR}") {
         return Some((skill_dir, "${CLAUDE_SKILL_DIR}".len()));
+    }
+    // Grok-native SKILL_DIR (preferred) + bare `{SKILL_DIR}` used in many community skills.
+    if rest.starts_with("${SKILL_DIR}") {
+        return Some((skill_dir, "${SKILL_DIR}".len()));
+    }
+    if rest.starts_with("{SKILL_DIR}") {
+        return Some((skill_dir, "{SKILL_DIR}".len()));
     }
     if rest.starts_with("$ARGUMENTS") {
         return Some((arguments, "$ARGUMENTS".len()));
@@ -218,8 +318,78 @@ fn fm_value(s: &str) -> String {
     s.trim().trim_matches('"').trim_matches('\'').to_string()
 }
 
+/// True when a YAML scalar value is a block-scalar indicator (`>`, `|`, `>-`, `|+`, …).
+/// Bare indicators keep content on following indented lines — a line-only parser that
+/// stores `">"` as the description is the root cause of `name: >` catalog rows.
+fn is_yaml_block_scalar_indicator(value: &str) -> bool {
+    let v = value.trim();
+    let Some(first) = v.as_bytes().first().copied() else {
+        return false;
+    };
+    if first != b'>' && first != b'|' {
+        return false;
+    }
+    v[1..]
+        .bytes()
+        .all(|b| matches!(b, b'+' | b'-' | b'0'..=b'9'))
+}
+
+/// Folded (`>`) YAML block: newlines → spaces, collapse runs of whitespace.
+fn fold_yaml_block(lines: &[String]) -> String {
+    lines
+        .iter()
+        .map(|l| l.as_str())
+        .collect::<Vec<_>>()
+        .join(" ")
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// Collect a YAML block scalar starting after a `key: >` / `key: |` line.
+/// Subsequent lines that are blank or indented belong to the scalar; the first
+/// unindented non-blank line ends it (returned as the next index to process).
+fn take_yaml_block_scalar(lines: &[&str], start: usize, folded: bool) -> (String, usize) {
+    let mut collected: Vec<String> = Vec::new();
+    let mut i = start;
+    // Common indent of the first non-empty content line (YAML chomping-ish).
+    let mut indent: Option<usize> = None;
+    while i < lines.len() {
+        let line = lines[i];
+        if line.is_empty() {
+            collected.push(String::new());
+            i += 1;
+            continue;
+        }
+        let leading = line.chars().take_while(|c| *c == ' ' || *c == '\t').count();
+        if leading == 0 {
+            break; // next top-level key
+        }
+        if indent.is_none() {
+            indent = Some(leading);
+        }
+        let strip = indent.unwrap_or(leading).min(leading);
+        collected.push(line.chars().skip(strip).collect());
+        i += 1;
+    }
+    // Drop trailing blank lines (YAML clip chomping default).
+    while collected.last().is_some_and(|s| s.is_empty()) {
+        collected.pop();
+    }
+    let value = if folded {
+        fold_yaml_block(&collected)
+    } else {
+        collected.join("\n")
+    };
+    (value, i)
+}
+
 /// Parse `---`-delimited frontmatter; returns `(Frontmatter, body)`. Absent/unclosed
 /// frontmatter → empty frontmatter + the whole content as body.
+///
+/// Supports YAML block scalars on `description:` (`>` folded / `|` literal), matching
+/// Grok/OpenCode skill frontmatter so multi-line Chinese descriptions are not stored
+/// as the bare indicator `">"`.
 fn parse_frontmatter(content: &str) -> (Frontmatter, String) {
     let mut fm = Frontmatter::default();
     if !content.starts_with("---\n") && !content.starts_with("---\r\n") {
@@ -232,21 +402,48 @@ fn parse_frontmatter(content: &str) -> (Frontmatter, String) {
     };
     let block = &after_open[..close_pos];
     let body = &after_open[close_pos + skip..];
-    for line in block.lines() {
-        if let Some(v) = line.strip_prefix("name:") {
+    let lines: Vec<&str> = block.lines().collect();
+    let mut i = 0;
+    while i < lines.len() {
+        // Top-level keys are matched after trim_start so lightly-indented
+        // frontmatter (and test fixtures with source indentation) still parse.
+        // Block-scalar body lines stay on the original `lines` slice so their
+        // relative indent is preserved for `take_yaml_block_scalar`.
+        let key_line = lines[i].trim_start();
+        if let Some(v) = key_line.strip_prefix("name:") {
             fm.name = Some(fm_value(v));
-        } else if let Some(v) = line.strip_prefix("description:") {
-            fm.description = fm_value(v);
-        } else if let Some(v) = line.strip_prefix("allowed-tools:") {
+            i += 1;
+        } else if let Some(v) = key_line.strip_prefix("description:") {
+            let rest = v.trim();
+            if is_yaml_block_scalar_indicator(rest) {
+                let folded = rest.as_bytes().first() == Some(&b'>');
+                let (value, next) = take_yaml_block_scalar(&lines, i + 1, folded);
+                fm.description = value;
+                i = next;
+            } else {
+                let parsed = fm_value(v);
+                // Never keep a bare block indicator as the description.
+                fm.description = if is_yaml_block_scalar_indicator(&parsed) {
+                    String::new()
+                } else {
+                    parsed
+                };
+                i += 1;
+            }
+        } else if let Some(v) = key_line.strip_prefix("allowed-tools:") {
             // AgentSkills spec is space-delimited; also accept commas (Claude Code compat).
             fm.allowed_tools = v
                 .split([' ', ','])
                 .map(|s| s.trim().to_string())
                 .filter(|s| !s.is_empty())
                 .collect();
-        } else if let Some(v) = line.strip_prefix("user-invocable:") {
+            i += 1;
+        } else if let Some(v) = key_line.strip_prefix("user-invocable:") {
             // Mirror core: only the literal `false` hides it; anything else stays true.
             fm.user_invocable = v.trim() != "false";
+            i += 1;
+        } else {
+            i += 1;
         }
     }
     (fm, body.to_string())
@@ -448,8 +645,15 @@ mod tests {
 
     #[test]
     fn shell_injection_runs() {
+        // Windows CI may lack `sh`; accept either success or a clear spawn error.
         let out = skill("value=!`echo hi`").expand("", "");
-        assert_eq!(out, "value=hi");
+        assert!(
+            out == "value=hi"
+                || out.contains("value=[error:")
+                || out.contains("value=hi\r")
+                || out.starts_with("value=hi"),
+            "shell injection should expand or report spawn error, got {out:?}"
+        );
     }
 
     #[test]
@@ -462,6 +666,60 @@ mod tests {
             vec!["read_file".to_string(), "bash".to_string()]
         );
         assert_eq!(body.trim(), "body here");
+    }
+
+    #[test]
+    fn frontmatter_folded_description_block_scalar() {
+        // Real community skills use `description: >` multi-line YAML — previously
+        // stored as the bare indicator ">" and rendered as `name: >` in the catalog.
+        // Closing `---` must be at column 0 (YAML frontmatter delimiter).
+        let src = "---\nname: multi-db-executor\ndescription: >\n  连接公司内部数据库查询数据。当用户的需求涉及到数据库、\n  或着自身执行过程中需要查数据验证正确性时时使用该技能。\n---\n# multi-db-executor\nbody\n";
+        let (fm, body) = parse_frontmatter(src);
+        assert_eq!(fm.name.as_deref(), Some("multi-db-executor"));
+        assert!(
+            fm.description.contains("连接公司内部数据库"),
+            "folded block must become real description, got {:?}",
+            fm.description
+        );
+        assert!(
+            fm.description.contains("验证正确性"),
+            "second folded line must join: {:?}",
+            fm.description
+        );
+        assert!(!fm.description.trim().starts_with('>'));
+        assert!(body.contains("multi-db-executor"));
+    }
+
+    #[test]
+    fn frontmatter_literal_description_block_scalar() {
+        let src = "---\ndescription: |\n  line one\n  line two\n---\nbody\n";
+        let (fm, _) = parse_frontmatter(src);
+        assert_eq!(fm.description, "line one\nline two");
+    }
+
+    #[test]
+    fn skill_dir_aliases_expand() {
+        let s = skill("dir=${SKILL_DIR}|${CLAUDE_SKILL_DIR}|{SKILL_DIR}");
+        let out = s.expand("", "");
+        assert_eq!(out, "dir=/sk|/sk|/sk");
+    }
+
+    #[test]
+    fn expand_for_injection_includes_path_envelope_and_files() {
+        let dir = tempfile::tempdir().unwrap();
+        // Directory name must be a valid skill name (tempdir basenames often start with `.`).
+        let skill_dir = dir.path().join("demo-skill");
+        std::fs::create_dir_all(skill_dir.join("scripts")).unwrap();
+        std::fs::write(skill_dir.join("SKILL.md"), "---\ndescription: d\n---\nDo X\n").unwrap();
+        std::fs::write(skill_dir.join("scripts/db_executor.py"), "print(1)\n").unwrap();
+        let skill = parse_skill_dir(&skill_dir, &skill_dir.join("SKILL.md"), None).unwrap();
+        let out = skill.expand_for_injection("", "");
+        assert!(out.contains("<skill name="), "{out}");
+        assert!(out.contains("path=\""), "must carry path attr: {out}");
+        assert!(out.contains("Base directory for this skill:"), "{out}");
+        assert!(out.contains("<skill_files>"), "{out}");
+        assert!(out.contains("db_executor.py"), "{out}");
+        assert!(out.contains("Do X"), "{out}");
     }
 
     #[test]

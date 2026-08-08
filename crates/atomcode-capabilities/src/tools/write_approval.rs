@@ -266,7 +266,10 @@ impl WriteApprovalGate {
                 }
             }
             PermissionDecision::Deny => BeforeOutcome::deny(format!(
-                "writing a sensitive path needs approval and was denied: {}",
+                "writing a sensitive path needs approval and was denied: {}. \
+If no approval dialog appeared, the session has no interactive approver (or Auto/bypass \
+mode is off). Retry after switching to Auto, or write under the workspace with a non-secret \
+filename. Credential files (.env, id_rsa, *.pem) always require approval.",
                 tool.name()
             )),
         }
@@ -674,6 +677,27 @@ mod tests {
         // ordinary project files are not sensitive
         assert!(!path_is_sensitive(Path::new("/proj/src/main.rs")));
         assert!(!path_is_sensitive(Path::new("/proj/README.md")));
+        // Docker/root workspaces under /root/source/... must NOT be whole-tree sensitive
+        // (regression: bare `/root` prefix blocked every write_file in root containers).
+        #[cfg(not(target_os = "windows"))]
+        {
+            assert!(
+                !path_is_sensitive(Path::new("/root/source/ERP/outputs/report.py")),
+                "project files under /root/source must not be system-protected"
+            );
+            assert!(
+                !path_is_sensitive(Path::new("/root/source/ERP/gen_report.py")),
+                "workspace root under /root must allow ordinary writes"
+            );
+            assert!(
+                path_is_sensitive(Path::new("/root/.ssh/id_rsa")),
+                "root credentials stay sensitive"
+            );
+            assert!(
+                path_is_sensitive(Path::new("/root")),
+                "exact /root directory stays protected"
+            );
+        }
     }
 
     #[tokio::test]

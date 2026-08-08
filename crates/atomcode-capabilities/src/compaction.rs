@@ -836,24 +836,112 @@ fn call_id_to_tool(msgs: &[Message]) -> HashMap<String, String> {
     map
 }
 
-/// The one-line stub a stubbed tool result is replaced with. Byte-for-byte port of core's
-/// `build_compact_stub`: `[<tool> ok|FAILED: N lines, first: <≤80 chars>]`. For a bash
-/// result whose first line is the `[elapsed: …]` metadata prefix, the SECOND line is used
-/// so `first:` surfaces real output, not the exit-code banner.
+/// Recoverable stub for a compacted tool result.
+///
+/// Prior format (`[tool ok: N lines, first: …]`) left the model with no way to
+/// recover the full output after context compaction — models re-ran SQL, guessed
+/// artifact ids, and treated non-empty results as empty. New format (Grok-style
+/// head/tail + OpenCode-style recovery handle):
+///
+/// ```text
+/// [bash ok: 371 lines | head: … | tail: … | artifact=ae50… | fetch_output(artifact_id="ae50…", offset=0)]
+/// ```
+///
+/// When the original already carried an artifact marker, its id is preserved.
+/// For a bash result whose first line is `[elapsed: …]`, head/tail skip that banner.
 pub fn build_compact_stub(tool_name: &str, output: &str, success: bool) -> String {
     let line_count = output.lines().count();
-    let first_line: String = {
-        let mut iter = output.lines();
-        let l1 = iter.next().unwrap_or("(empty)");
-        let chosen = if l1.starts_with("[elapsed:") {
-            iter.next().unwrap_or(l1)
-        } else {
-            l1
-        };
-        chosen.chars().take(80).collect()
-    };
     let status = if success { "ok" } else { "FAILED" };
-    format!("[{tool_name} {status}: {line_count} lines, first: {first_line}]")
+
+    // Prefer body after the optional bash elapsed banner so head/tail are real data.
+    let body = {
+        let mut lines = output.lines();
+        match lines.next() {
+            Some(l1) if l1.starts_with("[elapsed:") => {
+                let rest: Vec<&str> = lines.collect();
+                if rest.is_empty() {
+                    l1.to_string()
+                } else {
+                    rest.join("\n")
+                }
+            }
+            Some(l1) => {
+                let mut rest: Vec<&str> = vec![l1];
+                rest.extend(lines);
+                rest.join("\n")
+            }
+            None => String::new(),
+        }
+    };
+    let body_line_count = body.lines().count().max(if body.is_empty() { 0 } else { 1 });
+    let head: String = body
+        .lines()
+        .next()
+        .unwrap_or("(empty)")
+        .chars()
+        .take(80)
+        .collect();
+    let tail: String = if body_line_count > 1 {
+        body.lines()
+            .last()
+            .unwrap_or("")
+            .chars()
+            .take(80)
+            .collect()
+    } else {
+        String::new()
+    };
+
+    let mut parts = vec![format!("{tool_name} {status}: {line_count} lines")];
+    parts.push(format!("head: {head}"));
+    if !tail.is_empty() && tail != head {
+        parts.push(format!("tail: {tail}"));
+    }
+    if let Some(id) = extract_artifact_id(output) {
+        parts.push(format!("artifact={id}"));
+        parts.push(format!(
+            "fetch_output(artifact_id=\"{id}\", offset=0) to read more"
+        ));
+    } else {
+        parts.push(
+            "full output compacted from history; re-run the original tool if you need every row"
+                .into(),
+        );
+    }
+    format!("[{}]", parts.join(" | "))
+}
+
+/// Pull a 16-hex artifact id out of an artifact-middleware marker, if present.
+fn extract_artifact_id(output: &str) -> Option<String> {
+    // Markers look like:
+    //   Full output saved as artifact ae50a6f1c4d2e3f5. To read more: fetch_output(artifact_id="…")
+    // or the short form embedded by prior stubs: artifact=ae50a6f1c4d2e3f5
+    const KEYS: &[&str] = &[
+        "artifact_id=\"",
+        "artifact_id='",
+        "as artifact ",
+        "artifact=",
+    ];
+    for key in KEYS {
+        if let Some(pos) = output.find(key) {
+            let start = pos + key.len();
+            let rest = &output[start..];
+            let id: String = rest
+                .chars()
+                .take(16)
+                .take_while(|c| c.is_ascii_hexdigit())
+                .collect();
+            if id.len() == 16 && id.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+            {
+                return Some(id);
+            }
+            // Uppercase hex also accepted (normalize to lowercase).
+            if id.len() == 16 && id.bytes().all(|b| b.is_ascii_hexdigit()) {
+                return Some(id.to_ascii_lowercase());
+            }
+        }
+    }
+    None
 }
 
 #[cfg(test)]
@@ -926,23 +1014,47 @@ mod tests {
     }
 
     #[test]
-    fn stub_format_matches_core() {
-        assert_eq!(
-            build_compact_stub("bash", "line1\nline2\nline3", true),
-            "[bash ok: 3 lines, first: line1]"
+    fn stub_format_is_recoverable_with_head_tail() {
+        let s = build_compact_stub("bash", "line1\nline2\nline3", true);
+        assert!(s.contains("bash ok: 3 lines"), "{s}");
+        assert!(s.contains("head: line1"), "{s}");
+        assert!(s.contains("tail: line3"), "{s}");
+        assert!(s.contains("re-run the original tool"), "{s}");
+        assert!(!s.contains("first:"), "legacy first-only format retired: {s}");
+    }
+
+    #[test]
+    fn stub_format_single_line_and_empty() {
+        let boom = build_compact_stub("grep", "boom", false);
+        assert!(boom.contains("grep FAILED: 1 lines"), "{boom}");
+        assert!(boom.contains("head: boom"), "{boom}");
+        assert!(!boom.contains("tail:"), "{boom}");
+
+        let empty = build_compact_stub("bash", "", true);
+        assert!(empty.contains("bash ok: 0 lines"), "{empty}");
+        assert!(empty.contains("head: (empty)"), "{empty}");
+    }
+
+    #[test]
+    fn stub_skips_elapsed_banner_for_head() {
+        let s = build_compact_stub("bash", "[elapsed: 2s, exit: 0]\nreal output here", true);
+        assert!(s.contains("head: real output here"), "{s}");
+        assert!(!s.contains("head: [elapsed:"), "{s}");
+    }
+
+    #[test]
+    fn stub_preserves_artifact_id_for_fetch_output() {
+        let out = format!(
+            "{}\n\n[atomcode: output truncated — 20000 bytes total, showing first 4096 + last 4096 bytes. \
+Full output saved as artifact ae50a6f1c4d2e3f5. To read more: fetch_output(artifact_id=\"ae50a6f1c4d2e3f5\", offset, limit).]\n\n{}",
+            "H".repeat(100),
+            "T".repeat(100)
         );
-        assert_eq!(
-            build_compact_stub("grep", "boom", false),
-            "[grep FAILED: 1 lines, first: boom]"
-        );
-        assert_eq!(
-            build_compact_stub("bash", "", true),
-            "[bash ok: 0 lines, first: (empty)]"
-        );
-        // [elapsed: …] banner is skipped so `first:` shows real output.
-        assert_eq!(
-            build_compact_stub("bash", "[elapsed: 2s, exit: 0]\nreal output here", true),
-            "[bash ok: 2 lines, first: real output here]"
+        let s = build_compact_stub("bash", &out, true);
+        assert!(s.contains("artifact=ae50a6f1c4d2e3f5"), "{s}");
+        assert!(
+            s.contains("fetch_output(artifact_id=\"ae50a6f1c4d2e3f5\""),
+            "{s}"
         );
     }
 

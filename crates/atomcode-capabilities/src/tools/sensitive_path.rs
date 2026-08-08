@@ -137,6 +137,12 @@ fn home_dir() -> Option<PathBuf> {
 /// resolved, which the substring form misses. Faithful port of the legacy (v1) `is_sensitive_path`
 /// so write approval inherits the same protected set.
 pub fn path_is_sensitive(path: &Path) -> bool {
+    // System paths that must never be silently mutated/read. IMPORTANT: do NOT list
+    // bare `/root` (or `/var/root`) as a prefix — Docker/CI often run as root with the
+    // workspace under `/root/source/...`, and treating the whole tree as sensitive made
+    // every in-workspace write_file hit "sensitive path denied" with no usable approval
+    // UI. Root's credentials are still covered by SECRET_HOME_DIRS under home_dir()
+    // (when HOME=/root → /root/.ssh etc.) and by the exact `/root` equality check below.
     #[cfg(not(target_os = "windows"))]
     const SYSTEM_PROTECTED_PREFIXES: &[&str] = &[
         "/System",
@@ -147,9 +153,6 @@ pub fn path_is_sensitive(path: &Path) -> bool {
         "/private/etc",
         "/private/var",
         "/etc",
-        "/root",
-        "/var/root",
-        "/private/var/root",
     ];
     #[cfg(target_os = "windows")]
     const SYSTEM_PROTECTED_PREFIXES: &[&str] = &[
@@ -169,6 +172,9 @@ pub fn path_is_sensitive(path: &Path) -> bool {
         "/private/var/folders",
         "/var/tmp",
         "/private/var/tmp",
+        // Scratch under /var/root is rare; real secrets still hit SECRET_HOME_DIRS.
+        "/var/root/tmp",
+        "/private/var/root/tmp",
     ];
     #[cfg(target_os = "windows")]
     const SYSTEM_PROTECTED_EXCEPTIONS: &[&str] = &[];
@@ -190,6 +196,18 @@ pub fn path_is_sensitive(path: &Path) -> bool {
         "id_ed25519",
     ];
     const SECRET_EXTS: &[&str] = &["pem", "key", "p12", "pfx", "der", "crt", "cer"];
+
+    // Exact root-home directory itself (not its project subtrees) stays protected so a
+    // model cannot rewrite /root or /var/root as a file target.
+    #[cfg(not(target_os = "windows"))]
+    {
+        if path == Path::new("/root")
+            || path == Path::new("/var/root")
+            || path == Path::new("/private/var/root")
+        {
+            return true;
+        }
+    }
 
     let has_protected_prefix = SYSTEM_PROTECTED_PREFIXES
         .iter()
@@ -215,6 +233,24 @@ pub fn path_is_sensitive(path: &Path) -> bool {
         for file in SECRET_FILE_NAMES {
             if path == home.join(file) {
                 return true;
+            }
+        }
+    }
+
+    // Also treat classic root credential dirs as sensitive even when HOME is not /root
+    // (e.g. process running as non-root but path points at /root/.ssh).
+    #[cfg(not(target_os = "windows"))]
+    {
+        for root_home in ["/root", "/var/root", "/private/var/root"] {
+            for dir in SECRET_HOME_DIRS {
+                if path.starts_with(Path::new(root_home).join(dir)) {
+                    return true;
+                }
+            }
+            for file in SECRET_FILE_NAMES {
+                if path == Path::new(root_home).join(file) {
+                    return true;
+                }
             }
         }
     }

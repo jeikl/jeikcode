@@ -510,6 +510,27 @@ impl ActiveChatRegistry {
         Some((snapshot, rx))
     }
 
+    /// Unanswered permission / user-input prompts for an active session, derived
+    /// from the turn replay log. Empty when the session is idle or the turn has
+    /// already terminated.
+    async fn pending_interactive(
+        &self,
+        session_id: &str,
+    ) -> (Option<ChatEvent>, Option<ChatEvent>) {
+        let index = self.inner.read().await;
+        let Some(operation_id) = index.aliases.get(session_id) else {
+            return (None, None);
+        };
+        let Some(operation) = index.operations.get(operation_id) else {
+            return (None, None);
+        };
+        let guard = operation
+            .replay
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        pending_interactive_from_replay(&guard)
+    }
+
     /// Subscribe to a session's turn **if one is already running**, otherwise
     /// park the caller as a standby watcher so `admit` can wake it the instant an
     /// API/native turn starts for this session. This is the event-driven path
@@ -733,6 +754,48 @@ fn log_truncate(value: &str, max: usize) -> String {
     }
     out.push('…');
     out
+}
+
+/// Scan a turn's replay log for interactive prompts that are still unanswered.
+/// Used by `GET /chat/pending` so a refreshed WebUI can restore approval /
+/// user-input cards even if it misses the SSE edge that first emitted them.
+///
+/// A `PermissionRequest` is still pending when no later `ToolCallResult` (or
+/// terminal) has closed that `call_id`. A `UserInputRequest` is pending until
+/// the turn ends (no separate resolve event on the chat bus).
+fn pending_interactive_from_replay(events: &[ChatEvent]) -> (Option<ChatEvent>, Option<ChatEvent>) {
+    let mut last_permission: Option<ChatEvent> = None;
+    let mut last_user_input: Option<ChatEvent> = None;
+    let mut resolved_call_ids: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut turn_terminal = false;
+    for event in events {
+        match event {
+            ChatEvent::ToolCallResult { id, .. } => {
+                resolved_call_ids.insert(id.clone());
+            }
+            ChatEvent::Done { .. } | ChatEvent::Stopped | ChatEvent::Error { .. } => {
+                turn_terminal = true;
+            }
+            ChatEvent::PermissionRequest { .. } => {
+                last_permission = Some(event.clone());
+            }
+            ChatEvent::UserInputRequest { .. } => {
+                last_user_input = Some(event.clone());
+            }
+            _ => {}
+        }
+    }
+    if turn_terminal {
+        return (None, None);
+    }
+    let permission = last_permission.and_then(|ev| match &ev {
+        ChatEvent::PermissionRequest { call_id, .. } if !resolved_call_ids.contains(call_id) => {
+            Some(ev)
+        }
+        _ => None,
+    });
+    let user_input = last_user_input;
+    (permission, user_input)
 }
 
 /// Append `event` to the turn replay log, coalescing consecutive text/reasoning
@@ -1671,7 +1734,7 @@ pub(crate) enum ChatTurnOrigin {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct ChatTurnPolicy {
     pub origin: ChatTurnOrigin,
-    /// Wait on `/chat/permission` (Build / AcceptEdits + capable client).
+    /// Wait on `/chat/permission` (every mode except Auto, when the client can answer).
     pub interactive_permission: bool,
     /// Wait on WebUI `/chat/user-input` for `request_user_input`.
     pub interactive_user_input: bool,
@@ -1747,11 +1810,11 @@ fn effective_chat_approval_mode(
     request_mode.unwrap_or_else(live_api::live_current_approval_mode)
 }
 
+/// Modes that park the turn until the WebUI/TUI answers `/chat/permission`.
+/// Only **Auto** (`bypass`) auto-approves and must not register a responder.
+/// Build / AcceptEdits / Plan all need a human when a tool is gated.
 fn approval_mode_requires_responder(mode: crate::approval_mode::ApprovalMode) -> bool {
-    matches!(
-        mode,
-        crate::approval_mode::ApprovalMode::Build | crate::approval_mode::ApprovalMode::AcceptEdits
-    )
+    !matches!(mode, crate::approval_mode::ApprovalMode::Auto)
 }
 
 /// Map a working directory to its physical session-bucket name.
@@ -5262,6 +5325,82 @@ async fn active_chat_sessions(State(state): State<AppState>) -> impl IntoRespons
     Json(state.active_chats.active_session_ids().await)
 }
 
+#[derive(Debug, serde::Deserialize)]
+struct ChatPendingQuery {
+    session_id: String,
+}
+
+/// GET /chat/pending?session_id=… — restore interactive prompts after refresh /
+/// session switch. The SPA used to only listen for edge `permission_request`
+/// events; when those were dropped (or suppressed as "observer"), Build /
+/// AcceptEdits / Plan turns stayed forever in WaitingApproval with no card.
+///
+/// Returns the latest unanswered permission and/or user-input prompt from the
+/// active turn's replay log (null when idle or already resolved).
+async fn chat_pending(
+    State(state): State<AppState>,
+    axum::extract::Query(q): axum::extract::Query<ChatPendingQuery>,
+) -> impl IntoResponse {
+    let session_id = q.session_id.trim().to_string();
+    if session_id.is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({
+                "success": false,
+                "error": "session_id is required",
+            })),
+        )
+            .into_response();
+    }
+    let active = state
+        .active_chats
+        .active_session_ids()
+        .await
+        .iter()
+        .any(|id| id == &session_id);
+    let (permission, user_input) = state.active_chats.pending_interactive(&session_id).await;
+    let permission_json = permission.map(|ev| match ev {
+        ChatEvent::PermissionRequest {
+            session_id,
+            tool_name,
+            reason,
+            call_id,
+            arguments,
+        } => serde_json::json!({
+            "type": "permission_request",
+            "session_id": session_id,
+            "tool_name": tool_name,
+            "reason": reason,
+            "call_id": call_id,
+            "arguments": arguments,
+        }),
+        _ => serde_json::Value::Null,
+    });
+    let user_input_json = user_input.map(|ev| match ev {
+        ChatEvent::UserInputRequest {
+            session_id,
+            request_id,
+            payload,
+        } => {
+            let mut obj = payload;
+            if let Some(map) = obj.as_object_mut() {
+                map.insert("type".into(), serde_json::json!("user_input_request"));
+                map.insert("session_id".into(), serde_json::json!(session_id));
+                map.insert("request_id".into(), serde_json::json!(request_id));
+            }
+            obj
+        }
+        _ => serde_json::Value::Null,
+    });
+    Json(serde_json::json!({
+        "success": true,
+        "active": active,
+        "permission": permission_json,
+        "user_input": user_input_json,
+    }))
+    .into_response()
+}
+
 /// POST /chat/permission - Deliver a permission decision for a pending tool-approval request.
 ///
 /// The browser receives a `permission_request` SSE event (emitted by `/chat`)
@@ -6571,6 +6710,8 @@ pub async fn run_server(opts: ServerOpts) -> anyhow::Result<()> {
         )
         .route("/chat/stop", post(stop_chat))
         .route("/chat/active", get(active_chat_sessions))
+        // Restore unanswered approval / user-input cards after refresh or switch.
+        .route("/chat/pending", get(chat_pending))
         // Reattach to a turn started by another client (OpenAI API / another tab).
         .route("/chat/watch", get(chat_watch))
         .route("/chat/permission", post(chat_permission))
@@ -9084,12 +9225,82 @@ mod channel_mode_tests {
     }
 
     #[test]
-    fn interactive_responder_is_required_for_prompt_required_modes() {
+    fn interactive_responder_is_required_for_all_non_auto_modes() {
         use crate::approval_mode::ApprovalMode;
 
+        // Only Auto auto-approves; Build / AcceptEdits / Plan park on /chat/permission.
         assert!(approval_mode_requires_responder(ApprovalMode::Build));
         assert!(approval_mode_requires_responder(ApprovalMode::AcceptEdits));
+        assert!(approval_mode_requires_responder(ApprovalMode::Plan));
         assert!(!approval_mode_requires_responder(ApprovalMode::Auto));
-        assert!(!approval_mode_requires_responder(ApprovalMode::Plan));
+    }
+
+    #[test]
+    fn pending_interactive_from_replay_keeps_unanswered_permission() {
+        let events = vec![
+            ChatEvent::ToolCallStarted {
+                id: "c1".into(),
+                name: "task".into(),
+                arguments: "{}".into(),
+            },
+            ChatEvent::PermissionRequest {
+                session_id: "s1".into(),
+                tool_name: "task".into(),
+                reason: "Requires approval".into(),
+                call_id: "c1".into(),
+                arguments: "{}".into(),
+            },
+        ];
+        let (perm, user) = pending_interactive_from_replay(&events);
+        assert!(matches!(
+            perm,
+            Some(ChatEvent::PermissionRequest { call_id, .. }) if call_id == "c1"
+        ));
+        assert!(user.is_none());
+    }
+
+    #[test]
+    fn pending_interactive_from_replay_clears_after_tool_result() {
+        let events = vec![
+            ChatEvent::PermissionRequest {
+                session_id: "s1".into(),
+                tool_name: "bash".into(),
+                reason: "Requires approval".into(),
+                call_id: "c1".into(),
+                arguments: "{}".into(),
+            },
+            ChatEvent::ToolCallResult {
+                id: "c1".into(),
+                name: "bash".into(),
+                success: true,
+                output: "ok".into(),
+                duration_ms: 1,
+            },
+        ];
+        let (perm, _) = pending_interactive_from_replay(&events);
+        assert!(perm.is_none(), "resolved call must not restore a card");
+    }
+
+    #[test]
+    fn pending_interactive_from_replay_clears_on_terminal() {
+        let events = vec![
+            ChatEvent::PermissionRequest {
+                session_id: "s1".into(),
+                tool_name: "bash".into(),
+                reason: "Requires approval".into(),
+                call_id: "c1".into(),
+                arguments: "{}".into(),
+            },
+            ChatEvent::Done {
+                tokens: 0,
+                tool_calls: 0,
+                session_id: "s1".into(),
+                stop_reason: None,
+                message: None,
+            },
+        ];
+        let (perm, user) = pending_interactive_from_replay(&events);
+        assert!(perm.is_none());
+        assert!(user.is_none());
     }
 }

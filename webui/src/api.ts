@@ -149,6 +149,41 @@ export async function getActiveChatSessions(): Promise<string[]> {
   return body;
 }
 
+/** Unanswered interactive prompts for an active turn (Build / AcceptEdits / Plan).
+ *  Restores approval / user-input cards after refresh or session switch when the
+ *  original SSE edge was missed. Auto (bypass) never parks here. */
+export interface ChatPendingInteractive {
+  active: boolean;
+  permission: {
+    type: 'permission_request';
+    session_id: string;
+    tool_name: string;
+    reason: string;
+    call_id: string;
+    arguments: unknown;
+  } | null;
+  user_input: UserInputRequestEvent | null;
+}
+
+export async function getChatPending(sessionId: string): Promise<ChatPendingInteractive> {
+  const resp = await apiFetch(
+    `/chat/pending?session_id=${encodeURIComponent(sessionId)}`,
+    { headers: authHeaders() },
+  );
+  if (!resp.ok) throw new Error(`chat pending failed: ${resp.status}`);
+  const body = (await resp.json()) as {
+    success?: boolean;
+    active?: boolean;
+    permission?: ChatPendingInteractive['permission'];
+    user_input?: UserInputRequestEvent | null;
+  };
+  return {
+    active: body.active === true,
+    permission: body.permission ?? null,
+    user_input: body.user_input ?? null,
+  };
+}
+
 /**
  * Reattach to a turn started by another client (OpenAI API / another tab).
  * Same SSE `ChatEvent` frames as `POST /chat`.

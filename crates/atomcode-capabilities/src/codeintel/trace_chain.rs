@@ -1,10 +1,10 @@
 //! `trace_chain` — shortest call chain between two symbols (BFS, ≤10 hops). `Safe`.
 
 use super::index::CodeIndex;
-use super::{canonical, display_path, err, ok};
+use super::{canonical, display_path, err, graph_tool_desc, load_graph, ok};
 use crate::tool_feedback::{parse_tool_args, similar_symbol_names};
 use async_trait::async_trait;
-use atomcode_kernel::tool::{Tool, ToolContext, ToolResult};
+use atomcode_kernel::tool::{ProgressSink, Tool, ToolContext, ToolResult};
 use serde::Deserialize;
 use serde_json::json;
 use std::path::Path;
@@ -32,8 +32,10 @@ impl Tool for TraceChainTool {
         "trace_chain"
     }
     fn description(&self) -> &str {
-        "Find the shortest call chain between two symbols (BFS, max 10 hops). \
-         Example: {\"from\":\"main\",\"to\":\"db_query\"}."
+        graph_tool_desc!(
+            "Find the shortest call chain between two symbols (BFS, max 10 hops). \
+             Example: {\"from\":\"main\",\"to\":\"db_query\"}."
+        )
     }
     fn parameters_schema(&self) -> serde_json::Value {
         json!({
@@ -57,14 +59,21 @@ impl Tool for TraceChainTool {
         let index = self.index.clone();
         let root = ctx.working_dir.clone();
         let (from, to) = (a.from.clone(), a.to.clone());
-        tokio::task::spawn_blocking(move || render(&index, &root, &from, &to))
+        let progress = ctx.progress.clone();
+        tokio::task::spawn_blocking(move || render(&index, &root, &from, &to, &progress))
             .await
             .unwrap_or_else(|_| err("trace_chain: task failed"))
     }
 }
 
-fn render(index: &CodeIndex, root: &Path, from: &str, to: &str) -> ToolResult {
-    let g = index.get(root);
+fn render(
+    index: &CodeIndex,
+    root: &Path,
+    from: &str,
+    to: &str,
+    progress: &ProgressSink,
+) -> ToolResult {
+    let g = load_graph(index, root, progress);
     let croot = canonical(root);
     let root: &Path = &croot;
     let from_matches = g.find_by_name(from);

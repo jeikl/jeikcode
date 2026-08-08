@@ -16,7 +16,7 @@
 //! resolution; background/incremental indexing (we rebuild on mtime change). Behind the
 //! opt-in `codeintel` cargo feature (12 grammars = heavy C compilation).
 
-use atomcode_kernel::tool::{ToolRegistry, ToolResult};
+use atomcode_kernel::tool::{ProgressSink, ToolRegistry, ToolResult};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -45,7 +45,9 @@ pub use file_deps::FileDependenciesTool;
 pub use find_references::FindReferencesTool;
 pub use find_symbol::FindSymbolTool;
 pub use graph::{CodeGraph, Edge, EdgeKind, SymbolId, SymbolKind, SymbolNode, Visibility};
-pub use index::{build_graph, CodeIndex};
+pub use index::{
+    build_graph, disk_cache_path, init_workspace_index, CodeIndex, IndexReport, DISK_CACHE_REL,
+};
 pub use lang::Lang;
 pub use list_symbols::ListSymbolsTool;
 pub use read_symbol::ReadSymbolTool;
@@ -101,6 +103,9 @@ pub fn register_codeintel_tools(reg: &mut ToolRegistry) {
     reg.register(Arc::new(ReadSymbolTool));
     reg.register(Arc::new(FindReferencesTool));
     let index = Arc::new(CodeIndex::new());
+    // Poll the last workspace every few seconds so git pull / edits land as
+    // unit-level re-parses without waiting for the next graph tool call.
+    index.start_background_refresh();
     reg.register(Arc::new(FindSymbolTool::new(index.clone())));
     reg.register(Arc::new(TraceCallersTool::new(index.clone())));
     reg.register(Arc::new(TraceCalleesTool::new(index.clone())));
@@ -132,6 +137,16 @@ pub(crate) fn resolve_path(raw: &str, working_dir: &Path) -> PathBuf {
 /// stored paths instead of a false "not found".
 pub(crate) fn canonical(p: &Path) -> PathBuf {
     p.canonicalize().unwrap_or_else(|_| p.to_path_buf())
+}
+
+/// Human-readable path for CLI/logs. Windows `canonicalize` yields `\\?\E:\...`, which
+/// looks like mojibake/noise on GBK consoles — strip the extended-length prefix.
+pub(crate) fn path_for_display(p: &Path) -> String {
+    let s = p.display().to_string();
+    s.strip_prefix(r"\\?\")
+        .or_else(|| s.strip_prefix("//?/"))
+        .unwrap_or(&s)
+        .to_string()
 }
 
 /// Display a path relative to `root` when possible, else shortened to `.../last3`.
@@ -170,3 +185,27 @@ pub(crate) fn err(content: impl Into<String>) -> ToolResult {
         images: vec![],
     }
 }
+
+/// Load (or rebuild) the shared workspace code graph, streaming index progress to
+/// the driver so large C#/monorepo cold starts do not look hung.
+pub(crate) fn load_graph(
+    index: &CodeIndex,
+    root: &Path,
+    progress: &ProgressSink,
+) -> Arc<CodeGraph> {
+    index.get_with_progress(root, &|msg| progress.emit(msg))
+}
+
+/// Append to graph-tool `description()` string literals via `concat!`.
+macro_rules! graph_tool_desc {
+    ($desc:expr) => {
+        concat!(
+            $desc,
+            " Uses a workspace code graph with incremental per-file units: the FIRST call \
+             indexes the repo (can take minutes on large C# monorepos); later edits/git pulls \
+             only re-parse changed files. Prefer list_symbols/read_symbol for single-file work. \
+             Warm with one find_symbol first if the index is cold."
+        )
+    };
+}
+pub(crate) use graph_tool_desc;

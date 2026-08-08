@@ -2,10 +2,15 @@
 //! `semantic/mod.rs::list_symbols_treesitter`, minus the parse cache and the
 //! SemanticSearcher state — we parse fresh per call (single-file parsing is cheap, and
 //! a neutral tool holds no shared index; the cross-file graph layer comes later).
+//!
+//! Queries are cached per-thread (compiling a tree-sitter query is expensive; a monorepo
+//! index must not recompile them for every file).
 
 use crate::codeintel::lang::Lang;
+use std::cell::RefCell;
+use std::collections::HashMap;
 use std::path::Path;
-use tree_sitter::{Parser, Query, QueryCursor, StreamingIterator};
+use tree_sitter::{Parser, Query, QueryCursor, StreamingIterator, Tree};
 
 /// Per-signature display cap in a skeleton — mirrors `read_file`'s line cap so the
 /// skeleton never shows MORE of a (pathologically long, minified) line than a full read.
@@ -25,63 +30,154 @@ pub struct Symbol {
     pub end_byte: usize,
 }
 
+thread_local! {
+    static SYM_QUERIES: RefCell<HashMap<Lang, Query>> = RefCell::new(HashMap::new());
+    static CALL_QUERIES: RefCell<HashMap<Lang, Query>> = RefCell::new(HashMap::new());
+}
+
+/// Parse `source` once. Shared by symbol outline and call extraction.
+pub(crate) fn parse_source(source: &str, lang: Lang) -> Option<Tree> {
+    let grammar = lang.grammar();
+    let mut parser = Parser::new();
+    parser.set_language(&grammar).ok()?;
+    parser.parse(source, None)
+}
+
+fn with_sym_query<R>(lang: Lang, f: impl FnOnce(&Query) -> R) -> Option<R> {
+    SYM_QUERIES.with(|cell| {
+        let mut map = cell.borrow_mut();
+        if !map.contains_key(&lang) {
+            let q = Query::new(&lang.grammar(), lang.symbols_query()).ok()?;
+            map.insert(lang, q);
+        }
+        Some(f(map.get(&lang)?))
+    })
+}
+
+fn with_call_query<R>(lang: Lang, f: impl FnOnce(&Query) -> R) -> Option<R> {
+    let Some(q_src) = lang.calls_query() else {
+        return None;
+    };
+    CALL_QUERIES.with(|cell| {
+        let mut map = cell.borrow_mut();
+        if !map.contains_key(&lang) {
+            let q = Query::new(&lang.grammar(), q_src).ok()?;
+            map.insert(lang, q);
+        }
+        Some(f(map.get(&lang)?))
+    })
+}
+
+/// Extract symbols from an already-parsed tree (no second parse).
+pub(crate) fn extract_symbols_from_tree(
+    source: &str,
+    lang: Lang,
+    tree: &Tree,
+) -> Option<Vec<Symbol>> {
+    with_sym_query(lang, |query| {
+        let def_idx = match query.capture_index_for_name("definition") {
+            Some(i) => i,
+            None => return Vec::new(),
+        };
+        let name_idx = match query.capture_index_for_name("name") {
+            Some(i) => i,
+            None => return Vec::new(),
+        };
+
+        let mut cursor = QueryCursor::new();
+        let mut symbols = Vec::new();
+        let mut seen: std::collections::HashSet<(usize, usize)> = std::collections::HashSet::new();
+
+        let mut matches = cursor.matches(query, tree.root_node(), source.as_bytes());
+        loop {
+            matches.advance();
+            let m = match matches.get() {
+                Some(m) => m,
+                None => break,
+            };
+
+            let mut name = None;
+            let (mut ds, mut de, mut dsr, mut der) = (0usize, 0usize, 0usize, 0usize);
+            let mut kind = "";
+            let mut has_def = false;
+            for cap in m.captures {
+                if cap.index == name_idx {
+                    name = Some(source[cap.node.start_byte()..cap.node.end_byte()].to_string());
+                }
+                if cap.index == def_idx {
+                    ds = cap.node.start_byte();
+                    de = cap.node.end_byte();
+                    dsr = cap.node.start_position().row;
+                    der = cap.node.end_position().row;
+                    kind = cap.node.kind();
+                    has_def = true;
+                }
+            }
+            if let (Some(name), true) = (name, has_def) {
+                if seen.insert((ds, de)) {
+                    symbols.push(Symbol {
+                        name,
+                        kind: kind.to_string(),
+                        start_line: dsr + 1,
+                        end_line: der + 1,
+                        start_byte: ds,
+                        end_byte: de,
+                    });
+                }
+            }
+        }
+        symbols
+    })
+}
+
 /// Parse `source` as `lang` and extract symbol definitions (functions, types, classes,
 /// methods, …) via the language's tree-sitter query. `None` only if parsing or query
 /// compilation fails; an empty `Vec` means a clean parse with no symbols.
 pub fn extract_symbols(source: &str, lang: Lang) -> Option<Vec<Symbol>> {
-    let grammar = lang.grammar();
-    let mut parser = Parser::new();
-    parser.set_language(&grammar).ok()?;
-    let tree = parser.parse(source, None)?;
+    let tree = parse_source(source, lang)?;
+    extract_symbols_from_tree(source, lang, &tree)
+}
 
-    let query = Query::new(&grammar, lang.symbols_query()).ok()?;
-    let def_idx = query.capture_index_for_name("definition")?;
-    let name_idx = query.capture_index_for_name("name")?;
+/// Call-site rows for the code graph (name + line). Kept here so one parse serves both
+/// symbol outline and call edges.
+#[derive(Clone, Debug)]
+pub(crate) struct CallSite {
+    pub callee_name: String,
+    pub line: usize,
+}
 
-    let mut cursor = QueryCursor::new();
-    let mut symbols = Vec::new();
-    // Dedup by byte range — a query may match the same definition via multiple patterns.
-    let mut seen: std::collections::HashSet<(usize, usize)> = std::collections::HashSet::new();
-
-    let mut matches = cursor.matches(&query, tree.root_node(), source.as_bytes());
-    loop {
-        matches.advance();
-        let m = match matches.get() {
-            Some(m) => m,
-            None => break,
+/// Extract `@callee` call sites from an already-parsed tree.
+pub(crate) fn extract_call_sites_from_tree(
+    source: &str,
+    lang: Lang,
+    tree: &Tree,
+) -> Vec<CallSite> {
+    with_call_query(lang, |query| {
+        let Some(callee_idx) = query.capture_index_for_name("callee") else {
+            return Vec::new();
         };
-
-        let mut name = None;
-        let (mut ds, mut de, mut dsr, mut der) = (0usize, 0usize, 0usize, 0usize);
-        let mut kind = "";
-        let mut has_def = false;
-        for cap in m.captures {
-            if cap.index == name_idx {
-                name = Some(source[cap.node.start_byte()..cap.node.end_byte()].to_string());
-            }
-            if cap.index == def_idx {
-                ds = cap.node.start_byte();
-                de = cap.node.end_byte();
-                dsr = cap.node.start_position().row;
-                der = cap.node.end_position().row;
-                kind = cap.node.kind();
-                has_def = true;
-            }
-        }
-        if let (Some(name), true) = (name, has_def) {
-            if seen.insert((ds, de)) {
-                symbols.push(Symbol {
-                    name,
-                    kind: kind.to_string(),
-                    start_line: dsr + 1,
-                    end_line: der + 1,
-                    start_byte: ds,
-                    end_byte: de,
+        let mut cursor = QueryCursor::new();
+        let mut calls = Vec::new();
+        let mut matches = cursor.matches(query, tree.root_node(), source.as_bytes());
+        loop {
+            matches.advance();
+            let m = match matches.get() {
+                Some(m) => m,
+                None => break,
+            };
+            for cap in m.captures {
+                if cap.index != callee_idx {
+                    continue;
+                }
+                calls.push(CallSite {
+                    callee_name: source[cap.node.start_byte()..cap.node.end_byte()].to_string(),
+                    line: cap.node.start_position().row + 1,
                 });
             }
         }
-    }
-    Some(symbols)
+        calls
+    })
+    .unwrap_or_default()
 }
 
 /// Extract the first symbol named `name` from `source`.

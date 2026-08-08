@@ -178,6 +178,10 @@ mod tests {
             .execute(r#"{"file_path":"nope.rs"}"#, &ctx(d.path()))
             .await;
         assert!(r.is_error);
-        assert!(r.content.contains("cannot read"), "{}", r.content);
+        assert!(
+            r.content.contains("does not exist") || r.content.contains("cannot read"),
+            "{}",
+            r.content
+        );
     }
 }

@@ -1035,6 +1035,20 @@ enum Commands {
         #[arg(long)]
         force: bool,
     },
+    /// Build (or refresh) the workspace code graph index and save it under
+    /// `.atomcode/codegraph/` so agent graph tools start fast.
+    ///
+    /// First run parses the repo (can take minutes on large C# monorepos).
+    /// Later runs only re-parse changed files. Agent sessions load this cache
+    /// automatically when the workspace is unchanged.
+    Init {
+        /// Project root to index (default: current directory).
+        #[arg(long, short = 'C', value_hint = clap::ValueHint::DirPath)]
+        dir: Option<PathBuf>,
+        /// Ignore existing cache and re-parse every file.
+        #[arg(long)]
+        force: bool,
+    },
     /// Manage hooks (list, test, enable/disable)
     #[command(subcommand)]
     Hooks(HookCommands),
@@ -1833,6 +1847,14 @@ async fn run() -> Result<i32> {
             Commands::Setup { force } => {
                 HEADLESS_MODE.store(true, Ordering::Relaxed);
                 let exit_code = run_setup_command(force);
+                telemetry
+                    .shutdown(std::time::Duration::from_millis(500))
+                    .await;
+                return Ok(exit_code);
+            }
+            Commands::Init { dir, force } => {
+                HEADLESS_MODE.store(true, Ordering::Relaxed);
+                let exit_code = run_init_command(dir, force);
                 telemetry
                     .shutdown(std::time::Duration::from_millis(500))
                     .await;
@@ -3095,6 +3117,75 @@ fn run_setup_command(force: bool) -> i32 {
     }
 }
 
+/// `atomcode init` — build/refresh the workspace code graph and persist it.
+fn run_init_command(dir: Option<PathBuf>, force: bool) -> i32 {
+    use atomcode_capabilities::codeintel::{init_workspace_index, DISK_CACHE_REL};
+
+    let root = match dir {
+        Some(p) => {
+            if !p.is_dir() {
+                eprintln!("init error: not a directory: {}", p.display());
+                return 1;
+            }
+            p
+        }
+        None => match std::env::current_dir() {
+            Ok(p) => p,
+            Err(e) => {
+                eprintln!("init error: cannot read current directory: {e}");
+                return 1;
+            }
+        },
+    };
+
+    // ASCII-only progress text: Chinese Windows CMD often uses GBK and mangles `…` / fancy dashes.
+    let root_show = root.display().to_string();
+    println!("Indexing code graph for {root_show} ...");
+    if force {
+        println!("  (--force: full re-parse)");
+    }
+
+    match init_workspace_index(&root, force, &|msg| {
+        eprintln!("  {msg}");
+    }) {
+        Ok(r) => {
+            // Strip Windows `\\?\` extended prefix for readable console output.
+            let pretty = |p: &std::path::Path| {
+                let s = p.display().to_string();
+                s.strip_prefix(r"\\?\")
+                    .or_else(|| s.strip_prefix("//?/"))
+                    .unwrap_or(&s)
+                    .to_string()
+            };
+            println!();
+            println!("  Code graph ready.");
+            println!("  Root:      {}", pretty(&r.root));
+            println!("  Cache:     {}", pretty(&r.cache_path));
+            println!("  Files:     {}", r.files);
+            println!("  Symbols:   {}", r.symbols);
+            println!(
+                "  Units:     reparsed={}  removed={}  kept={}",
+                r.reparsed, r.removed, r.kept
+            );
+            println!(
+                "  Cache hit: {}   Elapsed: {:.2}s",
+                r.cache_hit,
+                r.elapsed.as_secs_f64()
+            );
+            println!();
+            println!(
+                "  Tip: agent graph tools load `{DISK_CACHE_REL}` automatically when up to date."
+            );
+            println!("  Re-run after large git pulls, or rely on incremental background refresh.");
+            0
+        }
+        Err(e) => {
+            eprintln!("init error: {e}");
+            1
+        }
+    }
+}
+
 /// Handle subcommands (login, logout, status)
 async fn handle_command(cmd: Commands, telemetry: &std::sync::Arc<Telemetry>) -> Result<()> {
     // Subcommands never enter TUI, so tell the panic hook to skip terminal
@@ -3170,6 +3261,9 @@ async fn handle_command(cmd: Commands, telemetry: &std::sync::Arc<Telemetry>) ->
         }
         Commands::Setup { .. } => {
             unreachable!("Setup is handled inline in run() before handle_command")
+        }
+        Commands::Init { .. } => {
+            unreachable!("Init is handled inline in run() before handle_command")
         }
         Commands::Plugin(sub) => handle_plugin_cli(sub),
         Commands::Mcp(McpCli::Add {

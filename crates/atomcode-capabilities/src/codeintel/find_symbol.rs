@@ -3,10 +3,10 @@
 //! "find CouponService" without grepping the whole tree first.
 
 use super::index::CodeIndex;
-use super::{canonical, display_path, err, ok};
+use super::{canonical, display_path, err, graph_tool_desc, load_graph, ok};
 use crate::tool_feedback::{parse_tool_args, similar_symbol_names};
 use async_trait::async_trait;
-use atomcode_kernel::tool::{Tool, ToolContext, ToolResult};
+use atomcode_kernel::tool::{ProgressSink, Tool, ToolContext, ToolResult};
 use serde::Deserialize;
 use serde_json::json;
 use std::path::Path;
@@ -37,12 +37,14 @@ impl Tool for FindSymbolTool {
         "find_symbol"
     }
     fn description(&self) -> &str {
-        "Find definitions of a symbol by exact name across the workspace code graph \
-         (classes, methods, functions, records, …). Prefer this over grep when you know \
-         the symbol name (e.g. CouponService from a DOMAIN GLOSSARY or prior hit). \
-         After grep finds a candidate type/method name, call this to jump to definitions. \
-         Supports Rust, Python, JS/TS, Go, Java, C/C++, C#. Next: trace_callers / \
-         blast_radius / file_dependencies for impact."
+        graph_tool_desc!(
+            "Find definitions of a symbol by exact name across the workspace code graph \
+             (classes, methods, functions, records, …). Prefer this over grep when you know \
+             the symbol name (e.g. CouponService from a DOMAIN GLOSSARY or prior hit). \
+             After grep finds a candidate type/method name, call this to jump to definitions. \
+             Supports Rust, Python, JS/TS, Go, Java, C/C++, C#. Next: trace_callers / \
+             blast_radius / file_dependencies for impact."
+        )
     }
     fn parameters_schema(&self) -> serde_json::Value {
         json!({
@@ -72,14 +74,21 @@ impl Tool for FindSymbolTool {
         let index = self.index.clone();
         let root = ctx.working_dir.clone();
         let name = a.name.clone();
-        tokio::task::spawn_blocking(move || render(&index, &root, &name, limit))
+        let progress = ctx.progress.clone();
+        tokio::task::spawn_blocking(move || render(&index, &root, &name, limit, &progress))
             .await
             .unwrap_or_else(|_| err("find_symbol: task failed"))
     }
 }
 
-fn render(index: &CodeIndex, root: &Path, name: &str, limit: usize) -> ToolResult {
-    let g = index.get(root);
+fn render(
+    index: &CodeIndex,
+    root: &Path,
+    name: &str,
+    limit: usize,
+    progress: &ProgressSink,
+) -> ToolResult {
+    let g = load_graph(index, root, progress);
     let croot = canonical(root);
     let root: &Path = &croot;
     let matches = g.find_by_name(name);

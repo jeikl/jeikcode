@@ -27,7 +27,7 @@
 
 import { VNode } from 'preact';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'preact/hooks';
-import { streamChat, stopChat, cancelDetachedChat, getActiveChatSessions, watchChatSession, SSEEvent, getSession, SessionMetaWithProject, getModels, ImageData, streamLive, postLiveMessage, postLiveStop, postLivePermission, postLiveProvider, postLiveMode, getApprovalMode, ApprovalMode, postLiveSwitchSession, LiveWireEvent, SessionMessage, getSkills, SkillInfo, listDir, changeDir, postConfigReload, postCommand, postLiveCompact, postLiveUserInput, postChatUserInput, setDefaultProvider, type CommandResult, UserInputRequestEvent } from '../api';
+import { streamChat, stopChat, getActiveChatSessions, watchChatSession, SSEEvent, getSession, SessionMetaWithProject, getModels, ImageData, streamLive, postLiveMessage, postLiveStop, postLivePermission, postLiveProvider, postLiveMode, getApprovalMode, ApprovalMode, postLiveSwitchSession, LiveWireEvent, SessionMessage, getSkills, SkillInfo, listDir, changeDir, postConfigReload, postCommand, postLiveCompact, postLiveUserInput, postChatUserInput, setDefaultProvider, type CommandResult, UserInputRequestEvent } from '../api';
 import {
   parseSlashCommand,
   buildCommandMap,
@@ -1014,7 +1014,6 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
     // 会话 id 变化（外部切换 / 新建按钮）才重置画布。本 Chat 自建会话首条消息完成后
     // sessionId 变成自己的 id（activeIdRef 已同步），不重置，以免清空刚看到的对话。
     if (sessionId !== activeIdRef.current) {
-      const switchGeneration = sessionGenerationRef.current;
       const prevId = activeIdRef.current;
       const liveSwitch = liveSessionSwitchDisposition(
         liveLifecycleRef.current.running || busyRef.current,
@@ -1035,7 +1034,6 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
           return;
         }
       }
-      const detachedRequestId = requestIdRef.current;
       const detachedController = abortRef.current;
       if (prevId && messagesRef.current.length > 0) {
         const sticky = activeTodosRef.current;
@@ -1046,6 +1044,12 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
         messageCacheRef.current.set(prevId, cached);
       }
 
+      // Invalidate in-flight /chat event handlers for the session we are leaving
+      // (isCurrentChatStream checks generation). Do this BEFORE rebinding ids so
+      // a late SSE chunk cannot paint into the destination session. Capture the
+      // post-bump generation for async switch callbacks (A→B→A races).
+      sessionGenerationRef.current += 1;
+      const switchGeneration = sessionGenerationRef.current;
       activeIdRef.current = sessionId;
       providerPinnedRef.current = false;
       loadedForRef.current = null;
@@ -1058,18 +1062,12 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
       requestIdRef.current = sessionId;
       abortRef.current = null;
       transitionChatRecovery({ type: 'session_switch', hasSession: sessionId !== null });
-      if (!syncRef.current && detachedRequestId) {
-        const cancellation = detachedController
-          ? cancelDetachedChat(detachedRequestId, detachedController)
-          : stopChat(detachedRequestId);
-        void cancellation.catch((error) => {
-          // A -> B -> A can reuse an id. Generation, not id equality, keeps a
-          // late cancellation failure out of the replacement view.
-          if (sessionGenerationRef.current === switchGeneration) {
-            pushCommandNotice(t('chat.cancelFailed', { error: String(error) }));
-          }
-        });
-      } else if (!syncRef.current) {
+      // Detach the local /chat SSE reader ONLY. Do NOT POST /chat/stop here —
+      // leaving a session must not kill its daemon turn (refresh already reattaches
+      // via getActiveChatSessions + history poll / idle watch). Previously
+      // cancelDetachedChat/stopChat ran on every sidebar switch and force-stopped
+      // the previous session mid-turn.
+      if (!syncRef.current) {
         detachedController?.abort();
       }
       liveLifecycleRef.current = createLiveLifecycleState();

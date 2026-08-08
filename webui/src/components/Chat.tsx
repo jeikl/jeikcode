@@ -1125,11 +1125,16 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
             if (loaded.length >= currentCached.length) {
               setMessages(loaded);
               messageCacheRef.current.delete(loadId);
+              pinTimelineToBottom();
+            } else {
+              // Still show richer cache pinned to bottom (refresh mid-turn).
+              setMessages(currentCached);
+              pinTimelineToBottom();
             }
           } else if (loaded.length > 0) {
             // A newly loaded session starts at the bottom regardless of prior scroll state.
-            atBottomRef.current = true;
             setMessages(loaded);
+            pinTimelineToBottom();
           }
         } else {
           loadedForRef.current = null;
@@ -1192,7 +1197,29 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
   const scrollToBottom = (behavior: ScrollBehavior = 'auto') => {
     atBottomRef.current = true;
     setShowJumpBtn(false);
+    const el = scrollRef.current;
+    if (el && behavior === 'auto') {
+      // Direct assignment is more reliable than scrollIntoView after history
+      // load / markdown layout (avoids landing mid-timeline after refresh).
+      el.scrollTop = el.scrollHeight;
+      return;
+    }
     bottomRef.current?.scrollIntoView({ behavior });
+  };
+  /** After setMessages(history): force follow-bottom once layout settles. */
+  const pinTimelineToBottom = () => {
+    atBottomRef.current = true;
+    setShowJumpBtn(false);
+    // Double rAF: first paint may still have incomplete message heights.
+    requestAnimationFrame(() => {
+      requestAnimationFrame(() => {
+        scrollToBottom('auto');
+        // Late markdown/images can grow the timeline after first pin.
+        window.setTimeout(() => {
+          if (atBottomRef.current) scrollToBottom('auto');
+        }, 50);
+      });
+    });
   };
 
   // Follow streaming output ONLY while the user is at the bottom. Scrolling up
@@ -1200,7 +1227,10 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
   // atBottomRef=false), so history stays put mid-stream. Instant behavior so the
   // programmatic scroll lands immediately and the next scroll event reads "at bottom".
   useEffect(() => {
-    if (atBottomRef.current) bottomRef.current?.scrollIntoView({ behavior: 'auto' });
+    if (!atBottomRef.current) return;
+    const el = scrollRef.current;
+    if (el) el.scrollTop = el.scrollHeight;
+    else bottomRef.current?.scrollIntoView({ behavior: 'auto' });
   }, [messages, tokens]);
 
   // Abort the live (/live) stream + cancel any pending reconnect timer if the
@@ -3844,6 +3874,23 @@ function ReasoningBlock({ text, search }: { text: string; search: string }) {
   // Default expanded while streaming (short / growing); collapse once settled
   // if the user prefers — start open so live thinking is visible.
   const [open, setOpen] = useState(true);
+  const bodyRef = useRef<HTMLDivElement>(null);
+  // Follow latest tokens at the bottom until the user scrolls up (same policy
+  // as the main timeline: sticky follow, release on manual up-scroll).
+  const followBottomRef = useRef(true);
+  const REASONING_BOTTOM_SLACK = 48;
+  const recomputeFollow = () => {
+    const el = bodyRef.current;
+    if (!el) return;
+    followBottomRef.current =
+      el.scrollHeight - el.scrollTop - el.clientHeight <= REASONING_BOTTOM_SLACK;
+  };
+  useEffect(() => {
+    if (!open) return;
+    const el = bodyRef.current;
+    if (!el || !followBottomRef.current) return;
+    el.scrollTop = el.scrollHeight;
+  }, [text, open]);
   if (!text.trim()) return null;
   return (
     <div class={'reasoning-block' + (open ? ' is-open' : '')}>
@@ -3860,7 +3907,7 @@ function ReasoningBlock({ text, search }: { text: string; search: string }) {
         <span class={'reasoning-chevron' + (open ? ' expanded' : '')}>▾</span>
       </button>
       {open && (
-        <div class="reasoning-body">
+        <div class="reasoning-body" ref={bodyRef} onScroll={recomputeFollow}>
           {highlightText(text, search)}
         </div>
       )}

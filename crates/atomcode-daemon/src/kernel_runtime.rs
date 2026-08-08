@@ -76,6 +76,28 @@ async fn start_native_runtime_with_session_bootstrap(
                 crate::legacy_convert::converge_session(&manager, &lease).map_err(|error| {
                     atomcode_coding::RuntimeStartError::Prepare(std::io::Error::other(error))
                 })?;
+                // If the durable aggregate was published as session-<uuid> before
+                // the API title was applied (or still looks like a placeholder),
+                // pin the client `user` / default title now so auto-name cannot
+                // overwrite it with the first prompt.
+                if let Some(title) = cfg
+                    .session_display_name
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|t| !t.is_empty())
+                {
+                    if let Ok(view) = manager.load_native_session(&id) {
+                        let needs_title = !view.meta.user_renamed
+                            || atomcode_capabilities::session::SessionMeta::name_needs_fallback(
+                                &view.meta.name,
+                                &view.meta.id,
+                            );
+                        if needs_title && view.meta.name != title {
+                            // `rename` sets name + user_renamed without CAS issues.
+                            let _ = manager.rename(&id, title);
+                        }
+                    }
+                }
             } else {
                 let now = atomcode_capabilities::session::now_ms();
                 let mut meta = atomcode_capabilities::session::SessionMeta::new(

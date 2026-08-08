@@ -1586,20 +1586,27 @@ fn is_private_network_authority(authority: &str) -> bool {
 }
 
 /// Whether this client can receive interactive approval prompts.
-/// Token-protected webui mode is always interactive. Local known clients are
-/// also allowed on loopback because their UI can answer `/chat/permission`.
+///
+/// - **WebUI** always can: the SPA has `PermissionCard` + `POST /chat/permission`
+///   and shows Build / Accept Edits / Auto / Plan. Honoring that UI must not
+///   depend on bind host or token — otherwise LAN `serve --host 0.0.0.0`
+///   (with or without `--no-token`) silently sets `dangerously_skip_permissions`
+///   for Build and contradicts the mode pill.
+/// - **Other known clients** (channel / VSCode / JetBrains): interactive when
+///   token-protected, or on loopback (UI can answer `/chat/permission`).
+/// - **API** never uses this path (`ChatTurnOrigin::Api` → automation policy).
 fn client_interactive_permission(
     client_mode: SessionMode,
     enforce_token: bool,
     bind_host: &str,
 ) -> bool {
+    if matches!(client_mode, SessionMode::Webui) {
+        return true;
+    }
     enforce_token
         || (matches!(
             client_mode,
-            SessionMode::Channel
-                | SessionMode::Webui
-                | SessionMode::Vscode
-                | SessionMode::Jetbrains
+            SessionMode::Channel | SessionMode::Vscode | SessionMode::Jetbrains
         ) && is_loopback_authority(bind_host))
 }
 
@@ -1609,10 +1616,13 @@ fn client_interactive_permission(
 /// - **API** (OpenAI/Anthropic `/v1/*`): low-confirm — Auto tools; no permission /
 ///   user-input modals; residual `request_user_input` → final-answer handoff so the
 ///   client replies in the **next** message. WebUI `/chat/watch` is an **observer**
-///   of this policy (must not open extra modals).
-/// - **Native** (WebUI / TUI / IDE / channel **sending** their own message): full
-///   interactive UX when the client can answer (`/chat/permission`, WebUI
-///   `/chat/user-input`), honoring Build / AcceptEdits / Auto like local AtomCode.
+///   of this policy (must not open extra modals). Unchanged by WebUI mode pill.
+/// - **Native WebUI** (`POST /chat` from the SPA input): full mode pill —
+///   Build / Accept Edits / Auto / Plan — always interactive for permission +
+///   user-input (LAN / no-token included). Request body `approval_mode` (or
+///   global `/approval_mode`) is honored; never force Auto here.
+/// - **Other native** (channel / IDE on loopback or token): interactive when the
+///   client can answer `/chat/permission`.
 /// - **Yolo** (`serve --yolo`): every path follows automation — Auto, no modals,
 ///   `request_user_input` unmounted process-wide.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1656,7 +1666,9 @@ impl ChatTurnPolicy {
         }
     }
 
-    /// WebUI / channel / IDE own message — native interactive when client allows.
+    /// WebUI / channel / IDE own message — honor the client's mode pill when the
+    /// client can answer approval / user-input. Does **not** force Auto (that is
+    /// reserved for API + YOLO).
     pub fn native(
         client_mode: SessionMode,
         enforce_token: bool,
@@ -1671,6 +1683,7 @@ impl ChatTurnPolicy {
             ),
             // Only WebUI implements the typed user-input response endpoint today.
             interactive_user_input: matches!(client_mode, SessionMode::Webui),
+            // Native turns use the request/global mode (Build/AcceptEdits/Auto/Plan).
             force_approval_mode: None,
         }
     }
@@ -4746,7 +4759,13 @@ async fn process_chat_request(
     active_chats
         .bind_session(&operation_id, &session_id)
         .await?;
-    publish_chat_session_assignment(&working_dir, &session_id, is_new_session, &event_tx)?;
+    publish_chat_session_assignment(
+        &working_dir,
+        &session_id,
+        is_new_session,
+        &event_tx,
+        req.session_title.as_deref(),
+    )?;
 
     // Key used to route interactive permission decisions back to this turn's
     // decider. We use the *actual* session id (not req.session_id, which may be
@@ -4946,11 +4965,16 @@ async fn process_chat_request(
 /// aggregate is durable. Existing sessions already crossed this boundary when
 /// they were loaded above. Keeping persistence and notification in one helper
 /// prevents clients from binding an id that a later request cannot resume.
+///
+/// `session_title`: OpenAI/Anthropic `user` (or `"default"` when omitted). When
+/// set, the durable display name is that title with `user_renamed=true` so
+/// first-prompt auto-naming does not overwrite it.
 fn publish_chat_session_assignment(
     working_dir: &std::path::Path,
     session_id: &str,
     is_new_session: bool,
     event_tx: &mpsc::UnboundedSender<ChatEvent>,
+    session_title: Option<&str>,
 ) -> anyhow::Result<()> {
     if is_new_session {
         let manager = NativeSessionManager::for_project(working_dir);
@@ -4962,6 +4986,12 @@ fn publish_chat_session_assignment(
             now,
         );
         meta.owner = atomcode_capabilities::session::StorageOwner::Native;
+        if let Some(title) = session_title.map(str::trim).filter(|t| !t.is_empty()) {
+            meta.name = title.to_string();
+            // Pin API / client-provided titles (including the stable "default"
+            // key) so turn-complete auto-name and AI naming leave them alone.
+            meta.user_renamed = true;
+        }
         manager.commit_native_import(
             &lease,
             Some(&atomcode_kernel::message::SessionSnapshot::new(Vec::new())),
@@ -6897,13 +6927,61 @@ mod tests {
             false,
             ChatTurnOrigin::Native,
             SessionMode::Webui,
-            true, // token-protected → interactive permission
+            true, // token-protected
             "0.0.0.0",
         );
         assert_eq!(p.origin, ChatTurnOrigin::Native);
         assert!(p.interactive_permission);
         assert!(p.interactive_user_input);
         assert!(p.force_approval_mode.is_none());
+    }
+
+    #[test]
+    fn chat_turn_policy_webui_lan_no_token_still_interactive() {
+        // LAN serve without token must still honor Build / Accept Edits UI —
+        // previously this path set dangerously_skip_permissions and auto-ran
+        // risky bash while the mode pill said "改动前逐个审批".
+        let p = ChatTurnPolicy::resolve(
+            false,
+            ChatTurnOrigin::Native,
+            SessionMode::Webui,
+            false, // --no-token
+            "0.0.0.0",
+        );
+        assert_eq!(p.origin, ChatTurnOrigin::Native);
+        assert!(
+            p.interactive_permission,
+            "WebUI must register /chat/permission responder on LAN"
+        );
+        assert!(p.interactive_user_input);
+        assert!(
+            p.force_approval_mode.is_none(),
+            "WebUI must not force Auto; mode pill owns approval_mode"
+        );
+        assert!(client_interactive_permission(
+            SessionMode::Webui,
+            false,
+            "0.0.0.0"
+        ));
+    }
+
+    #[test]
+    fn chat_turn_policy_api_stays_automation_on_lan() {
+        // API policy is independent of WebUI: always Auto, no modals.
+        let p = ChatTurnPolicy::resolve(
+            false,
+            ChatTurnOrigin::Api,
+            SessionMode::Webui, // header irrelevant for API origin
+            false,
+            "0.0.0.0",
+        );
+        assert_eq!(p.origin, ChatTurnOrigin::Api);
+        assert!(!p.interactive_permission);
+        assert!(!p.interactive_user_input);
+        assert_eq!(
+            p.force_approval_mode,
+            Some(crate::approval_mode::ApprovalMode::Auto)
+        );
     }
 
     #[test]
@@ -7382,11 +7460,14 @@ mod tests {
         let session_id = "11111111-1111-4111-8111-111111111111";
         let (event_tx, mut event_rx) = mpsc::unbounded_channel();
 
-        publish_chat_session_assignment(&working_dir, session_id, true, &event_tx).unwrap();
+        publish_chat_session_assignment(&working_dir, session_id, true, &event_tx, Some("jeik"))
+            .unwrap();
 
         let manager = NativeSessionManager::for_project(&working_dir);
         let loaded = manager.load_native_session(session_id).unwrap();
         assert!(loaded.snapshot.messages.is_empty());
+        assert_eq!(loaded.meta.name, "jeik");
+        assert!(loaded.meta.user_renamed);
         assert!(matches!(
             event_rx.try_recv(),
             Ok(ChatEvent::SessionAssigned { session_id: assigned }) if assigned == session_id
@@ -7407,6 +7488,7 @@ mod tests {
             "22222222-2222-4222-8222-222222222222",
             true,
             &event_tx,
+            Some("default"),
         );
 
         assert!(result.is_err());
@@ -8917,6 +8999,23 @@ mod channel_mode_tests {
             false,
             "localhost:17321"
         ));
+        // WebUI: always interactive (mode pill), any bind / token combo.
+        assert!(client_interactive_permission(
+            SessionMode::Webui,
+            false,
+            "0.0.0.0"
+        ));
+        assert!(client_interactive_permission(
+            SessionMode::Webui,
+            true,
+            "0.0.0.0"
+        ));
+        assert!(client_interactive_permission(
+            SessionMode::Webui,
+            false,
+            "127.0.0.1"
+        ));
+        // Channel / VSCode without token on LAN stay non-interactive.
         assert!(!client_interactive_permission(
             SessionMode::Channel,
             false,

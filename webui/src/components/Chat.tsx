@@ -27,7 +27,7 @@
 
 import { VNode } from 'preact';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'preact/hooks';
-import { streamChat, stopChat, getActiveChatSessions, watchChatSession, SSEEvent, getSession, SessionMetaWithProject, getModels, ImageData, streamLive, postLiveMessage, postLiveStop, postLivePermission, postLiveProvider, postLiveMode, getApprovalMode, ApprovalMode, postLiveSwitchSession, LiveWireEvent, SessionMessage, getSkills, SkillInfo, listDir, changeDir, postConfigReload, postCommand, postLiveCompact, postLiveUserInput, postChatUserInput, setDefaultProvider, type CommandResult, UserInputRequestEvent } from '../api';
+import { streamChat, stopChat, getActiveChatSessions, getChatPending, watchChatSession, SSEEvent, getSession, SessionMetaWithProject, getModels, ImageData, streamLive, postLiveMessage, postLiveStop, postLivePermission, postLiveProvider, postLiveMode, getApprovalMode, ApprovalMode, postLiveSwitchSession, LiveWireEvent, SessionMessage, getSkills, SkillInfo, listDir, changeDir, postConfigReload, postCommand, postLiveCompact, postLiveUserInput, postChatUserInput, setDefaultProvider, type CommandResult, UserInputRequestEvent } from '../api';
 import {
   parseSlashCommand,
   buildCommandMap,
@@ -709,6 +709,32 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
       return prev.slice(0, -1);
     });
   }
+  /** Restore Build / AcceptEdits / Plan approval (and user-input) cards after
+   *  refresh or session switch. Auto never parks; only non-Auto modes emit these. */
+  function restorePendingInteractive(loadId: string, loadGeneration: number) {
+    void getChatPending(loadId)
+      .then((pending) => {
+        if (
+          activeIdRef.current !== loadId ||
+          sessionGenerationRef.current !== loadGeneration
+        ) {
+          return;
+        }
+        if (pending.permission) {
+          updateToolInLastAssistant(pending.permission.call_id, {
+            status: 'waiting_approval',
+          });
+          onPermission(pending.permission as PermissionRequestEvent);
+        }
+        if (pending.user_input) {
+          setUserInputReq(pending.user_input);
+        }
+      })
+      .catch(() => {
+        /* watch replay is the primary path; pending is a backup */
+      });
+  }
+
   function startDetachedHistoryPoll(
     projectHash: string,
     loadId: string,
@@ -721,6 +747,10 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
     // Full turn will be rebuilt from watch replay (user + thinking + text + tools).
     dropTrailingAssistantForWatchReplay();
     ensureAssistantBubbleForWatch();
+
+    // Backup path: explicit pending query restores approval cards even if the
+    // watch stream drops the edge event (or a mid-turn race loses the snapshot).
+    restorePendingInteractive(loadId, loadGeneration);
 
     // Live reattach via event bus fan-out.
     const watchAbort = new AbortController();
@@ -742,10 +772,11 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
           return;
         }
         ensureAssistantBubbleForWatch();
-        // Observer of another client's turn (typically OpenAI/API). Follow API
-        // low-confirm policy: stream text/tools only — never open permission or
-        // user-input modals the observer cannot (and should not) own.
-        handleEvent(event, { observerOnly: true });
+        // Reattach after refresh / sidebar switch. Server replay includes
+        // permission_request / user_input_request for every non-Auto mode that
+        // parks (Build / AcceptEdits / Plan). Must restore those modals or the
+        // turn deadlocks in WaitingApproval with a blinking cursor.
+        handleEvent(event);
         if (atBottomRef.current) {
           const el = scrollRef.current;
           if (el) el.scrollTop = el.scrollHeight;
@@ -762,8 +793,9 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
       watchAbort.signal,
     ).catch((err) => {
       if (err?.name === 'AbortError') return;
-      // Fall through to poll-only mode.
+      // Fall through to poll-only mode — still try pending restore.
       setHistoryHint(t('chat.detachedPolling'));
+      restorePendingInteractive(loadId, loadGeneration);
     });
 
     startDetachedTick(projectHash, loadId, loadGeneration);
@@ -933,11 +965,14 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
           // replay if this connection is a mid-turn reattach).
           dropTrailingAssistantForWatchReplay();
           startDetachedTick(projectHash, loadId, loadGeneration);
+          // Backup: restore Build/AcceptEdits/Plan approval cards mid-turn.
+          restorePendingInteractive(loadId, loadGeneration);
           // API turn 已 admit(会话已建):通知 App 刷新侧栏,让新建会话实时出现。
           onLiveTurnDone?.();
         }
         ensureAssistantBubbleForWatch();
-        handleEvent(event, { observerOnly: true });
+        // Restore permission/user-input for every non-Auto mode that parks.
+        handleEvent(event);
         // Keep the main scroller pinned while we are following (user can scroll
         // up mid-turn to release via recomputeAtBottom).
         if (atBottomRef.current) {
@@ -2266,8 +2301,9 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
     });
   }
 
-  /** @param opts.observerOnly When true (GET /chat/watch on another client's turn),
-   *  follow API low-confirm: render stream only — no permission / user-input modals. */
+  /** @param opts.observerOnly Reserved for pure third-party observers that must
+   *  not own interactive modals. /chat/watch reattach after refresh MUST call
+   *  without this flag so Build-mode permission_request is restored. */
   function handleEvent(event: SSEEvent, opts?: { observerOnly?: boolean }) {
     const observerOnly = opts?.observerOnly === true;
     switch (event.type) {
@@ -2415,17 +2451,18 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
         break;
 
       case 'permission_request':
-        // Observer of API (or other non-owned) turn: no modal — API auto-approves.
-        if (observerOnly) break;
-        // Mark the tool row as waiting for approval
+        // Always mark the tool row; restore the modal unless a pure observer
+        // explicitly opts out (reattach/watch must NOT pass observerOnly — that
+        // previously deadlocked Build turns after refresh).
         updateToolInLastAssistant(event.call_id, {
           status: 'waiting_approval',
         });
-        onPermission(event as PermissionRequestEvent);
+        if (!observerOnly) {
+          onPermission(event as PermissionRequestEvent);
+        }
         break;
 
       case 'user_input_request':
-        // Observer: API residual path already streams the question as final text.
         if (observerOnly) break;
         setUserInputReq(event);
         break;

@@ -9,9 +9,10 @@
 default_provider = "deepseek"
 
 # ---- 自动更新 / 自动提交（顶层键，必须在任何 [表] 之前）----
-# auto_update: 每小时轮询新版本并预暂存，下次启动时应用（/upgrade 仍可手动）
+# auto_update: 默认 false。为 true 时每小时轮询新版本并预暂存，下次启动时应用。
+# /upgrade 仍可手动。源码/自建二进制不建议开启（会覆盖本地构建）。
 # auto_commit: 每轮 agent 结束后自动提交改动的文件（仅在 git 仓库内生效）
-auto_update = true
+auto_update = false
 auto_commit = false
 
 # ---- 离线 / 内网无公网环境开关（顶层键）----

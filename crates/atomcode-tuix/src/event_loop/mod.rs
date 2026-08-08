@@ -8203,21 +8203,20 @@ pub async fn run_loop(mut ctx: LoopCtx, renderer: &mut dyn Renderer) -> Result<E
         // OnboardingWizard's Modal impl owns the per-step box drawing.
         use crate::modals::Modal;
         renderer.clear_screen();
-        // First-launch fast path: single-page QR + URL. Background
-        // poll thread (PR 1b) watches `/auth/check` and auto-closes
-        // the modal the moment AtomGit reports authorisation, then
-        // the `OauthEvent::Authorized` branch in the main `select!`
-        // flips `pending_run_login_setup` so `/codingplan` claims
-        // immediately — zero keystrokes after the user finishes the
-        // browser flow. The legacy 3-step Intro / Language / Setup
-        // wizard stays intact for `/welcome` — `new_qr_fast_path` is
-        // ONLY used here. /welcome's command arm still uses `new()`
-        // / `new_with_confirm()` so users who explicitly re-run the
-        // wizard see the familiar language + setup path.
-        let mut wizard = crate::modals::OnboardingWizard::new_qr_fast_path();
+        // Official builds: first-launch QR fast path (scan → claim).
+        // Source/self-built binaries cannot sign AtomGit gateway requests,
+        // so QR → CodingPlan is a dead end that leaves auth.toml behind and
+        // used to strand the TUI in failed provider-reload loops. Use the
+        // multi-step wizard instead and pre-select Manual (/provider).
+        let mut wizard = if atomcode_capabilities::provider::signer_available() {
+            crate::modals::OnboardingWizard::new_qr_fast_path()
+        } else {
+            crate::modals::OnboardingWizard::new_source_build()
+        };
         // Pull the LoginSession out of the wizard before boxing — the
         // background poll thread owns it from here. wizard.draw still
         // has access to `qr_login_url` so the QR keeps rendering.
+        // Source-build wizard has no pending OAuth session.
         if let Some(session) = wizard.take_pending_session() {
             oauth_poll::spawn_oauth_poll(
                 session,
@@ -8516,65 +8515,8 @@ pub async fn run_loop(mut ctx: LoopCtx, renderer: &mut dyn Renderer) -> Result<E
             }
 
             // ── OAuth poll thread results ──
-            // Emitted by `event_loop::oauth_poll::spawn_oauth_poll`
-            // once per QR-fast-path session. Authorized → close the
-            // wizard + flip `pending_run_login_setup` so the existing
-            // /codingplan driver picks up the just-written auth.toml
-            // and claims the plan. Failed → close the wizard too and
-            // surface the reason in scrollback with a retry hint;
-            // leaving the modal open would require a Modal trait
-            // extension (as_any_mut + downcast) we don't yet have.
             Some(ev) = ctx.oauth_event_rx.recv() => {
-                use oauth_poll::OauthEvent;
-                let was_modal_open = app.active_modal.is_some();
-                if was_modal_open {
-                    app.active_modal = None;
-                    renderer.clear_screen();
-                }
-                match ev {
-                    OauthEvent::Authorized => {
-                        // Banner FIRST, /codingplan output below — per
-                        // user direction: AtomCode chrome should anchor
-                        // the top of scrollback, the codingplan claim
-                        // output is verbose detail underneath. Model
-                        // bullet is blank at this point because the
-                        // claim hasn't picked a default provider yet —
-                        // refreshed below once the claim writes
-                        // ctx.model_name.
-                        crate::modals::onboarding_wizard::paint_welcome(&ctx, renderer);
-                        // `pending_run_login_setup` is only drained by the
-                        // keystroke-handler path (handle_input → modal
-                        // close → drain flag). The OAuth poll path doesn't
-                        // route through there, so just call the codingplan
-                        // driver directly — same effect, runs in this
-                        // select! arm's scope where renderer + ctx are
-                        // already mutable.
-                        if let Err(e) = crate::event_loop::commands::run_login_flow(renderer, &mut ctx) {
-                            renderer.render(crate::render::UiLine::Error(
-                                format!("CodingPlan 自动配置失败: {e:#}。可运行 /login 手动重试。"),
-                            ));
-                            renderer.flush();
-                        }
-                        // Splice the resolved model name into the
-                        // banner painted above. `run_login_flow`
-                        // updates `ctx.model_name` from the picked
-                        // default provider (see commands.rs:2906) — at
-                        // this point the banner's cached model="" is
-                        // stale, so refresh in place.
-                        let dir_display = crate::platform::collapse_home(
-                            &ctx.working_dir.to_string_lossy(),
-                        );
-                        renderer.refresh_welcome_banner(&ctx.model_name, &dir_display);
-                    }
-                    OauthEvent::Failed(reason) => {
-                        renderer.render(crate::render::UiLine::Error(
-                            format!(
-                                "登录失败: {reason}。运行 /login 可重试。",
-                            ),
-                        ));
-                        renderer.flush();
-                    }
-                }
+                handle_oauth_poll_event(ev, &mut app, &mut ctx, renderer);
             }
 
             // ── /upgrade progress ──
@@ -8912,65 +8854,8 @@ pub async fn run_loop(mut ctx: LoopCtx, renderer: &mut dyn Renderer) -> Result<E
             }
 
             // ── OAuth poll thread results ──
-            // Emitted by `event_loop::oauth_poll::spawn_oauth_poll`
-            // once per QR-fast-path session. Authorized → close the
-            // wizard + flip `pending_run_login_setup` so the existing
-            // /codingplan driver picks up the just-written auth.toml
-            // and claims the plan. Failed → close the wizard too and
-            // surface the reason in scrollback with a retry hint;
-            // leaving the modal open would require a Modal trait
-            // extension (as_any_mut + downcast) we don't yet have.
             Some(ev) = ctx.oauth_event_rx.recv() => {
-                use oauth_poll::OauthEvent;
-                let was_modal_open = app.active_modal.is_some();
-                if was_modal_open {
-                    app.active_modal = None;
-                    renderer.clear_screen();
-                }
-                match ev {
-                    OauthEvent::Authorized => {
-                        // Banner FIRST, /codingplan output below — per
-                        // user direction: AtomCode chrome should anchor
-                        // the top of scrollback, the codingplan claim
-                        // output is verbose detail underneath. Model
-                        // bullet is blank at this point because the
-                        // claim hasn't picked a default provider yet —
-                        // refreshed below once the claim writes
-                        // ctx.model_name.
-                        crate::modals::onboarding_wizard::paint_welcome(&ctx, renderer);
-                        // `pending_run_login_setup` is only drained by the
-                        // keystroke-handler path (handle_input → modal
-                        // close → drain flag). The OAuth poll path doesn't
-                        // route through there, so just call the codingplan
-                        // driver directly — same effect, runs in this
-                        // select! arm's scope where renderer + ctx are
-                        // already mutable.
-                        if let Err(e) = crate::event_loop::commands::run_login_flow(renderer, &mut ctx) {
-                            renderer.render(crate::render::UiLine::Error(
-                                format!("CodingPlan 自动配置失败: {e:#}。可运行 /login 手动重试。"),
-                            ));
-                            renderer.flush();
-                        }
-                        // Splice the resolved model name into the
-                        // banner painted above. `run_login_flow`
-                        // updates `ctx.model_name` from the picked
-                        // default provider (see commands.rs:2906) — at
-                        // this point the banner's cached model="" is
-                        // stale, so refresh in place.
-                        let dir_display = crate::platform::collapse_home(
-                            &ctx.working_dir.to_string_lossy(),
-                        );
-                        renderer.refresh_welcome_banner(&ctx.model_name, &dir_display);
-                    }
-                    OauthEvent::Failed(reason) => {
-                        renderer.render(crate::render::UiLine::Error(
-                            format!(
-                                "登录失败: {reason}。运行 /login 可重试。",
-                            ),
-                        ));
-                        renderer.flush();
-                    }
-                }
+                handle_oauth_poll_event(ev, &mut app, &mut ctx, renderer);
             }
 
             // ── /upgrade progress ──
@@ -22037,6 +21922,58 @@ fn clipboard_image_hint_changed(
     pending_image_hashes: &[u64],
 ) -> bool {
     clipboard_image_hint_state(cache, pending_image_hashes).1
+}
+
+/// Handle a terminal OAuth poll result from the QR fast-path background
+/// thread. Always restores idle input chrome after clearing the wizard so
+/// Esc/timeout cannot leave a "ghost QR" session with a dead input box.
+fn handle_oauth_poll_event(
+    ev: oauth_poll::OauthEvent,
+    app: &mut App,
+    ctx: &mut LoopCtx,
+    renderer: &mut dyn Renderer,
+) {
+    use oauth_poll::OauthEvent;
+
+    // Always drop the wizard if still open — Esc may have already closed it,
+    // in which case this is a no-op and we still restore idle input below.
+    if app.active_modal.is_some() {
+        app.active_modal = None;
+        renderer.clear_screen();
+    }
+
+    match ev {
+        OauthEvent::Authorized => {
+            // Banner FIRST, codingplan claim output below.
+            crate::modals::onboarding_wizard::paint_welcome(ctx, renderer);
+            if let Err(e) = crate::event_loop::commands::run_login_flow(renderer, ctx) {
+                renderer.render(UiLine::Error(format!(
+                    "CodingPlan 自动配置失败: {e:#}。可运行 /login 手动重试，或用 /provider 配置自定义模型。"
+                )));
+                renderer.flush();
+            }
+            let dir_display =
+                crate::platform::collapse_home(&ctx.working_dir.to_string_lossy());
+            renderer.refresh_welcome_banner(&ctx.model_name, &dir_display);
+        }
+        OauthEvent::Failed(reason) => {
+            // Prefer paint_welcome so Esc-from-QR failure doesn't leave a
+            // blank body with only an error line.
+            crate::modals::onboarding_wizard::paint_welcome(ctx, renderer);
+            renderer.render(UiLine::Error(format!(
+                "登录失败: {reason}。运行 /login 可重试，或用 /provider 配置自定义模型。"
+            )));
+            renderer.flush();
+        }
+    }
+
+    // Restore interactive input after any terminal OAuth outcome. Modal keys
+    // no longer own the keyboard; without this redraw the session is a dead
+    // chrome shell (the "ghost QR" freeze).
+    if matches!(app.state.phase, UiPhase::Idle) && app.active_modal.is_none() {
+        redraw_idle_plain(&app.buf, &app.state, ctx, renderer);
+        renderer.flush();
+    }
 }
 
 /// Kick a background OS clipboard image probe when the cache is stale.

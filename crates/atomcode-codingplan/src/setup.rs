@@ -601,6 +601,37 @@ pub fn run(
     config: &mut Config,
     tel: Option<&Arc<atomcode_telemetry::Telemetry>>,
 ) -> Result<SetupReport> {
+    // Source/self-built binaries lack request signing for the AtomGit LLM
+    // gateway. Claiming a plan would write AtomGit providers into config that
+    // can never be assembled — fail closed before OAuth/claim so shells can
+    // steer the user to `/provider` or an official build.
+    if !atomcode_auth::gateway_crypto::signer_available() {
+        if let Some(t) = tel {
+            t.track(atomcode_telemetry::Event::TakeCodingplan {
+                type_: atomcode_telemetry::CodingplanResult::Fail,
+                error_kind: Some(atomcode_telemetry::CodingplanErrorKind::AuthError),
+                error_data: Some(
+                    serde_json::json!({
+                        "step": "build",
+                        "message": "gateway authentication unavailable in this build",
+                    })
+                    .to_string(),
+                ),
+            });
+        }
+        return Ok(SetupReport {
+            login: StepResult::Err(
+                "this build cannot access the AtomGit gateway — install an official build or use /provider"
+                    .into(),
+            ),
+            claim: StepResult::Skipped(CASCADE_FROM_UPSTREAM_FAIL.into()),
+            claim_attempts: Vec::new(),
+            models: StepResult::Skipped(CASCADE_FROM_UPSTREAM_FAIL.into()),
+            status: StepResult::Skipped(CASCADE_FROM_UPSTREAM_FAIL.into()),
+            auth_expired: false,
+        });
+    }
+
     // Step 1: login
     let login = step_login(tel);
     if login.is_err() {
@@ -1811,6 +1842,23 @@ mod tests {
             "empty expires-date with double space must not render: {}",
             out
         );
+    }
+
+    /// Source builds (no codingplan-crypto) must fail before OAuth/claim so
+    /// they never write AtomGit providers that cannot be assembled.
+    ///
+    /// The `codingplan-crypto` feature is owned by the final binary
+    /// (`atomcode-cli`), not this leaf crate — unit tests always see
+    /// `signer_available() == false`.
+    #[test]
+    fn source_build_fails_closed_before_claim() {
+        assert!(!atomcode_auth::gateway_crypto::signer_available());
+        let mut config = Config::default();
+        let report = run(&mut config, None).expect("run returns Ok report");
+        assert!(matches!(report.login, StepResult::Err(_)));
+        assert!(!report.should_persist_config());
+        assert!(config.providers.is_empty());
+        assert!(config.provider_accounts.is_empty());
     }
 
     /// Render exercise: login failed. Downstream steps are pre-marked

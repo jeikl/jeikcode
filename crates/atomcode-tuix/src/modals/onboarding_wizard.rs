@@ -406,6 +406,8 @@ impl OnboardingWizard {
     /// and hand it to a background poll thread. The wizard itself
     /// doesn't know about polling — that plumbing stays in the event
     /// loop.
+    /// **Official builds only.** Source/self-built binaries cannot sign
+    /// AtomGit gateway requests; use [`Self::new_source_build`] instead.
     pub fn new_qr_fast_path() -> Self {
         let (qr_login_url, qr_login_error, pending_session) =
             match atomcode_auth::oauth::start_login() {
@@ -420,6 +422,24 @@ impl OnboardingWizard {
             qr_login_url,
             qr_login_error,
             pending_session,
+            qr_url_copied: false,
+        }
+    }
+
+    /// First-launch path for source/self-built binaries (no
+    /// `codingplan-crypto`). CodingPlan QR login cannot claim or call the
+    /// AtomGit gateway, so we keep the multi-step wizard and pre-select
+    /// Manual setup (`/provider`) instead of offering a dead-end QR.
+    pub fn new_source_build() -> Self {
+        Self {
+            step: Step::Intro,
+            language_idx: 0,
+            // 0=CodingPlan, 1=Manual, 2=Skip — prefer Manual on source builds.
+            setup_idx: 1,
+            needs_confirm: false,
+            qr_login_url: None,
+            qr_login_error: None,
+            pending_session: None,
             qr_url_copied: false,
         }
     }

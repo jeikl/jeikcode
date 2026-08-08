@@ -568,12 +568,16 @@ fn is_dev_mode() -> bool {
 ///
 /// `apply_pending_upgrade` runs at process start — historically it ignored
 /// `auto_update = false`, so a self-built binary still got replaced by a
-/// staged official release (slow/corrupt TUI on large machines). Default
-/// remains "allow upgrade" if the file is missing or unreadable.
+/// staged official release (slow/corrupt TUI on large machines).
+///
+/// **Default is off** when the file is missing, unreadable, or has no
+/// `auto_update` key — matches `Config::default()` and avoids surprise
+/// overwrites that freeze the TUI. Only an explicit `auto_update = true`
+/// enables staged upgrades.
 fn config_auto_update_enabled() -> bool {
     let path = Config::default_path();
     let Ok(raw) = std::fs::read_to_string(path) else {
-        return true;
+        return false;
     };
     // Prefer the last assignment (TOML allows only one, but be defensive).
     for line in raw.lines().rev() {
@@ -585,11 +589,11 @@ fn config_auto_update_enabled() -> bool {
             let rest = rest.trim_start();
             if let Some(rest) = rest.strip_prefix('=') {
                 let v = rest.trim().trim_matches('"');
-                return !matches!(v, "false" | "False" | "0" | "no" | "off");
+                return matches!(v, "true" | "True" | "1" | "yes" | "on");
             }
         }
     }
-    true
+    false
 }
 
 /// True when the currently-running binary's filename ends in `.bak`.
@@ -1436,7 +1440,26 @@ async fn async_main() {
     // Honor `auto_update = false` here too (not only for the detached stager):
     // self-built / forked binaries must not be silently replaced by official
     // releases — that was freezing TUI input on large monorepos after upgrade.
-    if !is_backup && !dev_mode && auto_update_cfg {
+    //
+    // Also skip when this binary cannot sign AtomGit gateway requests
+    // (`codingplan-crypto` off). Auto-update always downloads the *official*
+    // release; silently replacing a source build left leftover auth/config
+    // from a failed CodingPlan claim and produced an unresponsive TUI
+    // (input box visible but effectively dead). Users can still `/upgrade`.
+    let source_build = !atomcode_capabilities::provider::signer_available();
+    if source_build && auto_update_cfg {
+        // Drop any staged official package so a later accidental re-enable
+        // cannot overwrite this binary mid-session either.
+        let staged = atomcode_updater::staged_dir();
+        if staged.exists() {
+            let _ = std::fs::remove_dir_all(&staged);
+            eprintln!(
+                "[source build] cleared staged upgrade at {} (auto-update disabled for non-official builds)",
+                staged.display()
+            );
+        }
+    }
+    if !is_backup && !dev_mode && auto_update_cfg && !source_build {
         let stage_start = std::time::Instant::now();
         // Capture current version BEFORE applying upgrade, so we can pass it to the re-exec'd child
         let current_version = format!("v{}", env!("CARGO_PKG_VERSION"));
@@ -2265,6 +2288,10 @@ async fn run() -> Result<i32> {
                 && !is_running_as_backup()
                 && !cli.dev
                 && !atomcode_updater::is_package_managed()
+                // Source/self-built binaries must not stage official releases;
+                // applying them overwrites the local build and has left users
+                // with a frozen TUI after a failed CodingPlan onboarding.
+                && atomcode_capabilities::provider::signer_available()
             {
                 spawn_detached_upgrade_prep();
             }

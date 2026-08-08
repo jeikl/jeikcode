@@ -83,12 +83,39 @@ export function Markdown({ content, search }: { content: string; search?: string
   function onClick(e: MouseEvent) {
     const t = (e.target as HTMLElement)?.closest('.copy-button') as HTMLElement | null;
     if (t?.dataset.copy) {
-      navigator.clipboard?.writeText(decodeURIComponent(t.dataset.copy)).catch(() => {});
+      const text = decodeURIComponent(t.dataset.copy);
       const prev = t.textContent;
-      t.textContent = 'Copied';
-      setTimeout(() => {
-        t.textContent = prev;
-      }, 1200);
+      const mark = (ok: boolean) => {
+        t.textContent = ok ? 'Copied' : 'Failed';
+        setTimeout(() => {
+          t.textContent = prev;
+        }, 1200);
+      };
+      void (async () => {
+        try {
+          if (navigator.clipboard?.writeText) {
+            await navigator.clipboard.writeText(text);
+            mark(true);
+            return;
+          }
+        } catch {
+          /* fall through */
+        }
+        try {
+          const ta = document.createElement('textarea');
+          ta.value = text;
+          ta.setAttribute('readonly', '');
+          ta.style.position = 'fixed';
+          ta.style.left = '-9999px';
+          document.body.appendChild(ta);
+          ta.select();
+          const ok = document.execCommand('copy');
+          document.body.removeChild(ta);
+          mark(ok);
+        } catch {
+          mark(false);
+        }
+      })();
     }
   }
 

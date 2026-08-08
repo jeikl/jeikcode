@@ -186,6 +186,9 @@ impl SkillRegistry {
                 name: s.name.clone(),
                 hint: None, // capabilities skills carry no argument hint
                 description: s.description.clone(),
+                // Directory skills get a location so the catalog itself answers
+                // "where is this skill?" without a use_skill round-trip.
+                location: s.is_directory_skill().then(|| s.display_location()),
                 source_rank: super::render::source_rank(&s.source_path),
             })
             .collect();

@@ -44,6 +44,10 @@ pub struct CatalogEntry {
     /// don't carry one (always `None`); the core twin passes it through.
     pub hint: Option<String>,
     pub description: String,
+    /// Absolute skill directory (directory-style skills only). Surfaced so the
+    /// model never has to `find` the skill root after reading the catalog —
+    /// mirrors Grok's `<agent_skill path>` / OpenCode `<location>`.
+    pub location: Option<String>,
     pub source_rank: u8,
 }
 
@@ -73,6 +77,19 @@ fn truncate_desc(desc: &str) -> String {
     format!("{cut}…")
 }
 
+/// Compact an absolute skill path for the catalog: keep the last two segments
+/// (e.g. `multi-db-executor` or `skills/multi-db-executor`) so many skills fit
+/// the budget. Full absolute path is always in the use_skill envelope.
+fn short_location(path: &str) -> String {
+    let norm = path.replace('\\', "/");
+    let parts: Vec<&str> = norm.split('/').filter(|p| !p.is_empty()).collect();
+    match parts.as_slice() {
+        [] => norm,
+        [one] => (*one).to_string(),
+        [.., a, b] => format!("{a}/{b}"),
+    }
+}
+
 /// Render the full `=== AVAILABLE SKILLS ===` section, or `None` when there are
 /// no skills. The returned string has no surrounding blank lines — the caller
 /// wraps it with newlines to taste.
@@ -99,7 +116,21 @@ pub fn render_skill_catalog(entries: &[CatalogEntry]) -> Option<String> {
             .as_deref()
             .map(|h| format!(" {h}"))
             .unwrap_or_default();
-        let line = format!("- {}{}: {}", e.name, hint, truncate_desc(&e.description));
+        // Prefer a short location suffix (last two path segments) so the budget
+        // still fits many skills; full path is still returned by use_skill.
+        let loc = e
+            .location
+            .as_deref()
+            .map(short_location)
+            .map(|l| format!(" @ {l}"))
+            .unwrap_or_default();
+        let line = format!(
+            "- {}{}{}: {}",
+            e.name,
+            hint,
+            loc,
+            truncate_desc(&e.description)
+        );
         let cost = line.len() + 1; // + newline
                                    // Always emit at least the top-ranked skill even if it alone is huge.
         if lines.is_empty() || body_bytes + cost <= CATALOG_BYTE_BUDGET {
@@ -135,6 +166,17 @@ mod tests {
             name: name.into(),
             hint: None,
             description: desc.into(),
+            location: None,
+            source_rank: rank,
+        }
+    }
+
+    fn entry_with_loc(name: &str, desc: &str, loc: &str, rank: u8) -> CatalogEntry {
+        CatalogEntry {
+            name: name.into(),
+            hint: None,
+            description: desc.into(),
+            location: Some(loc.into()),
             source_rank: rank,
         }
     }
@@ -259,5 +301,30 @@ mod tests {
             "top-ranked always emitted:\n{}",
             &out[..80.min(out.len())]
         );
+    }
+
+    #[test]
+    fn catalog_includes_short_location_for_directory_skills() {
+        let out = render_skill_catalog(&[entry_with_loc(
+            "multi-db-executor",
+            "连接数据库",
+            "/root/.atomcode/skills/multi-db-executor",
+            0,
+        )])
+        .unwrap();
+        assert!(
+            out.contains("@ skills/multi-db-executor") || out.contains("@ multi-db-executor"),
+            "catalog must surface skill location: {out}"
+        );
+        assert!(out.contains("连接数据库"), "{out}");
+    }
+
+    #[test]
+    fn short_location_keeps_last_two_segments() {
+        assert_eq!(
+            short_location("/root/.atomcode/skills/multi-db-executor"),
+            "skills/multi-db-executor"
+        );
+        assert_eq!(short_location("C:\\Users\\a\\.atomcode\\skills\\x"), "skills/x");
     }
 }

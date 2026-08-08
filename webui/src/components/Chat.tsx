@@ -190,6 +190,35 @@ function formatMsgTimeFull(ts?: number): string {
   return `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())} ${pad2(d.getHours())}:${pad2(d.getMinutes())}:${pad2(d.getSeconds())}`;
 }
 
+/** Copy text to clipboard. Prefer async Clipboard API; fall back to execCommand
+ *  for non-secure contexts. Returns false when both paths fail (caller should toast). */
+async function copyTextToClipboard(text: string): Promise<boolean> {
+  try {
+    if (navigator.clipboard?.writeText) {
+      await navigator.clipboard.writeText(text);
+      return true;
+    }
+  } catch {
+    /* fall through to legacy path */
+  }
+  try {
+    const ta = document.createElement('textarea');
+    ta.value = text;
+    ta.setAttribute('readonly', '');
+    ta.style.position = 'fixed';
+    ta.style.left = '-9999px';
+    ta.style.top = '0';
+    document.body.appendChild(ta);
+    ta.select();
+    ta.setSelectionRange(0, text.length);
+    const ok = document.execCommand('copy');
+    document.body.removeChild(ta);
+    return ok;
+  } catch {
+    return false;
+  }
+}
+
 /** Format all parts of a message as readable text (including tool calls and their
  *  output), matching what is displayed on the page. Used by the copy button to
  *  copy the full visible content of an assistant turn. */
@@ -1541,25 +1570,31 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
         loaded.push({ role: 'assistant', parts, ts: msg.created_at });
       } else if (msg.role === 'tool' && msg.tool_result) {
         const result = msg.tool_result;
+        // Prefer full `content` over truncated `summary` so history reload still
+        // shows multi-line SQL/table output (API always sends both).
+        const output =
+          (msg.content && msg.content.length > 0 ? msg.content : null) ??
+          result.summary ??
+          '';
         outer: for (let i = loaded.length - 1; i >= 0; i--) {
           const m = loaded[i];
           if (m.role !== 'assistant') continue;
           for (const p of m.parts) {
             if (p.kind === 'tool' && p.tool.id === result.call_id) {
-              p.tool.output = result.summary;
-              p.tool.status = toolResultStatus(result.success, result.summary);
+              p.tool.output = output;
+              p.tool.status = toolResultStatus(result.success, output);
               // History path: fold `<task id=… state=completed>` into subtasks panel.
               if (p.tool.subtasks && p.tool.subtasks.length > 0) {
                 p.tool.subtasks = applySubtaskResultsFromOutput(
                   p.tool.subtasks,
-                  result.summary ?? '',
+                  output,
                 );
               } else if (p.tool.name === 'task') {
                 const seeded = subtasksFromTaskArgs(p.tool.args);
                 if (seeded) {
                   p.tool.subtasks = applySubtaskResultsFromOutput(
                     seeded,
-                    result.summary ?? '',
+                    output,
                   );
                 }
               }
@@ -1939,8 +1974,17 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
       .then((confirmed) => {
         setModeState((cur) => completeModeSwitch(cur, confirmed));
         onConfirmed?.(confirmed);
+        // Backend may reject (runtime busy) and echo the previous mode — surface that.
+        if (confirmed !== m) {
+          pushCommandNotice(
+            t('cmd.mode.rejected', { requested: m, confirmed }),
+          );
+        }
       })
-      .catch(() => setModeState((cur) => failModeSwitch(cur)));
+      .catch(() => {
+        setModeState((cur) => failModeSwitch(cur));
+        pushCommandNotice(t('cmd.mode.failed'));
+      });
   }
 
   /** Switch the active provider and notify the backend when in sync mode. */
@@ -3774,10 +3818,15 @@ function AssistantMessageView({
   const [copied, setCopied] = useState(false);
 
   function handleCopy() {
-    navigator.clipboard.writeText(turnText).then(() => {
-      setCopied(true);
-      setTimeout(() => setCopied(false), 2000);
-    }).catch(() => {});
+    void copyTextToClipboard(turnText).then((ok) => {
+      if (ok) {
+        setCopied(true);
+        setTimeout(() => setCopied(false), 2000);
+      } else {
+        // Surface failure — silent .catch previously made the button look dead.
+        window.alert(t('copy.failed'));
+      }
+    });
   }
 
   const copyBtn = isLastInTurn && !isError && !streaming && turnText ? (
@@ -4023,10 +4072,14 @@ function UserMessageView({
   const [copied, setCopied] = useState(false);
 
   function handleCopy() {
-    navigator.clipboard.writeText(text).then(() => {
-      setCopied(true);
-      setTimeout(() => setCopied(false), 2000);
-    }).catch(() => {});
+    void copyTextToClipboard(text).then((ok) => {
+      if (ok) {
+        setCopied(true);
+        setTimeout(() => setCopied(false), 2000);
+      } else {
+        window.alert(t('copy.failed'));
+      }
+    });
   }
 
   const images = msg.images && msg.images.length > 0 && (

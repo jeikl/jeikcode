@@ -3816,8 +3816,9 @@ pub struct LoopCtx {
     pub(crate) pending_capability_projection: Option<atomcode_coding::SessionChanged>,
     /// Cached "clipboard currently holds an image" flag, with a short TTL
     /// so the right-aligned `Image in clipboard · ctrl+v to paste` hint
-    /// stays current without thrashing the system clipboard on every
-    /// redraw. Refreshed lazily inside `build_status`.
+    /// stays current. Refreshed by a **background** probe on the idle poller
+    /// only — never from `build_status` / keystroke redraws (large screenshots
+    /// make `get_image` freeze the TUI for seconds).
     pub clipboard_check: std::sync::Arc<std::sync::Mutex<ClipboardCheckState>>,
     /// Bound live-view identity when web/app views share the foreground runtime.
     pub live_binding: Option<atomcode_daemon::live_hub::LiveBinding>,
@@ -3884,6 +3885,9 @@ pub struct ClipboardCheckState {
     /// Desired hint state most recently observed by the renderer or idle
     /// poller. A change produces exactly one redraw request.
     pub published_hint_hash: Option<u64>,
+    /// A background probe is already in flight. Prevents the idle poller from
+    /// stacking OS clipboard round-trips (large screenshots can take seconds).
+    pub probe_in_flight: bool,
 }
 
 /// Cheap content fingerprint for clipboard images. Hashes width, height, total
@@ -8419,6 +8423,10 @@ pub async fn run_loop(mut ctx: LoopCtx, renderer: &mut dyn Renderer) -> Result<E
             _ = config_poll_tick.tick() => {
                 let idle_boundary = matches!(app.state.phase, UiPhase::Idle)
                     && app.active_modal.is_none();
+                if idle_boundary {
+                    // Off-thread clipboard probe (never on keystroke path).
+                    schedule_clipboard_image_probe(&ctx.clipboard_check, &ctx.wake_tx);
+                }
                 let projection_changed = idle_boundary
                     && ctx.pending_provider_reload.is_none()
                     && retry_pending_provider_projection(&mut ctx, &mut app.state, renderer);
@@ -8786,6 +8794,10 @@ pub async fn run_loop(mut ctx: LoopCtx, renderer: &mut dyn Renderer) -> Result<E
             _ = config_poll_tick.tick() => {
                 let idle_boundary = matches!(app.state.phase, UiPhase::Idle)
                     && app.active_modal.is_none();
+                if idle_boundary {
+                    // Off-thread clipboard probe (never on keystroke path).
+                    schedule_clipboard_image_probe(&ctx.clipboard_check, &ctx.wake_tx);
+                }
                 let projection_changed = idle_boundary
                     && ctx.pending_provider_reload.is_none()
                     && retry_pending_provider_projection(&mut ctx, &mut app.state, renderer);
@@ -21946,10 +21958,9 @@ mod session_naming_tests {
 /// Build the persistent status line shown directly below the input box.
 /// Pulls model name from ctx, cwd from ctx.working_dir (with $HOME
 /// collapsed to `~`), and running token count from state.
-/// Probe the system clipboard for an image, memoising the result inside
-/// the supplied cache for `CLIPBOARD_HINT_TTL_MS`. `build_status` calls
-/// this on every redraw, so without caching every spinner tick (~12/s
-/// during streaming) would round-trip to the platform clipboard API.
+/// Background clipboard probes are rate-limited to this interval. The
+/// status line only *reads* the cache (never probes) so keystroke redraws
+/// stay cheap even when the last probe took seconds on a huge screenshot.
 const CLIPBOARD_HINT_TTL_MS: u64 = 1500;
 const CLIPBOARD_HINT_DISPLAY_SECS: u64 = 6;
 
@@ -22002,15 +22013,56 @@ fn publish_clipboard_hint(state: &mut ClipboardCheckState, hint_hash: Option<u64
 fn clipboard_image_hint_state(
     cache: &std::sync::Mutex<ClipboardCheckState>,
     pending_image_hashes: &[u64],
-    probe_clipboard: bool,
 ) -> (Option<u64>, bool) {
+    // Read-only against the cache. Never call `Clipboard::get_image` here —
+    // that path used to run on every keystroke via `build_status` →
+    // `redraw_idle_plain`, and a large screenshot (common) blocked the TUI
+    // event loop for hundreds of ms to several seconds ("input is dead").
     let mut state = cache.lock().unwrap_or_else(|e| e.into_inner());
     let now = std::time::Instant::now();
-    let stale = state
-        .last_checked
-        .map(|t| t.elapsed() >= std::time::Duration::from_millis(CLIPBOARD_HINT_TTL_MS))
-        .unwrap_or(true);
-    if probe_clipboard && stale {
+    let hint_hash = active_clipboard_hint(&mut state, pending_image_hashes, now);
+    let changed = publish_clipboard_hint(&mut state, hint_hash);
+    (hint_hash, changed)
+}
+
+fn clipboard_image_hint_hash(
+    cache: &std::sync::Mutex<ClipboardCheckState>,
+    pending_image_hashes: &[u64],
+) -> Option<u64> {
+    clipboard_image_hint_state(cache, pending_image_hashes).0
+}
+
+fn clipboard_image_hint_changed(
+    cache: &std::sync::Mutex<ClipboardCheckState>,
+    pending_image_hashes: &[u64],
+) -> bool {
+    clipboard_image_hint_state(cache, pending_image_hashes).1
+}
+
+/// Kick a background OS clipboard image probe when the cache is stale.
+///
+/// Must never run on the keystroke path. Large RGBA clipboard payloads
+/// (screenshots) make `arboard`/`get_image` take seconds; doing that on the
+/// main TUI thread freezes input. Results land via `wake_tx` → idle redraw.
+fn schedule_clipboard_image_probe(
+    cache: &std::sync::Arc<std::sync::Mutex<ClipboardCheckState>>,
+    wake_tx: &mpsc::Sender<()>,
+) {
+    {
+        let mut state = cache.lock().unwrap_or_else(|e| e.into_inner());
+        let stale = state
+            .last_checked
+            .map(|t| t.elapsed() >= std::time::Duration::from_millis(CLIPBOARD_HINT_TTL_MS))
+            .unwrap_or(true);
+        if !stale || state.probe_in_flight {
+            return;
+        }
+        state.probe_in_flight = true;
+    }
+
+    let cache = std::sync::Arc::clone(cache);
+    let wake_tx = wake_tx.clone();
+    std::thread::spawn(move || {
         let observation = match arboard::Clipboard::new() {
             Ok(mut clipboard) => match clipboard.get_image() {
                 Ok(img) => Ok(Some(rgba_fingerprint(
@@ -22023,37 +22075,49 @@ fn clipboard_image_hint_state(
             },
             Err(_) => Err(()),
         };
-        apply_clipboard_observation(&mut state, observation, now);
-        state.last_checked = Some(now);
-    }
-    let hint_hash = active_clipboard_hint(&mut state, pending_image_hashes, now);
-    let changed = publish_clipboard_hint(&mut state, hint_hash);
-    (hint_hash, changed)
-}
-
-fn clipboard_image_hint_hash(
-    cache: &std::sync::Mutex<ClipboardCheckState>,
-    pending_image_hashes: &[u64],
-) -> Option<u64> {
-    clipboard_image_hint_state(cache, pending_image_hashes, true).0
-}
-
-fn clipboard_image_hint_changed(
-    cache: &std::sync::Mutex<ClipboardCheckState>,
-    pending_image_hashes: &[u64],
-) -> bool {
-    // The idle tick exists to repaint an expired/consumed hint, not to copy
-    // potentially tens of MB of RGBA clipboard data in the background.
-    clipboard_image_hint_state(cache, pending_image_hashes, false).1
+        let now = std::time::Instant::now();
+        let changed = {
+            let mut state = cache.lock().unwrap_or_else(|e| e.into_inner());
+            apply_clipboard_observation(&mut state, observation, now);
+            state.last_checked = Some(now);
+            state.probe_in_flight = false;
+            // Expire/publish so wake → redraw_idle_plain sees the new hint.
+            let hint_hash = active_clipboard_hint(&mut state, &[], now);
+            publish_clipboard_hint(&mut state, hint_hash)
+        };
+        if changed {
+            let _ = wake_tx.blocking_send(());
+        }
+    });
 }
 
 #[cfg(test)]
 mod clipboard_hint_tests {
     use super::{
-        active_clipboard_hint, apply_clipboard_observation, observe_clipboard_image,
-        publish_clipboard_hint, rgba_fingerprint, ClipboardCheckState,
+        active_clipboard_hint, apply_clipboard_observation, clipboard_image_hint_hash,
+        observe_clipboard_image, publish_clipboard_hint, rgba_fingerprint, ClipboardCheckState,
     };
+    use std::sync::Mutex;
     use std::time::{Duration, Instant};
+
+    #[test]
+    fn status_hint_hash_is_cache_only_never_requires_fresh_probe() {
+        // Regression: build_status used to call get_image() on every
+        // keystroke. The public hash helper must only read the cache so a
+        // huge screenshot cannot freeze the TUI when painting the status line.
+        let cache = Mutex::new(ClipboardCheckState {
+            image_hash: Some(42),
+            last_checked: Some(Instant::now()),
+            hint_hash: Some(42),
+            hint_deadline: Some(Instant::now() + Duration::from_secs(30)),
+            published_hint_hash: None,
+            probe_in_flight: false,
+        });
+        assert_eq!(clipboard_image_hint_hash(&cache, &[]), Some(42));
+        // Second call still cache-only; does not clear or re-probe.
+        assert_eq!(clipboard_image_hint_hash(&cache, &[]), Some(42));
+        assert!(!cache.lock().unwrap().probe_in_flight);
+    }
 
     #[test]
     fn image_hint_is_one_shot_until_clipboard_content_changes() {

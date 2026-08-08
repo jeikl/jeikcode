@@ -227,12 +227,12 @@ export async function watchChatSession(
 }
 
 /**
- * Detach a local `/chat` stream without orphaning its daemon operation.
+ * Explicitly cancel a detached /chat turn (local abort + POST /chat/stop).
  *
- * Session switches cannot keep consuming the old SSE response, but aborting
- * fetch alone does not prove the daemon turn stopped. Abort the local reader
- * immediately, then use the existing cancellation endpoint; callers must
- * surface rejection because the old turn may still own the runtime.
+ * Use only when the user intends to stop the turn (e.g. Stop button on a
+ * detached_active session). Do NOT call this on sidebar session switches —
+ * switching views must leave the daemon turn running so the user can return
+ * and reattach via /chat/active (same as a page refresh).
  */
 export async function cancelDetachedChat(
   requestId: string,

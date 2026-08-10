@@ -1,0 +1,680 @@
+# atomcode-sdk
+
+AtomCode **serve 兼容层** 的 Python 客户端与流式解析库。
+
+- 对接 `atomcode --host/--port` / `atomcode serve` 暴露的 OpenAI / Anthropic 兼容 HTTP 接口  
+- 把三种协议的 SSE **统一**成双栏事件：`reasoning`（思考 + 工具 + 子代理）与 `content`（正式回答）  
+- **不打包进** `atomcode.exe`：本目录与 `atomcode` 主工程**同级、独立**，需单独 `pip install`
+
+| 项 | 说明 |
+|----|------|
+| 包路径 | `agents/atomcode-sdk/`（与 `atomcode` / `opencode` / `grok-build` **同级**） |
+| 包名 | `atomcode-sdk`（import 名：`atomcode_sdk`） |
+| Python | ≥ 3.10 |
+| 依赖 | `httpx` |
+
+---
+
+## 目录
+
+1. [安装](#1-安装)  
+2. [前置：启动 AtomCode 服务](#2-前置启动-atomcode-服务)  
+3. [5 分钟上手](#3-5-分钟上手)  
+4. [reasoning 合一流（核心行为）](#4-reasoning-合一流核心行为)  
+5. [三种协议 API](#5-三种协议-api)  
+6. [会话与模型](#6-会话与模型)  
+7. [多模态输入](#7-多模态输入)  
+8. [仅解析 SSE（不发 HTTP）](#8-仅解析-sse不发-http)  
+9. [类型与事件说明](#9-类型与事件说明)  
+10. [异步客户端](#10-异步客户端)  
+11. [与服务端协议对照](#11-与服务端协议对照)  
+12. [示例脚本与测试](#12-示例脚本与测试)  
+13. [常见问题](#13-常见问题)  
+
+---
+
+## 1. 安装
+
+```bash
+# 在 agents 工作区根目录下
+cd atomcode-sdk
+pip install -e .
+
+# 开发 / 跑测试
+pip install -e ".[dev]"
+pytest -q
+```
+
+可选环境变量（示例脚本会读）：
+
+| 变量 | 含义 |
+|------|------|
+| `ATOMCODE_BASE` | 服务根地址，默认 `http://127.0.0.1:4096` |
+| `ATOMCODE_TOKEN` | Bearer token（与 WebUI 相同） |
+| `ATOMCODE_MODEL` | 模型 selection id |
+
+---
+
+## 2. 前置：启动 AtomCode 服务
+
+```bash
+# 本机
+atomcode --host 127.0.0.1 --port 4096
+
+# 局域网（注意 token 安全）
+atomcode --host 0.0.0.0 --port 4096
+```
+
+启动横幅里会打印：
+
+- WebUI / attach 地址  
+- 兼容 API：`/v1/models`、`/v1/chat/completions`、`/v1/responses`、`/v1/messages`、`/v1/sessions`  
+
+鉴权：
+
+- 默认：请求头 `Authorization: Bearer <token>`（与 WebUI 一致）
+- 服务端可用 `atomcode serve --host 0.0.0.0 --port 4096 --token sk-xxx` 固定 token
+- 同一 token 同时兼容：
+  - OpenAI：`Authorization: Bearer` / `api-key` / `OPENAI_API_KEY`
+  - Anthropic：`x-api-key` / `ANTHROPIC_API_KEY`
+- 若使用 `atomcode serve --no-token`：可不传 token（仅可信网络）
+---
+
+## 3. 5 分钟上手
+
+### 3.1 流式双栏（推荐做 UI）
+
+```python
+from atomcode_sdk import AtomCodeClient
+
+client = AtomCodeClient(
+    "http://127.0.0.1:4096",
+    token="YOUR_TOKEN",   # --no-token 时可省略
+)
+
+for ev in client.chat.stream(
+    model="AtomGit/GLM-5.2",   # GET /v1/models 的 id = account/model
+    user="alice_proj1",          # 会话 key：相同则续聊，不同则新会话
+    system="用中文简洁回答",     # 会拼到 AGENTS/glossary 等之后
+    messages=[{"role": "user", "content": "看一下 README 并总结"}],
+):
+    # 左栏 / 思考区：模型思考 + 正在调用工具 + 子代理进度
+    if ev.reasoning_delta:
+        print(ev.reasoning_delta, end="", flush=True)
+
+    # 右栏 / 正文：正式回答
+    if ev.content_delta:
+        print(ev.content_delta, end="", flush=True)
+
+    if ev.type.value == "error":
+        raise RuntimeError(ev.error)
+
+    if ev.type.value == "done":
+        print("\n--- done ---")
+        print("session_id:", ev.session_id)
+        print("user:", ev.user)
+```
+
+### 3.2 一次收齐（脚本 / 批处理）
+
+```python
+result = client.chat.run(
+    model="your-selection-id",
+    user="alice_proj1",
+    messages=[{"role": "user", "content": "看一下 README"}],
+)
+
+print("=== reasoning ===")
+print(result.reasoning)
+print("=== content ===")
+print(result.content)
+print(result.session_id, result.user, result.ok)
+```
+
+### 3.3 命令行示例
+
+```bash
+export ATOMCODE_BASE=http://127.0.0.1:4096
+export ATOMCODE_TOKEN=...
+export ATOMCODE_MODEL=...
+
+python examples/stream_chat.py "用一句话介绍当前项目"
+```
+
+---
+
+## 4. reasoning 合一流（核心行为）
+
+服务端会推送：模型思考、并行工具、`task` 子代理进度等。SDK 在客户端把它们**合成一条 reasoning 时间线**，方便 UI 只绑一个「思考过程」组件。
+
+### 4.1 展示形态（示例）
+
+```text
+先读项目说明再决定改哪里。
+正在调用 read
+正在调用 task
+子代理 explore#1: 排队中
+子代理 explore#1: 分析 auth 模块 [glm]
+子代理 worker#2: 改代码中
+工具 task 完成 (1200ms)
+```
+
+| 来源 | 写入 reasoning 的文案 |
+|------|------------------------|
+| 模型 thinking / `reasoning_content` | 原文增量 |
+| 工具开始 | `正在调用 {name}` |
+| 子代理进度 | `子代理 {id}: {message/状态} [model] tokens=…` |
+| 工具结束（默认开） | `工具 {name} 完成/失败 (Nms)` |
+| 工具 stdout 流 | **默认不写入**（太吵）；可 `include_tool_output_in_reasoning=True` |
+
+**正式回答只在 `content` / `content_delta`，不会混进工具过程。**
+
+### 4.2 并行与子代理
+
+- 多个工具用稳定 **`call_id`** 区分，可交错到达；客户端不要用「最后一个工具」猜测。  
+- `task` 下的 `explore#1` / `worker#2` 等出现在 **父工具** 的 `children` / `progress` 上，并同步变成 reasoning 行。  
+
+### 4.3 输出强度 `reasoning_effort`
+
+控制 **客户端 reasoning 栏** 显示多少（服务端仍完整跑思考/工具；结构化 `tool`/`subagent` 事件仍会发出）。
+
+| 值 | 思考细节 | 工具调用 / 子代理 | 正式正文 |
+
+> **注意**：官方 `openai` Python SDK 默认只打印 `delta.content`，**看不到**
+> `reasoning_content` / 服务端工具扩展。要用思考/工具/子代理时间线请用
+> **atomcode-sdk**，并设 `reasoning_effort="max"`（或 `ATOMCODE_REASONING_EFFORT=max`）。
+> 服务端也会把「正在调用… / 子代理…」镜像进 `reasoning_content`，便于自定义打印。
+|----|----------|-------------------|----------|
+| **`low`** | ✗ | ✗ | ✓ |
+| **`medium`**（默认） | ✗ | ✓ | ✓ |
+| **`max`** | ✓ | ✓ | ✓ |
+
+别名：`min`→low，`med`/`default`→medium，`high`/`full`→max。
+
+```python
+from atomcode_sdk import AtomCodeClient, ReasoningEffort
+
+# 默认 medium：工具 + 子代理 + 正文，不要模型推理全文
+for ev in client.chat.stream(messages=[...], reasoning_effort="medium"):
+    ...
+
+# 只要正文
+for ev in client.chat.stream(messages=[...], reasoning_effort=ReasoningEffort.LOW):
+    ...
+
+# 全量：思考 + 工具 + 子代理 + 正文
+for ev in client.chat.stream(messages=[...], reasoning_effort="max"):
+    ...
+
+# 工具 stdout 摘要也进 reasoning（仅 medium/max 有意义）
+for ev in client.chat.stream(
+    messages=[...],
+    reasoning_effort="max",
+    include_tool_output_in_reasoning=True,
+):
+    ...
+```
+
+CLI：
+
+```bash
+# 默认 medium
+python examples/stream_all_sync.py chat -p "hi"
+
+# 仅正文
+python examples/stream_all_sync.py chat --reasoning-effort low -p "hi"
+
+# 全量过程
+python examples/stream_all_sync.py chat --effort max -s "用中文" -p "hi"
+
+# 环境变量
+export ATOMCODE_REASONING_EFFORT=max
+```
+
+`ReasoningComposer` 还可单独使用（自定义文案时）：
+
+```python
+from atomcode_sdk import ReasoningComposer, ReasoningEffort
+
+composer = ReasoningComposer(effort=ReasoningEffort.MEDIUM)
+```
+
+---
+
+## 5. 三种协议 API
+
+SDK 对同一服务暴露三套入口，语义一致（只取**最新 user 消息**；历史由 AtomCode 会话管理；`user` 为会话 key）。
+
+| SDK | HTTP | 说明 |
+|-----|------|------|
+| `client.chat.stream` / `.run` | `POST /v1/chat/completions` | OpenAI Chat Completions |
+| `client.responses.stream` / `.run` | `POST /v1/responses` | OpenAI Responses |
+| `client.messages.stream` / `.run` | `POST /v1/messages` | Anthropic Messages |
+| `client.list_models` | `GET /v1/models` | 模型列表（`id` 统一为 `account/model`，如 `AtomGit/GLM-5.2`） |
+| `client.list_sessions` | `GET /v1/sessions` | 会话列表 |
+
+### Chat Completions
+
+```python
+for ev in client.chat.stream(
+    model="sel-id",
+    user="thread_a",
+    system="简洁",                 # 可选；映射为 messages 里的 system
+    messages=[{"role": "user", "content": "…"}],
+    extra_body={"…": "…"},         # 可选透传
+):
+    ...
+
+result = client.chat.run(...)      # → TurnResult
+raw = client.chat.create(..., stream=False)  # 原始 JSON（非流）
+```
+
+### Responses
+
+```python
+for ev in client.responses.stream(
+    model="sel-id",
+    user="thread_a",
+    instructions="简洁",           # 系统侧说明
+    input="列出目录",              # 或 messages=[...]
+):
+    ...
+
+result = client.responses.run(input="列出目录", user="thread_a", model="sel-id")
+```
+
+### Anthropic Messages
+
+```python
+for ev in client.messages.stream(
+    model="sel-id",
+    user="thread_a",
+    system="简洁",
+    messages=[{"role": "user", "content": "列出目录"}],
+):
+    ...
+
+result = client.messages.run(...)
+```
+
+三种 `stream` 产出的都是同一套 `StreamEvent`，UI 代码可共用。
+
+---
+
+## 6. 会话与模型
+
+### 6.1 `user` = 会话 key
+
+- 传入 `user="alice_proj1"` / `"chat-42"` / `"tenant_a-chat_3"` 等  
+- **相同 key** → 恢复 AtomCode 侧同名会话  
+- **不同 key** → 新建会话  
+- **省略** → 每次临时新会话  
+
+查询：
+
+```python
+client.list_sessions()
+client.list_sessions(user="alice_proj1")
+```
+
+### 6.2 `model`
+
+使用服务端 catalog 的 **selection id**（或可解析的 wire 模型名）：
+
+```python
+models = client.list_models()
+# OpenAI 形：{"object":"list","data":[{"id":"…","root":"…"}, …]}
+```
+
+每轮请求的 `model` 立即生效（换模型不必重开进程）。
+
+### 6.3 `system` / `instructions`
+
+客户端 system 会拼到 AtomCode 已加载的 AGENTS.md / glossary / db 等 **之后**，不会覆盖项目指令。
+
+---
+
+## 7. 多模态输入
+
+与 OpenAI 兼容的 content parts（Chat Completions / 部分 Responses）：
+
+```python
+messages = [{
+    "role": "user",
+    "content": [
+        {"type": "text", "text": "图里有什么？"},
+        {
+            "type": "image_url",
+            "image_url": {"url": "data:image/png;base64,iVBORw0KGgo..."},
+        },
+        {
+            "type": "image_url",
+            "image_url": {"url": "https://example.com/a.png"},
+        },
+    ],
+}]
+
+for ev in client.chat.stream(messages=messages, user="vision_1", model="…"):
+    ...
+```
+
+Anthropic 风格由 `client.messages` 传 `content` 块（`type: image` + `source`）即可。
+
+---
+
+## 8. 仅解析 SSE（不发 HTTP）
+
+适合：抓包回放、网关转发后再解析、单测。
+
+```python
+from atomcode_sdk import StreamParser, Protocol, collect_events
+
+# 协议三选一
+parser = StreamParser(Protocol.CHAT_COMPLETIONS)
+# parser = StreamParser(Protocol.RESPONSES)
+# parser = StreamParser(Protocol.MESSAGES)
+
+sse_text = open("capture.sse", encoding="utf-8").read()
+
+for ev in parser.feed_sse_text(sse_text):
+    if ev.reasoning_delta:
+        print(ev.reasoning_delta, end="")
+    if ev.content_delta:
+        print(ev.content_delta, end="")
+
+# 或一次收齐
+result = collect_events(parser.feed_sse_text(sse_text))
+```
+
+按行喂：
+
+```python
+for ev in parser.feed_sse_lines(open("capture.sse", encoding="utf-8")):
+    ...
+```
+
+---
+
+## 9. 类型与事件说明
+
+### 9.1 `StreamEvent`
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| `type` | `StreamEventType` | `reasoning` / `content` / `tool` / `subagent` / `runtime` / `done` / `error` |
+| `reasoning_delta` | `str` | 本帧增量（思考或工具/子代理文案） |
+| `content_delta` | `str` | 本帧正式回答增量 |
+| `reasoning` | `str` | 截至本帧的完整 reasoning |
+| `content` | `str` | 截至本帧的完整 content |
+| `tool` | `ToolState?` | 结构化工具卡 |
+| `subagent` | `SubagentState?` | 结构化子代理行 |
+| `session_id` | `str?` | 结束时常见 |
+| `user` | `str?` | 会话 key 回显 |
+| `stop_reason` | `str?` | 服务端停止原因 |
+| `model` | `str?` | 模型 |
+| `error` | `str?` | 错误信息 |
+| `is_terminal` | `bool` | `done` 或 `error` |
+
+### 9.2 `TurnResult`（`run()` / `collect_events()`）
+
+| 字段 | 说明 |
+|------|------|
+| `reasoning` | 完整思考时间线 |
+| `content` | 完整正式回答 |
+| `session_id` / `user` / `model` / `stop_reason` | 元数据 |
+| `error` | 若有错误 |
+| `tools` | `dict[call_id, ToolState]` |
+| `ok` | `error is None` |
+| `to_dict()` | 可 JSON 序列化摘要 |
+
+### 9.3 `ToolState` / `SubagentState`
+
+```text
+ToolState
+  id, index, name, arguments
+  status: in_progress | completed | failed
+  output, success, duration_ms, batch_id
+  children: { subagent_id: SubagentState }
+
+SubagentState
+  id, state(queued|running|completed|failed)
+  label, message, model, description, tokens
+  parent_call_id
+```
+
+### 9.4 简单 UI 状态机
+
+```python
+reasoning_buf = []
+content_buf = []
+
+for ev in client.chat.stream(...):
+    if ev.reasoning_delta:
+        reasoning_buf.append(ev.reasoning_delta)
+        # render_reasoning("".join(reasoning_buf))
+    if ev.content_delta:
+        content_buf.append(ev.content_delta)
+        # render_content("".join(content_buf))
+    if ev.type.value == "tool" and ev.tool:
+        # 可选：按 ev.tool.id 更新工具卡片
+        pass
+    if ev.type.value == "subagent" and ev.subagent:
+        # 可选：更新子代理行
+        pass
+```
+
+---
+
+## 10. 异步客户端
+
+```python
+import asyncio
+from atomcode_sdk import AsyncAtomCodeClient
+
+async def main():
+    async with AsyncAtomCodeClient("http://127.0.0.1:4096", token="…") as client:
+        # 流式
+        async for ev in client.chat.stream(
+            messages=[{"role": "user", "content": "hi"}],
+            user="u1",
+            model="m",
+        ):
+            if ev.reasoning_delta:
+                print(ev.reasoning_delta, end="")
+            if ev.content_delta:
+                print(ev.content_delta, end="")
+
+        # 或一次收齐
+        result = await client.chat.run(
+            messages=[{"role": "user", "content": "hi"}],
+            user="u1",
+            model="m",
+        )
+        print(result.reasoning, result.content)
+
+asyncio.run(main())
+```
+
+`AsyncAtomCodeClient` 同样提供 `.responses` / `.messages` / `list_models` / `list_sessions`。
+
+---
+
+## 11. 与服务端协议对照
+
+SDK **不要求**你手写 SSE 字段；下面仅供对照调试。
+
+### Chat Completions（摘要）
+
+- 思考：`delta.reasoning_content`  
+- 正文：`delta.content`  
+- 工具：`delta.tool_calls[]`（`id` / `index` / `status` / `function` / `output_delta` / `progress` / `children`）  
+- 结束：`atomcode.done` + `[DONE]`  
+
+### Responses（摘要）
+
+- `response.reasoning.delta` / `response.output_text.delta`  
+- `response.output_item.added`（`function_call`）  
+- `response.function_call_arguments.done`  
+- `response.function_call_output.delta` / `.done`  
+- `response.function_call_progress`（子代理，扩展）  
+- `response.completed`  
+
+### Anthropic Messages（摘要）
+
+- `thinking_delta` / `text_delta`  
+- 多个 `tool_use` content block（并行）  
+- `tool_progress` / `tool_output_delta` / `tool_result`（服务端执行扩展）  
+- `message_stop`  
+
+服务端行为要点（与 SDK 无关但常踩坑）：
+
+1. **只取最新 user query**，客户端多轮 history 不作为上下文源  
+2. 上下文由 AtomCode 会话 + AGENTS/glossary 等管理  
+3. 工具在**服务端**执行，不是「返回 tool_calls 让客户端再调」的经典代理模式  
+
+---
+
+## 12. 示例脚本与测试
+
+```text
+agents/
+  atomcode/          # AtomCode 主工程（Rust）
+  opencode/
+  grok-build/
+  atomcode-sdk/      # 本 SDK（Python，与上述工程同级）
+    atomcode_sdk/
+    examples/
+      _common.py                      # 公共：参数 / 双栏打印 / 错误处理
+      stream_all_sync.py              # 三种协议同步流式（推荐入口）
+      stream_all_async.py             # 三种协议异步流式
+      stream_run_collect.py           # 收齐 reasoning+content（可 --json）
+      stream_with_system_and_vision.py# system + 图片多模态
+      stream_chat.py                  # 兼容旧入口 → chat
+      sys.example.txt                 # 系统提示词样例
+    tests/
+    README.md
+    pyproject.toml
+```
+
+### 12.1 三种格式 · 同步流式（推荐）
+
+```bash
+cd atomcode-sdk
+export ATOMCODE_BASE=http://127.0.0.1:4096
+export ATOMCODE_TOKEN=...          # --no-token 服务可省略
+export ATOMCODE_MODEL=...          # 可选
+
+# Chat Completions + 内联 system
+python examples/stream_all_sync.py chat \
+  --system "用中文，先思考再回答" \
+  -p "总结当前项目"
+
+# 系统提示词从文件
+python examples/stream_all_sync.py chat \
+  --system-file examples/sys.example.txt \
+  --user demo_thread_1 \
+  -p "按系统提示回答"
+
+# OpenAI Responses（system → instructions）
+python examples/stream_all_sync.py responses \
+  -s "简洁" \
+  --user resp_demo \
+  -p "列出工作区要点"
+
+# Anthropic Messages
+python examples/stream_all_sync.py messages \
+  --system-file examples/sys.example.txt \
+  -p "hi"
+
+# 同一 prompt 连续跑三种协议（对比 SSE 形状）
+python examples/stream_all_sync.py all -s "用中文" -p "一句话介绍自己"
+
+# 临时会话（不传 user）
+python examples/stream_all_sync.py chat --no-user -p "hi"
+
+# 工具 stdout 也进 reasoning
+python examples/stream_all_sync.py chat --include-tool-output -p "跑一下 ls"
+```
+
+终端会打印两栏：
+
+1. **reasoning** — 思考 / `正在调用 …` / `子代理 …`  
+2. **content** — 正式回答  
+
+### 12.2 三种格式 · 异步流式
+
+```bash
+python examples/stream_all_async.py chat -s "用中文" -p "hi"
+python examples/stream_all_async.py responses --user async_1 -p "列目录"
+python examples/stream_all_async.py messages --system-file examples/sys.example.txt -p "hi"
+python examples/stream_all_async.py all -s "简洁" -p "一句话"
+```
+
+### 12.3 收齐为完整文本 / JSON
+
+```bash
+python examples/stream_run_collect.py chat -s "简洁" -p "hi"
+python examples/stream_run_collect.py responses -p "hi" --json
+python examples/stream_run_collect.py messages --system-file examples/sys.example.txt -p "hi"
+```
+
+### 12.4 system + 图片
+
+```bash
+python examples/stream_with_system_and_vision.py \
+  --system-file examples/sys.example.txt \
+  --image ./shot.png \
+  -p "图里有什么？"
+```
+
+### 12.5 单测
+
+```bash
+cd atomcode-sdk
+pytest -q
+```
+
+---
+
+## 13. 常见问题
+
+### 会打进 atomcode.exe 吗？
+
+**不会。** 本包与 `atomcode` 主工程**同级、独立**，不在 `atomcode/crates` 或 `atomcode/packages` 内，不参与 Rust 二进制链接。需要时在业务环境单独 `pip install`。
+
+### 为什么不放在 atomcode 仓库里？
+
+便于单独分发、版本与业务客户端对齐，且避免和 AtomCode 的 npm/homebrew 等 packaging 混在一起。服务端仍是 `atomcode` 二进制。
+
+### 和官方 OpenAI Python SDK 能混用吗？
+
+可以拿 `base_url` 指向 AtomCode 调部分接口，但 **不会**得到本 SDK 的 reasoning 合流与子代理结构化解析。要双栏体验请用本包。
+
+### `user` 和 OpenAI 的 user 字段一样吗？
+
+字段名兼容；语义上 AtomCode 把它当作 **会话 key**（可含 `_`、`-`），用于命名/恢复会话，不是计费 user id。
+
+### 为什么 content 里没有工具日志？
+
+设计如此：工具与子代理进 **reasoning**，避免污染最终回答。若要在 UI 单独画工具卡，读 `ev.tool` / `ev.subagent`。
+
+### 超时？
+
+默认 httpx timeout 约 600s（agent 长任务）。可构造时传入：
+
+```python
+import httpx
+client = AtomCodeClient(base, token=tok, timeout=httpx.Timeout(1200.0))
+```
+
+### 错误怎么处理？
+
+- HTTP 层：`httpx` 抛 `HTTPStatusError`  
+- 流内：`ev.type == StreamEventType.ERROR`，见 `ev.error`  
+- `TurnResult.ok` / `TurnResult.error`  
+
+---
+
+## 许可证
+
+与 AtomCode 主仓库一致（见 `atomcode/LICENSE`）。

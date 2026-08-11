@@ -8430,6 +8430,9 @@ pub async fn run_loop(mut ctx: LoopCtx, renderer: &mut dyn Renderer) -> Result<E
                     && ctx.pending_provider_reload.is_none()
                     && retry_pending_provider_projection(&mut ctx, &mut app.state, renderer);
                 let config_changed = idle_boundary && poll_external_config(&mut ctx);
+                if config_changed {
+                    crate::sync_history_replay_config(renderer, &ctx.config, &ctx.caps);
+                }
                 let auth_changed = poll_external_auth(&mut ctx);
                 let clipboard_hint_changed = idle_boundary
                     && clipboard_image_hint_changed(
@@ -8614,7 +8617,7 @@ pub async fn run_loop(mut ctx: LoopCtx, renderer: &mut dyn Renderer) -> Result<E
                         // The end of a turn is the first safe provider reload
                         // boundary. Reconcile before draining type-ahead so the
                         // next queued message cannot start on the stale model.
-                        let config_redraw = poll_shared_state(&mut ctx);
+                        let config_redraw = poll_shared_state(&mut ctx, renderer);
                         // Pop exactly one FIFO entry only when a natural
                         // TurnFinished (or an explicitly held idle submit)
                         // authorized it. Other idle events may redraw, but can
@@ -8744,6 +8747,9 @@ pub async fn run_loop(mut ctx: LoopCtx, renderer: &mut dyn Renderer) -> Result<E
                     && ctx.pending_provider_reload.is_none()
                     && retry_pending_provider_projection(&mut ctx, &mut app.state, renderer);
                 let config_changed = idle_boundary && poll_external_config(&mut ctx);
+                if config_changed {
+                    crate::sync_history_replay_config(renderer, &ctx.config, &ctx.caps);
+                }
                 let auth_changed = poll_external_auth(&mut ctx);
                 let clipboard_hint_changed = idle_boundary
                     && clipboard_image_hint_changed(
@@ -8950,7 +8956,7 @@ pub async fn run_loop(mut ctx: LoopCtx, renderer: &mut dyn Renderer) -> Result<E
                         draw_spinner_now(&mut app.state, &app.buf, &ctx, renderer, app.message_queue.len(), app.menu.selected);
                     }
                     if matches!(app.state.phase, UiPhase::Idle) {
-                        let config_redraw = poll_shared_state(&mut ctx);
+                        let config_redraw = poll_shared_state(&mut ctx, renderer);
                         if !app.queue_drain_authorized {
                             redraw_idle_plain(&app.buf, &app.state, &ctx, renderer);
                         } else if provider_transition_blocks_queue_drain(
@@ -10469,8 +10475,11 @@ fn poll_external_auth(ctx: &mut LoopCtx) -> bool {
     true
 }
 
-fn poll_shared_state(ctx: &mut LoopCtx) -> bool {
+fn poll_shared_state(ctx: &mut LoopCtx, renderer: &mut dyn Renderer) -> bool {
     let config_changed = poll_external_config(ctx);
+    if config_changed {
+        crate::sync_history_replay_config(renderer, &ctx.config, &ctx.caps);
+    }
     let auth_changed = poll_external_auth(ctx);
     config_changed || auth_changed
 }
@@ -10700,7 +10709,7 @@ fn handle_input(
 
     if matches!(app.state.phase, UiPhase::Idle)
         && app.active_modal.is_none()
-        && poll_shared_state(ctx)
+        && poll_shared_state(ctx, renderer)
     {
         redraw_idle_plain(&app.buf, &app.state, ctx, renderer);
     }
@@ -18577,6 +18586,7 @@ fn handle_runtime_event(
                     let previous_language = ctx.config.language;
                     let (provider, model) = resolved_provider_and_model(&desired_config);
                     ctx.config = desired_config;
+                    crate::sync_history_replay_config(renderer, &ctx.config, &ctx.caps);
                     let language_changed = previous_language != ctx.config.language;
                     if language_changed {
                         crate::i18n::set_locale(atomcode_config::i18n::resolve_initial_locale(

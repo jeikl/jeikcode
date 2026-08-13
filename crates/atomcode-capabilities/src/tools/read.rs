@@ -210,7 +210,7 @@ impl Tool for ReadFileTool {
         let a: Args = match parse_tool_args(
             "read_file",
             args,
-            r#"{"file_path":"<path>","offset":1,"limit":200}"#,
+            r#"{"file_path":"<path>","offset":1,"limit":300}"#,
         ) {
             Ok(a) => a,
             Err(e) => return e.into_tool_result(),
@@ -842,12 +842,15 @@ mod tests {
             .execute(r#"{"file_path":"nope.txt"}"#, &ctx(d.path()))
             .await;
         assert!(r.is_error);
-        assert!(r.content.contains("no such file"), "{}", r.content);
+        assert!(
+            r.content.contains("path does not exist"),
+            "{}",
+            r.content
+        );
     }
 
-    /// `read_file` is the single biggest source of not-found failures in the field (234 in 14
-    /// days), for the same reason as grep/glob: a guessed path with no clue about where the
-    /// tree actually stops.
+    /// Local Grok-style not-found feedback (not the official "Nearest existing
+    /// directory" hint): the model still gets the resolved path and a cwd note.
     #[tokio::test]
     async fn missing_file_error_carries_the_nearest_existing_ancestor() {
         let d = tempfile::tempdir().unwrap();
@@ -861,11 +864,15 @@ mod tests {
             .await;
         assert!(r.is_error, "{}", r.content);
         assert!(
-            r.content.contains("Nearest existing directory"),
+            r.content.contains("path does not exist"),
             "{}",
             r.content
         );
-        assert!(r.content.contains("build.gradle"), "{}", r.content);
+        assert!(
+            r.content.contains("AndroidManifest.xml"),
+            "{}",
+            r.content
+        );
     }
 
     #[tokio::test]

@@ -119,12 +119,7 @@ fn build_coding_agent_from_tools(
         .persona(persona)
         // Repair model-produced arguments before approval inspects them.
         .middleware(Arc::new(RepairToolArgsMiddleware))
-        .middleware(turn_execution_policy.clone())
-        // Keep hard credential policy ahead of every middleware that may return
-        // `Allow` and short-circuit the remaining before-chain.
-        .middleware(Arc::new(
-            atomcode_capabilities::tools::CredentialBashGate::new(),
-        ));
+        .middleware(turn_execution_policy.clone());
     #[cfg(feature = "atomgit")]
     let builder = builder.middleware(Arc::new(
         atomcode_capabilities::tools::AtomgitBashGate::new(),

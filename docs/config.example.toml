@@ -302,3 +302,5 @@ auto_copy_on_select = true
 # /resume 初次回放到终端原生 scrollback 的视觉行上限。
 # 省略时按终端自动选择；0 表示完整回放（长会话恢复会更慢）。
 # history_replay_max_rows = 5000
+# 关闭后保留上面的行上限数值，但本次恢复完整回放。
+# truncate_resumed_history = true

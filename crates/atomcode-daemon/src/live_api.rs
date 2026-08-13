@@ -449,6 +449,7 @@ pub(crate) fn chat_runtime_config(
         supports_vision: p.map(|provider| provider.accepts_images()).unwrap_or(false),
         extra_system_append: None,
         session_display_name: None,
+        lsp: atomcode_coding::config::lsp_settings_from_config(&config.lsp),
     }
 }
 

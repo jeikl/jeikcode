@@ -25,8 +25,14 @@ use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock};
 
-const DEFAULT_MAX_FILES: usize = 8;
-const MAX_ALLOWED_FILES: usize = 20;
+const DEFAULT_MAX_FILES: usize = 12;
+const MAX_ALLOWED_FILES: usize = 30;
+
+/// How many flow-spine edges the mermaid diagram draws before falling back to a
+/// compact omitted-name list. The spine is ALWAYS computed in full (no per-edge
+/// truncation in `extract_flow_spine`); this only caps the drawing, and the
+/// Coverage summary reports shown/total so nothing is silently dropped.
+const MAX_SPINE_EDGES: usize = 32;
 
 /// Thread-safe session-level sent code ranges to avoid duplicate context bloat.
 static SESSION_SENT_SPANS: std::sync::LazyLock<RwLock<HashMap<String, Vec<(usize, usize)>>>> =
@@ -108,11 +114,17 @@ impl Tool for CodeExploreTool {
     fn description(&self) -> &str {
         "PRIMARY CODE INTELLIGENCE & FLOW EXPLORATION TOOL: One-shot surgical context retrieval. \
          Investigates how features work, traces execution flows from X to Y, finds root causes for bugs, \
-         or inspects symbols before editing. Returns the verbatim line-numbered source code (<line>\\t<code>, \
-         Read-equivalent, safe to edit from) grouped by file, along with full bidirectional call paths \
-         (callers/callees/dynamic dispatch) and blast radius. Query can be a natural language question in \
-         Chinese or English, or a list of symbols/files. ONE call delivers complete context — do NOT re-read \
-         the returned files with read_file."
+         or inspects symbols before editing. Returns the TOP-RANKED verbatim line-numbered source code \
+         (<line>\\t<code>, Read-equivalent, safe to edit from) grouped by file, with bidirectional call \
+         paths (callers/callees/dynamic dispatch) and blast radius. Query can be a natural language \
+         question in Chinese or English, or a list of symbols/files. \
+         IMPORTANT — this is a RANKED, BUDGETED retrieval, NOT an exhaustive listing: the output is \
+         capped by max_files (default 12) and per-file symbol caps, large functions are folded, and a \
+         session dedup may replace spans with [Already sent] placeholders. ALWAYS read the leading \
+         📊 Coverage summary for shown/total counts and omitted items, re-read folded spans with \
+         read_file when you need the full body, and treat a 0-hit result as INCONCLUSIVE (retry with \
+         synonyms / English terms / broader path, or check repo_map) — never conclude a feature is \
+         absent from one query alone."
     }
 
     fn parameters_schema(&self) -> serde_json::Value {
@@ -125,7 +137,7 @@ impl Tool for CodeExploreTool {
                 },
                 "max_files": {
                     "type": "integer",
-                    "description": "Maximum number of files to render source code from (default: 8, max: 20)"
+                    "description": "Maximum number of files to render source code from (default: 12, max: 30)"
                 },
                 "path": {
                     "type": "string",
@@ -264,13 +276,20 @@ impl Tool for CodeExploreTool {
 
             return ok(format!(
                 "🔍 Zero-Hit Diagnostic for query '{}':\n\
+                 ⚠️ **0 hits ≠ feature absent** — an empty result is INCONCLUSIVE, not proof the \
+                 feature does not exist (thresholds, per-file caps, index coverage, or synonyms can \
+                 all hide matches).\n\
                  - Scope Path: `{}` (Matched {} files in index, {} indexed symbols, Language Exts: {:?})\n\
                  - Workspace Total: {} symbols indexed across {} files\n\
                  - Query Analysis: {}\n\
                  - Diagnostic Assessment:\n\
                  {}  * Scope file(s) contained {} AST symbols in memory.\n\
                    * None of the symbols/comments matched query tokens with threshold >= 12.0.\n\
-                 👉 Tip: Verify symbol name case or check repo_map for available module exports.",
+                 👉 Suggested follow-ups (do at least one before concluding absence):\n\
+                    1. Retry with synonyms / English terms / a shorter keyword (thesaurus pairs).\n\
+                    2. Drop `path:`/`kind:`/`name:` filters or widen the scope.\n\
+                    3. Check `repo_map` for available modules/exports.\n\
+                    4. Grep the workspace for likely identifiers.",
                 a.query,
                 scope_desc,
                 files_in_scope.len(),
@@ -296,6 +315,7 @@ impl Tool for CodeExploreTool {
             &flow_spine,
             connected,
             max_files,
+            scope_path.as_deref(),
         );
 
         ok(output)
@@ -661,15 +681,24 @@ fn score_workspace_symbols(
     candidates
 }
 
-/// Trace flow spine bidirectionally from the highest-scoring seed symbols.
+/// Trace flow spine bidirectionally from the scored seed symbols.
+///
+/// COMPLETENESS CONTRACT: the spine is a true panorama, not a sample —
+/// every scored candidate symbol is a seed, and for each seed EVERY caller /
+/// callee within the hop budget is traced (no `.take()` truncation). The
+/// renderer may still cap the mermaid drawing, but it reports the omitted
+/// count/names via the Coverage line and the omitted-edge list.
 fn extract_flow_spine(
     graph: &CodeGraph,
     candidates: &[FileCandidate],
 ) -> (Vec<(SymbolId, Option<SymbolId>, EdgeKind)>, bool) {
+    // Seeds: every scored symbol in every candidate file (all already passed the
+    // >= 12 workspace bar), so a hit in a 5th-place symbol of a file is not
+    // starved of its own caller/callee panorama.
     let mut seeds = Vec::new();
-    for fc in candidates.iter().take(4) {
-        for s in fc.symbols.iter().take(3) {
-            if s.total_score >= 20.0 {
+    for fc in candidates {
+        for s in &fc.symbols {
+            if s.total_score >= 12.0 {
                 seeds.push(s.node.id);
             }
         }
@@ -684,13 +713,13 @@ fn extract_flow_spine(
 
     for &seed in &seeds {
         visited.insert(seed);
-        // Trace Callees (forward 2 hops)
+        // Trace Callees (forward 2 hops) — ALL of them.
         if let Some(callees) = graph.callees(seed) {
-            for e in callees.iter().take(4) {
+            for e in callees {
                 if visited.insert(e.to) {
                     spine_edges.push((seed, Some(e.to), e.kind.clone()));
                     if let Some(sub_callees) = graph.callees(e.to) {
-                        for sub_e in sub_callees.iter().take(2) {
+                        for sub_e in sub_callees {
                             if visited.insert(sub_e.to) {
                                 spine_edges.push((e.to, Some(sub_e.to), sub_e.kind.clone()));
                             }
@@ -699,11 +728,11 @@ fn extract_flow_spine(
                 }
             }
         }
-        // Trace Callers (backward 1 hop)
+        // Trace Callers (backward 1 hop) — ALL of them, preserving the edge kind.
         if let Some(callers) = graph.callers(seed) {
-            for e in callers.iter().take(3) {
+            for e in callers {
                 if visited.insert(e.to) {
-                    spine_edges.push((e.to, Some(seed), EdgeKind::Calls));
+                    spine_edges.push((e.to, Some(seed), e.kind.clone()));
                 }
             }
         }
@@ -711,6 +740,57 @@ fn extract_flow_spine(
 
     let connected = spine_edges.len() >= 2;
     (spine_edges, connected)
+}
+
+/// Collect directories NEAR the top-ranked hits: the hit's own directory, its
+/// direct subdirectories, and its parent directory — WITHOUT listing individual
+/// files (a directory can hold many files; the point is to point the model at
+/// where to look next, not to enumerate filenames). Only directories that
+/// actually contain indexed files are reported, and a `path:` scope is respected.
+fn collect_adjacent_dirs(
+    graph: &CodeGraph,
+    top_files: &[FileCandidate],
+    scope: Option<&Path>,
+    max_adjacent: usize,
+) -> Vec<PathBuf> {
+    // Directories that contain indexed files (respecting scope).
+    let mut indexed_dirs: HashSet<PathBuf> = HashSet::new();
+    for file in graph.file_symbols.keys() {
+        if let Some(sc) = scope {
+            if !path_matches_scope(file, sc) {
+                continue;
+            }
+        }
+        if let Some(dir) = file.parent() {
+            indexed_dirs.insert(dir.to_path_buf());
+        }
+    }
+
+    let mut near_dirs: HashSet<PathBuf> = HashSet::new();
+    for fc in top_files {
+        let Some(dir) = fc.file.parent() else { continue };
+        // The hit's own directory.
+        if indexed_dirs.contains(dir) {
+            near_dirs.insert(dir.to_path_buf());
+        }
+        // Direct subdirectories of the hit's directory.
+        for d in &indexed_dirs {
+            if d.parent().is_some_and(|p| p == dir) {
+                near_dirs.insert(d.clone());
+            }
+        }
+        // The hit's parent directory (sibling modules one level up).
+        if let Some(parent) = dir.parent() {
+            if indexed_dirs.contains(parent) {
+                near_dirs.insert(parent.to_path_buf());
+            }
+        }
+    }
+
+    let mut out: Vec<PathBuf> = near_dirs.into_iter().collect();
+    out.sort();
+    out.truncate(max_adjacent);
+    out
 }
 
 /// Render formatted explore output with multi-symbol extraction and merged spans.
@@ -722,17 +802,67 @@ fn render_explore_output(
     flow_spine: &[(SymbolId, Option<SymbolId>, EdgeKind)],
     connected: bool,
     max_files: usize,
+    scope: Option<&Path>,
 ) -> String {
     let mut out = Vec::new();
     let top_files = &candidates[..candidates.len().min(max_files)];
 
     out.push("> 💡 **Surgical Flow & Capsule Notice**: Primary execution flow, candidate spans, and file capability capsules are rendered below. To ensure complete coverage of edge cases or declarative configs, examine the **File Capability Capsule** or adjacent files in the same directory.\n".to_string());
 
+    // Scope + layered-architecture hint: a path-limited search is CONFINED to that
+    // scope — an interface may live here while its implementations / middleware
+    // registration live in sibling layers (crates/packages). Never conclude "the
+    // project lacks X" from a scope-confined hit set.
+    if let Some(sc) = scope {
+        let scope_disp = sc.strip_prefix(root).unwrap_or(sc).display().to_string();
+        out.push(format!(
+            "> 🔭 **Search scope**: `{scope_disp}` (path-limited). Results are confined to this \
+             scope — related code frequently lives in SIBLING layers (other crates/packages/dirs). \
+             If the top hits are interfaces/traits (or you see only a bare contract), the \
+             implementations are at `impl <name>` in other files: follow up with `code_explore` or \
+             grep before concluding the mechanism is absent.\n"
+        ));
+    }
+
+    // Trait/interface-hit hint: the top symbol being a contract is an ANCHOR-STRENGTHENING trap
+    // (a bare `Tool::execute(&str) -> ToolResult{is_error}` can look like "weak error handling"
+    // while the real logic lives in its impls). Surface the follow-up explicitly.
+    {
+        let has_contract = top_files.iter().take(4).any(|fc| {
+            fc.symbols.iter().take(4).any(|s| {
+                matches!(
+                    s.node.kind,
+                    SymbolKind::Trait | SymbolKind::Interface | SymbolKind::TypeAlias
+                )
+            })
+        });
+        if has_contract {
+            out.push(
+                "> 🧩 **Contract hit**: top results include a trait/interface/type-alias. This is the \
+                 DECLARATION, not the behavior — implementations live at `impl <name>` elsewhere. \
+                 Query `code_explore(\"impl <name>\")` or grep `impl <name>` to find every \
+                 implementation before judging the mechanism.\n".to_string(),
+            );
+        }
+    }
+
+    // Low-hit hint: a thin hit set is a WEAK signal — never let 1-2 files look conclusive.
+    // (The zero-hit branch already returned early with its own diagnostic; this covers 1..2.)
+    if !candidates.is_empty() && candidates.len() < 3 {
+        out.push(
+            "> 🎯 **Low hit count** (<3 candidate files): this is a WEAK match signal, not a \
+             confirmation. Run 2-3 more `code_explore` queries IN PARALLEL with synonyms / \
+             English terms / a narrower `name:` filter / a wider `path:` scope before drawing \
+             any conclusion — ranked retrieval can hide relevant code below its thresholds.\n"
+                .to_string(),
+        );
+    }
+
     if connected {
         out.push(format!("### 🔗 Flow Trace: \"{query}\"\n"));
         out.push("```mermaid".to_string());
         out.push("graph TD".to_string());
-        for (from, to, kind) in flow_spine.iter().take(16) {
+        for (from, to, kind) in flow_spine.iter().take(MAX_SPINE_EDGES) {
             let from_name = graph.node(*from).map(|n| n.name.as_str()).unwrap_or("unknown");
             if let Some(target) = to {
                 let to_name = graph.node(*target).map(|n| n.name.as_str()).unwrap_or("unknown");
@@ -745,6 +875,28 @@ fn render_explore_output(
                 };
                 out.push(format!("    {from_name} -->|{label}| {to_name}"));
             }
+        }
+        if flow_spine.len() > MAX_SPINE_EDGES {
+            let omitted_count = flow_spine.len() - MAX_SPINE_EDGES;
+            let mut omitted_names: Vec<String> = Vec::new();
+            for (from, to, _kind) in flow_spine.iter().skip(MAX_SPINE_EDGES) {
+                let from_name = graph.node(*from).map(|n| n.name.as_str()).unwrap_or("unknown");
+                if let Some(target) = to {
+                    let to_name = graph.node(*target).map(|n| n.name.as_str()).unwrap_or("unknown");
+                    omitted_names.push(format!("{from_name} → {to_name}"));
+                }
+            }
+            let shown: Vec<String> = omitted_names.iter().take(10).cloned().collect();
+            let more = omitted_names.len().saturating_sub(10);
+            let mut line = format!(
+                "    %% ... {} additional edge(s) omitted: {}",
+                omitted_count,
+                shown.join(", ")
+            );
+            if more > 0 {
+                line.push_str(&format!(", … and {more} more"));
+            }
+            out.push(line);
         }
         out.push("```\n".to_string());
     } else {
@@ -782,6 +934,15 @@ fn render_explore_output(
         ));
     }
     out.push("".to_string());
+
+    // Coverage accounting — surfaced in the leading 📊 summary so the model knows this is a
+    // ranked/budgeted view, not an exhaustive listing.
+    let mut folded_spans: usize = 0;
+    let mut folded_lines: usize = 0;
+    let mut omitted_symbols: usize = 0;
+    for fc in top_files {
+        omitted_symbols += fc.symbols.len().saturating_sub(4);
+    }
 
     let mut session_spans = SESSION_SENT_SPANS.write().unwrap();
 
@@ -845,7 +1006,7 @@ fn render_explore_output(
                 let already_sent = sent_list.iter().any(|(s, e)| *s <= start_line && end_line <= *e);
 
                 if already_sent {
-                    out.push(format!("> `[Already sent: {rel_path} L{start_line}-L{end_line} ({}) — refer to previous turns]`\n", labels.join(", ")));
+                    out.push(format!("> `[Same range already returned earlier this session (dedup): {rel_path} L{start_line}-L{end_line} ({}) — content omitted here; use read_file if you need it again]`\n", labels.join(", ")));
                 } else {
                     sent_list.push((start_line, end_line));
                     let total_span = end_line.saturating_sub(start_line) + 1;
@@ -853,6 +1014,7 @@ fn render_explore_output(
 
                     if total_span > 70 {
                         // Smart Folding for large functions (keep head 35 lines + tail 15 lines)
+                        folded_spans += 1;
                         let head_end = (start_line + 35).min(lines.len());
                         for l in start_line..=head_end {
                             if l - 1 < lines.len() {
@@ -861,6 +1023,7 @@ fn render_explore_output(
                         }
                         let tail_start = end_line.saturating_sub(15).max(head_end + 1);
                         let folded_count = tail_start.saturating_sub(head_end + 1);
+                        folded_lines += folded_count;
                         if folded_count > 0 {
                             snippet.push(format!("...\t// ... [{} lines folded; use read_file(\"{rel_path}\", start_line={}, end_line={}) to view full body] ...", folded_count, head_end + 1, tail_start - 1));
                         }
@@ -884,17 +1047,99 @@ fn render_explore_output(
         }
     }
 
-    // Trailing Pointers for remaining files
+    // Remaining candidate files — FULL PATH LISTING (no truncation): every
+    // scored-but-not-rendered candidate path is listed so the model can see the
+    // complete hit set, not just the top-ranked slice.
     if candidates.len() > max_files {
-        out.push("\n**Additional Relevant Symbols (not fully expanded):**".to_string());
-        for c in &candidates[max_files..candidates.len().min(max_files + 6)] {
+        out.push("\n**All Remaining Candidate Files (full paths, not rendered):**".to_string());
+        for c in &candidates[max_files..] {
             let rel = c.file.strip_prefix(root).unwrap_or(&c.file).display().to_string();
-            let sym_names: Vec<String> = c.symbols.iter().take(3).map(|s| format!("{}:L{}", s.node.name, s.node.start_line)).collect();
-            out.push(format!("- `{rel}`: {}", sym_names.join(", ")));
+            out.push(format!("- `{rel}`"));
         }
     }
 
+    // 📁 Adjacent DIRECTORIES near the top hits: the hit's own directory, its
+    // direct subdirectories, and its parent directory. Directories only — a dir
+    // can hold many files; the point is to point where to look next, not to
+    // enumerate filenames.
+    const MAX_ADJACENT_DIRS: usize = 16;
+    let adjacent = collect_adjacent_dirs(graph, top_files, scope, MAX_ADJACENT_DIRS);
+    if !adjacent.is_empty() {
+        out.push("\n> 📁 **Adjacent directories** (hit's dir + nearby sub/parent dirs — likely related, NOT matched by your query; explore these next):".to_string());
+        let listed_adj: Vec<String> = adjacent
+            .iter()
+            .map(|d| {
+                let rel = d.strip_prefix(root).unwrap_or(d).display().to_string();
+                format!("`{rel}/`")
+            })
+            .collect();
+        out.push(format!("> {}", listed_adj.join(" ")));
+    }
+
     out.push("\n> 🔍 **Deep Investigation Tip**: To inspect any folded function body, use `read_file` with the line numbers provided above. To trace cross-module callers/callees in full detail, supply the exact symbol or file path to `code_explore`.\n".to_string());
+
+    // Leading 📊 Coverage summary — inserted right after the opening notice so the model sees the
+    // shown/total split BEFORE the ranked content (ranked ≠ exhaustive). Counts are always
+    // informative: a "showing 8/47" line is what stops "the project lacks X" hallucinations.
+    // Remaining candidates are FULLY listed at the bottom (no hidden set anymore).
+    let remaining = candidates.len().saturating_sub(max_files);
+    let spine_total = flow_spine.len();
+    let spine_shown = spine_total.min(MAX_SPINE_EDGES);
+
+    // Scope-vs-workspace contrast: when a `path:` scope confines the search, the
+    // model must see how much of the workspace was NOT searched — a kernel-only
+    // query says nothing about sibling-layer crates (the original blind spot:
+    // `path: kernel` hid `repair.rs`/`tool_feedback.rs` entirely).
+    let workspace_files = graph.file_symbols.len();
+    let workspace_syms = graph.nodes.len();
+    let (scope_files, scope_syms) = match scope {
+        Some(sc) => {
+            let mut scope_file_set: HashSet<&PathBuf> = HashSet::new();
+            let mut syms = 0usize;
+            for node in graph.nodes.values() {
+                if path_matches_scope(&node.file, sc) {
+                    scope_file_set.insert(&node.file);
+                    syms += 1;
+                }
+            }
+            (scope_file_set.len(), syms)
+        }
+        None => (workspace_files, workspace_syms),
+    };
+    let scope_note = match scope {
+        Some(sc) => {
+            let scope_disp = sc.strip_prefix(root).unwrap_or(sc).display().to_string();
+            let outside_syms = workspace_syms.saturating_sub(scope_syms);
+            format!(
+                "(scope `{scope_disp}`: searched {scope_files}/{workspace_files} files · \
+                 {scope_syms}/{workspace_syms} symbols — {outside_syms} symbol(s) OUTSIDE this \
+                 scope were NOT searched; if the top hits are contracts, their implementations \
+                 likely live in sibling layers)"
+            )
+        }
+        None => format!("(searched all {workspace_files} workspace files · {workspace_syms} symbols)"),
+    };
+
+    let coverage = format!(
+        "> 📊 **Coverage** {scope_note}: showing {shown}/{total} candidate file(s) (max_files={max_files}) · \
+         {omitted} high-scoring symbol(s) omitted by the per-file cap · {folded} span(s) folded \
+         ({folded_lines} lines) · flow spine {spine_shown}/{spine_total} edge(s) · \
+         {remaining} remaining candidate file(s) — ALL listed with full paths below · \
+         {adjacent} adjacent dir(s) in 📁. \
+         Omitted/folded content and adjacent directories can still be relevant — \
+         re-query with a narrower `path:`/`name:` filter or use `read_file` to inspect specific ranges.",
+        shown = top_files.len(),
+        total = candidates.len(),
+        max_files = max_files,
+        omitted = omitted_symbols,
+        folded = folded_spans,
+        folded_lines = folded_lines,
+        spine_shown = spine_shown,
+        spine_total = spine_total,
+        remaining = remaining,
+        adjacent = adjacent.len(),
+    );
+    out.insert(1, coverage);
 
     out.join("\n")
 }
@@ -964,6 +1209,441 @@ mod tests {
         assert!(capsule_joined.contains("Agent:L10"));
         assert!(capsule_joined.contains("ToolMiddleware:L60"));
         assert!(capsule_joined.contains("run_turn:L100"));
+    }
+
+    #[test]
+    fn render_explore_output_includes_coverage_summary() {
+        let mut graph = CodeGraph::new();
+        // Unique per-test path avoids cross-test SESSION_SENT_SPANS dedup pollution.
+        let file = PathBuf::from("crates/kernel/src/coverage_probe.rs");
+        let mut nodes = Vec::new();
+        for i in 0..6u64 {
+            let node = SymbolNode {
+                id: i + 1,
+                name: format!("sym_{i}"),
+                kind: super::super::graph::SymbolKind::Function,
+                visibility: super::super::graph::Visibility::Public,
+                file: file.clone(),
+                start_line: (10 + i * 10) as usize,
+                end_line: (20 + i * 10) as usize,
+                signature: None,
+                docstring: None,
+                inline_comments: Vec::new(),
+            };
+            graph.add_symbol(node.clone());
+            nodes.push(node);
+        }
+        let symbols: Vec<ScoredSymbol> = nodes
+            .into_iter()
+            .map(|node| ScoredSymbol {
+                node,
+                total_score: 30.0,
+                name_score: 25.0,
+                doc_score: 0.0,
+                inline_score: 0.0,
+                graph_mass: 1.0,
+            })
+            .collect();
+        // 6 symbols in one file → per-file cap (4) omits 2.
+        let candidates = vec![FileCandidate {
+            file,
+            top_score: 50.0,
+            symbols,
+            is_test: false,
+            is_generated: false,
+        }];
+        let root = PathBuf::from(".");
+        let out = render_explore_output(&graph, &root, "coverage probe", &candidates, &[], false, 8, None);
+        assert!(out.contains("📊 **Coverage**"), "coverage summary missing:\n{out}");
+        assert!(out.contains("showing 1/1 candidate file(s)"), "shown/total missing:\n{out}");
+        assert!(out.contains("2 high-scoring symbol(s) omitted"), "omitted count missing:\n{out}");
+        assert!(out.contains("flow spine 0/0 edge(s)"), "spine counts missing:\n{out}");
+        assert!(out.contains("0 remaining candidate file(s)"), "remaining count missing:\n{out}");
+    }
+
+    #[test]
+    fn render_explore_output_reports_hidden_and_spine_overflow() {
+        let graph = CodeGraph::new();
+        let root = PathBuf::from(".");
+        // 15 files > max_files(8) + 6 trailing-pointer cap(14) → exactly 1 is never listed.
+        let mut candidates = Vec::new();
+        for f in 0..15usize {
+            // Real candidates always carry >= 1 scored symbol (only score>=12 symbols enter);
+            // replicate that invariant so the table's `symbols[0]` lookup is valid.
+            let node = SymbolNode {
+                id: (f + 100) as u64,
+                name: format!("hidden_sym_{f}"),
+                kind: super::super::graph::SymbolKind::Function,
+                visibility: super::super::graph::Visibility::Public,
+                file: PathBuf::from(format!("crates/kernel/src/hidden_{f}.rs")),
+                start_line: 1,
+                end_line: 10,
+                signature: None,
+                docstring: None,
+                inline_comments: Vec::new(),
+            };
+            candidates.push(FileCandidate {
+                file: node.file.clone(),
+                top_score: 50.0,
+                symbols: vec![ScoredSymbol {
+                    node,
+                    total_score: 30.0,
+                    name_score: 25.0,
+                    doc_score: 0.0,
+                    inline_score: 0.0,
+                    graph_mass: 1.0,
+                }],
+                is_test: false,
+                is_generated: false,
+            });
+        }
+        // Fake an over-cap flow spine: 40 edges (32 shown, 8 omitted).
+        let flow_spine: Vec<(u64, Option<u64>, super::super::graph::EdgeKind)> = (0..40u64)
+            .map(|i| (i, Some(i + 1), super::super::graph::EdgeKind::Calls))
+            .collect();
+        let out = render_explore_output(&graph, &root, "q", &candidates, &flow_spine, true, 8, None);
+        assert!(out.contains("showing 8/15 candidate file(s)"), "shown/total:\n{out}");
+        assert!(
+            out.contains("7 remaining candidate file(s) — ALL listed with full paths below"),
+            "remaining count:\n{out}"
+        );
+        assert!(
+            out.contains("- `crates/kernel/src/hidden_8.rs`"),
+            "remaining candidate full-path listing missing:\n{out}"
+        );
+        assert!(
+            out.contains("- `crates/kernel/src/hidden_14.rs`"),
+            "last remaining candidate full path missing:\n{out}"
+        );
+        assert!(out.contains("flow spine 32/40 edge(s)"), "spine overflow count:\n{out}");
+        assert!(out.contains("%% ... 8 additional edge(s) omitted:"), "mermaid omission note:\n{out}");
+    }
+
+    #[test]
+    fn extract_flow_spine_traces_all_callers_and_callees() {
+        use super::super::graph::{Edge, EdgeKind, SymbolKind, Visibility};
+
+        let mut graph = CodeGraph::new();
+        // Target symbol with 6 callers + 2 callees. The old implementation capped
+        // callers at 3 and callees at 4 per seed — the find-all contract must
+        // surface every one of them.
+        let target_file = PathBuf::from("crates/tools/src/repair.rs");
+        let target = SymbolNode {
+            id: 1,
+            name: "repair_tool_args".into(),
+            kind: SymbolKind::Function,
+            visibility: Visibility::Public,
+            file: target_file.clone(),
+            start_line: 18,
+            end_line: 70,
+            signature: None,
+            docstring: None,
+            inline_comments: Vec::new(),
+        };
+        let target_id = target.id;
+        graph.add_symbol(target.clone());
+
+        let mut caller_ids = Vec::new();
+        for i in 0..6u64 {
+            let node = SymbolNode {
+                id: 100 + i,
+                name: format!("caller_{i}"),
+                kind: SymbolKind::Function,
+                visibility: Visibility::Public,
+                file: PathBuf::from(format!("crates/tools/src/caller_{i}.rs")),
+                start_line: 1,
+                end_line: 5,
+                signature: None,
+                docstring: None,
+                inline_comments: Vec::new(),
+            };
+            graph.add_symbol(node.clone());
+            caller_ids.push(node.id);
+            graph.add_edge(node.id, Edge { to: target_id, kind: EdgeKind::Calls, line: 3 });
+        }
+
+        let mut callee_ids = Vec::new();
+        for i in 0..2u64 {
+            let node = SymbolNode {
+                id: 200 + i,
+                name: format!("callee_{i}"),
+                kind: SymbolKind::Function,
+                visibility: Visibility::Public,
+                file: target_file.clone(),
+                start_line: 80 + i as usize * 10,
+                end_line: 90 + i as usize * 10,
+                signature: None,
+                docstring: None,
+                inline_comments: Vec::new(),
+            };
+            graph.add_symbol(node.clone());
+            callee_ids.push(node.id);
+            graph.add_edge(target_id, Edge { to: node.id, kind: EdgeKind::Calls, line: 30 });
+        }
+
+        let candidates = vec![FileCandidate {
+            file: target_file,
+            top_score: 240.0,
+            symbols: vec![ScoredSymbol {
+                node: target,
+                total_score: 240.0,
+                name_score: 240.0,
+                doc_score: 0.0,
+                inline_score: 0.0,
+                graph_mass: 10.0,
+            }],
+            is_test: false,
+            is_generated: false,
+        }];
+
+        let (spine, connected) = extract_flow_spine(&graph, &candidates);
+        assert!(connected, "spine should be connected");
+        let spine_froms: Vec<u64> = spine.iter().map(|(f, _, _)| *f).collect();
+        let spine_tos: Vec<u64> = spine.iter().filter_map(|(_, t, _)| *t).collect();
+
+        // Find-all contract: every caller appears as an incoming edge (its id is
+        // the FROM of a caller edge) and every callee as an outgoing TO.
+        for id in &caller_ids {
+            assert!(spine_froms.contains(id), "caller {id} missing from spine:\n{spine:?}");
+        }
+        for id in &callee_ids {
+            assert!(spine_tos.contains(id), "callee {id} missing from spine:\n{spine:?}");
+        }
+        assert!(spine_tos.contains(&target_id), "target missing as edge target:\n{spine:?}");
+    }
+
+    #[test]
+    fn render_explore_output_surfaces_scope_contract_and_low_hit_hints() {
+        use super::super::graph::{SymbolKind, Visibility};
+
+        let mut graph = CodeGraph::new();
+        // One trait symbol in one file → 1 candidate (low hit) + contract hit.
+        let node = SymbolNode {
+            id: 1,
+            name: "Tool".into(),
+            kind: SymbolKind::Trait,
+            visibility: Visibility::Public,
+            file: PathBuf::from("crates/kernel/src/tool.rs"),
+            start_line: 182,
+            end_line: 210,
+            signature: None,
+            docstring: None,
+            inline_comments: Vec::new(),
+        };
+        graph.add_symbol(node.clone());
+        let candidates = vec![FileCandidate {
+            file: node.file.clone(),
+            top_score: 240.0,
+            symbols: vec![ScoredSymbol {
+                node,
+                total_score: 240.0,
+                name_score: 240.0,
+                doc_score: 0.0,
+                inline_score: 0.0,
+                graph_mass: 10.0,
+            }],
+            is_test: false,
+            is_generated: false,
+        }];
+        let root = PathBuf::from(".");
+        let scope = PathBuf::from("crates/kernel/src");
+        let out = render_explore_output(
+            &graph,
+            &root,
+            "Tool execute error handling",
+            &candidates,
+            &[],
+            false,
+            8,
+            Some(&scope),
+        );
+        assert!(out.contains("🔭 **Search scope**"), "scope hint missing:\n{out}");
+        assert!(out.contains("SIBLING layers"), "sibling-layers hint missing:\n{out}");
+        assert!(out.contains("🧩 **Contract hit**"), "contract hint missing:\n{out}");
+        assert!(out.contains("`impl <name>`"), "impl-follow-up hint missing:\n{out}");
+        assert!(out.contains("🎯 **Low hit count**"), "low-hit hint missing:\n{out}");
+        // Contract hint must NOT fire when the top symbol is not a contract (function here),
+        // while the low-hit hint still fires (1 candidate).
+        let func_node = SymbolNode {
+            id: 2,
+            name: "run_turn".into(),
+            kind: SymbolKind::Function,
+            visibility: Visibility::Public,
+            file: PathBuf::from("crates/kernel/src/agent.rs"),
+            start_line: 10,
+            end_line: 40,
+            signature: None,
+            docstring: None,
+            inline_comments: Vec::new(),
+        };
+        let func_candidates = vec![FileCandidate {
+            file: func_node.file.clone(),
+            top_score: 240.0,
+            symbols: vec![ScoredSymbol {
+                node: func_node,
+                total_score: 240.0,
+                name_score: 240.0,
+                doc_score: 0.0,
+                inline_score: 0.0,
+                graph_mass: 10.0,
+            }],
+            is_test: false,
+            is_generated: false,
+        }];
+        let no_contract = render_explore_output(&graph, &root, "q", &func_candidates, &[], false, 8, None);
+        assert!(!no_contract.contains("🧩 **Contract hit**"), "contract hint should not fire for a function:\n{no_contract}");
+        assert!(no_contract.contains("🎯 **Low hit count**"), "low-hit should still fire:\n{no_contract}");
+    }
+
+    #[test]
+    fn adjacent_files_surface_siblings_not_matched_by_query() {
+        use super::super::graph::{SymbolKind, Visibility};
+
+        let mut graph = CodeGraph::new();
+        // The hit: repair.rs in tools/. The query matched THIS file only.
+        let hit_node = SymbolNode {
+            id: 1,
+            name: "repair_tool_args".into(),
+            kind: SymbolKind::Function,
+            visibility: Visibility::Public,
+            file: PathBuf::from("crates/capabilities/src/tools/repair.rs"),
+            start_line: 18,
+            end_line: 70,
+            signature: None,
+            docstring: None,
+            inline_comments: Vec::new(),
+        };
+        graph.add_symbol(hit_node.clone());
+        // A sibling in the SAME dir that the query never surfaced (no shared term):
+        // tool_feedback.rs — the real-world case that "path: kernel" + ranked query
+        // originally missed. MUST appear in 📁.
+        let sibling_node = SymbolNode {
+            id: 2,
+            name: "parse_tool_args".into(),
+            kind: SymbolKind::Function,
+            visibility: Visibility::Public,
+            file: PathBuf::from("crates/capabilities/src/tools/tool_feedback.rs"),
+            start_line: 98,
+            end_line: 130,
+            signature: None,
+            docstring: None,
+            inline_comments: Vec::new(),
+        };
+        graph.add_symbol(sibling_node.clone());
+        // An unrelated file in a FAR directory: MUST NOT appear.
+        let far_node = SymbolNode {
+            id: 3,
+            name: "unrelated".into(),
+            kind: SymbolKind::Function,
+            visibility: Visibility::Public,
+            file: PathBuf::from("crates/kernel/src/agent.rs"),
+            start_line: 10,
+            end_line: 40,
+            signature: None,
+            docstring: None,
+            inline_comments: Vec::new(),
+        };
+        graph.add_symbol(far_node.clone());
+
+        let candidates = vec![FileCandidate {
+            file: hit_node.file.clone(),
+            top_score: 240.0,
+            symbols: vec![ScoredSymbol {
+                node: hit_node,
+                total_score: 240.0,
+                name_score: 240.0,
+                doc_score: 0.0,
+                inline_score: 0.0,
+                graph_mass: 10.0,
+            }],
+            is_test: false,
+            is_generated: false,
+        }];
+        let root = PathBuf::from(".");
+        let out = render_explore_output(&graph, &root, "repair_tool_args", &candidates, &[], false, 8, None);
+        // 📁 now lists the hit's DIRECTORY (not sibling filenames): the tools/
+        // dir must appear; the far kernel/src dir must not.
+        assert!(
+            out.contains("crates/capabilities/src/tools/"),
+            "hit dir must be listed in 📁:\n{out}"
+        );
+        assert!(!out.contains("kernel/src/"), "far dir must NOT be listed:\n{out}");
+        assert!(
+            out.contains("1 adjacent dir(s) in 📁"),
+            "adjacent dir count missing in Coverage:\n{out}"
+        );
+    }
+
+    #[test]
+    fn coverage_reports_scope_vs_workspace_contrast() {
+        use super::super::graph::{SymbolKind, Visibility};
+
+        let mut graph = CodeGraph::new();
+        // File INSIDE the scope: a kernel trait contract.
+        let in_scope_node = SymbolNode {
+            id: 1,
+            name: "Tool".into(),
+            kind: SymbolKind::Trait,
+            visibility: Visibility::Public,
+            file: PathBuf::from("crates/kernel/src/tool.rs"),
+            start_line: 182,
+            end_line: 210,
+            signature: None,
+            docstring: None,
+            inline_comments: Vec::new(),
+        };
+        graph.add_symbol(in_scope_node.clone());
+        // File OUTSIDE the scope: the capabilities-layer repair implementation that a
+        // kernel-scoped query would entirely miss (the exact first-round blind spot).
+        let out_of_scope_node = SymbolNode {
+            id: 2,
+            name: "repair_tool_args".into(),
+            kind: SymbolKind::Function,
+            visibility: Visibility::Public,
+            file: PathBuf::from("crates/capabilities/src/tools/repair.rs"),
+            start_line: 18,
+            end_line: 70,
+            signature: None,
+            docstring: None,
+            inline_comments: Vec::new(),
+        };
+        graph.add_symbol(out_of_scope_node.clone());
+
+        let candidates = vec![FileCandidate {
+            file: in_scope_node.file.clone(),
+            top_score: 240.0,
+            symbols: vec![ScoredSymbol {
+                node: in_scope_node,
+                total_score: 240.0,
+                name_score: 240.0,
+                doc_score: 0.0,
+                inline_score: 0.0,
+                graph_mass: 10.0,
+            }],
+            is_test: false,
+            is_generated: false,
+        }];
+        let root = PathBuf::from(".");
+        let scope = PathBuf::from("crates/kernel/src");
+        let out = render_explore_output(
+            &graph,
+            &root,
+            "Tool execute error handling",
+            &candidates,
+            &[],
+            false,
+            8,
+            Some(&scope),
+        );
+        // The Coverage line must surface the workspace contrast: only 1 of 2 files /
+        // 1 of 2 symbols were searched, and 1 symbol is OUTSIDE the scope — so a
+        // scope-confined "no mechanism" conclusion is invalid.
+        assert!(out.contains("searched 1/2 files"), "scope-vs-workspace file counts missing:\n{out}");
+        assert!(out.contains("1/2 symbols"), "scope-vs-workspace symbol counts missing:\n{out}");
+        assert!(
+            out.contains("1 symbol(s) OUTSIDE this scope were NOT searched"),
+            "outside-scope warning missing:\n{out}"
+        );
     }
 }
 

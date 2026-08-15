@@ -328,31 +328,76 @@ fn count_disk_source_files(path: &Path) -> (usize, HashSet<String>) {
 /// Check whether a symbol or its surrounding comments have a genuine semantic/lexical anchor to the query.
 fn has_genuine_match_anchor(tokens: &SearchTokens, node: &SymbolNode) -> bool {
     let node_name_lower = node.name.to_ascii_lowercase();
+    let query_lower = tokens.raw_query.to_ascii_lowercase();
 
-    // 1. Raw query or code identifier matches symbol name
+    // 1. Exact query match or exact symbol containment
     if tokens.raw_query.eq_ignore_ascii_case(&node.name)
-        || tokens
-            .code_identifiers
-            .iter()
-            .any(|id| node_name_lower.contains(&id.to_ascii_lowercase()))
+        || node_name_lower == query_lower
+        || (node_name_lower.contains(&query_lower) && query_lower.len() >= 4)
     {
         return true;
     }
 
-    // 2. Bilingual expanded domain terms in symbol name
+    let is_single_identifier = tokens.cjk_phrases.is_empty()
+        && !tokens.raw_query.contains(' ')
+        && (!tokens.code_identifiers.is_empty() || tokens.words.len() <= 4);
+
+    if is_single_identifier {
+        // Single Identifier mode (e.g. "completeToolCall", "thisSymbolDoesNotExistAnywhere"):
+        // Strict symbol lookup intent — reject random stop-word fragmentation.
+        for id in &tokens.code_identifiers {
+            let id_lower = id.to_ascii_lowercase();
+            if node_name_lower == id_lower || (node_name_lower.contains(&id_lower) && id_lower.len() >= 4) {
+                return true;
+            }
+            if id_lower.contains(&node_name_lower) && node_name_lower.len() >= 5 {
+                return true;
+            }
+        }
+
+        // Subword coverage threshold: require at least 50% of the identifier's subwords
+        if tokens.words.len() >= 2 {
+            let matched_subwords = tokens
+                .words
+                .iter()
+                .filter(|w| w.len() >= 3 && node_name_lower.contains(*w))
+                .count();
+            if matched_subwords * 2 >= tokens.words.len() && matched_subwords >= 2 {
+                return true;
+            }
+        }
+
+        // For single identifier, only match docstring/comment if it contains the full identifier
+        if let Some(doc) = &node.docstring {
+            let doc_lower = doc.to_ascii_lowercase();
+            if doc_lower.contains(&query_lower) {
+                return true;
+            }
+        }
+        for c in &node.inline_comments {
+            let c_lower = c.to_ascii_lowercase();
+            if c_lower.contains(&query_lower) {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    // Natural Language / Multi-token Mode:
+    // 2. Full Code identifier hits
+    for id in &tokens.code_identifiers {
+        let id_lower = id.to_ascii_lowercase();
+        if node_name_lower.contains(&id_lower) {
+            return true;
+        }
+    }
+
+    // 3. Bilingual expanded domain terms in symbol name
     if tokens
         .expanded_terms
         .iter()
         .any(|term| node_name_lower.contains(term))
-    {
-        return true;
-    }
-
-    // 3. Meaningful query words in symbol name
-    if tokens
-        .words
-        .iter()
-        .any(|w| w.len() >= 2 && node_name_lower.contains(w))
     {
         return true;
     }
@@ -362,32 +407,53 @@ fn has_genuine_match_anchor(tokens: &SearchTokens, node: &SymbolNode) -> bool {
         return true;
     }
 
-    // 5. Check docstring
+    // 5. Meaningful query words in symbol name (require >= 2 words or 1 significant word)
+    let matched_words_sym = tokens
+        .words
+        .iter()
+        .filter(|w| w.len() >= 3 && node_name_lower.contains(*w))
+        .count();
+    if matched_words_sym >= 2
+        || tokens
+            .words
+            .iter()
+            .any(|w| w.len() >= 5 && node_name_lower.contains(w))
+    {
+        return true;
+    }
+
+    // 6. Check docstring
     if let Some(doc) = &node.docstring {
         let doc_lower = doc.to_ascii_lowercase();
         if tokens.cjk_phrases.iter().any(|p| doc.contains(p))
             || tokens.expanded_terms.iter().any(|t| doc_lower.contains(t))
-            || tokens.words.iter().any(|w| w.len() >= 3 && doc_lower.contains(w))
-            || tokens
-                .code_identifiers
-                .iter()
-                .any(|id| doc_lower.contains(&id.to_ascii_lowercase()))
         {
+            return true;
+        }
+        let matched_in_doc = tokens
+            .words
+            .iter()
+            .filter(|w| w.len() >= 3 && doc_lower.contains(*w))
+            .count();
+        if matched_in_doc >= 2 {
             return true;
         }
     }
 
-    // 6. Check inline comments
+    // 7. Check inline comments
     for c in &node.inline_comments {
         let c_lower = c.to_ascii_lowercase();
         if tokens.cjk_phrases.iter().any(|p| c.contains(p))
             || tokens.expanded_terms.iter().any(|t| c_lower.contains(t))
-            || tokens.words.iter().any(|w| w.len() >= 3 && c_lower.contains(w))
-            || tokens
-                .code_identifiers
-                .iter()
-                .any(|id| c_lower.contains(&id.to_ascii_lowercase()))
         {
+            return true;
+        }
+        let matched_in_comment = tokens
+            .words
+            .iter()
+            .filter(|w| w.len() >= 3 && c_lower.contains(*w))
+            .count();
+        if matched_in_comment >= 2 {
             return true;
         }
     }

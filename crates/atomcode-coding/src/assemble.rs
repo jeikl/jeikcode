@@ -284,6 +284,18 @@ mod tests {
 
     #[test]
     fn lsp_is_mounted_only_when_runtime_policy_enables_it() {
+        // Full codeintel mode so the graph tools (incl. find_symbol) are mounted —
+        // the default Unified mode only mounts repo_map + code_explore. Guard the
+        // env so the process-wide ATOMCODE_CODEINTEL_MODE is restored after the test.
+        struct EnvGuard;
+        impl Drop for EnvGuard {
+            fn drop(&mut self) {
+                std::env::remove_var("ATOMCODE_CODEINTEL_MODE");
+            }
+        }
+        let _guard = EnvGuard;
+        std::env::set_var("ATOMCODE_CODEINTEL_MODE", "full");
+
         let disabled: Vec<_> = mount_base_coding_tools(false, true, &LspSettings::default())
             .defs()
             .into_iter()

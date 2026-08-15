@@ -221,13 +221,30 @@ impl Tool for CodeExploreTool {
                 format!("Keywords: [{}]", query_tokens.words.join(", "))
             };
 
+            let disk_inspection = if let Some(sc) = scope_path.as_deref() {
+                if sc.exists() {
+                    let (disk_files, disk_exts) = count_disk_source_files(sc);
+                    let mut ext_list: Vec<String> = disk_exts.into_iter().collect();
+                    ext_list.sort();
+                    if files_in_scope.is_empty() && disk_files > 0 {
+                        format!("* ⚠️ Disk Inspection: Found {} source file(s) on disk {:?}, but 0 files indexed in memory. (Likely filtered by ignore rules or index needs rebuild).\n", disk_files, ext_list)
+                    } else {
+                        format!("* Disk Inspection: {} source file(s) on disk {:?}.\n", disk_files, ext_list)
+                    }
+                } else {
+                    format!("* ⚠️ Disk Inspection: Specified path `{}` does not exist on disk.\n", sc.display())
+                }
+            } else {
+                String::new()
+            };
+
             return ok(format!(
                 "🔍 Zero-Hit Diagnostic for query '{}':\n\
-                 - Scope Path: `{}` (Matched {} files, {} indexed symbols, Language Exts: {:?})\n\
+                 - Scope Path: `{}` (Matched {} files in index, {} indexed symbols, Language Exts: {:?})\n\
                  - Workspace Total: {} symbols indexed across {} files\n\
                  - Query Analysis: {}\n\
                  - Diagnostic Assessment:\n\
-                   * Scope file(s) contained {} AST symbols in memory.\n\
+                 {}  * Scope file(s) contained {} AST symbols in memory.\n\
                    * None of the symbols/comments matched query tokens with threshold >= 12.0.\n\
                  👉 Tip: Verify symbol name case or check repo_map for available module exports.",
                 a.query,
@@ -238,6 +255,7 @@ impl Tool for CodeExploreTool {
                 total_nodes,
                 graph.nodes.values().map(|n| &n.file).collect::<HashSet<_>>().len(),
                 query_terms_str,
+                disk_inspection,
                 symbols_in_scope
             ));
         }
@@ -258,6 +276,53 @@ impl Tool for CodeExploreTool {
 
         ok(output)
     }
+}
+
+/// Helper to scan physical source files on disk for diagnostic reporting.
+fn count_disk_source_files(path: &Path) -> (usize, HashSet<String>) {
+    let mut count = 0;
+    let mut exts = HashSet::new();
+    if path.is_file() {
+        if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
+            if super::index::is_indexed_ext(ext) {
+                count += 1;
+                exts.insert(ext.to_string());
+            }
+        }
+    } else if path.is_dir() {
+        let mut dirs = vec![path.to_path_buf()];
+        let mut scanned = 0;
+        while let Some(dir) = dirs.pop() {
+            if scanned > 1000 {
+                break;
+            }
+            if let Ok(entries) = std::fs::read_dir(&dir) {
+                for entry in entries.flatten() {
+                    let p = entry.path();
+                    if p.is_dir() {
+                        if let Some(name) = p.file_name().and_then(|n| n.to_str()) {
+                            if !name.starts_with('.')
+                                && name != "node_modules"
+                                && name != "target"
+                                && name != "dist"
+                            {
+                                dirs.push(p);
+                            }
+                        }
+                    } else if p.is_file() {
+                        scanned += 1;
+                        if let Some(ext) = p.extension().and_then(|e| e.to_str()) {
+                            if super::index::is_indexed_ext(ext) {
+                                count += 1;
+                                exts.insert(ext.to_string());
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    (count, exts)
 }
 
 /// Score all symbols across files using multi-field similarity & graph topology.
@@ -309,6 +374,13 @@ fn score_workspace_symbols(
 
         let path_sim = calculate_text_similarity(tokens, &node.file.to_string_lossy());
 
+        // HARD THRESHOLD: Require genuine token / identifier / keyword match.
+        // Unrelated garbage queries must NOT be rescued by graph_mass or directory bonuses!
+        let text_match = (name_sim + name_bonus) * 0.50 + doc_sim * 0.25 + inline_sim * 0.15 + path_sim * 0.10;
+        if text_match < 8.0 {
+            continue;
+        }
+
         let callers_cnt = graph.callers(node.id).map(|v| v.len()).unwrap_or(0);
         let callees_cnt = graph.callees(node.id).map(|v| v.len()).unwrap_or(0);
         let graph_mass = ((callers_cnt + callees_cnt) as f64).min(10.0);
@@ -322,7 +394,7 @@ fn score_workspace_symbols(
             _ => 0.7,
         };
 
-        let raw_score = ((name_sim + name_bonus) * 0.45 + doc_sim * 0.25 + inline_sim * 0.15 + path_sim * 0.10 + graph_mass * 1.0) * kind_weight;
+        let raw_score = (text_match + graph_mass * 1.0) * kind_weight;
 
         if raw_score >= 12.0 {
             file_map.entry(node.file.clone()).or_default().push(ScoredSymbol {
@@ -335,6 +407,7 @@ fn score_workspace_symbols(
             });
         }
     }
+
 
     let mut candidates = Vec::new();
     for (file, mut syms) in file_map {

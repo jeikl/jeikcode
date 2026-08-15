@@ -31,10 +31,10 @@ use std::time::{Duration, Instant, UNIX_EPOCH};
 const BACKGROUND_REFRESH_SECS: u64 = 2;
 
 /// On-disk cache layout version. Bump when AST queries / DiskCache / unit schema changes.
-const DISK_CACHE_VERSION: u32 = 2;
+const DISK_CACHE_VERSION: u32 = 3;
 
 /// Relative path under the workspace root for the persisted unit+graph cache.
-pub const DISK_CACHE_REL: &str = ".atomcode/codegraph/units.v2.json";
+pub const DISK_CACHE_REL: &str = ".atomcode/codegraph/units.v3.json";
 
 
 /// Map a tree-sitter node-kind string to a [`SymbolKind`]. From production
@@ -215,12 +215,16 @@ fn parse_xml_mapper(path: &Path, source: &str) -> Option<(Vec<SymbolNode>, Vec<R
 }
 
 /// Extensions walked into the graph (matches production's full language matrix).
-const INDEXED_EXTS: &[&str] = &[
+pub const INDEXED_EXTS: &[&str] = &[
     "rs", "py", "pyi", "js", "jsx", "mjs", "cjs", "ts", "mts", "cts", "tsx", "vue",
     "go", "java", "c", "h", "cc", "cpp", "cxx", "hpp", "hh", "cs", "php", "phtml",
     "kt", "kts", "swift", "dart", "rb", "scala", "sc", "sol", "lua", "tf", "tfvars",
     "erl", "hrl", "r", "nix", "xml", "sql",
 ];
+
+pub fn is_indexed_ext(ext: &str) -> bool {
+    INDEXED_EXTS.iter().any(|e| e.eq_ignore_ascii_case(ext))
+}
 
 
 /// Directory basenames skipped even when not covered by `.gitignore` (common on
@@ -236,7 +240,6 @@ const SKIP_DIR_NAMES: &[&str] = &[
     ".git",
     ".vs",
     ".idea",
-    "packages", // NuGet restore folder
     "TestResults",
     "coverage",
     "wwwroot", // static assets; often minified JS

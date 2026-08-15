@@ -1,4 +1,4 @@
-; Rust: functions, methods, structs, enums, traits, impls
+; Rust: functions, methods, structs, enums, traits, impls, macros, modules
 
 (function_item
   name: (identifier) @name) @definition
@@ -23,3 +23,10 @@
 
 (type_item
   name: (type_identifier) @name) @definition
+
+(macro_definition
+  name: (identifier) @name) @definition
+
+(mod_item
+  name: (identifier) @name) @definition
+

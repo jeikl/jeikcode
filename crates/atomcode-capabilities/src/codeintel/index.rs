@@ -108,12 +108,121 @@ fn attribute_calls(syms: &[Symbol], sites: Vec<super::symbols::CallSite>) -> Vec
     calls
 }
 
+fn parse_yaml_config(path: &Path, source: &str) -> Option<(Vec<SymbolNode>, Vec<RawCall>)> {
+    let mut nodes = Vec::new();
+    let lines: Vec<&str> = source.lines().collect();
+
+    for (idx, line) in lines.iter().enumerate() {
+        let line_num = idx + 1;
+        let trimmed = line.trim();
+        if trimmed.starts_with('#') || trimmed.is_empty() {
+            continue;
+        }
+
+        if let Some(pos) = trimmed.find(':') {
+            let key = trimmed[..pos].trim().trim_start_matches("- ").trim_matches('"').trim_matches('\'');
+            if !key.is_empty() && key.len() >= 3 && !key.contains(' ') {
+                let kind = if key.contains("plugin") || key.contains("reminder") || key.contains("middleware") || key.contains("hook") {
+                    SymbolKind::PluginDeclaration
+                } else {
+                    SymbolKind::ConfigProperty
+                };
+                nodes.push(SymbolNode {
+                    id: CodeGraph::make_id(path, key, line_num),
+                    name: key.to_string(),
+                    kind,
+                    visibility: Visibility::Public,
+                    file: path.to_path_buf(),
+                    start_line: line_num,
+                    end_line: (line_num + 3).min(lines.len()),
+                    signature: Some(trimmed.to_string()),
+                    docstring: None,
+                    inline_comments: Vec::new(),
+                });
+            }
+        } else if trimmed.starts_with("- ") {
+            let val = trimmed[2..].trim().trim_matches('"').trim_matches('\'');
+            if !val.is_empty() && val.len() >= 3 && !val.contains(' ') {
+                nodes.push(SymbolNode {
+                    id: CodeGraph::make_id(path, val, line_num),
+                    name: val.to_string(),
+                    kind: SymbolKind::PluginDeclaration,
+                    visibility: Visibility::Public,
+                    file: path.to_path_buf(),
+                    start_line: line_num,
+                    end_line: line_num,
+                    signature: Some(trimmed.to_string()),
+                    docstring: None,
+                    inline_comments: Vec::new(),
+                });
+            }
+        }
+    }
+
+    if nodes.is_empty() {
+        None
+    } else {
+        Some((nodes, Vec::new()))
+    }
+}
+
+fn parse_json_config(path: &Path, source: &str) -> Option<(Vec<SymbolNode>, Vec<RawCall>)> {
+    let mut nodes = Vec::new();
+    let lines: Vec<&str> = source.lines().collect();
+
+    for (idx, line) in lines.iter().enumerate() {
+        let line_num = idx + 1;
+        let trimmed = line.trim();
+        if let Some(colon) = trimmed.find(':') {
+            let key = trimmed[..colon].trim().trim_matches('"').trim_matches('\'');
+            if (key.contains("plugin") || key.contains("middleware") || key.contains("name") || key.contains("main") || key.contains("scripts")) && key.len() >= 3 {
+                let val_part = trimmed[colon + 1..].trim().trim_matches(',').trim_matches('"').trim_matches('\'');
+                let sym_name = if !val_part.is_empty() && val_part.len() >= 3 && !val_part.starts_with('{') && !val_part.starts_with('[') {
+                    format!("{key}::{val_part}")
+                } else {
+                    key.to_string()
+                };
+                nodes.push(SymbolNode {
+                    id: CodeGraph::make_id(path, &sym_name, line_num),
+                    name: sym_name.clone(),
+                    kind: SymbolKind::PluginDeclaration,
+                    visibility: Visibility::Public,
+                    file: path.to_path_buf(),
+                    start_line: line_num,
+                    end_line: line_num,
+                    signature: Some(trimmed.to_string()),
+                    docstring: None,
+                    inline_comments: Vec::new(),
+                });
+            }
+        }
+    }
+
+    if nodes.is_empty() {
+        None
+    } else {
+        Some((nodes, Vec::new()))
+    }
+}
+
 /// One tree-sitter parse → symbols + calls (was two full parses per file).
 fn parse_file(path: &Path, source: &str) -> Option<(Vec<SymbolNode>, Vec<RawCall>)> {
     if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
-        if ext.eq_ignore_ascii_case("xml") {
+        let ext_lower = ext.to_ascii_lowercase();
+        if ext_lower == "xml" {
             if let Some(xml_res) = parse_xml_mapper(path, source) {
                 return Some(xml_res);
+            }
+        } else if ext_lower == "yml" || ext_lower == "yaml" {
+            if let Some(yaml_res) = parse_yaml_config(path, source) {
+                return Some(yaml_res);
+            }
+        } else if ext_lower == "json" {
+            let file_name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+            if file_name.contains("package.json") || file_name.contains("config") || file_name.contains("plugin") {
+                if let Some(json_res) = parse_json_config(path, source) {
+                    return Some(json_res);
+                }
             }
         }
     }
@@ -219,7 +328,7 @@ pub const INDEXED_EXTS: &[&str] = &[
     "rs", "py", "pyi", "js", "jsx", "mjs", "cjs", "ts", "mts", "cts", "tsx", "vue",
     "go", "java", "c", "h", "cc", "cpp", "cxx", "hpp", "hh", "cs", "php", "phtml",
     "kt", "kts", "swift", "dart", "rb", "scala", "sc", "sol", "lua", "tf", "tfvars",
-    "erl", "hrl", "r", "nix", "xml", "sql",
+    "erl", "hrl", "r", "nix", "xml", "sql", "yml", "yaml", "json", "toml",
 ];
 
 pub fn is_indexed_ext(ext: &str) -> bool {
@@ -1426,4 +1535,31 @@ public class OrderController
         assert!(g.find_by_name("dist").is_empty(), "custom_dist should be ignored");
         assert!(g.find_by_name("gen").is_empty(), "test_generated.rs should be ignored");
     }
+
+    #[test]
+    fn test_yaml_and_json_plugin_config_indexing() {
+        let d = tempfile::tempdir().unwrap();
+        std::fs::write(
+            d.path().join("cordis.patch.yml"),
+            "plugins:\n  - repeat-tool-reminder\n  - auto-context-compaction\n",
+        )
+        .unwrap();
+
+        std::fs::write(
+            d.path().join("package.json"),
+            "{\n  \"name\": \"opencode\",\n  \"plugin\": \"@opencode/telemetry\"\n}\n",
+        )
+        .unwrap();
+
+        let g = build_graph(d.path());
+        assert!(
+            g.find_by_name("repeat-tool-reminder").into_iter().next().is_some(),
+            "YAML plugin should be indexed"
+        );
+        assert!(
+            g.find_by_name("auto-context-compaction").into_iter().next().is_some(),
+            "YAML plugin should be indexed"
+        );
+    }
 }
+

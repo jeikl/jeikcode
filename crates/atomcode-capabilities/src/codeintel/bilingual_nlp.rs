@@ -266,6 +266,61 @@ pub fn parse_bilingual_query_with_thesaurus(
     tokens
 }
 
+#[derive(Debug, Clone, Default)]
+pub struct ParsedQuery {
+    pub clean_text: String,
+    pub kind_filters: Vec<String>,
+    pub path_filters: Vec<String>,
+    pub name_filters: Vec<String>,
+    pub lang_filters: Vec<String>,
+}
+
+/// Parse field-qualified search queries (e.g. `kind:class path:session name:run_turn agent loop`)
+pub fn parse_field_qualified_query(raw: &str) -> ParsedQuery {
+    let mut out = ParsedQuery::default();
+    let mut text_parts = Vec::new();
+
+    for token in raw.split_whitespace() {
+        if let Some(rest) = token.strip_prefix("kind:") {
+            if !rest.is_empty() {
+                out.kind_filters.push(rest.to_ascii_lowercase());
+                continue;
+            }
+        } else if let Some(rest) = token.strip_prefix("path:") {
+            if !rest.is_empty() {
+                out.path_filters.push(rest.trim_matches('"').to_string());
+                continue;
+            }
+        } else if let Some(rest) = token.strip_prefix("name:") {
+            if !rest.is_empty() {
+                out.name_filters.push(rest.trim_matches('"').to_string());
+                continue;
+            }
+        } else if let Some(rest) = token.strip_prefix("lang:") {
+            if !rest.is_empty() {
+                out.lang_filters.push(rest.to_ascii_lowercase());
+                continue;
+            }
+        }
+        text_parts.push(token);
+    }
+
+    out.clean_text = text_parts.join(" ");
+    out
+}
+
+/// Derive project name tokens to prevent false mass hits from self-referencing repository names.
+pub fn derive_project_name_tokens(workspace_root: &Path) -> HashSet<String> {
+    let mut tokens = HashSet::new();
+    if let Some(name) = workspace_root.file_name().and_then(|n| n.to_str()) {
+        let norm = name.to_ascii_lowercase().replace('-', "_");
+        if norm.len() >= 4 {
+            tokens.insert(norm);
+        }
+    }
+    tokens
+}
+
 /// Compute 128-dimensional dense semantic embedding from text and expanded terms.
 pub fn compute_dense_embedding(text: &str, expanded: &HashSet<String>) -> Vec<f32> {
     let mut vec = vec![0.0f32; VECTOR_DIM];
@@ -293,6 +348,11 @@ pub fn compute_dense_embedding(text: &str, expanded: &HashSet<String>) -> Vec<f3
         (&['患', '医', '诊'], &["patient", "medical", "doctor", "rx"], 59),
         (&['臂', '机', '关'], &["robot", "arm", "joint", "motor"], 60),
         (&['路', '口', '端'], &["route", "api", "endpoint", "controller"], 61),
+        (&['管', '件', '拦'], &["middleware", "interceptor", "pipeline", "filter", "plug"], 62),
+        (&['提', '醒', '阶'], &["reminder", "prompt", "steer", "nudge", "ladder"], 63),
+        (&['试', '败', '错'], &["retry", "error", "fail", "backoff", "reopen"], 64),
+        (&['环', '轮', '转'], &["loop", "turn", "round", "cycle", "driver"], 65),
+        (&['配', '置', '档'], &["config", "setting", "patch", "yaml", "manifest"], 66),
     ];
 
     for (cjk_chars, en_stems, dim) in CONCEPT_ROOTS {

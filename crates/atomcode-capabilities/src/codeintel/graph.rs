@@ -27,6 +27,10 @@ pub enum SymbolKind {
     Module,
     Import,
     TypeAlias,
+    RouteEndpoint,
+    SqlStatement,
+    ConfigProperty,
+    UiElement,
     Other(String),
 }
 
@@ -49,6 +53,10 @@ pub struct SymbolNode {
     pub start_line: usize,
     pub end_line: usize,
     pub signature: Option<String>,
+    #[serde(default)]
+    pub docstring: Option<String>,
+    #[serde(default)]
+    pub inline_comments: Vec<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -58,6 +66,9 @@ pub enum EdgeKind {
     Inherits,
     Implements,
     References,
+    HttpDispatches,
+    MapperBinds,
+    ConfigBinds,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -257,6 +268,8 @@ mod tests {
             start_line: 1,
             end_line: 2,
             signature: None,
+            docstring: None,
+            inline_comments: Vec::new(),
         }
     }
 

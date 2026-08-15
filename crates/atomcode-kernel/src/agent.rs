@@ -197,7 +197,7 @@ fn round_tool_signature(calls: &[ToolCall]) -> String {
 
 /// Maximum number of `parallel_safe` (read-only) tools that run CONCURRENTLY in
 /// Phase ② of the tool loop. Read from `ATOMCODE_MAX_PARALLEL_TOOLS` (a positive
-/// integer); anything unset, unparseable, or `< 1` falls back to the default 4.
+/// integer); anything unset, unparseable, or `< 1` falls back to the default 8.
 /// A cap of 1 makes Phase ② effectively serial (one permit) without disabling the
 /// gate. Side-effecting tools always take the exclusive write-lock regardless of
 /// this cap, so it bounds only read-only overlap.
@@ -209,7 +209,7 @@ fn env_max_parallel_tools() -> usize {
         .ok()
         .and_then(|v| v.parse::<usize>().ok())
         .filter(|n| *n >= 1)
-        .unwrap_or(4)
+        .unwrap_or(8)
 }
 
 /// Hard upper bound applied to the parallel-tools cap (both the env path and the

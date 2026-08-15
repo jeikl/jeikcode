@@ -5,7 +5,7 @@
 use std::path::Path;
 use tree_sitter::Language;
 
-/// A source language with a tree-sitter grammar + symbol query.
+/// A source language with a tree-sitter grammar or semantic symbol extraction.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Lang {
     Rust,
@@ -20,12 +20,24 @@ pub enum Lang {
     CSharp,
     Html,
     Php,
+    // Modern Mobile, Web3, Scripting, and Systems
+    Kotlin,
+    Swift,
+    Dart,
+    Ruby,
+    Scala,
+    Solidity,
+    Lua,
+    Terraform,
+    Erlang,
+    R,
+    Nix,
 }
 
 impl Lang {
-    /// The tree-sitter grammar for this language.
-    pub fn grammar(&self) -> Language {
-        match self {
+    /// The tree-sitter grammar for this language, if available.
+    pub fn grammar(&self) -> Option<Language> {
+        Some(match self {
             Lang::Rust => tree_sitter_rust::LANGUAGE.into(),
             Lang::Python => tree_sitter_python::LANGUAGE.into(),
             Lang::JavaScript => tree_sitter_javascript::LANGUAGE.into(),
@@ -38,12 +50,13 @@ impl Lang {
             Lang::CSharp => tree_sitter_c_sharp::LANGUAGE.into(),
             Lang::Html => tree_sitter_html::LANGUAGE.into(),
             Lang::Php => tree_sitter_php::LANGUAGE_PHP.into(),
-        }
+            _ => return None,
+        })
     }
 
     /// The tree-sitter query that captures symbol definitions (`@name` + `@definition`).
-    pub fn symbols_query(&self) -> &'static str {
-        match self {
+    pub fn symbols_query(&self) -> Option<&'static str> {
+        Some(match self {
             Lang::Rust => include_str!("queries/rust.scm"),
             Lang::Python => include_str!("queries/python.scm"),
             Lang::JavaScript => include_str!("queries/javascript.scm"),
@@ -57,7 +70,8 @@ impl Lang {
             Lang::CSharp => include_str!("queries/csharp.scm"),
             Lang::Html => include_str!("queries/html.scm"),
             Lang::Php => include_str!("queries/php.scm"),
-        }
+            _ => return None,
+        })
     }
 
     /// The tree-sitter query that captures call expressions (`@callee`). `None` for
@@ -92,6 +106,12 @@ impl Lang {
                 | Lang::C
                 | Lang::Cpp
                 | Lang::CSharp
+                | Lang::Kotlin
+                | Lang::Swift
+                | Lang::Dart
+                | Lang::Ruby
+                | Lang::Scala
+                | Lang::Solidity
         )
     }
 
@@ -102,15 +122,26 @@ impl Lang {
             "rs" => Lang::Rust,
             "py" | "pyi" => Lang::Python,
             "js" | "mjs" | "cjs" => Lang::JavaScript,
-            "ts" | "mts" => Lang::TypeScript,
-            "tsx" | "jsx" => Lang::Tsx,
+            "ts" | "mts" | "ets" => Lang::TypeScript,
+            "tsx" | "jsx" | "vue" | "svelte" | "astro" => Lang::Tsx,
             "go" => Lang::Go,
             "java" => Lang::Java,
             "c" | "h" => Lang::C,
-            "cc" | "cpp" | "cxx" | "hh" | "hpp" | "hxx" => Lang::Cpp,
+            "cc" | "cpp" | "cxx" | "hh" | "hpp" | "hxx" | "cu" | "cuh" | "m" | "mm" => Lang::Cpp,
             "cs" => Lang::CSharp,
             "html" | "htm" => Lang::Html,
             "php" => Lang::Php,
+            "kt" | "kts" => Lang::Kotlin,
+            "swift" => Lang::Swift,
+            "dart" => Lang::Dart,
+            "rb" | "rake" => Lang::Ruby,
+            "scala" | "sc" => Lang::Scala,
+            "sol" => Lang::Solidity,
+            "lua" | "luau" => Lang::Lua,
+            "tf" | "tfvars" => Lang::Terraform,
+            "erl" | "hrl" => Lang::Erlang,
+            "r" | "R" => Lang::R,
+            "nix" => Lang::Nix,
             _ => return None,
         })
     }
@@ -126,6 +157,19 @@ mod tests {
         assert_eq!(Lang::detect(Path::new("a.rs")), Some(Lang::Rust));
         assert_eq!(Lang::detect(Path::new("x/y/z.py")), Some(Lang::Python));
         assert_eq!(Lang::detect(Path::new("a.tsx")), Some(Lang::Tsx));
+        assert_eq!(Lang::detect(Path::new("App.vue")), Some(Lang::Tsx));
+        assert_eq!(Lang::detect(Path::new("Header.svelte")), Some(Lang::Tsx));
+        assert_eq!(Lang::detect(Path::new("Index.astro")), Some(Lang::Tsx));
+        assert_eq!(Lang::detect(Path::new("EntryAbility.ets")), Some(Lang::TypeScript));
+        assert_eq!(Lang::detect(Path::new("main.go")), Some(Lang::Go));
+        assert_eq!(Lang::detect(Path::new("MainActivity.kt")), Some(Lang::Kotlin));
+        assert_eq!(Lang::detect(Path::new("AppDelegate.swift")), Some(Lang::Swift));
+        assert_eq!(Lang::detect(Path::new("widget.dart")), Some(Lang::Dart));
+        assert_eq!(Lang::detect(Path::new("app.rb")), Some(Lang::Ruby));
+        assert_eq!(Lang::detect(Path::new("Token.sol")), Some(Lang::Solidity));
+        assert_eq!(Lang::detect(Path::new("kernel.cu")), Some(Lang::Cpp));
+        assert_eq!(Lang::detect(Path::new("main.tf")), Some(Lang::Terraform));
+        assert_eq!(Lang::detect(Path::new("init.lua")), Some(Lang::Lua));
         assert_eq!(Lang::detect(Path::new("a.hpp")), Some(Lang::Cpp));
         assert_eq!(Lang::detect(Path::new("CouponService.cs")), Some(Lang::CSharp));
         assert_eq!(Lang::detect(Path::new("a.unknownext")), None);
@@ -136,7 +180,7 @@ mod tests {
     fn csharp_is_fully_indexed_with_calls() {
         assert!(Lang::CSharp.is_indexed());
         assert!(Lang::CSharp.calls_query().is_some());
-        let q = tree_sitter::Query::new(&Lang::CSharp.grammar(), Lang::CSharp.calls_query().unwrap())
+        let q = tree_sitter::Query::new(&Lang::CSharp.grammar().unwrap(), Lang::CSharp.calls_query().unwrap())
             .expect("csharp_calls.scm must compile");
         assert!(q.capture_index_for_name("callee").is_some());
     }
@@ -158,7 +202,9 @@ mod tests {
             Lang::Html,
             Lang::Php,
         ] {
-            match tree_sitter::Query::new(&lang.grammar(), lang.symbols_query()) {
+            let Some(grammar) = lang.grammar() else { continue; };
+            let Some(query_str) = lang.symbols_query() else { continue; };
+            match tree_sitter::Query::new(&grammar, query_str) {
                 Ok(q) => {
                     if q.capture_index_for_name("name").is_none()
                         || q.capture_index_for_name("definition").is_none()

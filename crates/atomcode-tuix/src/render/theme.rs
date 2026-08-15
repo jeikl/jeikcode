@@ -28,10 +28,25 @@ impl Palette {
     // "dark cyan" looks desaturated. CC uses bright variants for diff
     // +/- and inline code for the same reason; aligning here so colours
     // read consistently across Mac Terminal / iTerm / Alacritty dark
-    // themes. Bright variants also still map to sensible colours on
-    // light themes (most terminals give them enough contrast with the
-    // default background).
-    pub const BRAND: Color = Color::Magenta; // bright magenta (95)
+    // Refined modern brand color: clean cyan/indigo tone matching OpenCode/Claude aesthetics.
+    pub const BRAND: Color = Color::Cyan;
+
+    /// Thinking accent on **dark** backgrounds: warm amber (#ffaf00 / AnsiValue 214).
+    pub const THINKING_DARK: Color = Color::AnsiValue(214);
+    /// Thinking accent on **light** backgrounds: deep gold (#d78700 / AnsiValue 172).
+    pub const THINKING_LIGHT: Color = Color::AnsiValue(172);
+
+    /// Thinking body text on dark: subtle warm dimmed (#afafaf / AnsiValue 246).
+    pub const THINKING_BODY_DARK: Color = Color::AnsiValue(246);
+    /// Thinking body text on light: subtle muted gray (#666666 / AnsiValue 242).
+    pub const THINKING_BODY_LIGHT: Color = Color::AnsiValue(242);
+
+    /// Tool accent name color: vibrant cyan.
+    pub const TOOL_NAME: Color = Color::Cyan;
+    /// Tool success green: vibrant emerald.
+    pub const TOOL_SUCCESS: Color = Color::AnsiValue(35);
+    /// Tool error red: vibrant coral red.
+    pub const TOOL_ERROR: Color = Color::AnsiValue(196);
 
     /// Colour for the footer **mode badge** (`⏵ accept edits`, `PLAN`).
     /// Deliberately a soft 256-colour periwinkle (`AnsiValue(104)` ≈ `#8787d7`)
@@ -200,6 +215,24 @@ pub fn diff_remove_for_current_theme() -> Color {
     }
 }
 
+/// Resolve the thinking header accent (warm amber/gold) for the active palette.
+pub fn thinking_header_for_current_theme() -> Color {
+    if md_theme::is_light_for_render() {
+        Palette::THINKING_LIGHT
+    } else {
+        Palette::THINKING_DARK
+    }
+}
+
+/// Resolve the thinking body text shade for the active palette.
+pub fn thinking_body_for_current_theme() -> Color {
+    if md_theme::is_light_for_render() {
+        Palette::THINKING_BODY_LIGHT
+    } else {
+        Palette::THINKING_BODY_DARK
+    }
+}
+
 /// Semantic colour role → concrete Color, honouring NO_COLOR etc.
 /// Returns None when colours are disabled OR when the role intentionally
 /// uses the terminal's default foreground (so strong/tool-name text just
@@ -216,6 +249,8 @@ pub fn role(caps: TerminalCaps, role: Role) -> Option<Color> {
         Role::Muted => Some(muted_for_current_theme()),
         Role::Accent => Some(Palette::ACCENT),
         Role::AccentDim => Some(muted_for_current_theme()),
+        Role::ThinkingHeader => Some(thinking_header_for_current_theme()),
+        Role::ThinkingBody => Some(thinking_body_for_current_theme()),
         // Secondary = default terminal foreground. Using None means
         // "don't emit a colour SGR"; text shows in whatever colour the
         // terminal's theme chose for regular output.
@@ -223,10 +258,12 @@ pub fn role(caps: TerminalCaps, role: Role) -> Option<Color> {
         Role::Border => Some(Palette::BORDER),
         Role::Warning => Some(warning_for_current_theme()),
         Role::Error => Some(Palette::ERROR),
-        Role::Success => Some(Palette::DIFF_ADD),
+        Role::Success => Some(Palette::TOOL_SUCCESS),
         Role::DiffAdd => Some(diff_add_for_current_theme()),
         Role::DiffRemove => Some(diff_remove_for_current_theme()),
         Role::ToolName => None,
+        Role::ToolSuccess => Some(Palette::TOOL_SUCCESS),
+        Role::ToolError => Some(Palette::TOOL_ERROR),
         Role::PanelFg => {
             if md_theme::is_light_for_render() {
                 Some(Palette::PANEL_FG_LIGHT)
@@ -253,6 +290,8 @@ pub enum Role {
     Muted,
     Accent,
     AccentDim,
+    ThinkingHeader,
+    ThinkingBody,
     Secondary,
     Border,
     Warning,
@@ -261,6 +300,8 @@ pub enum Role {
     DiffAdd,
     DiffRemove,
     ToolName,
+    ToolSuccess,
+    ToolError,
     PanelFg,
     PanelBg,
 }

@@ -831,6 +831,8 @@ pub struct RetainedRenderer<W: Write + Send> {
     assistant_line_buf: String,
     /// Line-buffer for streaming reasoning text.
     reasoning_line_buf: String,
+    /// True when the initial `+ Thought` header was rendered for the current reasoning segment.
+    reasoning_header_emitted: bool,
     /// Markdown parser state (code-block tracking, table row
     /// buffering) passed to `crate::markdown::render_line` on each
     /// completed assistant line.
@@ -1126,6 +1128,7 @@ impl<W: Write + Send> RetainedRenderer<W> {
             auto_copy_enabled: false,
             assistant_line_buf: String::new(),
             reasoning_line_buf: String::new(),
+            reasoning_header_emitted: false,
             md_state: crate::markdown::MdState::new(),
             dirty: false,
             last_painted_footer_rows: 0,
@@ -6485,10 +6488,8 @@ impl<W: Write + Send> RetainedRenderer<W> {
         let Some(complete) = append_stream_chunk(&mut self.reasoning_line_buf, chunk) else {
             return;
         };
-        let style = CellStyle {
-            faint: true,
-            ..CellStyle::default()
-        };
+        let mut style = self.style_for(Role::ThinkingBody);
+        style.faint = true;
         for content in complete.split_terminator('\n') {
             self.push_body_text(content, &style);
         }
@@ -6497,10 +6498,8 @@ impl<W: Write + Send> RetainedRenderer<W> {
     fn flush_reasoning_remainder(&mut self) {
         if !self.reasoning_line_buf.is_empty() {
             let line = std::mem::take(&mut self.reasoning_line_buf);
-            let style = CellStyle {
-                faint: true,
-                ..CellStyle::default()
-            };
+            let mut style = self.style_for(Role::ThinkingBody);
+            style.faint = true;
             self.push_body_text(&line, &style);
         }
     }
@@ -7378,6 +7377,7 @@ impl<W: Write + Send> Renderer for RetainedRenderer<W> {
             UiLine::TurnComplete => {
                 self.flush_assistant_remainder();
                 self.flush_reasoning_remainder();
+                self.reasoning_header_emitted = false;
                 // Defense in depth: a turn that ended without a
                 // matching ToolCallCommit (interrupted, forced stop,
                 // protocol bug) would otherwise leave inflight_tool
@@ -7389,6 +7389,7 @@ impl<W: Write + Send> Renderer for RetainedRenderer<W> {
             UiLine::TurnCancelled => {
                 self.flush_assistant_remainder();
                 self.flush_reasoning_remainder();
+                self.reasoning_header_emitted = false;
                 self.commit_inflight_tool();
                 // (cancelled) is a state-change marker — must remain
                 // visible. Default fg, not Muted.
@@ -7814,7 +7815,8 @@ impl<W: Write + Send> Renderer for RetainedRenderer<W> {
                 } else {
                     "  ` "
                 };
-                for (line_idx, phys) in body_str.split('\n').enumerate() {
+                let collapsed = crate::render::diff::collapse_tool_output(&body_str, 3, row_w * 3);
+                for (line_idx, phys) in collapsed.preview.split('\n').enumerate() {
                     // First physical line of a failure body is the
                     // header. Wrapped continuation chunks of that same
                     // physical line stay header-styled (a long error
@@ -7861,6 +7863,15 @@ impl<W: Write + Send> Renderer for RetainedRenderer<W> {
                         self.push_body_row(row);
                         first_visual = false;
                     }
+                }
+                if collapsed.overflow {
+                    let mut row = Vec::new();
+                    let expand_icon = if self.caps.unicode_symbols { "  ▼ " } else { "  v " };
+                    let remaining = collapsed.total_lines.saturating_sub(3);
+                    let expand_hint = format!("Click / Enter to expand (+{remaining} lines)");
+                    push_str_cells(&mut row, expand_icon, &self.style_bold(Role::Accent));
+                    push_str_cells(&mut row, &expand_hint, &self.style_for(Role::Muted));
+                    self.push_body_row(row);
                 }
                 // No trailing spacer — tool chains stay compact. A
                 // following assistant paragraph provides its own
@@ -17828,6 +17839,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(not(windows))]
     fn retained_resume_does_not_request_keyboard_release_events() {
         let buf = Arc::new(Mutex::new(Vec::new()));
         let sink = CapturingSink(buf.clone());

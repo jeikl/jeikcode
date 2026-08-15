@@ -21,7 +21,6 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use atomcode_capabilities::cc_hooks::{CCExternalHooks, HookConfig};
-use atomcode_capabilities::codeintel::register_codeintel_tools;
 use atomcode_capabilities::datalog::DatalogHook;
 use atomcode_capabilities::mcp::{self, McpConnectEvent, McpRegistry};
 use atomcode_capabilities::memory::MemoryHook;
@@ -303,12 +302,30 @@ async fn prepare_with_plugin_hooks_reusing_lease(
     if !request_user_input_enabled {
         names.retain(|name| name != "request_user_input");
     }
-    register_codeintel_tools(&mut registry);
-    names.extend(
-        atomcode_capabilities::codeintel::codeintel_tool_names()
-            .iter()
-            .map(|s| s.to_string()),
+    let codeintel_mode = atomcode_capabilities::codeintel::CodeIntelMode::from_env_or_config(
+        std::env::var("ATOMCODE_CODEINTEL_MODE").ok().as_deref(),
+        None,
     );
+    atomcode_capabilities::codeintel::register_codeintel_tools_with_mode(&mut registry, &codeintel_mode);
+    match &codeintel_mode {
+        atomcode_capabilities::codeintel::CodeIntelMode::Unified => {
+            names.extend(
+                atomcode_capabilities::codeintel::codeintel_unified_tool_names()
+                    .iter()
+                    .map(|s| s.to_string()),
+            );
+        }
+        atomcode_capabilities::codeintel::CodeIntelMode::Full => {
+            names.extend(
+                atomcode_capabilities::codeintel::codeintel_tool_names()
+                    .iter()
+                    .map(|s| s.to_string()),
+            );
+        }
+        atomcode_capabilities::codeintel::CodeIntelMode::Custom(tools) => {
+            names.extend(tools.clone());
+        }
+    }
     if atomcode_capabilities::codeintel::register_lsp_tool(&mut registry, &cfg.lsp) {
         names.push("lsp".into());
     }

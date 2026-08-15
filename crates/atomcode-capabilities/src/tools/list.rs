@@ -10,13 +10,13 @@ use serde_json::json;
 use std::path::Path;
 
 /// Entries shown in a folded result: first/last `FOLD_HALF` with a marker between.
-const MAX_ENTRIES: usize = 200;
+const MAX_ENTRIES: usize = 350;
 /// Half of the folded window — head and tail each keep this many lines.
 const FOLD_HALF: usize = MAX_ENTRIES / 2;
 /// Hard stop for the walk itself. Bounds the work while still collecting
 /// enough lines past the cap for the tail half to be meaningful.
 const COLLECT_CAP: usize = MAX_ENTRIES * 2;
-const MAX_DEPTH_CAP: usize = 5;
+const MAX_DEPTH_CAP: usize = 6;
 
 pub struct ListDirTool;
 
@@ -397,7 +397,7 @@ mod tests {
             r.content
         );
         // An elided middle entry must NOT leak into the output.
-        assert!(!r.content.contains("f100.txt"), "{}", r.content);
+        assert!(!r.content.contains(&format!("f{:03}.txt", FOLD_HALF)), "{}", r.content);
     }
 
     /// The regression this fix targets: on a multi-project workspace the rows

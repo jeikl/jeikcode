@@ -1,34 +1,41 @@
 //! `repo_map` — high-density, multi-language architectural codebase map.
 //!
-//! Uses Tree-sitter AST symbol extraction to build a global architecture summary of
-//! key types, structs, traits, classes, interfaces, enums, and functions across all
-//! 12 supported languages (Rust, Python, JS, TS, TSX, Go, Java, C, C++, C#, PHP, HTML).
+//! Index-backed: reuses the shared [`CodeIndex`] the graph tools hold, so the
+//! directory tree shows EXACTLY the files `code_explore` / `find_symbol` can
+//! resolve — one source of truth, never a separate (and drifting) walk.
 //!
-//! Designed to give an agent immediate full-scope situational awareness in 1 turn (~1.5k-3k tokens),
-//! eliminating blind grep/list rounds when entering unfamiliar repositories.
+//! The **full directory tree is never truncated**: every index-backed source
+//! file is rendered, regardless of `max_files` or output-budget pressure. The
+//! symbol-detail section below it is budgeted; when it is cut, an explicit
+//! marker tells the model that the tree above is still complete and which
+//! paths to drill into next (or that `mode: "tree"` / a `path:` scope can
+//! trade detail for space).
 
-use super::lang::Lang;
-use super::symbols::extract_symbols;
+use super::graph::CodeGraph;
+use super::index::{collect_source_paths, CodeIndex};
 use super::{err, ok};
 use async_trait::async_trait;
 use atomcode_kernel::tool::{Tool, ToolContext, ToolResult};
-use ignore::WalkBuilder;
 use serde::Deserialize;
 use serde_json::json;
-use std::collections::{BTreeMap, HashMap};
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
-const DEFAULT_MAX_FILES: usize = 60;
-const MAX_ALLOWED_FILES: usize = 200;
-const MAX_SYMBOLS_PER_FILE: usize = 25;
-const MAX_MAP_OUTPUT_BYTES: usize = 48 * 1024; // 48 KiB budget (~12k tokens max)
+/// Default number of files whose SYMBOLS are rendered (the tree is unaffected).
+const DEFAULT_MAX_FILES: usize = 100;
+const MAX_ALLOWED_FILES: usize = 300;
+const MAX_SYMBOLS_PER_FILE: usize = 40;
+/// Budget for the symbol-detail section only; the tree above it is never cut.
+const MAX_SYMBOL_OUTPUT_BYTES: usize = 64 * 1024;
 
-#[derive(Default)]
-pub struct RepoMapTool;
+pub struct RepoMapTool {
+    index: Arc<CodeIndex>,
+}
 
 impl RepoMapTool {
-    pub fn new() -> Self {
-        Self
+    pub fn new(index: Arc<CodeIndex>) -> Self {
+        Self { index }
     }
 }
 
@@ -38,6 +45,10 @@ struct Args {
     path: Option<String>,
     #[serde(default)]
     max_files: Option<usize>,
+    /// "full" (default) = complete tree + budgeted symbol detail;
+    /// "tree" = complete tree only; "symbols" = symbol detail only.
+    #[serde(default)]
+    mode: Option<String>,
 }
 
 #[async_trait]
@@ -47,11 +58,14 @@ impl Tool for RepoMapTool {
     }
 
     fn description(&self) -> &str {
-        "MANDATORY Round 1 architecture radar: generates a high-density, multi-language \
-         outline of the codebase (key types, structs, interfaces, classes, functions, and module hierarchy) \
-         using Tree-Sitter AST extraction. Supports Rust, Python, TS/JS, Go, Java, C, C++, C#, PHP, HTML. \
-         ALWAYS call this in Round 1 on any unfamiliar project, multi-project workspace, or broad inquiry \
-         to see global architecture in 1 round without blind searches."
+        "MANDATORY Round 1 architecture radar: prints the COMPLETE index-backed \
+         directory tree (every source file code_explore can resolve — NEVER truncated \
+         by max_files) plus a budgeted AST symbol outline (structs, traits, classes, \
+         functions) per file, across all indexed languages. ALWAYS call this in Round 1 \
+         on any unfamiliar project, multi-project workspace, or broad inquiry to see the \
+         full file/module topology in 1 round without blind searches. If the symbol \
+         section is cut by its budget marker, the tree above it is still complete — \
+         drill with a narrower `path:` or `mode: \"tree\"`."
     }
 
     fn parameters_schema(&self) -> serde_json::Value {
@@ -64,7 +78,12 @@ impl Tool for RepoMapTool {
                 },
                 "max_files": {
                     "type": "integer",
-                    "description": "Maximum number of source files to include in the architecture map (default 60, max 200)"
+                    "description": "Maximum number of files whose SYMBOLS are rendered (default 100, max 300). The directory tree always shows every file."
+                },
+                "mode": {
+                    "type": "string",
+                    "enum": ["full", "tree", "symbols"],
+                    "description": "full (default): complete tree + budgeted symbol detail; tree: complete tree only; symbols: symbol detail only"
                 }
             }
         })
@@ -80,6 +99,7 @@ impl Tool for RepoMapTool {
             Err(_) => Args {
                 path: None,
                 max_files: None,
+                mode: None,
             },
         };
 
@@ -103,10 +123,15 @@ impl Tool for RepoMapTool {
         }
 
         let max_files = a.max_files.unwrap_or(DEFAULT_MAX_FILES).min(MAX_ALLOWED_FILES);
+        let mode = a
+            .mode
+            .unwrap_or_else(|| "full".to_string())
+            .to_ascii_lowercase();
         let working_dir = ctx.working_dir.clone();
+        let index = self.index.clone();
 
         let result = tokio::task::spawn_blocking(move || {
-            build_repo_map(&target_dir, &working_dir, max_files)
+            build_repo_map(&index, &target_dir, &working_dir, max_files, &mode)
         })
         .await;
 
@@ -117,21 +142,37 @@ impl Tool for RepoMapTool {
     }
 }
 
-/// Score a relative path so key architectural files and entry points are prioritized.
+/// Score a relative path so key architectural files and entry points are
+/// prioritized in the SYMBOL section (the tree keeps full order).
 fn file_priority_score(rel_path: &str) -> i32 {
     let lower = rel_path.to_ascii_lowercase();
     let mut score = 0;
 
     // Entry points and exports
-    if lower.contains("main.") || lower.contains("lib.") || lower.contains("index.") || lower.contains("app.") || lower.contains("mod.rs") {
+    if lower.contains("main.")
+        || lower.contains("lib.")
+        || lower.contains("index.")
+        || lower.contains("app.")
+        || lower.contains("mod.rs")
+    {
         score += 50;
     }
     // Core contracts and schemas
-    if lower.contains("types.") || lower.contains("schema.") || lower.contains("models.") || lower.contains("protocol.") || lower.contains("interface.") {
+    if lower.contains("types.")
+        || lower.contains("schema.")
+        || lower.contains("models.")
+        || lower.contains("protocol.")
+        || lower.contains("interface.")
+    {
         score += 40;
     }
     // High-signal architectural layers
-    if lower.contains("service") || lower.contains("controller") || lower.contains("agent") || lower.contains("kernel") || lower.contains("engine") {
+    if lower.contains("service")
+        || lower.contains("controller")
+        || lower.contains("agent")
+        || lower.contains("kernel")
+        || lower.contains("engine")
+    {
         score += 30;
     }
     // Shallow depth bonus
@@ -139,179 +180,210 @@ fn file_priority_score(rel_path: &str) -> i32 {
     score += (10 - depth.min(10)) as i32 * 5;
 
     // Deprioritize tests, mocks, examples, and generated fixtures
-    if lower.contains("test") || lower.contains("mock") || lower.contains("spec") || lower.contains("fixture") || lower.contains("example") {
+    if lower.contains("test")
+        || lower.contains("mock")
+        || lower.contains("spec")
+        || lower.contains("fixture")
+        || lower.contains("example")
+    {
         score -= 60;
     }
 
     score
 }
 
-fn is_skip_dir_component(name: &str) -> bool {
-    matches!(
-        name,
-        ".git"
-            | "node_modules"
-            | "target"
-            | "dist"
-            | "build"
-            | "bin"
-            | "obj"
-            | ".atomcode"
-            | ".claude"
-            | ".opencode"
-            | "vendor"
-            | ".venv"
-            | "__pycache__"
-    )
-}
-
-fn build_repo_map(target_dir: &Path, working_dir: &Path, max_files: usize) -> String {
-    let mut walker = WalkBuilder::new(target_dir);
-    walker
-        .standard_filters(true)
-        .hidden(true)
-        .parents(true)
-        .git_ignore(true);
-
-    let mut candidate_files: Vec<(i32, PathBuf, Lang)> = Vec::new();
-    let mut lang_counts: HashMap<String, usize> = HashMap::new();
-
-    for entry in walker.build().filter_map(Result::ok) {
-        let path = entry.path();
-        if path.is_dir() {
-            continue;
-        }
-
-        // Check if any component is a skipped dir
-        if path.components().any(|c| {
-            c.as_os_str()
-                .to_str()
-                .map(is_skip_dir_component)
-                .unwrap_or(false)
-        }) {
-            continue;
-        }
-
-        if let Some(lang) = Lang::detect(path) {
-            let rel = path
-                .strip_prefix(working_dir)
-                .unwrap_or(path)
-                .to_string_lossy()
-                .replace('\\', "/");
-
-            let lang_name = format!("{lang:?}");
-            *lang_counts.entry(lang_name).or_default() += 1;
-
-            let score = file_priority_score(&rel);
-            candidate_files.push((score, path.to_path_buf(), lang));
-        }
+fn build_repo_map(
+    index: &CodeIndex,
+    target_dir: &Path,
+    working_dir: &Path,
+    max_symbol_files: usize,
+    mode: &str,
+) -> String {
+    // Shared, cache-warm walk: identical to what code_explore can resolve.
+    let files = collect_source_paths(target_dir);
+    if files.is_empty() {
+        return "(no indexed source files found in target directory)".to_string();
     }
 
-    if candidate_files.is_empty() {
-        return "(no supported source files found in target directory)".to_string();
-    }
+    let graph = index.get(target_dir);
 
-    // Sort by priority score descending
-    candidate_files.sort_by(|a, b| b.0.cmp(&a.0));
-
-    let selected_files = &candidate_files[..candidate_files.len().min(max_files)];
-
-    let mut output = String::new();
-    output.push_str("=== CODEBASE ARCHITECTURE MAP (Tree-Sitter AST) ===\n");
-    output.push_str(&format!(
-        "Overview: {} / {} candidate source files indexed by priority (Languages: {})\n\n",
-        selected_files.len(),
-        candidate_files.len(),
-        lang_counts
-            .iter()
-            .map(|(k, v)| format!("{k}: {v}"))
-            .collect::<Vec<_>>()
-            .join(", ")
+    let mut out = String::new();
+    out.push_str("=== CODEBASE ARCHITECTURE MAP (index-backed) ===\n");
+    out.push_str(&format!(
+        "Overview: {} indexed source files\n",
+        files.len()
     ));
 
-    // Group files by top-level module/directory for clean mental models
-    let mut module_map: BTreeMap<String, Vec<&(i32, PathBuf, Lang)>> = BTreeMap::new();
-    for item in selected_files {
-        let rel = item
-            .1
+    // Language distribution by extension (same matrix the index walks).
+    let mut lang_counts: BTreeMap<String, usize> = BTreeMap::new();
+    for p in &files {
+        let ext = p
+            .extension()
+            .and_then(|e| e.to_str())
+            .unwrap_or("?")
+            .to_ascii_lowercase();
+        *lang_counts.entry(ext).or_default() += 1;
+    }
+    if !lang_counts.is_empty() {
+        out.push_str(&format!(
+            "Languages: {}\n",
+            lang_counts
+                .iter()
+                .map(|(k, v)| format!("{k}: {v}"))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ));
+    }
+
+    let want_tree = mode != "symbols";
+    let want_symbols = mode != "tree";
+
+    if want_tree {
+        out.push_str("\n-- DIRECTORY TREE (complete: every indexed source file) --\n");
+        out.push_str(&render_file_tree(target_dir, &files));
+    }
+
+    if want_symbols {
+        out.push_str("\n-- SYMBOL DETAIL (priority-ranked; budgeted) --\n");
+        let (detail, cut) = render_symbols(&graph, working_dir, max_symbol_files);
+        out.push_str(&detail);
+        if cut {
+            out.push_str(&format!(
+                "\n[symbol detail cut at {}KB budget; the tree above is COMPLETE. \
+                 Re-run with a narrower `path:` (or `mode: \"symbols\"` + a subdir) to see \
+                 the remaining files' symbols.]\n",
+                MAX_SYMBOL_OUTPUT_BYTES / 1024
+            ));
+        }
+    }
+
+    out
+}
+
+/// A complete, deterministic, compact file tree. Directories render before
+/// files, each level sorted — no `max_files` cut, no output-budget cut.
+fn render_file_tree(root: &Path, files: &[PathBuf]) -> String {
+    #[derive(Default)]
+    struct Dir {
+        dirs: BTreeMap<String, Dir>,
+        files: Vec<String>,
+    }
+
+    let mut top = Dir::default();
+    for p in files {
+        let rel = match p.strip_prefix(root) {
+            Ok(r) => r,
+            Err(_) => p,
+        };
+        let comps: Vec<String> = rel
+            .components()
+            .map(|c| c.as_os_str().to_string_lossy().into_owned())
+            .collect();
+        if comps.is_empty() {
+            continue;
+        }
+        let mut node = &mut top;
+        for (i, comp) in comps.iter().enumerate() {
+            if i + 1 == comps.len() {
+                node.files.push(comp.clone());
+            } else {
+                node = node.dirs.entry(comp.clone()).or_default();
+            }
+        }
+    }
+    for node in top.dirs.values_mut() {
+        node.files.sort();
+    }
+
+    let mut out = String::new();
+    fn emit(node: &Dir, prefix: &str, out: &mut String) {
+        for (name, child) in &node.dirs {
+            out.push_str(&format!("{prefix}{name}/\n"));
+            emit(child, &format!("{prefix}  "), out);
+        }
+        for f in &node.files {
+            out.push_str(&format!("{prefix}{f}\n"));
+        }
+    }
+    emit(&top, "", &mut out);
+    out
+}
+
+/// Render per-file symbol outlines from the shared graph, priority-ranked and
+/// budgeted. Returns (text, was_cut).
+fn render_symbols(graph: &CodeGraph, working_dir: &Path, max_symbol_files: usize) -> (String, bool) {
+    // Rank files by architectural priority for the SYMBOL section.
+    let mut ranked: Vec<(&PathBuf, &Vec<u64>)> = graph.file_symbols.iter().collect();
+    ranked.sort_by(|a, b| {
+        let ra = file_priority_score(
+            &a.0.strip_prefix(working_dir).unwrap_or(a.0).to_string_lossy().replace('\\', "/"),
+        );
+        let rb = file_priority_score(
+            &b.0.strip_prefix(working_dir).unwrap_or(b.0).to_string_lossy().replace('\\', "/"),
+        );
+        rb.cmp(&ra).then_with(|| a.0.cmp(b.0))
+    });
+
+    let mut out = String::new();
+    let mut cut = false;
+    for (path, ids) in ranked.iter().take(max_symbol_files) {
+        let rel = path
             .strip_prefix(working_dir)
-            .unwrap_or(&item.1)
+            .unwrap_or(path)
             .to_string_lossy()
             .replace('\\', "/");
 
-        let module_name = if let Some(idx) = rel.find('/') {
-            rel[..idx].to_string()
-        } else {
-            "root".to_string()
-        };
-        module_map.entry(module_name).or_default().push(item);
-    }
-
-    for (module, files) in module_map {
-        output.push_str(&format!("📦 [{module}]\n"));
-
-        for (_, path, lang) in files {
-            let rel = path
-                .strip_prefix(working_dir)
-                .unwrap_or(path)
-                .to_string_lossy()
-                .replace('\\', "/");
-
-            let content = match std::fs::read_to_string(path) {
-                Ok(s) => s,
-                Err(_) => continue,
+        let mut formatted: Vec<String> = Vec::new();
+        for id in ids.iter() {
+            if formatted.len() >= MAX_SYMBOLS_PER_FILE {
+                break;
+            }
+            let Some(node) = graph.node(*id) else {
+                continue;
             };
-
-            let symbols = match extract_symbols(&content, *lang) {
-                Some(s) if !s.is_empty() => s,
-                _ => {
-                    output.push_str(&format!("  📄 {rel} ({lang:?})\n"));
-                    continue;
-                }
-            };
-
-            output.push_str(&format!("  📄 {rel} ({lang:?})\n"));
-
-            // Filter and compact key symbols
-            let mut formatted_symbols = Vec::new();
-            for sym in symbols.iter().take(MAX_SYMBOLS_PER_FILE) {
-                let kind_label = match sym.kind.as_str() {
-                    "struct_item" | "struct_declaration" | "struct_specifier" | "struct" => "struct",
-                    "class_definition" | "class_declaration" | "class_specifier" | "class" => "class",
-                    "trait_item" | "trait_definition" | "trait" => "trait",
-                    "interface_declaration" | "interface_type" | "interface" | "protocol" => "interface",
-                    "enum_item" | "enum_declaration" | "enum_specifier" | "enum" => "enum",
-                    "function_item" | "function_definition" | "function_declaration" | "func_item" | "function" | "fn" | "def" => "fn",
-                    "method_definition" | "method_declaration" | "method" => "method",
-                    "type_item" | "type_alias_declaration" | "type_declaration" | "type_spec" | "typedef_declaration" | "type" => "type",
-                    "mod_item" | "module" | "namespace_declaration" | "mod" => "mod",
-                    "contract" => "contract",
-                    "resource" => "resource",
-                    "impl_item" | "impl" => "impl",
-                    _ => {
-                        if !sym.name.is_empty() {
-                            sym.kind.split('_').next().unwrap_or("sym")
-                        } else {
-                            continue;
-                        }
-                    }
-                };
-                formatted_symbols.push(format!("{kind_label} {}:{}", sym.name, sym.start_line));
+            if node.name.is_empty() {
+                continue;
             }
-
-            if !formatted_symbols.is_empty() {
-                output.push_str(&format!("     └─ {}\n", formatted_symbols.join(", ")));
-            }
-
-            if output.len() > MAX_MAP_OUTPUT_BYTES {
-                output.push_str("\n... [output capped at 48KB budget; remaining files omitted]\n");
-                return output;
-            }
+            let kind_label = symbol_kind_label(&node.kind);
+            formatted.push(format!("{kind_label} {}:{}", node.name, node.start_line));
         }
-        output.push('\n');
-    }
 
-    output
+        out.push_str(&format!("  📄 {rel}\n"));
+        if !formatted.is_empty() {
+            out.push_str(&format!("     └─ {}\n", formatted.join(", ")));
+        }
+
+        if out.len() > MAX_SYMBOL_OUTPUT_BYTES {
+            cut = true;
+            break;
+        }
+    }
+    (out, cut)
+}
+
+fn symbol_kind_label(kind: &super::graph::SymbolKind) -> &'static str {
+    use super::graph::SymbolKind;
+    match kind {
+        SymbolKind::Function => "fn",
+        SymbolKind::Method => "method",
+        SymbolKind::Struct => "struct",
+        SymbolKind::Class => "class",
+        SymbolKind::Trait => "trait",
+        SymbolKind::Interface => "interface",
+        SymbolKind::Enum => "enum",
+        SymbolKind::Constant => "const",
+        SymbolKind::Variable => "var",
+        SymbolKind::Module => "mod",
+        SymbolKind::Import => "import",
+        SymbolKind::TypeAlias => "type",
+        SymbolKind::RouteEndpoint => "route",
+        SymbolKind::SqlStatement => "sql",
+        SymbolKind::ConfigProperty => "config",
+        SymbolKind::PluginDeclaration => "plugin",
+        SymbolKind::Middleware => "middleware",
+        SymbolKind::UiElement => "ui",
+        SymbolKind::Other(_) => "sym",
+    }
 }
 
 #[cfg(test)]
@@ -326,7 +398,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_multi_language_repo_map() {
+    async fn test_index_backed_repo_map() {
         let dir = TempDir::new().unwrap();
         let root = dir.path();
 
@@ -358,11 +430,47 @@ mod tests {
         )
         .unwrap();
 
-        let map_output = build_repo_map(root, root, 10);
+        let index = Arc::new(CodeIndex::new());
+        let map_output = build_repo_map(&index, root, root, 10, "full");
         assert!(map_output.contains("CODEBASE ARCHITECTURE MAP"));
+        assert!(map_output.contains("DIRECTORY TREE"));
+        // Complete tree shows EVERY file (never max_files-truncated).
+        assert!(map_output.contains("main.rs"));
+        assert!(map_output.contains("app.py"));
+        assert!(map_output.contains("index.ts"));
+        assert!(map_output.contains("service.go"));
+        // Symbol detail from the shared graph.
         assert!(map_output.contains("ServerConfig"));
         assert!(map_output.contains("UserModel"));
         assert!(map_output.contains("AuthPayload"));
         assert!(map_output.contains("OrderService"));
+    }
+
+    #[tokio::test]
+    async fn test_tree_mode_skips_symbols_and_is_complete() {
+        let dir = TempDir::new().unwrap();
+        let root = dir.path();
+        std::fs::write(root.join("a.rs"), "pub fn a() {}\n").unwrap();
+        std::fs::write(root.join("b.rs"), "pub fn b() {}\n").unwrap();
+
+        let index = Arc::new(CodeIndex::new());
+        let map_output = build_repo_map(&index, root, root, 10, "tree");
+        assert!(map_output.contains("DIRECTORY TREE"));
+        assert!(!map_output.contains("SYMBOL DETAIL"));
+        assert!(map_output.contains("a.rs"));
+        assert!(map_output.contains("b.rs"));
+    }
+
+    #[tokio::test]
+    async fn test_symbols_mode_omits_tree() {
+        let dir = TempDir::new().unwrap();
+        let root = dir.path();
+        std::fs::write(root.join("a.rs"), "pub fn a() {}\n").unwrap();
+
+        let index = Arc::new(CodeIndex::new());
+        let map_output = build_repo_map(&index, root, root, 10, "symbols");
+        assert!(map_output.contains("SYMBOL DETAIL"));
+        assert!(!map_output.contains("DIRECTORY TREE"));
+        assert!(map_output.contains("fn a:1"));
     }
 }

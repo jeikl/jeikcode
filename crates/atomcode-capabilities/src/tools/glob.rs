@@ -97,11 +97,26 @@ impl Tool for GlobTool {
         let pattern = a.pattern.clone();
         let res = tokio::task::spawn_blocking(move || {
             let mut hits: Vec<String> = Vec::new();
-            let walk = WalkBuilder::new(&base2)
+            let mut builder = WalkBuilder::new(&base2);
+            builder
                 .hidden(true)
                 .git_ignore(true)
                 .git_global(true)
                 .git_exclude(true)
+                .add_custom_ignore_filename(".codegraphignore")
+                .add_custom_ignore_filename(".codegraignore");
+
+            let global_config = crate::paths::config_dir();
+            let global_ignore1 = global_config.join(".codegraphignore");
+            if global_ignore1.is_file() {
+                builder.add_ignore(global_ignore1);
+            }
+            let global_ignore2 = global_config.join(".codegraignore");
+            if global_ignore2.is_file() {
+                builder.add_ignore(global_ignore2);
+            }
+
+            let walk = builder
                 .filter_entry(|e| {
                     if e.file_type().map(|t| t.is_dir()).unwrap_or(false) {
                         if let Some(name) = e.file_name().to_str() {

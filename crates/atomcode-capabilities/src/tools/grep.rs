@@ -127,7 +127,9 @@ impl Tool for GrepTool {
                 let capped = matches >= max;
                 let mut out = lines.join("\n");
                 if capped {
-                    out.push_str(&format!("\n\n[Results capped at {max} matches]"));
+                    out.push_str(&format!(
+                        "\n\n[Results capped at {max} matches; narrow the `pattern` or add a more specific `path` to see the rest]"
+                    ));
                 }
                 ok(out)
             }

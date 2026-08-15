@@ -16,7 +16,21 @@ pub struct ListSymbolsTool;
 #[derive(Deserialize)]
 struct Args {
     file_path: String,
+    /// First symbol to show (0-based, by symbol ordinal — NOT a byte offset).
+    #[serde(default)]
+    offset: Option<usize>,
+    /// Max symbols to show (default 300). Paginate by re-invoking with `offset`.
+    #[serde(default)]
+    limit: Option<usize>,
 }
+
+/// Default page size. Keeps a single response comfortably under the 16 KiB
+/// artifact threshold for typical files (~90 B/line × 300 ≈ 27 KiB worst case
+/// is still paginated; the bound is on symbol count, not bytes, so a huge file
+/// can never blow up into a multi-hundred-KB listing).
+const DEFAULT_PAGE: usize = 300;
+/// Hard ceiling so even an explicit `limit` can't produce an unbounded listing.
+const MAX_PAGE: usize = 1000;
 
 #[async_trait]
 impl Tool for ListSymbolsTool {
@@ -27,14 +41,17 @@ impl Tool for ListSymbolsTool {
         "List the functions, classes, structs, methods and other symbols defined in a \
          source file, each with its line range. Faster and more precise than read_file \
          for understanding a file's structure before editing. Supports Rust, Python, \
-         JS/TS/TSX, Go, Java, C/C++, C#, HTML, PHP. Relative paths resolve against the \
-         working directory."
+         JS/TS/TSX, Go, Java, C/C++, C#, HTML, PHP. Paginated: pass `offset` to page \
+         through a large symbol list (symbol ordinal, not byte offset). Relative paths \
+         resolve against the working directory."
     }
     fn parameters_schema(&self) -> serde_json::Value {
         json!({
             "type": "object",
             "properties": {
-                "file_path": { "type": "string", "description": "Path to the source file (absolute, or relative to the working directory)" }
+                "file_path": { "type": "string", "description": "Path to the source file (absolute, or relative to the working directory)" },
+                "offset": { "type": "integer", "description": "First symbol to show (0-based, default 0)" },
+                "limit": { "type": "integer", "description": "Max symbols to show (default 300, max 1000)" }
             },
             "required": ["file_path"]
         })
@@ -52,14 +69,16 @@ impl Tool for ListSymbolsTool {
         let path = resolve_path(&a.file_path, &ctx.working_dir);
         let display = a.file_path.clone();
         let cwd = ctx.working_dir.clone();
+        let offset = a.offset.unwrap_or(0);
+        let limit = a.limit.unwrap_or(DEFAULT_PAGE).clamp(1, MAX_PAGE);
         // tree-sitter parsing is CPU-bound — keep it off the async runtime.
-        tokio::task::spawn_blocking(move || render(&path, &display, &cwd))
+        tokio::task::spawn_blocking(move || render(&path, &display, &cwd, offset, limit))
             .await
             .unwrap_or_else(|_| err("list_symbols: task failed"))
     }
 }
 
-fn render(path: &Path, display: &str, cwd: &Path) -> ToolResult {
+fn render(path: &Path, display: &str, cwd: &Path, offset: usize, limit: usize) -> ToolResult {
     let lang = match Lang::detect(path) {
         Some(l) => l,
         // NOT an error: the file is fine, this tool just has no grammar for it. Reporting it
@@ -92,13 +111,37 @@ fn render(path: &Path, display: &str, cwd: &Path) -> ToolResult {
     match extract_symbols(&source, lang) {
         Some(syms) if syms.is_empty() => ok(format!("No symbols found in {display}")),
         Some(syms) => {
-            let mut out = format!("Symbols in {display} ({} total):\n\n", syms.len());
-            for s in &syms {
+            let total = syms.len();
+            // Symbol-ORDINAL window — never a byte slice, so a row can never be
+            // split mid-line and pagination is by count, not by guessing offsets.
+            let start = offset.min(total);
+            let end = (start + limit).min(total);
+            let mut out = format!("Symbols in {display} ({total} total):\n\n");
+            for s in &syms[start..end] {
                 // Both line numbers right-aligned (matches production) so the columns
                 // stay aligned across rows for easy scanning.
                 out.push_str(&format!(
                     "  {:>4}-{:>4}  {}  ({})\n",
                     s.start_line, s.end_line, s.name, s.kind
+                ));
+            }
+            if start == end {
+                // Empty window (offset past the end): say so plainly instead of
+                // emitting a nonsensical "51-50" range.
+                out.push_str(&format!(
+                    "\n(no symbols at offset {offset}: file has {total} symbols)"
+                ));
+            } else if end < total {
+                out.push_str(&format!(
+                    "\n(showing symbols {}-{} of {total}; pass offset={end} for more)",
+                    start + 1,
+                    end
+                ));
+            } else if start > 0 {
+                out.push_str(&format!(
+                    "\n(showing symbols {}-{} of {total}; end)",
+                    start + 1,
+                    end
                 ));
             }
             out.push_str("\n[Use read_symbol to read any symbol's full source.]");
@@ -183,5 +226,55 @@ mod tests {
             "{}",
             r.content
         );
+    }
+
+    /// Pagination is by SYMBOL ORDINAL, not byte offset: a page boundary can
+    /// never split a row, and the hint tells the model exactly which offset to
+    /// pass next.
+    #[tokio::test]
+    async fn paginates_by_symbol_ordinal() {
+        let d = tempfile::tempdir().unwrap();
+        let mut src = String::new();
+        for i in 0..50 {
+            src.push_str(&format!("fn alpha_{i}() {{}}\n"));
+        }
+        std::fs::write(d.path().join("many.rs"), src).unwrap();
+
+        // First page: limit 10 → symbols 1-10 + a "pass offset=10 for more" hint.
+        let r1 = ListSymbolsTool
+            .execute(r#"{"file_path":"many.rs","limit":10}"#, &ctx(d.path()))
+            .await;
+        assert!(!r1.is_error, "{}", r1.content);
+        assert!(r1.content.contains("alpha_0"), "{}", r1.content);
+        assert!(r1.content.contains("alpha_9"), "{}", r1.content);
+        assert!(!r1.content.contains("alpha_10"), "{}", r1.content);
+        assert!(r1.content.contains("(50 total)"), "{}", r1.content);
+        assert!(r1.content.contains("offset=10"), "{}", r1.content);
+
+        // Second page: offset 10 → symbols 11-20.
+        let r2 = ListSymbolsTool
+            .execute(r#"{"file_path":"many.rs","offset":10,"limit":10}"#, &ctx(d.path()))
+            .await;
+        assert!(r2.content.contains("alpha_10"), "{}", r2.content);
+        assert!(r2.content.contains("alpha_19"), "{}", r2.content);
+        assert!(!r2.content.contains("alpha_20"), "{}", r2.content);
+        assert!(r2.content.contains("offset=20"), "{}", r2.content);
+
+        // Last page: offset 45 → symbols 46-50 + "(end)" — no dead "more" hint.
+        let r3 = ListSymbolsTool
+            .execute(r#"{"file_path":"many.rs","offset":45,"limit":10}"#, &ctx(d.path()))
+            .await;
+        assert!(r3.content.contains("alpha_49"), "{}", r3.content);
+        assert!(r3.content.contains("46-50 of 50; end)"), "{}", r3.content);
+        assert!(!r3.content.contains("for more"), "{}", r3.content);
+
+        // offset past the end → empty window, no panic, coherent message.
+        let r4 = ListSymbolsTool
+            .execute(r#"{"file_path":"many.rs","offset":999,"limit":10}"#, &ctx(d.path()))
+            .await;
+        assert!(!r4.is_error, "{}", r4.content);
+        assert!(r4.content.contains("(50 total)"), "{}", r4.content);
+        assert!(r4.content.contains("no symbols at offset 999"), "{}", r4.content);
+        assert!(!r4.content.contains("alpha_"), "{}", r4.content);
     }
 }

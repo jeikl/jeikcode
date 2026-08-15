@@ -29,6 +29,19 @@ const MAX_SYMBOLS_PER_FILE: usize = 40;
 /// Budget for the symbol-detail section only; the tree above it is never cut.
 const MAX_SYMBOL_OUTPUT_BYTES: usize = 64 * 1024;
 
+/// Appended to every tree section: what the default tree shows, how to explore
+/// deeper files with one root-scoped `code_explore` call (never a subpackage),
+/// and the cross-check duty — if `code_explore`'s hits don't cover every
+/// subdirectory the tree shows, re-explore the directories it missed.
+const TREE_NOTE: &str = "\
+NOTE: top-level files are listed in full; subdirectories are recursed to the \
+deepest level but files inside them are only counted, not named — nothing is \
+elided. To explore deeper files, call `code_explore` ONCE against the project \
+root (e.g. `code_explore(\"<root>\")`) — it searches every file recursively \
+across all subdirectories; do NOT scope `code_explore` to a subpackage. If \
+`code_explore`'s hits do not cover every subdirectory shown here, re-explore \
+the directories it missed.";
+
 pub struct RepoMapTool {
     index: Arc<CodeIndex>,
 }
@@ -60,10 +73,11 @@ impl Tool for RepoMapTool {
 
     fn description(&self) -> &str {
         "WHEN TO USE — FIRST CALL on any unfamiliar repo, BEFORE writing code or running deeper \
-         searches. Prints the COMPLETE index-backed DIRECTORY TREE (every indexed directory with \
-         per-directory file counts + top file names), so you see the real module/layer layout in one \
-         round instead of wandering with list_directory. Always pair it with list_directory in the \
-         same round (they are cheap and complementary).\n\
+         searches. Prints the COMPLETE index-backed DIRECTORY TREE: every top-level file is listed \
+         by name and every subdirectory is recursed to the deepest level (files inside deeper \
+         directories are counted, not named — never elided), so you see the real module/layer \
+         layout in one round instead of wandering with list_directory. Always pair it with \
+         list_directory in the same round (they are cheap and complementary).\n\
          \n\
          HOW IT FITS THE FLOW — structure first, then hunt:\n\
          1. Round 1: repo_map (full layout) + list_directory — never skip on an unfamiliar repo.\n\
@@ -75,7 +89,9 @@ impl Tool for RepoMapTool {
          MODES — default `tree` = structure only (small, never truncated). Pass `mode: full` \
          (tree + budgeted symbol outline) or `symbols` (symbols only) when you already know the \
          layout and need types/functions. In a multi-project workspace, pass `path:` to map ONE repo \
-         at a time (the default spans ALL repos as separate subtrees).\n\
+         at a time (the default spans ALL repos as separate subtrees). To see files under deeper \
+         directories, call `code_explore` once against the project root (never a subpackage); if \
+         its hits miss any subdirectory shown in the tree, re-explore those directories.\n\
          \n\
          CAUTION — a directory tree is NOT proof a mechanism is absent: it shows WHERE things live, \
          not WHAT exists. Empty-looking trees can hide code in sibling crates/layers (interface here, \
@@ -319,9 +335,11 @@ fn build_repo_map(
                     if stray == 1 { "" } else { "s" }
                 ));
             }
+            out.push_str(&format!("{TREE_NOTE}\n"));
         } else {
             out.push_str("\n-- DIRECTORY TREE (complete: every indexed directory) --\n");
             out.push_str(&render_dir_tree(target_dir, &files));
+            out.push_str(&format!("{TREE_NOTE}\n"));
         }
     }
 
@@ -342,13 +360,14 @@ fn build_repo_map(
     out
 }
 
-/// A complete, deterministic, compact DIRECTORY tree (no file leaves). The
-/// default view for structure exploration: small enough to never be truncated
-/// by the host, while still showing every indexed directory.
+/// A complete, deterministic, compact DIRECTORY tree. The default view for
+/// structure exploration: every top-level file AND every subdirectory (recursed
+/// to the deepest level) is shown, with files under subdirectories summarized
+/// as counts — small enough to never be truncated by the host while still
+/// showing the full layout. `TREE_NOTE` explains how to explore deeper files.
 ///
-/// Files directly under the root (entry points like `main.rs` / `Cargo.toml`)
-/// are summarized as a count line so the tree stays directory-only but the
-/// root's shape is not silently hidden.
+/// Top-level files (entry points like `main.rs` / `Cargo.toml`) are listed in
+/// full: they are the orientation rows the model needs by name.
 /// Whether `p` lives under `dir`, compared on normalized absolute paths so
 /// Windows separators / casing never cause a false negative (a bare
 /// `starts_with` would also match `E:\agents\atomcode-x` under `E:\agents`).
@@ -374,6 +393,41 @@ fn render_dir_tree(root: &Path, files: &[PathBuf]) -> String {
     render_dir_tree_indented(root, files, "")
 }
 
+/// Relative path from `root` to `p`, tolerant of the `\\?\` verbatim prefix
+/// (graph paths carry it on Windows) and of separator/casing differences.
+/// Returns `None` when `p` is not under `root` (or equals it).
+fn rel_path(p: &Path, root: &Path) -> Option<PathBuf> {
+    let norm = |x: &Path| {
+        let s = x.to_string_lossy();
+        let s = if let Some(rest) = s.strip_prefix(r"\\?\") {
+            rest
+        } else {
+            &s
+        };
+        s.replace('/', "\\").to_ascii_lowercase()
+    };
+    let p_n = norm(p);
+    let r_n = norm(root).trim_end_matches('\\').to_string();
+    if !(p_n.starts_with(&r_n)
+        && (p_n.len() == r_n.len() || p_n[r_n.len()..].starts_with('\\')))
+    {
+        return None;
+    }
+    // Normalization is length-preserving (lowercase + `/`→`\` only), so slice
+    // the ORIGINAL (case-preserving) string at the same offset.
+    let s = p.to_string_lossy();
+    let s = if let Some(rest) = s.strip_prefix(r"\\?\") {
+        rest
+    } else {
+        &s
+    };
+    let rest = s[r_n.len()..].trim_start_matches(['\\', '/']);
+    if rest.is_empty() {
+        return None;
+    }
+    Some(PathBuf::from(rest))
+}
+
 /// Render the directory tree with an indentation prefix (used to nest each
 /// repo's subtree under its own header in a multi-repo workspace).
 fn render_dir_tree_indented(root: &Path, files: &[PathBuf], indent: &str) -> String {
@@ -385,13 +439,14 @@ fn render_dir_tree_indented(root: &Path, files: &[PathBuf], indent: &str) -> Str
 
     let mut top = Dir::default();
     for p in files {
-        let rel = match p.strip_prefix(root) {
-            Ok(r) => r,
-            Err(_) => p,
+        let Some(rel) = rel_path(p, root) else {
+            continue;
         };
-        let comps: Vec<String> = rel
-            .components()
-            .map(|c| c.as_os_str().to_string_lossy().into_owned())
+        let s = rel.to_string_lossy();
+        let comps: Vec<String> = s
+            .split(['\\', '/'])
+            .filter(|c| !c.is_empty())
+            .map(str::to_string)
             .collect();
         if comps.is_empty() {
             continue;
@@ -404,34 +459,31 @@ fn render_dir_tree_indented(root: &Path, files: &[PathBuf], indent: &str) -> Str
     }
 
     let mut out = String::new();
-    fn emit(node: &Dir, prefix: &str, out: &mut String) {
+    fn emit(node: &Dir, prefix: &str, depth: usize, out: &mut String) {
         for (name, child) in &node.dirs {
             out.push_str(&format!("{prefix}{name}/\n"));
-            emit(child, &format!("{prefix}  "), out);
+            emit(child, &format!("{prefix}  "), depth + 1, out);
         }
         if !node.files.is_empty() {
-            // Top-N file names by architectural priority (index-free: ranks the
-            // path string itself), so the tree hints at which files to open next.
             let mut sorted = node.files.clone();
-            sorted.sort_by(|a, b| {
-                file_priority_score(b)
-                    .cmp(&file_priority_score(a))
-                    .then_with(|| a.cmp(b))
-            });
+            sorted.sort();
             let count = sorted.len();
-            let plural = if count == 1 { "" } else { "s" };
-            let top_suffix = if sorted.is_empty() {
-                String::new()
+            if depth == 0 {
+                // Top level of the mapped root: list EVERY file by name. These
+                // are the orientation rows the model needs (entry points like
+                // `main.rs` / `Cargo.toml`), so nothing is elided or folded.
+                for f in &sorted {
+                    out.push_str(&format!("{prefix}{f}\n"));
+                }
             } else {
-                format!(
-                    " · top: {}",
-                    sorted.iter().take(3).cloned().collect::<Vec<_>>().join(", ")
-                )
-            };
-            out.push_str(&format!("{prefix}({count} file{plural}{top_suffix})\n"));
+                // Deeper directories: directories themselves are recursed in
+                // full; their files are counted, not named (see TREE_NOTE).
+                let plural = if count == 1 { "" } else { "s" };
+                out.push_str(&format!("{prefix}({count} file{plural})\n"));
+            }
         }
     }
-    emit(&top, indent, &mut out);
+    emit(&top, indent, 0, &mut out);
     out
 }
 
@@ -583,10 +635,40 @@ mod tests {
         let map_output = build_repo_map(&index, root, root, 10, "tree");
         assert!(map_output.contains("DIRECTORY TREE"));
         assert!(!map_output.contains("SYMBOL DETAIL"));
-        // Tree mode shows a per-directory count plus top-N file names (no symbol detail).
-        assert!(map_output.contains("(2 files"));
+        // Tree mode lists EVERY top-level file by name (no count summary, no fold).
         assert!(map_output.contains("a.rs"));
         assert!(map_output.contains("b.rs"));
+        assert!(!map_output.contains("(2 files"));
+        // The TREE_NOTE explaining deeper-file exploration is present.
+        assert!(map_output.contains("code_explore"));
+    }
+
+    #[tokio::test]
+    async fn test_tree_mode_recurses_subdirs_and_counts_deep_files() {
+        let dir = TempDir::new().unwrap();
+        let root = dir.path();
+        // Top-level files: listed in full.
+        std::fs::write(root.join("main.rs"), "fn main() {}\n").unwrap();
+        // Nested dirs: recursed to the deepest level; deep files counted, not named.
+        std::fs::create_dir_all(root.join("crates/core/src")).unwrap();
+        std::fs::write(root.join("crates/core/src/lib.rs"), "pub fn core() {}\n").unwrap();
+        std::fs::write(root.join("crates/core/src/util.rs"), "pub fn util() {}\n").unwrap();
+
+        let index = Arc::new(CodeIndex::new());
+        let map_output = build_repo_map(&index, root, root, 10, "tree");
+        // Top-level file names appear verbatim; no root count summary.
+        assert!(map_output.contains("main.rs"));
+        assert!(!map_output.contains("(1 file"));
+        // Every subdirectory recursed to the deepest level.
+        assert!(map_output.contains("crates/"));
+        assert!(map_output.contains("core/"));
+        assert!(map_output.contains("src/"));
+        // Deep files are counted, not named; nothing is elided or folded.
+        assert!(map_output.contains("(2 files"));
+        assert!(!map_output.contains("util.rs"));
+        // The TREE_NOTE explains deeper-file exploration via root code_explore.
+        assert!(map_output.contains("code_explore"));
+        assert!(map_output.contains("nothing is elided"));
     }
 
     #[tokio::test]

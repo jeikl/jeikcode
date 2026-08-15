@@ -134,12 +134,11 @@ pub fn register_codeintel_tools_with_mode(reg: &mut ToolRegistry, mode: &CodeInt
 
     match mode {
         CodeIntelMode::Unified => {
-            reg.register(Arc::new(RepoMapTool::new()));
+            reg.register(Arc::new(RepoMapTool::new(index.clone())));
             reg.register(Arc::new(CodeExploreTool::new(index)));
         }
         CodeIntelMode::Full => {
-            reg.register(Arc::new(RepoMapTool::new()));
-            reg.register(Arc::new(CodeExploreTool::new(index.clone())));
+            reg.register(Arc::new(RepoMapTool::new(index.clone())));
             reg.register(Arc::new(ListSymbolsTool));
             reg.register(Arc::new(ReadSymbolTool));
             reg.register(Arc::new(FindReferencesTool));
@@ -153,7 +152,7 @@ pub fn register_codeintel_tools_with_mode(reg: &mut ToolRegistry, mode: &CodeInt
         CodeIntelMode::Custom(tools) => {
             let set: HashSet<String> = tools.iter().map(|s| s.to_ascii_lowercase()).collect();
             if set.contains("repo_map") {
-                reg.register(Arc::new(RepoMapTool::new()));
+                reg.register(Arc::new(RepoMapTool::new(index.clone())));
             }
             if set.contains("code_explore") {
                 reg.register(Arc::new(CodeExploreTool::new(index.clone())));

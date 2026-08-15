@@ -646,19 +646,28 @@ mod tests {
 
     #[test]
     fn path_in_workspace_lexical_classifies_paths() {
-        let ws = Path::new("/home/proj");
+        // Absolute roots behave per-platform: Windows needs a drive-letter root
+        // for `is_absolute()` to hold, POSIX uses `/`. The lexical classifier
+        // must classify inside/outside identically on both.
+        let (ws, other_root) = if cfg!(windows) {
+            (Path::new(r"C:\home\proj"), Path::new(r"C:\home"))
+        } else {
+            (Path::new("/home/proj"), Path::new("/home"))
+        };
+        let root = ws.to_string_lossy();
+        let other = other_root.to_string_lossy();
         // Inside.
-        assert!(path_in_workspace_lexical("/home/proj/src/main.rs", ws));
+        assert!(path_in_workspace_lexical(&format!("{root}/src/main.rs"), ws));
         assert!(path_in_workspace_lexical("src/main.rs", ws)); // relative → joined to ws
         assert!(path_in_workspace_lexical("./a/b.rs", ws));
-        assert!(path_in_workspace_lexical("/home/proj/./sub/../x.rs", ws)); // normalizes inside
-                                                                            // Outside.
-        assert!(!path_in_workspace_lexical("/tmp/test.txt", ws));
-        assert!(!path_in_workspace_lexical("/home/other/x.rs", ws));
+        assert!(path_in_workspace_lexical(&format!("{root}/./sub/../x.rs"), ws)); // normalizes inside
+                                                                                  // Outside.
+        assert!(!path_in_workspace_lexical(&format!("{other}/tmp/test.txt"), ws));
+        assert!(!path_in_workspace_lexical(&format!("{other}/other/x.rs"), ws));
         assert!(!path_in_workspace_lexical("../sibling/x.rs", ws)); // escapes via ..
-        assert!(!path_in_workspace_lexical("/home/proj/../evil.rs", ws)); // climbs out
-                                                                          // Sibling-prefix must not false-match (/home/proj2 is NOT under /home/proj).
-        assert!(!path_in_workspace_lexical("/home/proj2/x.rs", ws));
+        assert!(!path_in_workspace_lexical(&format!("{root}/../evil.rs"), ws)); // climbs out
+                                                                                // Sibling-prefix must not false-match (/home/proj2 is NOT under /home/proj).
+        assert!(!path_in_workspace_lexical(&format!("{root}2/x.rs"), ws));
         // Empty / unparseable → conservative in-workspace.
         assert!(path_in_workspace_lexical("", ws));
     }

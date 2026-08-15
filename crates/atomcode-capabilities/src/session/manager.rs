@@ -1386,6 +1386,19 @@ impl SessionManager {
                     path,
                 })
             }
+            // Windows reports lock contention as ERROR_LOCK_VIOLATION (33) rather than
+            // WouldBlock (LockFileEx fails with ERROR_LOCK_VIOLATION while another handle
+            // holds the byte range). Map it to the SAME SessionInUse so a second runtime
+            // binding a session fails with the intended error on every platform — raw
+            // os error 33 was leaking through as `Io` and broke the runtime/parts lease
+            // tests (unexpected lease error / kind() != WouldBlock / ReconfigureFailed).
+            #[cfg(windows)]
+            Err(error) if error.raw_os_error() == Some(33) => {
+                Err(SessionStoreError::SessionInUse {
+                    id: id.to_string(),
+                    path,
+                })
+            }
             Err(error) => Err(io_at(&path, error)),
         }
     }

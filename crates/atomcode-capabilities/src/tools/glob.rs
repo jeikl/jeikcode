@@ -3,7 +3,7 @@
 //! does not) via `globset` with `literal_separator(true)`. Build/VCS/cache dirs are
 //! skipped; results sorted, capped at 100.
 
-use super::{err, is_absolute_path, is_skip_dir, ok, resolve_path};
+use super::{err, is_absolute_path, is_skip_dir, not_found_hint, ok, resolve_path};
 use crate::tool_feedback::{format_path_not_found, parse_tool_args};
 use async_trait::async_trait;
 use atomcode_kernel::tool::{Tool, ToolContext, ToolResult};
@@ -76,12 +76,11 @@ impl Tool for GlobTool {
         match tokio::fs::metadata(&base).await {
             Ok(m) if m.is_dir() => {}
             _ => {
-                return err(format_path_not_found(
-                    "glob",
-                    &display_base,
-                    &base,
-                    &ctx.working_dir,
-                ))
+                let hint = not_found_hint(&base, &ctx.working_dir).await;
+                return err(format!(
+                    "{}{hint}",
+                    format_path_not_found("glob", &display_base, &base, &ctx.working_dir)
+                ));
             }
         }
 
@@ -167,7 +166,13 @@ fn split_absolute_base(pattern: &str) -> Option<(PathBuf, String)> {
     // isn't silently walked relative to cwd.
     let base = if let Some(home) = crate::pathutil::expand_tilde(dir) {
         home
-    } else if !dir.is_empty() && is_absolute_path(dir) {
+    } else if !dir.is_empty() && (is_absolute_path(dir) || dir.starts_with('/')) {
+        // `starts_with('/')` covers the Unix-root form on Windows builds: the
+        // cross-platform `is_absolute_path` recognizes drive/UNC roots but a bare
+        // `/abs/dir` (Git-Bash-style, or pasted from a Linux prompt) is NOT
+        // absolute to `Path::is_absolute` on Windows. Treating it as a base keeps
+        // the "pasted absolute path" affordance consistent across platforms
+        // (and keeps the unit test reproducible on Windows).
         PathBuf::from(dir)
     } else {
         return None;

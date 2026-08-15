@@ -484,15 +484,6 @@ fn collect_files(root: &Path) -> Vec<Walked> {
     out
 }
 
-/// Full, index-backed source file list for `root` (same walk the graph tools use).
-///
-/// Exposed for `repo_map` so its directory tree shows EXACTLY the files the
-/// graph tools can resolve — one shared source of truth, never truncated by a
-/// `max_files` budget. The tree therefore cannot silently omit a crate/module.
-pub(crate) fn collect_source_paths(root: &Path) -> Vec<PathBuf> {
-    collect_files(root).into_iter().map(|w| w.path).collect()
-}
-
 fn fingerprint(files: &[Walked]) -> u64 {
     let mut h = DefaultHasher::new();
     for w in files {

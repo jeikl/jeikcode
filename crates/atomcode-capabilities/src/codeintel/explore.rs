@@ -11,7 +11,8 @@
 //! 8. Test file deprioritization & Zero-hit rich diagnostic feedback
 
 use super::bilingual_nlp::{
-    calculate_text_similarity, parse_bilingual_query_with_thesaurus, DynamicThesaurus, SearchTokens,
+    calculate_text_similarity, derive_project_name_tokens, parse_bilingual_query_with_thesaurus,
+    parse_field_qualified_query, DynamicThesaurus, ParsedQuery, SearchTokens,
 };
 use super::graph::{CodeGraph, EdgeKind, SymbolId, SymbolKind, SymbolNode};
 use super::index::CodeIndex;
@@ -162,22 +163,45 @@ impl Tool for CodeExploreTool {
             }
         }
 
+        let parsed_query = parse_field_qualified_query(&a.query);
+        let project_tokens = derive_project_name_tokens(&root);
+        let search_text = if parsed_query.clean_text.is_empty() {
+            &a.query
+        } else {
+            &parsed_query.clean_text
+        };
+
         let thesaurus_guard = self.thesaurus.read().unwrap();
-        let query_tokens = parse_bilingual_query_with_thesaurus(&a.query, &thesaurus_guard);
+        let query_tokens = parse_bilingual_query_with_thesaurus(search_text, &thesaurus_guard);
         drop(thesaurus_guard);
 
         let graph = self.index.get(&root);
 
-        let scope_path = a.path.as_deref().map(|p| {
+        let scope_path = if !parsed_query.path_filters.is_empty() {
+            let p = &parsed_query.path_filters[0];
             if Path::new(p).is_absolute() {
-                PathBuf::from(p)
+                Some(PathBuf::from(p))
             } else {
-                root.join(p)
+                Some(root.join(p))
             }
-        });
+        } else {
+            a.path.as_deref().map(|p| {
+                if Path::new(p).is_absolute() {
+                    PathBuf::from(p)
+                } else {
+                    root.join(p)
+                }
+            })
+        };
 
         // Step 1: Score all symbols in the workspace
-        let scored_files = score_workspace_symbols(&graph, &query_tokens, scope_path.as_deref());
+        let scored_files = score_workspace_symbols(
+            &graph,
+            &query_tokens,
+            &parsed_query,
+            &project_tokens,
+            scope_path.as_deref(),
+        );
 
         if scored_files.is_empty() {
             let total_nodes = graph.nodes.len();
@@ -465,6 +489,8 @@ fn has_genuine_match_anchor(tokens: &SearchTokens, node: &SymbolNode) -> bool {
 fn score_workspace_symbols(
     graph: &CodeGraph,
     tokens: &SearchTokens,
+    parsed_query: &ParsedQuery,
+    project_tokens: &HashSet<String>,
     scope: Option<&Path>,
 ) -> Vec<FileCandidate> {
     let mut file_map: HashMap<PathBuf, Vec<ScoredSymbol>> = HashMap::new();
@@ -472,6 +498,25 @@ fn score_workspace_symbols(
     for (_id, node) in &graph.nodes {
         if let Some(sc) = scope {
             if !path_matches_scope(&node.file, sc) {
+                continue;
+            }
+        }
+
+        // Apply field-qualified filters
+        if !parsed_query.kind_filters.is_empty() {
+            let kind_str = format!("{:?}", node.kind).to_ascii_lowercase();
+            if !parsed_query.kind_filters.iter().any(|k| kind_str.contains(k)) {
+                continue;
+            }
+        }
+        if !parsed_query.name_filters.is_empty() {
+            if !parsed_query.name_filters.iter().any(|n| node.name.to_ascii_lowercase().contains(&n.to_ascii_lowercase())) {
+                continue;
+            }
+        }
+        if !parsed_query.path_filters.is_empty() {
+            let f_lower = node.file.to_string_lossy().to_ascii_lowercase();
+            if !parsed_query.path_filters.iter().any(|p| f_lower.contains(&p.to_ascii_lowercase())) {
                 continue;
             }
         }
@@ -502,6 +547,11 @@ fn score_workspace_symbols(
             name_bonus += 30.0;
         }
 
+        // Project name de-inflation: if symbol name is just the repo name itself, de-prioritize
+        if project_tokens.contains(&node_name_lower) && !tokens.raw_query.eq_ignore_ascii_case(&node.name) {
+            name_bonus *= 0.2;
+        }
+
         let doc_sim = node
             .docstring
             .as_ref()
@@ -525,8 +575,9 @@ fn score_workspace_symbols(
         let graph_mass = ((callers_cnt + callees_cnt) as f64).min(10.0);
 
         let kind_weight = match node.kind {
-            SymbolKind::Function | SymbolKind::Method | SymbolKind::RouteEndpoint => 1.0,
+            SymbolKind::Function | SymbolKind::Method | SymbolKind::Middleware | SymbolKind::RouteEndpoint => 1.0,
             SymbolKind::Class | SymbolKind::Struct | SymbolKind::Interface | SymbolKind::Trait => 0.95,
+            SymbolKind::PluginDeclaration => 1.05,
             SymbolKind::SqlStatement => 0.95,
             SymbolKind::ConfigProperty | SymbolKind::UiElement => 0.85,
             SymbolKind::Constant | SymbolKind::Variable => 0.75,
@@ -675,6 +726,8 @@ fn render_explore_output(
     let mut out = Vec::new();
     let top_files = &candidates[..candidates.len().min(max_files)];
 
+    out.push("> 💡 **Surgical Flow & Capsule Notice**: Primary execution flow, candidate spans, and file capability capsules are rendered below. To ensure complete coverage of edge cases or declarative configs, examine the **File Capability Capsule** or adjacent files in the same directory.\n".to_string());
+
     if connected {
         out.push(format!("### 🔗 Flow Trace: \"{query}\"\n"));
         out.push("```mermaid".to_string());
@@ -751,6 +804,16 @@ fn render_explore_output(
         let sym_names: Vec<String> = relevant_syms.iter().map(|s| format!("`{}`", s.node.name)).collect();
         out.push(format!("**`{rel_path}`** — {}", sym_names.join(", ")));
 
+        // Output File Capability Capsule
+        let capsule = graph.file_capsule(&fc.file);
+        if !capsule.is_empty() {
+            out.push("> 📋 **File Capability Capsule**:".to_string());
+            for cap_line in capsule {
+                out.push(format!("> - {cap_line}"));
+            }
+            out.push("".to_string());
+        }
+
         if let Ok(content) = std::fs::read_to_string(&fc.file) {
             let lines: Vec<&str> = content.lines().collect();
 
@@ -785,12 +848,35 @@ fn render_explore_output(
                     out.push(format!("> `[Already sent: {rel_path} L{start_line}-L{end_line} ({}) — refer to previous turns]`\n", labels.join(", ")));
                 } else {
                     sent_list.push((start_line, end_line));
+                    let total_span = end_line.saturating_sub(start_line) + 1;
                     let mut snippet = Vec::new();
-                    for l in start_line..=end_line {
-                        if l - 1 < lines.len() {
-                            snippet.push(format!("{l}\t{}", lines[l - 1]));
+
+                    if total_span > 70 {
+                        // Smart Folding for large functions (keep head 35 lines + tail 15 lines)
+                        let head_end = (start_line + 35).min(lines.len());
+                        for l in start_line..=head_end {
+                            if l - 1 < lines.len() {
+                                snippet.push(format!("{l}\t{}", lines[l - 1]));
+                            }
+                        }
+                        let tail_start = end_line.saturating_sub(15).max(head_end + 1);
+                        let folded_count = tail_start.saturating_sub(head_end + 1);
+                        if folded_count > 0 {
+                            snippet.push(format!("...\t// ... [{} lines folded; use read_file(\"{rel_path}\", start_line={}, end_line={}) to view full body] ...", folded_count, head_end + 1, tail_start - 1));
+                        }
+                        for l in tail_start..=end_line {
+                            if l - 1 < lines.len() {
+                                snippet.push(format!("{l}\t{}", lines[l - 1]));
+                            }
+                        }
+                    } else {
+                        for l in start_line..=end_line {
+                            if l - 1 < lines.len() {
+                                snippet.push(format!("{l}\t{}", lines[l - 1]));
+                            }
                         }
                     }
+
                     let ext = fc.file.extension().and_then(|e| e.to_str()).unwrap_or("");
                     out.push(format!("// Symbols: {}\n```{ext}\n{}\n```\n", labels.join(", "), snippet.join("\n")));
                 }
@@ -808,6 +894,77 @@ fn render_explore_output(
         }
     }
 
+    out.push("\n> 🔍 **Deep Investigation Tip**: To inspect any folded function body, use `read_file` with the line numbers provided above. To trace cross-module callers/callees in full detail, supply the exact symbol or file path to `code_explore`.\n".to_string());
+
     out.join("\n")
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_field_qualified_query_parser() {
+        let q = parse_field_qualified_query("kind:trait path:session name:ToolMiddleware agent loop");
+        assert_eq!(q.kind_filters, vec!["trait"]);
+        assert_eq!(q.path_filters, vec!["session"]);
+        assert_eq!(q.name_filters, vec!["ToolMiddleware"]);
+        assert_eq!(q.clean_text, "agent loop");
+    }
+
+    #[test]
+    fn test_file_capsule_generation() {
+        let mut graph = CodeGraph::new();
+        let file = PathBuf::from("crates/kernel/src/agent.rs");
+
+        let node1 = SymbolNode {
+            id: 1,
+            name: "Agent".to_string(),
+            kind: SymbolKind::Struct,
+            visibility: super::super::graph::Visibility::Public,
+            file: file.clone(),
+            start_line: 10,
+            end_line: 50,
+            signature: None,
+            docstring: None,
+            inline_comments: Vec::new(),
+        };
+        let node2 = SymbolNode {
+            id: 2,
+            name: "ToolMiddleware".to_string(),
+            kind: SymbolKind::Trait,
+            visibility: super::super::graph::Visibility::Public,
+            file: file.clone(),
+            start_line: 60,
+            end_line: 80,
+            signature: None,
+            docstring: None,
+            inline_comments: Vec::new(),
+        };
+        let node3 = SymbolNode {
+            id: 3,
+            name: "run_turn".to_string(),
+            kind: SymbolKind::Function,
+            visibility: super::super::graph::Visibility::Public,
+            file: file.clone(),
+            start_line: 100,
+            end_line: 200,
+            signature: None,
+            docstring: None,
+            inline_comments: Vec::new(),
+        };
+
+        graph.add_symbol(node1);
+        graph.add_symbol(node2);
+        graph.add_symbol(node3);
+
+        let capsule = graph.file_capsule(&file);
+        assert!(!capsule.is_empty());
+        let capsule_joined = capsule.join(" | ");
+        assert!(capsule_joined.contains("Agent:L10"));
+        assert!(capsule_joined.contains("ToolMiddleware:L60"));
+        assert!(capsule_joined.contains("run_turn:L100"));
+    }
+}
+
 

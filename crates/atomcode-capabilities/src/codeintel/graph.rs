@@ -30,6 +30,8 @@ pub enum SymbolKind {
     RouteEndpoint,
     SqlStatement,
     ConfigProperty,
+    PluginDeclaration,
+    Middleware,
     UiElement,
     Other(String),
 }
@@ -250,6 +252,60 @@ impl CodeGraph {
             }
         }
         deps.into_iter().collect()
+    }
+
+    /// Extract an architectural capability capsule summarizing top types, pipelines, and plugins in a file.
+    pub fn file_capsule(&self, file: &Path) -> Vec<String> {
+        let mut out = Vec::new();
+        let mut types = Vec::new();
+        let mut pipelines = Vec::new();
+        let mut plugins = Vec::new();
+
+        if let Some(ids) = self.file_symbols.get(file) {
+            for &id in ids {
+                if let Some(node) = self.node(id) {
+                    match node.kind {
+                        SymbolKind::Struct
+                        | SymbolKind::Class
+                        | SymbolKind::Trait
+                        | SymbolKind::Interface
+                        | SymbolKind::Enum => {
+                            types.push(format!("{}:L{}", node.name, node.start_line));
+                        }
+                        SymbolKind::Function
+                        | SymbolKind::Method
+                        | SymbolKind::Middleware
+                        | SymbolKind::RouteEndpoint => {
+                            pipelines.push(format!("{}:L{}", node.name, node.start_line));
+                        }
+                        SymbolKind::PluginDeclaration | SymbolKind::ConfigProperty => {
+                            plugins.push(format!("{}:L{}", node.name, node.start_line));
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        }
+
+        if !types.is_empty() {
+            out.push(format!(
+                "**Types/Traits**: {}",
+                types.iter().take(6).cloned().collect::<Vec<_>>().join(", ")
+            ));
+        }
+        if !pipelines.is_empty() {
+            out.push(format!(
+                "**Pipelines/Methods**: {}",
+                pipelines.iter().take(8).cloned().collect::<Vec<_>>().join(", ")
+            ));
+        }
+        if !plugins.is_empty() {
+            out.push(format!(
+                "**Plugins/Configs**: {}",
+                plugins.iter().take(6).cloned().collect::<Vec<_>>().join(", ")
+            ));
+        }
+        out
     }
 }
 

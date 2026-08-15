@@ -325,6 +325,76 @@ fn count_disk_source_files(path: &Path) -> (usize, HashSet<String>) {
     (count, exts)
 }
 
+/// Check whether a symbol or its surrounding comments have a genuine semantic/lexical anchor to the query.
+fn has_genuine_match_anchor(tokens: &SearchTokens, node: &SymbolNode) -> bool {
+    let node_name_lower = node.name.to_ascii_lowercase();
+
+    // 1. Raw query or code identifier matches symbol name
+    if tokens.raw_query.eq_ignore_ascii_case(&node.name)
+        || tokens
+            .code_identifiers
+            .iter()
+            .any(|id| node_name_lower.contains(&id.to_ascii_lowercase()))
+    {
+        return true;
+    }
+
+    // 2. Bilingual expanded domain terms in symbol name
+    if tokens
+        .expanded_terms
+        .iter()
+        .any(|term| node_name_lower.contains(term))
+    {
+        return true;
+    }
+
+    // 3. Meaningful query words in symbol name
+    if tokens
+        .words
+        .iter()
+        .any(|w| w.len() >= 2 && node_name_lower.contains(w))
+    {
+        return true;
+    }
+
+    // 4. CJK phrases in symbol name
+    if tokens.cjk_phrases.iter().any(|p| node.name.contains(p)) {
+        return true;
+    }
+
+    // 5. Check docstring
+    if let Some(doc) = &node.docstring {
+        let doc_lower = doc.to_ascii_lowercase();
+        if tokens.cjk_phrases.iter().any(|p| doc.contains(p))
+            || tokens.expanded_terms.iter().any(|t| doc_lower.contains(t))
+            || tokens.words.iter().any(|w| w.len() >= 3 && doc_lower.contains(w))
+            || tokens
+                .code_identifiers
+                .iter()
+                .any(|id| doc_lower.contains(&id.to_ascii_lowercase()))
+        {
+            return true;
+        }
+    }
+
+    // 6. Check inline comments
+    for c in &node.inline_comments {
+        let c_lower = c.to_ascii_lowercase();
+        if tokens.cjk_phrases.iter().any(|p| c.contains(p))
+            || tokens.expanded_terms.iter().any(|t| c_lower.contains(t))
+            || tokens.words.iter().any(|w| w.len() >= 3 && c_lower.contains(w))
+            || tokens
+                .code_identifiers
+                .iter()
+                .any(|id| c_lower.contains(&id.to_ascii_lowercase()))
+        {
+            return true;
+        }
+    }
+
+    false
+}
+
 /// Score all symbols across files using multi-field similarity & graph topology.
 fn score_workspace_symbols(
     graph: &CodeGraph,
@@ -338,6 +408,11 @@ fn score_workspace_symbols(
             if !path_matches_scope(&node.file, sc) {
                 continue;
             }
+        }
+
+        // HARD SEMANTIC ANCHOR: Reject false-positive background noise from Dense Vector n-grams.
+        if !has_genuine_match_anchor(tokens, node) {
+            continue;
         }
 
         let name_sim = calculate_text_similarity(tokens, &node.name);
@@ -374,8 +449,6 @@ fn score_workspace_symbols(
 
         let path_sim = calculate_text_similarity(tokens, &node.file.to_string_lossy());
 
-        // HARD THRESHOLD: Require genuine token / identifier / keyword match.
-        // Unrelated garbage queries must NOT be rescued by graph_mass or directory bonuses!
         let text_match = (name_sim + name_bonus) * 0.50 + doc_sim * 0.25 + inline_sim * 0.15 + path_sim * 0.10;
         if text_match < 8.0 {
             continue;

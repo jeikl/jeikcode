@@ -384,4 +384,54 @@ Binary files a/image.png and b/image.png differ";
         assert_eq!(diff_row_text(&entries[1], w), "  10 + added");
         assert_eq!(diff_row_text(&entries[2], w), "  10 - removed");
     }
+
+    #[test]
+    fn test_collapse_tool_output() {
+        let text = "line 1\nline 2\nline 3\nline 4\nline 5";
+        let c = collapse_tool_output(text, 3, 100);
+        assert!(c.overflow);
+        assert_eq!(c.total_lines, 5);
+        assert_eq!(c.preview, "line 1\nline 2\nline 3");
+
+        let short = "one line";
+        let c2 = collapse_tool_output(short, 3, 100);
+        assert!(!c2.overflow);
+        assert_eq!(c2.preview, "one line");
+    }
 }
+
+#[derive(Debug, Clone)]
+pub struct CollapsedOutput {
+    pub preview: String,
+    pub overflow: bool,
+    pub total_lines: usize,
+}
+
+/// Collapses long tool outputs to `max_lines` or `max_chars`, reporting overflow.
+pub fn collapse_tool_output(output: &str, max_lines: usize, max_chars: usize) -> CollapsedOutput {
+    let lines: Vec<&str> = output.lines().collect();
+    let total_lines = lines.len();
+    if total_lines <= max_lines && output.chars().count() <= max_chars {
+        return CollapsedOutput {
+            preview: output.to_string(),
+            overflow: false,
+            total_lines,
+        };
+    }
+
+    let slice = &lines[..max_lines.min(total_lines)];
+    let joined = slice.join("\n");
+    let preview = if joined.chars().count() > max_chars {
+        let truncated: String = joined.chars().take(max_chars.saturating_sub(1)).collect();
+        format!("{truncated}…")
+    } else {
+        joined
+    };
+
+    CollapsedOutput {
+        preview,
+        overflow: true,
+        total_lines,
+    }
+}
+

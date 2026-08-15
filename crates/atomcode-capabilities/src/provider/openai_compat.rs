@@ -3673,15 +3673,20 @@ mod tests {
         // aborts the ENTIRE client on the first cert it rejects. A single legacy OS root
         // is therefore enough to take every provider down — which is exactly why
         // `add_trusted_roots` must pre-filter each cert.
-        let junk = reqwest::Certificate::from_der(&[0x30, 0x03, 0x02, 0x01, 0x00])
-            .expect("from_der stores bytes without validating under rustls");
-        let built = reqwest::Client::builder()
-            .add_root_certificate(junk)
-            .build();
-        assert!(
-            built.is_err(),
-            "reqwest aborts the whole build on one bad user root — the failure we defend against"
-        );
+        match reqwest::Certificate::from_der(&[0x30, 0x03, 0x02, 0x01, 0x00]) {
+            Ok(junk) => {
+                let built = reqwest::Client::builder()
+                    .add_root_certificate(junk)
+                    .build();
+                assert!(
+                    built.is_err(),
+                    "reqwest aborts the whole build on one bad user root — the failure we defend against"
+                );
+            }
+            Err(_) => {
+                // On Windows OS backend, from_der itself rejects malformed ASN.1 immediately.
+            }
+        }
     }
 
     #[test]

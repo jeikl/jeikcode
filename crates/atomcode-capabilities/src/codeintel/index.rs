@@ -109,6 +109,14 @@ fn attribute_calls(syms: &[Symbol], sites: Vec<super::symbols::CallSite>) -> Vec
 
 /// One tree-sitter parse → symbols + calls (was two full parses per file).
 fn parse_file(path: &Path, source: &str) -> Option<(Vec<SymbolNode>, Vec<RawCall>)> {
+    if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
+        if ext.eq_ignore_ascii_case("xml") {
+            if let Some(xml_res) = parse_xml_mapper(path, source) {
+                return Some(xml_res);
+            }
+        }
+    }
+
     let lang = Lang::detect(path)?;
     if !lang.is_indexed() {
         return None;
@@ -117,7 +125,7 @@ fn parse_file(path: &Path, source: &str) -> Option<(Vec<SymbolNode>, Vec<RawCall
     let raw = extract_symbols_from_tree(source, lang, &tree)?;
     let sites = extract_call_sites_from_tree(source, lang, &tree);
     let calls = attribute_calls(&raw, sites);
-    let nodes = raw
+    let mut nodes: Vec<SymbolNode> = raw
         .iter()
         .map(|s| SymbolNode {
             id: CodeGraph::make_id(path, &s.name, s.start_line),
@@ -128,15 +136,87 @@ fn parse_file(path: &Path, source: &str) -> Option<(Vec<SymbolNode>, Vec<RawCall
             start_line: s.start_line,
             end_line: s.end_line,
             signature: None,
+            docstring: None,
+            inline_comments: Vec::new(),
         })
         .collect();
+
+    // Extract comment blocks and bind to symbol nodes by physical line proximity
+    let comment_blocks = super::comment_index::extract_comment_blocks(source);
+    super::comment_index::bind_comments_to_symbols(&mut nodes, &comment_blocks);
+
     Some((nodes, calls))
 }
 
-/// Extensions walked into the graph (matches production's INDEXED set + C#).
+fn parse_xml_mapper(path: &Path, source: &str) -> Option<(Vec<SymbolNode>, Vec<RawCall>)> {
+    let mut nodes = Vec::new();
+    let lines: Vec<&str> = source.lines().collect();
+
+    let mut namespace = String::new();
+    for line in &lines {
+        if let Some(pos) = line.find("namespace=") {
+            let rest = &line[pos + 10..];
+            if let Some(quote) = rest.chars().next() {
+                if quote == '"' || quote == '\'' {
+                    if let Some(end) = rest[1..].find(quote) {
+                        namespace = rest[1..=end].to_string();
+                    }
+                }
+            }
+        }
+    }
+
+    if namespace.is_empty() && !source.contains("<select") && !source.contains("<insert") && !source.contains("<update") && !source.contains("<delete") {
+        return None;
+    }
+
+    for (idx, line) in lines.iter().enumerate() {
+        let line_num = idx + 1;
+        let trimmed = line.trim();
+        for tag in &["<select", "<insert", "<update", "<delete"] {
+            if trimmed.starts_with(tag) {
+                if let Some(id_pos) = trimmed.find("id=") {
+                    let rest = &trimmed[id_pos + 3..];
+                    if let Some(quote) = rest.chars().next() {
+                        if quote == '"' || quote == '\'' {
+                            if let Some(end) = rest[1..].find(quote) {
+                                let id = &rest[1..=end];
+                                let sym_name = if !namespace.is_empty() {
+                                    format!("{namespace}::{id}")
+                                } else {
+                                    id.to_string()
+                                };
+                                nodes.push(SymbolNode {
+                                    id: CodeGraph::make_id(path, &sym_name, line_num),
+                                    name: sym_name.clone(),
+                                    kind: SymbolKind::SqlStatement,
+                                    visibility: Visibility::Public,
+                                    file: path.to_path_buf(),
+                                    start_line: line_num,
+                                    end_line: (line_num + 5).min(lines.len()),
+                                    signature: Some(trimmed.to_string()),
+                                    docstring: None,
+                                    inline_comments: Vec::new(),
+                                });
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    if nodes.is_empty() {
+        None
+    } else {
+        Some((nodes, Vec::new()))
+    }
+}
+
+/// Extensions walked into the graph (matches production's INDEXED set + C# + XML/SQL).
 const INDEXED_EXTS: &[&str] = &[
     "rs", "py", "js", "jsx", "mjs", "cjs", "ts", "mts", "tsx", "go", "java", "c", "h", "cc", "cpp",
-    "cxx", "hpp", "hh", "cs",
+    "cxx", "hpp", "hh", "cs", "xml", "sql",
 ];
 
 /// Directory basenames skipped even when not covered by `.gitignore` (common on

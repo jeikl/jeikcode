@@ -315,4 +315,36 @@ mod tests {
         // with reset, "<think>" is treated as the start of a new block.
         assert_eq!(s.feed("not a tag: <3"), "not a tag: <3");
     }
+
+    #[test]
+    fn test_reasoning_summary() {
+        let (title, body) = reasoning_summary("**Inspecting PR workflow**\n\nChecking files now...");
+        assert_eq!(title.as_deref(), Some("Inspecting PR workflow"));
+        assert_eq!(body, "Checking files now...");
+
+        let (title, body) = reasoning_summary("Just regular thinking without title");
+        assert_eq!(title, None);
+        assert_eq!(body, "Just regular thinking without title");
+    }
 }
+
+/// Extracts a title from OpenAI/DeepSeek/Qwen style bolded thinking blocks like `**Inspecting PR workflow**\n\n<body>`.
+/// Returns (Option<title>, body).
+pub fn reasoning_summary(text: &str) -> (Option<String>, String) {
+    let trimmed = text.trim();
+    if let Some(rest) = trimmed.strip_prefix("**") {
+        if let Some(end_idx) = rest.find("**") {
+            let title = rest[..end_idx].trim().to_string();
+            let body = rest[end_idx + 2..]
+                .trim_start_matches('\n')
+                .trim_start_matches('\r')
+                .trim()
+                .to_string();
+            if !title.is_empty() {
+                return (Some(title), body);
+            }
+        }
+    }
+    (None, trimmed.to_string())
+}
+

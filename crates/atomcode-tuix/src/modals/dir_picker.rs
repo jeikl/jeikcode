@@ -555,11 +555,23 @@ mod tests {
         let app = desktop.join("app");
         std::fs::create_dir(&app).unwrap();
 
+        fn strip_unc(p: PathBuf) -> PathBuf {
+            let s = p.to_string_lossy();
+            if let Some(rest) = s.strip_prefix(r"\\?\UNC\") {
+                PathBuf::from(format!(r"\\{}", rest))
+            } else if let Some(rest) = s.strip_prefix(r"\\?\") {
+                PathBuf::from(rest)
+            } else {
+                p
+            }
+        }
+
         let query = desktop.to_string_lossy();
         let resolved = resolve_enter_target(&[app], 0, &query, root.path(), None)
             .expect("typed path resolves")
             .expect("typed path is selected");
-        assert_eq!(resolved, desktop.canonicalize().unwrap());
+        let expected = strip_unc(desktop.canonicalize().unwrap_or_else(|_| desktop.clone()));
+        assert_eq!(strip_unc(resolved), expected);
     }
 
     #[test]
@@ -590,12 +602,24 @@ mod tests {
 
     #[test]
     fn enter_zero_match_resolves_query_as_new_path() {
+        fn strip_unc(p: PathBuf) -> PathBuf {
+            let s = p.to_string_lossy();
+            if let Some(rest) = s.strip_prefix(r"\\?\UNC\") {
+                PathBuf::from(format!(r"\\{}", rest))
+            } else if let Some(rest) = s.strip_prefix(r"\\?\") {
+                PathBuf::from(rest)
+            } else {
+                p
+            }
+        }
+
         let root = tempfile::tempdir().unwrap();
         let target = root.path().join("new-project");
         std::fs::create_dir(&target).unwrap();
         let resolved = resolve_enter_target(&[], 0, target.to_str().unwrap(), root.path(), None)
             .expect("zero-match path resolves");
-        assert_eq!(resolved, Some(target.canonicalize().unwrap()));
+        let expected = strip_unc(target.canonicalize().unwrap_or_else(|_| target.clone()));
+        assert_eq!(resolved.map(strip_unc), Some(expected));
     }
 
     #[test]

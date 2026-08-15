@@ -21375,33 +21375,21 @@ fn handle_agent_event(
             }
         }
         AgentEvent::SubAgentDispatchStart { tasks } => {
-            // Header line: announce the dispatch. The model gets this
-            // same fact in the ToolResult; the UI line tells the user
-            // "the wait is intentional, not a hang". Per-task running/
-            // done lines are suppressed (Task 3 — CC alignment); the
-            // footer spinner conveys mid-flight progress, the
-            // DispatchEnd summary lands the final count.
+            let n = tasks.len();
             renderer.render(UiLine::CommandOutput(format!(
-                "Dispatching {} sub-agents in parallel...",
-                tasks.len()
+                "↳ SubAgent Dispatch · {n} worker{} running in parallel",
+                if n == 1 { "" } else { "s" }
             )));
             renderer.flush();
             state.on_sub_agent_dispatch_start(tasks);
         }
-        AgentEvent::SubAgentTaskStarted { index: _ } => {
-            // Per-task running lines suppressed for CC-style collapsed
-            // view. State tracking still happens via DispatchStart's
-            // task list. Nothing to render here.
-        }
+        AgentEvent::SubAgentTaskStarted { index: _ } => {}
         AgentEvent::SubAgentTaskDone {
             index: _,
             elapsed_ms: _,
             turns: _,
             summary: _,
         } => {
-            // Per-task done lines suppressed — final count shows in
-            // DispatchEnd summary. Still tick the counter so the
-            // aggregate `N/M ok` reflects this completion.
             state.on_sub_agent_task_done();
         }
         AgentEvent::SubAgentTaskFailed {
@@ -21410,13 +21398,9 @@ fn handle_agent_event(
             turns: _,
             reason,
         } => {
-            // Failures KEEP their per-task line. Rationale: the user
-            // needs to know which sub-agent failed for diagnosis;
-            // collapsing into "1 fail" leaves them blind. Successes
-            // collapse silently (no actionable info per success).
             state.on_sub_agent_task_failed();
             if let Some(info) = state.sub_agent_tasks.get(index) {
-                let cross = "\u{2717}";
+                let cross = "✗";
                 let short_reason = reason.lines().next().unwrap_or("").trim();
                 renderer.render(UiLine::CommandOutput(format!(
                     "  {} {}{} — {} · {}",
@@ -21434,11 +21418,6 @@ fn handle_agent_event(
             }
         }
         AgentEvent::SubAgentDispatchEnd => {
-            // Compute the aggregate before clearing state. This is the
-            // single line that replaces the old multi-row pipe-table
-            // result block — the model still sees the full breakdown
-            // in the ToolResult content, but the UI only needs the
-            // bottom line.
             let total = state.sub_agent_total;
             let failed = state.sub_agent_failed;
             let ok = total.saturating_sub(failed);
@@ -21447,19 +21426,17 @@ fn handle_agent_event(
                 .map(|t| t.elapsed().as_millis() as u64)
                 .unwrap_or(0);
             if total > 0 {
-                let arrow = "\u{25cf}";
+                let check = "✓";
                 let summary = if failed == 0 {
                     format!(
-                        "{} ParallelEditFiles · {}/{} ok · {} wall",
-                        arrow,
+                        "↳ SubAgent Completed · {}/{} ok · {} wall",
                         ok,
                         total,
                         fmt_elapsed(elapsed)
                     )
                 } else {
                     format!(
-                        "{} ParallelEditFiles · {} ok · {} fail · {} wall",
-                        arrow,
+                        "↳ SubAgent Completed · {} ok · {} fail · {} wall",
                         ok,
                         failed,
                         fmt_elapsed(elapsed)

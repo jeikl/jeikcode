@@ -17,11 +17,14 @@
 //! opt-in `codeintel` cargo feature (12 grammars = heavy C compilation).
 
 use atomcode_kernel::tool::{ProgressSink, ToolRegistry, ToolResult};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+pub mod bilingual_nlp;
 pub mod blast_radius;
+pub mod comment_index;
+pub mod explore;
 pub mod file_deps;
 pub mod find_references;
 pub mod find_symbol;
@@ -30,6 +33,7 @@ pub mod index;
 pub mod lang;
 pub mod list_symbols;
 pub mod read_symbol;
+pub mod repo_map;
 pub mod symbols;
 pub mod trace_callees;
 pub mod trace_callers;
@@ -43,6 +47,7 @@ pub mod lsp;
 pub mod lsp_tool;
 
 pub use blast_radius::BlastRadiusTool;
+pub use explore::CodeExploreTool;
 pub use file_deps::FileDependenciesTool;
 pub use find_references::FindReferencesTool;
 pub use find_symbol::FindSymbolTool;
@@ -53,6 +58,7 @@ pub use index::{
 pub use lang::Lang;
 pub use list_symbols::ListSymbolsTool;
 pub use read_symbol::ReadSymbolTool;
+pub use repo_map::RepoMapTool;
 pub use symbols::{extract_symbol, extract_symbols, skeleton, Symbol};
 pub use trace_callees::TraceCalleesTool;
 pub use trace_callers::TraceCallersTool;
@@ -65,12 +71,43 @@ pub use lsp::LspManager;
 #[cfg(feature = "lsp")]
 pub use lsp_tool::LspTool;
 
-/// Names of the graph/symbol tools — pass to
-/// [`ToolRegistry::mount`](atomcode_kernel::tool::ToolRegistry::mount). LSP is
-/// intentionally separate: a Cargo feature must not silently expose a process-spawning
-/// tool in every codeintel consumer.
+/// Operational mode for code-intelligence tools.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub enum CodeIntelMode {
+    /// Default: Mount only the two high-density core tools (`repo_map` + `code_explore`).
+    #[default]
+    Unified,
+    /// Full: Mount all tools including fine-grained inspection tools.
+    Full,
+    /// Custom: Mount explicit list of tools.
+    Custom(Vec<String>),
+}
+
+impl CodeIntelMode {
+    pub fn from_env_or_config(env_val: Option<&str>, config_mode: Option<&str>) -> Self {
+        let val = env_val.or(config_mode).unwrap_or("unified").trim().to_ascii_lowercase();
+        match val.as_str() {
+            "full" | "all" | "granular" => Self::Full,
+            "unified" | "compact" => Self::Unified,
+            other if other.contains(',') => {
+                let list = other.split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect();
+                Self::Custom(list)
+            }
+            _ => Self::Unified,
+        }
+    }
+}
+
+/// Default unified tool names (repo_map + code_explore).
+pub fn codeintel_unified_tool_names() -> &'static [&'static str] {
+    &["repo_map", "code_explore"]
+}
+
+/// Names of all possible graph/symbol tools.
 pub fn codeintel_tool_names() -> &'static [&'static str] {
     &[
+        "repo_map",
+        "code_explore",
         "list_symbols",
         "read_symbol",
         "find_symbol",
@@ -83,22 +120,73 @@ pub fn codeintel_tool_names() -> &'static [&'static str] {
     ]
 }
 
-/// Register graph/symbol tools. Graph tools SHARE one lazily-built [`CodeIndex`].
-/// LSP is registered separately by the L2 runtime owner via [`register_lsp_tool`].
+/// Register codeintel tools using default mode (or environment ATOMCODE_CODEINTEL_MODE).
 pub fn register_codeintel_tools(reg: &mut ToolRegistry) {
-    reg.register(Arc::new(ListSymbolsTool));
-    reg.register(Arc::new(ReadSymbolTool));
-    reg.register(Arc::new(FindReferencesTool));
+    let env_mode = std::env::var("ATOMCODE_CODEINTEL_MODE").ok();
+    let mode = CodeIntelMode::from_env_or_config(env_mode.as_deref(), None);
+    register_codeintel_tools_with_mode(reg, &mode);
+}
+
+/// Register graph/symbol tools according to the chosen [`CodeIntelMode`].
+pub fn register_codeintel_tools_with_mode(reg: &mut ToolRegistry, mode: &CodeIntelMode) {
     let index = Arc::new(CodeIndex::new());
-    // Poll the last workspace every few seconds so git pull / edits land as
-    // unit-level re-parses without waiting for the next graph tool call.
     index.start_background_refresh();
-    reg.register(Arc::new(FindSymbolTool::new(index.clone())));
-    reg.register(Arc::new(TraceCallersTool::new(index.clone())));
-    reg.register(Arc::new(TraceCalleesTool::new(index.clone())));
-    reg.register(Arc::new(TraceChainTool::new(index.clone())));
-    reg.register(Arc::new(BlastRadiusTool::new(index.clone())));
-    reg.register(Arc::new(FileDependenciesTool::new(index)));
+
+    match mode {
+        CodeIntelMode::Unified => {
+            reg.register(Arc::new(RepoMapTool::new()));
+            reg.register(Arc::new(CodeExploreTool::new(index)));
+        }
+        CodeIntelMode::Full => {
+            reg.register(Arc::new(RepoMapTool::new()));
+            reg.register(Arc::new(CodeExploreTool::new(index.clone())));
+            reg.register(Arc::new(ListSymbolsTool));
+            reg.register(Arc::new(ReadSymbolTool));
+            reg.register(Arc::new(FindReferencesTool));
+            reg.register(Arc::new(FindSymbolTool::new(index.clone())));
+            reg.register(Arc::new(TraceCallersTool::new(index.clone())));
+            reg.register(Arc::new(TraceCalleesTool::new(index.clone())));
+            reg.register(Arc::new(TraceChainTool::new(index.clone())));
+            reg.register(Arc::new(BlastRadiusTool::new(index.clone())));
+            reg.register(Arc::new(FileDependenciesTool::new(index)));
+        }
+        CodeIntelMode::Custom(tools) => {
+            let set: HashSet<String> = tools.iter().map(|s| s.to_ascii_lowercase()).collect();
+            if set.contains("repo_map") {
+                reg.register(Arc::new(RepoMapTool::new()));
+            }
+            if set.contains("code_explore") {
+                reg.register(Arc::new(CodeExploreTool::new(index.clone())));
+            }
+            if set.contains("list_symbols") {
+                reg.register(Arc::new(ListSymbolsTool));
+            }
+            if set.contains("read_symbol") {
+                reg.register(Arc::new(ReadSymbolTool));
+            }
+            if set.contains("find_references") {
+                reg.register(Arc::new(FindReferencesTool));
+            }
+            if set.contains("find_symbol") {
+                reg.register(Arc::new(FindSymbolTool::new(index.clone())));
+            }
+            if set.contains("trace_callers") {
+                reg.register(Arc::new(TraceCallersTool::new(index.clone())));
+            }
+            if set.contains("trace_callees") {
+                reg.register(Arc::new(TraceCalleesTool::new(index.clone())));
+            }
+            if set.contains("trace_chain") {
+                reg.register(Arc::new(TraceChainTool::new(index.clone())));
+            }
+            if set.contains("blast_radius") {
+                reg.register(Arc::new(BlastRadiusTool::new(index.clone())));
+            }
+            if set.contains("file_dependencies") {
+                reg.register(Arc::new(FileDependenciesTool::new(index)));
+            }
+        }
+    }
 }
 
 /// A neutral language-server entry supplied by an L2 assembly. Capabilities cannot

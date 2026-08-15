@@ -37,17 +37,19 @@ thread_local! {
 
 /// Parse `source` once. Shared by symbol outline and call extraction.
 pub(crate) fn parse_source(source: &str, lang: Lang) -> Option<Tree> {
-    let grammar = lang.grammar();
+    let grammar = lang.grammar()?;
     let mut parser = Parser::new();
     parser.set_language(&grammar).ok()?;
     parser.parse(source, None)
 }
 
 fn with_sym_query<R>(lang: Lang, f: impl FnOnce(&Query) -> R) -> Option<R> {
+    let q_str = lang.symbols_query()?;
+    let grammar = lang.grammar()?;
     SYM_QUERIES.with(|cell| {
         let mut map = cell.borrow_mut();
         if !map.contains_key(&lang) {
-            let q = Query::new(&lang.grammar(), lang.symbols_query()).ok()?;
+            let q = Query::new(&grammar, q_str).ok()?;
             map.insert(lang, q);
         }
         Some(f(map.get(&lang)?))
@@ -55,13 +57,12 @@ fn with_sym_query<R>(lang: Lang, f: impl FnOnce(&Query) -> R) -> Option<R> {
 }
 
 fn with_call_query<R>(lang: Lang, f: impl FnOnce(&Query) -> R) -> Option<R> {
-    let Some(q_src) = lang.calls_query() else {
-        return None;
-    };
+    let q_src = lang.calls_query()?;
+    let grammar = lang.grammar()?;
     CALL_QUERIES.with(|cell| {
         let mut map = cell.borrow_mut();
         if !map.contains_key(&lang) {
-            let q = Query::new(&lang.grammar(), q_src).ok()?;
+            let q = Query::new(&grammar, q_src).ok()?;
             map.insert(lang, q);
         }
         Some(f(map.get(&lang)?))
@@ -130,12 +131,336 @@ pub(crate) fn extract_symbols_from_tree(
     })
 }
 
+/// Fallback AST/semantic extractor for modern languages without native C tree-sitter bindings.
+pub(crate) fn extract_semantic_symbols(source: &str, lang: Lang) -> Vec<Symbol> {
+    let mut symbols = Vec::new();
+    let mut byte_offset = 0;
+    for (line_idx, line) in source.lines().enumerate() {
+        let line_num = line_idx + 1;
+        let line_len = line.len() + 1;
+        let trimmed = line.trim();
+        if trimmed.starts_with("//")
+            || trimmed.starts_with('#')
+            || trimmed.starts_with("--")
+            || trimmed.is_empty()
+        {
+            byte_offset += line_len;
+            continue;
+        }
+
+        match lang {
+            Lang::Kotlin => {
+                if let Some(rest) = trimmed
+                    .strip_prefix("class ")
+                    .or_else(|| trimmed.strip_prefix("data class "))
+                    .or_else(|| trimmed.strip_prefix("object "))
+                    .or_else(|| trimmed.strip_prefix("interface "))
+                    .or_else(|| trimmed.strip_prefix("enum class "))
+                {
+                    let name = rest
+                        .split(|c: char| !c.is_alphanumeric() && c != '_')
+                        .next()
+                        .unwrap_or("");
+                    if !name.is_empty() {
+                        symbols.push(Symbol {
+                            name: name.to_string(),
+                            kind: "class".into(),
+                            start_line: line_num,
+                            end_line: line_num,
+                            start_byte: byte_offset,
+                            end_byte: byte_offset + line.len(),
+                        });
+                    }
+                } else if let Some(rest) = trimmed
+                    .strip_prefix("fun ")
+                    .or_else(|| trimmed.strip_prefix("suspend fun "))
+                {
+                    let name = rest
+                        .split(|c: char| !c.is_alphanumeric() && c != '_')
+                        .next()
+                        .unwrap_or("");
+                    if !name.is_empty() {
+                        symbols.push(Symbol {
+                            name: name.to_string(),
+                            kind: "fn".into(),
+                            start_line: line_num,
+                            end_line: line_num,
+                            start_byte: byte_offset,
+                            end_byte: byte_offset + line.len(),
+                        });
+                    }
+                }
+            }
+            Lang::Swift => {
+                if let Some(rest) = trimmed
+                    .strip_prefix("class ")
+                    .or_else(|| trimmed.strip_prefix("struct "))
+                    .or_else(|| trimmed.strip_prefix("enum "))
+                    .or_else(|| trimmed.strip_prefix("protocol "))
+                    .or_else(|| trimmed.strip_prefix("actor "))
+                    .or_else(|| trimmed.strip_prefix("extension "))
+                {
+                    let name = rest
+                        .split(|c: char| !c.is_alphanumeric() && c != '_')
+                        .next()
+                        .unwrap_or("");
+                    if !name.is_empty() {
+                        symbols.push(Symbol {
+                            name: name.to_string(),
+                            kind: "struct".into(),
+                            start_line: line_num,
+                            end_line: line_num,
+                            start_byte: byte_offset,
+                            end_byte: byte_offset + line.len(),
+                        });
+                    }
+                } else if let Some(rest) = trimmed.strip_prefix("func ") {
+                    let name = rest
+                        .split(|c: char| !c.is_alphanumeric() && c != '_')
+                        .next()
+                        .unwrap_or("");
+                    if !name.is_empty() {
+                        symbols.push(Symbol {
+                            name: name.to_string(),
+                            kind: "fn".into(),
+                            start_line: line_num,
+                            end_line: line_num,
+                            start_byte: byte_offset,
+                            end_byte: byte_offset + line.len(),
+                        });
+                    }
+                }
+            }
+            Lang::Dart => {
+                if let Some(rest) = trimmed
+                    .strip_prefix("class ")
+                    .or_else(|| trimmed.strip_prefix("abstract class "))
+                    .or_else(|| trimmed.strip_prefix("mixin "))
+                    .or_else(|| trimmed.strip_prefix("enum "))
+                    .or_else(|| trimmed.strip_prefix("extension "))
+                {
+                    let name = rest
+                        .split(|c: char| !c.is_alphanumeric() && c != '_')
+                        .next()
+                        .unwrap_or("");
+                    if !name.is_empty() {
+                        symbols.push(Symbol {
+                            name: name.to_string(),
+                            kind: "class".into(),
+                            start_line: line_num,
+                            end_line: line_num,
+                            start_byte: byte_offset,
+                            end_byte: byte_offset + line.len(),
+                        });
+                    }
+                }
+            }
+            Lang::Ruby => {
+                if let Some(rest) = trimmed
+                    .strip_prefix("class ")
+                    .or_else(|| trimmed.strip_prefix("module "))
+                {
+                    let name = rest
+                        .split(|c: char| !c.is_alphanumeric() && c != '_' && c != ':')
+                        .next()
+                        .unwrap_or("");
+                    if !name.is_empty() {
+                        symbols.push(Symbol {
+                            name: name.to_string(),
+                            kind: "class".into(),
+                            start_line: line_num,
+                            end_line: line_num,
+                            start_byte: byte_offset,
+                            end_byte: byte_offset + line.len(),
+                        });
+                    }
+                } else if let Some(rest) = trimmed.strip_prefix("def ") {
+                    let name = rest
+                        .split(|c: char| !c.is_alphanumeric() && c != '_' && c != '?' && c != '!')
+                        .next()
+                        .unwrap_or("");
+                    if !name.is_empty() {
+                        symbols.push(Symbol {
+                            name: name.to_string(),
+                            kind: "fn".into(),
+                            start_line: line_num,
+                            end_line: line_num,
+                            start_byte: byte_offset,
+                            end_byte: byte_offset + line.len(),
+                        });
+                    }
+                }
+            }
+            Lang::Solidity => {
+                if let Some(rest) = trimmed
+                    .strip_prefix("contract ")
+                    .or_else(|| trimmed.strip_prefix("interface "))
+                    .or_else(|| trimmed.strip_prefix("library "))
+                {
+                    let name = rest
+                        .split(|c: char| !c.is_alphanumeric() && c != '_')
+                        .next()
+                        .unwrap_or("");
+                    if !name.is_empty() {
+                        symbols.push(Symbol {
+                            name: name.to_string(),
+                            kind: "contract".into(),
+                            start_line: line_num,
+                            end_line: line_num,
+                            start_byte: byte_offset,
+                            end_byte: byte_offset + line.len(),
+                        });
+                    }
+                } else if let Some(rest) = trimmed.strip_prefix("function ") {
+                    let name = rest
+                        .split(|c: char| !c.is_alphanumeric() && c != '_')
+                        .next()
+                        .unwrap_or("");
+                    if !name.is_empty() {
+                        symbols.push(Symbol {
+                            name: name.to_string(),
+                            kind: "fn".into(),
+                            start_line: line_num,
+                            end_line: line_num,
+                            start_byte: byte_offset,
+                            end_byte: byte_offset + line.len(),
+                        });
+                    }
+                }
+            }
+            Lang::Lua => {
+                if let Some(rest) = trimmed
+                    .strip_prefix("function ")
+                    .or_else(|| trimmed.strip_prefix("local function "))
+                {
+                    let name = rest
+                        .split(|c: char| !c.is_alphanumeric() && c != '_' && c != '.' && c != ':')
+                        .next()
+                        .unwrap_or("");
+                    if !name.is_empty() {
+                        symbols.push(Symbol {
+                            name: name.to_string(),
+                            kind: "fn".into(),
+                            start_line: line_num,
+                            end_line: line_num,
+                            start_byte: byte_offset,
+                            end_byte: byte_offset + line.len(),
+                        });
+                    }
+                }
+            }
+            Lang::Terraform => {
+                if let Some(rest) = trimmed
+                    .strip_prefix("resource ")
+                    .or_else(|| trimmed.strip_prefix("module "))
+                    .or_else(|| trimmed.strip_prefix("variable "))
+                    .or_else(|| trimmed.strip_prefix("output "))
+                    .or_else(|| trimmed.strip_prefix("data "))
+                {
+                    let name = rest.split('{').next().unwrap_or("").trim().replace('"', "");
+                    if !name.is_empty() {
+                        symbols.push(Symbol {
+                            name,
+                            kind: "resource".into(),
+                            start_line: line_num,
+                            end_line: line_num,
+                            start_byte: byte_offset,
+                            end_byte: byte_offset + line.len(),
+                        });
+                    }
+                }
+            }
+            Lang::Scala => {
+                if let Some(rest) = trimmed
+                    .strip_prefix("class ")
+                    .or_else(|| trimmed.strip_prefix("case class "))
+                    .or_else(|| trimmed.strip_prefix("object "))
+                    .or_else(|| trimmed.strip_prefix("trait "))
+                    .or_else(|| trimmed.strip_prefix("enum "))
+                {
+                    let name = rest
+                        .split(|c: char| !c.is_alphanumeric() && c != '_')
+                        .next()
+                        .unwrap_or("");
+                    if !name.is_empty() {
+                        symbols.push(Symbol {
+                            name: name.to_string(),
+                            kind: "class".into(),
+                            start_line: line_num,
+                            end_line: line_num,
+                            start_byte: byte_offset,
+                            end_byte: byte_offset + line.len(),
+                        });
+                    }
+                } else if let Some(rest) = trimmed.strip_prefix("def ") {
+                    let name = rest
+                        .split(|c: char| !c.is_alphanumeric() && c != '_')
+                        .next()
+                        .unwrap_or("");
+                    if !name.is_empty() {
+                        symbols.push(Symbol {
+                            name: name.to_string(),
+                            kind: "fn".into(),
+                            start_line: line_num,
+                            end_line: line_num,
+                            start_byte: byte_offset,
+                            end_byte: byte_offset + line.len(),
+                        });
+                    }
+                }
+            }
+            Lang::Erlang => {
+                if let Some(rest) = trimmed
+                    .strip_prefix("-module(")
+                    .or_else(|| trimmed.strip_prefix("-record("))
+                {
+                    let name = rest
+                        .split(|c: char| !c.is_alphanumeric() && c != '_')
+                        .next()
+                        .unwrap_or("");
+                    if !name.is_empty() {
+                        symbols.push(Symbol {
+                            name: name.to_string(),
+                            kind: "mod".into(),
+                            start_line: line_num,
+                            end_line: line_num,
+                            start_byte: byte_offset,
+                            end_byte: byte_offset + line.len(),
+                        });
+                    }
+                }
+            }
+            Lang::R => {
+                if let Some(idx) = trimmed.find("<- function") {
+                    let name = trimmed[..idx].trim();
+                    if !name.is_empty() {
+                        symbols.push(Symbol {
+                            name: name.to_string(),
+                            kind: "fn".into(),
+                            start_line: line_num,
+                            end_line: line_num,
+                            start_byte: byte_offset,
+                            end_byte: byte_offset + line.len(),
+                        });
+                    }
+                }
+            }
+            _ => {}
+        }
+        byte_offset += line_len;
+    }
+    symbols
+}
+
 /// Parse `source` as `lang` and extract symbol definitions (functions, types, classes,
-/// methods, …) via the language's tree-sitter query. `None` only if parsing or query
-/// compilation fails; an empty `Vec` means a clean parse with no symbols.
+/// methods, …) via the language's tree-sitter query or semantic parser. `None` only if parsing
+/// fails; an empty `Vec` means a clean parse with no symbols.
 pub fn extract_symbols(source: &str, lang: Lang) -> Option<Vec<Symbol>> {
-    let tree = parse_source(source, lang)?;
-    extract_symbols_from_tree(source, lang, &tree)
+    if let Some(tree) = parse_source(source, lang) {
+        extract_symbols_from_tree(source, lang, &tree)
+    } else {
+        Some(extract_semantic_symbols(source, lang))
+    }
 }
 
 /// Call-site rows for the code graph (name + line). Kept here so one parse serves both
@@ -331,6 +656,16 @@ mod tests {
             ),
             (CSharp, "class C {\n  void M() {}\n}\n", &["C", "M"]),
             (Php, "<?php\nfunction f() {}\nclass C {}\n", &["f", "C"]),
+            (Kotlin, "class MyActivity\nfun process() {}\n", &["MyActivity", "process"]),
+            (Swift, "class AppController {}\nfunc startup() {}\n", &["AppController", "startup"]),
+            (Dart, "class CounterWidget {}\n", &["CounterWidget"]),
+            (Ruby, "class AuthController\ndef login\nend\nend\n", &["AuthController", "login"]),
+            (Solidity, "contract ERC20Token {\nfunction transfer() {}\n}\n", &["ERC20Token", "transfer"]),
+            (Lua, "function handle_event()\nend\n", &["handle_event"]),
+            (Terraform, "resource \"aws_instance\" \"web\" {}\n", &["aws_instance web"]),
+            (Scala, "class DataPipeline\ndef execute() {}\n", &["DataPipeline", "execute"]),
+            (Erlang, "-module(server).\n", &["server"]),
+            (R, "calculate_mean <- function(x) {\n}\n", &["calculate_mean"]),
         ];
         for (lang, src, expected) in cases {
             let syms = extract_symbols(src, *lang).unwrap_or_default();

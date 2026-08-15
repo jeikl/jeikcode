@@ -665,9 +665,20 @@ fn sort_json_object_keys(value: Value) -> Value {
 ///
 /// DETERMINISTIC: same content + same cap → byte-identical output, so the cap
 /// never breaks the append-only wire-prefix (prefix-cache) invariant.
+///
+/// Kernel-side marker for an artifact-backed preview produced by middleware
+/// (e.g. `ArtifactMiddleware` in atomcode-capabilities). When present, the
+/// content is ALREADY a bounded head+marker+tail preview, so the kernel cap
+/// must not truncate it again — re-capping would cut the embedded artifact id
+/// and turn the fetch_output recovery handle into a dead link.
+pub const ARTIFACT_PREVIEW_MARKER: &str = "[atomcode: output truncated";
 fn cap_tool_result(result: &mut ToolResult, max: usize) {
     if max == 0 {
         return; // unbounded
+    }
+    // Already an artifact preview → bounded by construction; never re-cap.
+    if result.content.contains(ARTIFACT_PREVIEW_MARKER) {
+        return;
     }
     let total = result.content.len();
     if total <= max {
@@ -4664,6 +4675,43 @@ mod cap_tests {
         assert_eq!(
             a.content, b.content,
             "same content + same cap must yield byte-identical truncation"
+        );
+    }
+
+    #[test]
+    fn artifact_preview_is_never_recapped() {
+        // A bounded artifact preview (head + marker + tail, as produced by
+        // ArtifactMiddleware) is ALREADY small. A tiny kernel cap must NOT
+        // truncate it again — re-capping would cut the embedded artifact id
+        // and turn fetch_output into a dead link.
+        let preview = format!(
+            "HEAD{}\n[atomcode: output truncated — 20000 bytes total, showing first 4096 + last 4096 bytes. \
+Full output saved as artifact 7450efc5941c8ce0. To read more: fetch_output(artifact_id=\"7450efc5941c8ce0\", offset, limit).]\n{}TAIL",
+            "h".repeat(4000),
+            "t".repeat(4000)
+        );
+        let mut r = res(&preview);
+        cap_tool_result(&mut r, 512);
+        assert_eq!(
+            r.content, preview,
+            "artifact preview must pass the kernel cap untouched"
+        );
+        assert!(
+            r.content.contains("7450efc5941c8ce0"),
+            "artifact id must survive the cap"
+        );
+    }
+
+    #[test]
+    fn plain_large_content_still_gets_capped() {
+        // The exemption is scoped to artifact previews: ordinary large content
+        // must STILL be capped (no bypass).
+        let mut r = res(&"x".repeat(5000));
+        cap_tool_result(&mut r, 1024);
+        assert!(
+            r.content.contains("[truncated:"),
+            "plain large content must still be capped: {}",
+            r.content
         );
     }
 }

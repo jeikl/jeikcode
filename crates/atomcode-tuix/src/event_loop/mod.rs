@@ -19182,7 +19182,8 @@ mod working_dir_projection_tests {
 
 fn truncate_local_shell_output(mut output: String) -> String {
     const LIMIT: usize = 128 * 1024;
-    if output.len() <= LIMIT {
+    let total = output.len();
+    if total <= LIMIT {
         return output;
     }
     let mut boundary = LIMIT;
@@ -19190,7 +19191,9 @@ fn truncate_local_shell_output(mut output: String) -> String {
         boundary -= 1;
     }
     output.truncate(boundary);
-    output.push_str("\n[output truncated at 128 KiB]");
+    output.push_str(&format!(
+        "\n[output truncated at 128 KiB; {total} bytes total — rerun with a narrower command to see the rest]"
+    ));
     output
 }
 

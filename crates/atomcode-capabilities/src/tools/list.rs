@@ -9,7 +9,13 @@ use serde::Deserialize;
 use serde_json::json;
 use std::path::Path;
 
+/// Entries shown in a folded result: first/last `FOLD_HALF` with a marker between.
 const MAX_ENTRIES: usize = 200;
+/// Half of the folded window — head and tail each keep this many lines.
+const FOLD_HALF: usize = MAX_ENTRIES / 2;
+/// Hard stop for the walk itself. Bounds the work while still collecting
+/// enough lines past the cap for the tail half to be meaningful.
+const COLLECT_CAP: usize = MAX_ENTRIES * 2;
 const MAX_DEPTH_CAP: usize = 5;
 
 pub struct ListDirTool;
@@ -90,12 +96,23 @@ impl Tool for ListDirTool {
             Err(_) => return err("list_directory: scan task failed".to_string()),
         };
 
-        let truncated = lines.len() > MAX_ENTRIES;
-        let mut shown = lines;
-        if truncated {
-            shown.truncate(MAX_ENTRIES);
-        }
-        let mut out = shown.join("\n");
+        let total = lines.len();
+        let truncated = total > MAX_ENTRIES;
+        let mut out = if truncated {
+            // Head + tail fold: the tail is where deep subdirectories (often the
+            // most useful signal) land, so never drop it silently. The middle is
+            // elided with a count + a recovery hint.
+            let head = &lines[..FOLD_HALF];
+            let tail = &lines[total - FOLD_HALF..];
+            let elided = total - FOLD_HALF * 2;
+            format!(
+                "{}\n  ... ({elided} entries elided; total {total}; pass a smaller `depth` or a subdirectory `path` to see them)\n{}",
+                head.join("\n"),
+                tail.join("\n")
+            )
+        } else {
+            lines.join("\n")
+        };
         if truncated {
             out.push_str(&format!("\n  ... (truncated at {MAX_ENTRIES} entries)"));
         }
@@ -104,7 +121,9 @@ impl Tool for ListDirTool {
 }
 
 fn walk(dir: &Path, depth: usize, max: usize, out: &mut Vec<String>) {
-    if depth > max || out.len() > MAX_ENTRIES {
+    // `>=` (not `>`) keeps the cap exact: at `out.len() == COLLECT_CAP` no more
+    // entries are appended, so `truncated` and the marker math stay in sync.
+    if depth > max || out.len() >= COLLECT_CAP {
         return;
     }
     let mut entries: Vec<_> = match std::fs::read_dir(dir) {
@@ -114,7 +133,7 @@ fn walk(dir: &Path, depth: usize, max: usize, out: &mut Vec<String>) {
     entries.sort_by_key(|e| e.file_name());
     let indent = "  ".repeat(depth);
     for e in entries {
-        if out.len() > MAX_ENTRIES {
+        if out.len() >= COLLECT_CAP {
             return;
         }
         let name = e.file_name().to_string_lossy().to_string();
@@ -207,5 +226,65 @@ mod tests {
             r.content
         );
         assert!(r.content.contains("settings.gradle"), "{}", r.content);
+    }
+
+    #[tokio::test]
+    async fn under_cap_is_untouched() {
+        // Off-by-one guard: exactly MAX_ENTRIES lines must NOT be flagged as
+        // truncated (no fold, no marker). This is the regression the old
+        // `> MAX_ENTRIES` checks were about to cause at 201 lines.
+        let d = tempfile::tempdir().unwrap();
+        for i in 0..MAX_ENTRIES {
+            std::fs::write(d.path().join(format!("f{i:03}.txt")), "x").unwrap();
+        }
+        let r = ListDirTool.execute(r#"{"path":"."}"#, &ctx(d.path())).await;
+        assert!(!r.is_error, "{}", r.content);
+        assert!(
+            !r.content.contains("truncated") && !r.content.contains("elided"),
+            "exactly {} entries must pass through untouched: {}",
+            MAX_ENTRIES,
+            r.content
+        );
+        assert!(
+            r.content.contains("f000.txt") && r.content.contains(&format!("f{:03}.txt", MAX_ENTRIES - 1)),
+            "all entries present: {}",
+            r.content
+        );
+    }
+
+    #[tokio::test]
+    async fn over_cap_folds_head_and_tail() {
+        // Fold: first/last FOLD_HALF lines kept, middle elided with a count and
+        // a recovery hint. The TAIL — where deep subdirectories land — must
+        // survive (this was the C1 defect: tail was silently dropped).
+        let d = tempfile::tempdir().unwrap();
+        for i in 0..COLLECT_CAP {
+            std::fs::write(d.path().join(format!("f{i:03}.txt")), "x").unwrap();
+        }
+        let r = ListDirTool.execute(r#"{"path":"."}"#, &ctx(d.path())).await;
+        assert!(!r.is_error, "{}", r.content);
+        assert!(r.content.contains("elided"), "{}", r.content);
+        // The fold marker reports BOTH the total and the elided count.
+        assert!(
+            r.content.contains(&format!("total {COLLECT_CAP}")),
+            "{}",
+            r.content
+        );
+        let elided = COLLECT_CAP - FOLD_HALF * 2;
+        assert!(
+            r.content.contains(&format!("{elided} entries elided")),
+            "{}",
+            r.content
+        );
+        // Head survives.
+        assert!(r.content.contains("f000.txt"), "{}", r.content);
+        // Tail survives — the crux of the fix.
+        assert!(
+            r.content.contains(&format!("f{:03}.txt", COLLECT_CAP - 1)),
+            "tail entry must survive the fold: {}",
+            r.content
+        );
+        // An elided middle entry must NOT leak into the output.
+        assert!(!r.content.contains("f100.txt"), "{}", r.content);
     }
 }

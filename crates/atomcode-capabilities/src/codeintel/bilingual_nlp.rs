@@ -574,4 +574,102 @@ mod tests {
         let score_snake = calculate_text_similarity(&q2, target_snake);
         assert!(score_snake > 50.0, "deductStock -> batch_deduct_stock score was {score_snake}, expected > 50");
     }
+
+    /// The same `中文 = 英文` lines shipped in `~/.atomcode/thesaurus/*.txt`
+    /// (the user-editable external thesaurus — NOT baked into the binary). The
+    /// embedded defaults deliberately do NOT include these generic verbs, so
+    /// the boost below comes purely from the external format.
+    const EXTERNAL_GENERIC_VERBS: &str = "\
+保存, 持久化, 存档, 落盘 = save, persist, durable, store, write_back, flush, archive
+更新, 修改, 重载, 刷新 = update, reload, refresh, renew, modify, refresh_config
+登录, 登陆, 认证, 会话 = login, authenticate, sign_in, auth, session, token
+发送, 派发, 推送, 传递 = send, dispatch, push, deliver, transmit, emit
+加载, 装载, 读取, 读取文件 = load, read, fetch, mount, read_file
+创建, 新建, 生成, 初始化 = create, new, generate, build, make, init, instantiate
+";
+
+    /// PROBE (baseline vs external-thesaurus boost): semantically-near but
+    /// lexically-disjoint terms — the exact case the 128-dim vector is weakest
+    /// at. Prints both scores side by side so the improvement is visible.
+    #[test]
+    fn probe_semantic_but_lexically_disjoint_cases() {
+        let cases: &[(&str, &str)] = &[
+            ("保存数据", "fn persist_data(...)"),
+            ("保存数据", "fn persistData(...)"),
+            ("保存数据", "fn save_record(...)"),
+            ("持久化", "fn durable_store(...)"),
+            ("更新配置", "fn reload_config(...)"),
+            ("更新配置", "fn refreshConfig(...)"),
+            ("重载配置", "fn reload_config(...)"),
+            ("用户登录", "fn authenticate_user(...)"),
+            ("用户登录", "fn login_user(...)"),
+            ("加载配置", "fn load_config(...)"),
+            ("读取配置", "fn load_config(...)"),
+            ("删除记录", "fn remove_record(...)"),
+            ("查询订单", "fn find_orders(...)"),
+            ("发送消息", "fn send_message(...)"),
+            ("发送消息", "fn dispatchMessage(...)"),
+        ];
+        let plain = DynamicThesaurus::new();
+        let mut boosted = DynamicThesaurus::new();
+        boosted.parse_and_append(EXTERNAL_GENERIC_VERBS);
+        for (q, target) in cases {
+            let s0 = calculate_text_similarity(&parse_bilingual_query_with_thesaurus(q, &plain), target);
+            let s1 = calculate_text_similarity(&parse_bilingual_query_with_thesaurus(q, &boosted), target);
+            println!("  {q:8} -> {target:32} baseline={s0:.1} boosted={s1:.1}");
+        }
+    }
+
+    /// REGRESSION: external-thesaurus lines (what a user drops into
+    /// `~/.atomcode/thesaurus/*.txt`) MUST lift lexically-disjoint semantic
+    /// matches across the code_explore floors (text_match >= 8.0 → raw >= 12.0,
+    /// plus the `has_genuine_match_anchor` lexical anchor). 25.0 is comfortably
+    /// above those floors while far below exact-hit scores, so this catches
+    /// both "thesaurus line stopped working" and "vector alone can't carry it".
+    #[test]
+    fn test_external_thesaurus_rescues_disjoint_semantics() {
+        let mut dt = DynamicThesaurus::new();
+        dt.parse_and_append(EXTERNAL_GENERIC_VERBS);
+
+        let cases: &[(&str, &str)] = &[
+            ("保存数据", "fn persist_data(...)"),
+            ("保存数据", "fn save_record(...)"),
+            ("持久化", "fn durable_store(...)"),
+            ("更新配置", "fn reload_config(...)"),
+            ("用户登录", "fn authenticate_user(...)"),
+            ("用户登录", "fn login_user(...)"),
+            ("加载配置", "fn load_config(...)"),
+            ("发送消息", "fn send_message(...)"),
+            ("发送消息", "fn dispatchMessage(...)"),
+        ];
+        for (q, target) in cases {
+            let tokens = parse_bilingual_query_with_thesaurus(q, &dt);
+            let score = calculate_text_similarity(&tokens, target);
+            assert!(
+                score >= 25.0,
+                "{q} -> {target}: boosted score {score:.1} < 25 — external thesaurus entry not lifting this case"
+            );
+        }
+    }
+
+    /// REGRESSION: `load_from_dir` — the actual production path that reads
+    /// `~/.atomcode/thesaurus/*.txt` — must pick up the same generic verbs from
+    /// a `.txt` file on disk (verifies the external-thesaurus loading seam, not
+    /// just `parse_and_append`).
+    #[test]
+    fn test_load_from_dir_reads_external_txt() {
+        let dir = std::env::temp_dir().join(format!("atomcode-thesaurus-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("generic.txt"), EXTERNAL_GENERIC_VERBS).unwrap();
+
+        let mut dt = DynamicThesaurus::new();
+        dt.load_from_dir(&dir);
+        let tokens = parse_bilingual_query_with_thesaurus("保存数据", &dt);
+        let score = calculate_text_similarity(&tokens, "fn persist_data(...)");
+        std::fs::remove_dir_all(&dir).unwrap();
+        assert!(
+            score >= 25.0,
+            "load_from_dir did not apply external txt: score {score:.1} < 25"
+        );
+    }
 }

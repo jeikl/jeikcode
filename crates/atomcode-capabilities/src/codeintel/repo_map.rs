@@ -12,7 +12,7 @@
 //! trade detail for space).
 
 use super::graph::CodeGraph;
-use super::index::{collect_source_paths, CodeIndex};
+use super::index::CodeIndex;
 use super::{err, ok};
 use async_trait::async_trait;
 use atomcode_kernel::tool::{Tool, ToolContext, ToolResult};
@@ -59,14 +59,28 @@ impl Tool for RepoMapTool {
     }
 
     fn description(&self) -> &str {
-        "MANDATORY Round 1 architecture radar: prints the COMPLETE index-backed DIRECTORY \
-         tree (every indexed directory — files summarized per directory as a count) plus, \
-         optionally, a budgeted AST symbol outline. Default `mode: tree` is structure-only \
-         so the output stays small enough to never be truncated by the host; pass \
-         `mode: full` (or `symbols`) when you also need types/functions, and narrow with \
-         `path:` for a single repo in a multi-project workspace. ALWAYS call this in \
-         Round 1 on any unfamiliar project to see the real module/layer layout in 1 round \
-         without blind searches."
+        "WHEN TO USE — FIRST CALL on any unfamiliar repo, BEFORE writing code or running deeper \
+         searches. Prints the COMPLETE index-backed DIRECTORY TREE (every indexed directory with \
+         per-directory file counts + top file names), so you see the real module/layer layout in one \
+         round instead of wandering with list_directory. Always pair it with list_directory in the \
+         same round (they are cheap and complementary).\n\
+         \n\
+         HOW IT FITS THE FLOW — structure first, then hunt:\n\
+         1. Round 1: repo_map (full layout) + list_directory — never skip on an unfamiliar repo.\n\
+         2. Hunt with several parallel greps → panorama with several parallel code_explore calls → \
+         read_file only the hot spans. Alternate grep-batches and code-batches until covered.\n\
+         3. Only if you need actual file names under a specific dir, use list_directory; only to \
+         read a specific file's full body, use read_file.\n\
+         \n\
+         MODES — default `tree` = structure only (small, never truncated). Pass `mode: full` \
+         (tree + budgeted symbol outline) or `symbols` (symbols only) when you already know the \
+         layout and need types/functions. In a multi-project workspace, pass `path:` to map ONE repo \
+         at a time (the default spans ALL repos as separate subtrees).\n\
+         \n\
+         CAUTION — a directory tree is NOT proof a mechanism is absent: it shows WHERE things live, \
+         not WHAT exists. Empty-looking trees can hide code in sibling crates/layers (interface here, \
+         impl elsewhere). Do not conclude 'project lacks X' from the tree alone — follow up with \
+         grep/code_explore."
     }
 
     fn parameters_schema(&self) -> serde_json::Value {
@@ -200,13 +214,18 @@ fn build_repo_map(
     max_symbol_files: usize,
     mode: &str,
 ) -> String {
-    // Shared, cache-warm walk: identical to what code_explore can resolve.
-    let files = collect_source_paths(target_dir);
+    // Fully index-backed: the shared CodeGraph is the single source of truth.
+    // `index.get(target_dir)` triggers an INCREMENTAL index of the target
+    // directory on first use (fast multi-threaded unit sync — the same update
+    // `atomcode init` produces), so a `path:` pointing at a never-indexed
+    // directory is indexed on the spot, exactly like every other index-backed
+    // tool (code_explore / find_symbol). The graph is rooted at `target_dir`,
+    // so every indexed file lives inside it — no disk walk, no filter needed.
+    let graph = index.get(target_dir);
+    let files: Vec<PathBuf> = graph.file_symbols.keys().cloned().collect();
     if files.is_empty() {
         return "(no indexed source files found in target directory)".to_string();
     }
-
-    let graph = index.get(target_dir);
 
     let mut out = String::new();
     out.push_str("=== CODEBASE ARCHITECTURE MAP (index-backed) ===\n");
@@ -270,8 +289,40 @@ fn build_repo_map(
     let want_symbols = mode != "tree";
 
     if want_tree {
-        out.push_str("\n-- DIRECTORY TREE (complete: every indexed directory) --\n");
-        out.push_str(&render_dir_tree(target_dir, &files));
+        if sub_repos.len() > 1 {
+            // Multi-repo workspace: render one subtree PER repo instead of one
+            // giant tree that can blow host budgets. Stray root files (not in
+            // any repo) are summarized as a count so nothing is silently hidden.
+            out.push_str("\n-- DIRECTORY TREE (complete, per-repo) --\n");
+            for repo in &sub_repos {
+                let repo_dir = target_dir.join(repo);
+                let repo_files: Vec<PathBuf> = files
+                    .iter()
+                    .filter(|p| path_within(p, &repo_dir))
+                    .cloned()
+                    .collect();
+                out.push_str(&format!("{}/\n", repo));
+                out.push_str(&render_dir_tree_indented(&repo_dir, &repo_files, "  "));
+            }
+            let stray = files
+                .iter()
+                .filter(|p| {
+                    !sub_repos
+                        .iter()
+                        .any(|r| path_within(p, &target_dir.join(r)))
+                })
+                .count();
+            if stray > 0 {
+                out.push_str(&format!(
+                    "(workspace root: {} file{})\n",
+                    stray,
+                    if stray == 1 { "" } else { "s" }
+                ));
+            }
+        } else {
+            out.push_str("\n-- DIRECTORY TREE (complete: every indexed directory) --\n");
+            out.push_str(&render_dir_tree(target_dir, &files));
+        }
     }
 
     if want_symbols {
@@ -298,11 +349,38 @@ fn build_repo_map(
 /// Files directly under the root (entry points like `main.rs` / `Cargo.toml`)
 /// are summarized as a count line so the tree stays directory-only but the
 /// root's shape is not silently hidden.
+/// Whether `p` lives under `dir`, compared on normalized absolute paths so
+/// Windows separators / casing never cause a false negative (a bare
+/// `starts_with` would also match `E:\agents\atomcode-x` under `E:\agents`).
+/// The `\\?\` verbatim prefix is stripped first so graph paths (which carry it
+/// on Windows) match plain test / user-supplied paths.
+fn path_within(p: &Path, dir: &Path) -> bool {
+    let norm = |x: &Path| {
+        let s = x.to_string_lossy();
+        let s = if let Some(rest) = s.strip_prefix(r"\\?\") {
+            rest
+        } else {
+            &s
+        };
+        s.replace('/', "\\").to_ascii_lowercase()
+    };
+    let p_n = norm(p);
+    let d_n = norm(dir).trim_end_matches('\\').to_string();
+    p_n.starts_with(&d_n)
+        && (p_n.len() == d_n.len() || p_n[d_n.len()..].starts_with('\\'))
+}
+
 fn render_dir_tree(root: &Path, files: &[PathBuf]) -> String {
+    render_dir_tree_indented(root, files, "")
+}
+
+/// Render the directory tree with an indentation prefix (used to nest each
+/// repo's subtree under its own header in a multi-repo workspace).
+fn render_dir_tree_indented(root: &Path, files: &[PathBuf], indent: &str) -> String {
     #[derive(Default)]
     struct Dir {
         dirs: BTreeMap<String, Dir>,
-        files: usize,
+        files: Vec<String>,
     }
 
     let mut top = Dir::default();
@@ -322,7 +400,7 @@ fn render_dir_tree(root: &Path, files: &[PathBuf]) -> String {
         for comp in &comps[..comps.len() - 1] {
             node = node.dirs.entry(comp.clone()).or_default();
         }
-        node.files += 1;
+        node.files.push(comps[comps.len() - 1].clone());
     }
 
     let mut out = String::new();
@@ -331,15 +409,29 @@ fn render_dir_tree(root: &Path, files: &[PathBuf]) -> String {
             out.push_str(&format!("{prefix}{name}/\n"));
             emit(child, &format!("{prefix}  "), out);
         }
-        if node.files > 0 {
-            out.push_str(&format!(
-                "{prefix}({count} file{plural})\n",
-                count = node.files,
-                plural = if node.files == 1 { "" } else { "s" },
-            ));
+        if !node.files.is_empty() {
+            // Top-N file names by architectural priority (index-free: ranks the
+            // path string itself), so the tree hints at which files to open next.
+            let mut sorted = node.files.clone();
+            sorted.sort_by(|a, b| {
+                file_priority_score(b)
+                    .cmp(&file_priority_score(a))
+                    .then_with(|| a.cmp(b))
+            });
+            let count = sorted.len();
+            let plural = if count == 1 { "" } else { "s" };
+            let top_suffix = if sorted.is_empty() {
+                String::new()
+            } else {
+                format!(
+                    " · top: {}",
+                    sorted.iter().take(3).cloned().collect::<Vec<_>>().join(", ")
+                )
+            };
+            out.push_str(&format!("{prefix}({count} file{plural}{top_suffix})\n"));
         }
     }
-    emit(&top, "", &mut out);
+    emit(&top, indent, &mut out);
     out
 }
 
@@ -491,11 +583,10 @@ mod tests {
         let map_output = build_repo_map(&index, root, root, 10, "tree");
         assert!(map_output.contains("DIRECTORY TREE"));
         assert!(!map_output.contains("SYMBOL DETAIL"));
-        // Tree mode is directory-only: root files are summarized as a count,
-        // never listed as leaves.
-        assert!(map_output.contains("(2 files)"));
-        assert!(!map_output.contains("a.rs"));
-        assert!(!map_output.contains("b.rs"));
+        // Tree mode shows a per-directory count plus top-N file names (no symbol detail).
+        assert!(map_output.contains("(2 files"));
+        assert!(map_output.contains("a.rs"));
+        assert!(map_output.contains("b.rs"));
     }
 
     #[tokio::test]
@@ -511,7 +602,7 @@ mod tests {
         let index = Arc::new(CodeIndex::new());
         let map_output = build_repo_map(&index, root, root, 10, "tree");
         assert!(map_output.contains("src/"));
-        assert!(map_output.contains("(1 file)"));
+        assert!(map_output.contains("(1 file"));
         assert!(!map_output.contains("SYMBOL DETAIL"));
         assert!(!map_output.contains("fn a:"));
     }

@@ -82,8 +82,6 @@ struct FileCandidate {
     file: PathBuf,
     top_score: f64,
     symbols: Vec<ScoredSymbol>,
-    is_test: bool,
-    is_generated: bool,
 }
 
 fn normalize_path_for_match(p: &Path) -> String {
@@ -112,19 +110,23 @@ impl Tool for CodeExploreTool {
     }
 
     fn description(&self) -> &str {
-        "PRIMARY CODE INTELLIGENCE & FLOW EXPLORATION TOOL: One-shot surgical context retrieval. \
-         Investigates how features work, traces execution flows from X to Y, finds root causes for bugs, \
-         or inspects symbols before editing. Returns the TOP-RANKED verbatim line-numbered source code \
-         (<line>\\t<code>, Read-equivalent, safe to edit from) grouped by file, with bidirectional call \
-         paths (callers/callees/dynamic dispatch) and blast radius. Query can be a natural language \
-         question in Chinese or English, or a list of symbols/files. \
-         IMPORTANT — this is a RANKED, BUDGETED retrieval, NOT an exhaustive listing: the output is \
-         capped by max_files (default 12) and per-file symbol caps, large functions are folded, and a \
-         session dedup may replace spans with [Already sent] placeholders. ALWAYS read the leading \
-         📊 Coverage summary for shown/total counts and omitted items, re-read folded spans with \
-         read_file when you need the full body, and treat a 0-hit result as INCONCLUSIVE (retry with \
-         synonyms / English terms / broader path, or check repo_map) — never conclude a feature is \
-         absent from one query alone."
+        "WHEN TO USE — after a grep (or several parallel greps) surfaces promising symbol names, or \
+         directly for 'how does X work' / 'trace flow X→Y' / 'find the bug in Z' / 'what calls F'. \
+         One call returns the top-ranked files with verbatim line-numbered source (safe to edit from) \
+         plus each symbol's callers/callees — the full call-graph panorama around a symbol.\n\
+         \n\
+         ALTERNATE PARALLEL BATCHES — never a one-by-one crawl (several calls per phase, then advance):\n\
+         1. Structure first: list_directory + repo_map (never skip on an unfamiliar repo).\n\
+         2. Hunt: fire SEVERAL greps IN PARALLEL for candidate symbols.\n\
+         3. Panorama: feed those names to SEVERAL code_explore calls IN PARALLEL (one per symbol).\n\
+         4. Zoom: read_file only the specific hot spans (folded/large bodies) you now know matter.\n\
+         5. If the panorama is incomplete (Coverage shows omissions, or a sibling layer is likely), \
+         loop back to step 2 with new greps — alternate grep-batches and code-batches until covered.\n\
+         \n\
+         CAUTION: this is a ranked & budgeted view (max_files cap, per-file symbol cap, folded spans, \
+         session dedup) — NOT the complete file set. A 0-hit or thin result is INCONCLUSIVE: retry with \
+         synonyms / English terms / a broader path, or grep more — never conclude a feature is absent \
+         from one call alone."
     }
 
     fn parameters_schema(&self) -> serde_json::Value {
@@ -669,8 +671,6 @@ fn score_workspace_symbols(
             file,
             top_score: adjusted_score,
             symbols: syms,
-            is_test,
-            is_generated,
         });
     }
 
@@ -686,6 +686,17 @@ fn score_workspace_symbols(
 /// COMPLETENESS CONTRACT: the spine is a true panorama, not a sample —
 /// every scored candidate symbol is a seed, and for each seed EVERY caller /
 /// callee within the hop budget is traced (no `.take()` truncation). The
+/// Whether a symbol lives in a workspace file that the graph indexes. External
+/// crates / std-library calls are NOT in `file_symbols`, so this filters the
+/// flow spine down to in-repo business edges (an `iter → map → collect` tail
+/// from the standard library would otherwise drown the real call chain).
+fn is_workspace_symbol(graph: &CodeGraph, id: SymbolId) -> bool {
+    graph
+        .node(id)
+        .map(|n| graph.file_symbols.contains_key(&n.file))
+        .unwrap_or(false)
+}
+
 /// renderer may still cap the mermaid drawing, but it reports the omitted
 /// count/names via the Coverage line and the omitted-edge list.
 fn extract_flow_spine(
@@ -713,14 +724,14 @@ fn extract_flow_spine(
 
     for &seed in &seeds {
         visited.insert(seed);
-        // Trace Callees (forward 2 hops) — ALL of them.
+        // Trace Callees (forward 2 hops) — ALL workspace-internal ones.
         if let Some(callees) = graph.callees(seed) {
             for e in callees {
-                if visited.insert(e.to) {
+                if visited.insert(e.to) && is_workspace_symbol(graph, e.to) {
                     spine_edges.push((seed, Some(e.to), e.kind.clone()));
                     if let Some(sub_callees) = graph.callees(e.to) {
                         for sub_e in sub_callees {
-                            if visited.insert(sub_e.to) {
+                            if visited.insert(sub_e.to) && is_workspace_symbol(graph, sub_e.to) {
                                 spine_edges.push((e.to, Some(sub_e.to), sub_e.kind.clone()));
                             }
                         }
@@ -728,10 +739,10 @@ fn extract_flow_spine(
                 }
             }
         }
-        // Trace Callers (backward 1 hop) — ALL of them, preserving the edge kind.
+        // Trace Callers (backward 1 hop) — ALL workspace-internal ones.
         if let Some(callers) = graph.callers(seed) {
             for e in callers {
-                if visited.insert(e.to) {
+                if visited.insert(e.to) && is_workspace_symbol(graph, e.to) {
                     spine_edges.push((e.to, Some(seed), e.kind.clone()));
                 }
             }
@@ -791,6 +802,21 @@ fn collect_adjacent_dirs(
     out.sort();
     out.truncate(max_adjacent);
     out
+}
+
+/// Per-symbol match signal, so the candidate table marks EACH symbol (a file
+/// with one exact hit and three semantic hits shows all four) instead of a
+/// single file-level label derived from only the top symbol.
+fn symbol_match_signal(s: &ScoredSymbol) -> &'static str {
+    if s.name_score > 40.0 {
+        "🎯 精确符号/标识符"
+    } else if s.doc_score > 30.0 {
+        "📝 注释/文档"
+    } else if s.inline_score > 30.0 {
+        "🔍 内部代码逻辑"
+    } else {
+        "🌐 语义/拓扑相关"
+    }
 }
 
 /// Render formatted explore output with multi-symbol extraction and merged spans.
@@ -906,29 +932,19 @@ fn render_explore_output(
 
     // Top Matched Candidates Overview Table
     out.push("#### 📋 Matched Symbol Candidates:".to_string());
-    out.push("| Score | File | Symbols & Lines | Match Signal |".to_string());
-    out.push("| :--- | :--- | :--- | :--- |".to_string());
+    out.push("| Score | File | Symbols & Lines |".to_string());
+    out.push("| :--- | :--- | :--- |".to_string());
 
     for fc in top_files {
         let rel_path = fc.file.strip_prefix(root).unwrap_or(&fc.file).display().to_string();
-        let top_sym = &fc.symbols[0];
         let sym_summary: Vec<String> = fc
             .symbols
             .iter()
             .take(4)
-            .map(|s| format!("`{}`:L{}", s.node.name, s.node.start_line))
+            .map(|s| format!("`{}`:L{} {}", s.node.name, s.node.start_line, symbol_match_signal(s)))
             .collect();
-        let reason = if top_sym.name_score > 40.0 {
-            "🎯 精确符号/标识符"
-        } else if top_sym.doc_score > 30.0 {
-            "📝 注释/文档"
-        } else if top_sym.inline_score > 30.0 {
-            "🔍 内部代码逻辑"
-        } else {
-            "🌐 语义/拓扑相关"
-        };
         out.push(format!(
-            "| **{:.1}** | `{rel_path}` | {} | {reason} |",
+            "| **{:.1}** | `{rel_path}` | {} |",
             fc.top_score,
             sym_summary.join(", ")
         ));
@@ -1048,13 +1064,24 @@ fn render_explore_output(
     }
 
     // Remaining candidate files — FULL PATH LISTING (no truncation): every
-    // scored-but-not-rendered candidate path is listed so the model can see the
-    // complete hit set, not just the top-ranked slice.
+    // scored-but-not-rendered candidate path is listed (with its top symbols so
+    // the model can pick which to open without a blind read), so the model can
+    // see the complete hit set, not just the top-ranked slice.
     if candidates.len() > max_files {
         out.push("\n**All Remaining Candidate Files (full paths, not rendered):**".to_string());
         for c in &candidates[max_files..] {
             let rel = c.file.strip_prefix(root).unwrap_or(&c.file).display().to_string();
-            out.push(format!("- `{rel}`"));
+            let sym_summary: Vec<String> = c
+                .symbols
+                .iter()
+                .take(3)
+                .map(|s| format!("{}:L{}", s.node.name, s.node.start_line))
+                .collect();
+            if sym_summary.is_empty() {
+                out.push(format!("- `{rel}`"));
+            } else {
+                out.push(format!("- `{rel}` — {}", sym_summary.join(", ")));
+            }
         }
     }
 
@@ -1111,13 +1138,13 @@ fn render_explore_output(
             let scope_disp = sc.strip_prefix(root).unwrap_or(sc).display().to_string();
             let outside_syms = workspace_syms.saturating_sub(scope_syms);
             format!(
-                "(scope `{scope_disp}`: searched {scope_files}/{workspace_files} files · \
+                "(scope `{scope_disp}`: in-scope {scope_files} of {workspace_files} indexed files · \
                  {scope_syms}/{workspace_syms} symbols — {outside_syms} symbol(s) OUTSIDE this \
-                 scope were NOT searched; if the top hits are contracts, their implementations \
-                 likely live in sibling layers)"
+                 scope were NOT ranked (the index is workspace-wide; only this scope was scored); \
+                 if the top hits are contracts, their implementations likely live in sibling layers)"
             )
         }
-        None => format!("(searched all {workspace_files} workspace files · {workspace_syms} symbols)"),
+        None => format!("(all {workspace_files} indexed files · {workspace_syms} symbols)"),
     };
 
     let coverage = format!(
@@ -1249,8 +1276,6 @@ mod tests {
             file,
             top_score: 50.0,
             symbols,
-            is_test: false,
-            is_generated: false,
         }];
         let root = PathBuf::from(".");
         let out = render_explore_output(&graph, &root, "coverage probe", &candidates, &[], false, 8, None);
@@ -1293,8 +1318,6 @@ mod tests {
                     inline_score: 0.0,
                     graph_mass: 1.0,
                 }],
-                is_test: false,
-                is_generated: false,
             });
         }
         // Fake an over-cap flow spine: 40 edges (32 shown, 8 omitted).
@@ -1392,8 +1415,6 @@ mod tests {
                 inline_score: 0.0,
                 graph_mass: 10.0,
             }],
-            is_test: false,
-            is_generated: false,
         }];
 
         let (spine, connected) = extract_flow_spine(&graph, &candidates);
@@ -1442,8 +1463,6 @@ mod tests {
                 inline_score: 0.0,
                 graph_mass: 10.0,
             }],
-            is_test: false,
-            is_generated: false,
         }];
         let root = PathBuf::from(".");
         let scope = PathBuf::from("crates/kernel/src");
@@ -1487,8 +1506,6 @@ mod tests {
                 inline_score: 0.0,
                 graph_mass: 10.0,
             }],
-            is_test: false,
-            is_generated: false,
         }];
         let no_contract = render_explore_output(&graph, &root, "q", &func_candidates, &[], false, 8, None);
         assert!(!no_contract.contains("🧩 **Contract hit**"), "contract hint should not fire for a function:\n{no_contract}");
@@ -1556,8 +1573,6 @@ mod tests {
                 inline_score: 0.0,
                 graph_mass: 10.0,
             }],
-            is_test: false,
-            is_generated: false,
         }];
         let root = PathBuf::from(".");
         let out = render_explore_output(&graph, &root, "repair_tool_args", &candidates, &[], false, 8, None);
@@ -1620,8 +1635,6 @@ mod tests {
                 inline_score: 0.0,
                 graph_mass: 10.0,
             }],
-            is_test: false,
-            is_generated: false,
         }];
         let root = PathBuf::from(".");
         let scope = PathBuf::from("crates/kernel/src");
@@ -1638,10 +1651,10 @@ mod tests {
         // The Coverage line must surface the workspace contrast: only 1 of 2 files /
         // 1 of 2 symbols were searched, and 1 symbol is OUTSIDE the scope — so a
         // scope-confined "no mechanism" conclusion is invalid.
-        assert!(out.contains("searched 1/2 files"), "scope-vs-workspace file counts missing:\n{out}");
+        assert!(out.contains("in-scope 1 of 2 indexed files"), "scope-vs-workspace file counts missing:\n{out}");
         assert!(out.contains("1/2 symbols"), "scope-vs-workspace symbol counts missing:\n{out}");
         assert!(
-            out.contains("1 symbol(s) OUTSIDE this scope were NOT searched"),
+            out.contains("1 symbol(s) OUTSIDE this scope were NOT ranked"),
             "outside-scope warning missing:\n{out}"
         );
     }

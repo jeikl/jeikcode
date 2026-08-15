@@ -126,7 +126,11 @@ impl DynamicThesaurus {
 推理, 生成, 补全 = inference, generate, prediction, complete
 流式输出, 打字机 = stream, streaming, sse, chunk, delta
 智能体, 代理, 助手 = agent, assistant, bot, subagent, worker
-工具调用, 技能, 插件 = tool, tool_call, function_call, skill, plugin, capability
+主循环, 轮次循环, 智能体循环, 事件循环 = main_loop, loop, run_turn, agent_loop, turn_loop, event_loop, step, processor, session_processor
+重试, 退避, 熔断, 重试循环 = retry, backoff, attempt, circuit_breaker, fallback, resample, doom_loop, run_request_task
+错误处理, 异常处理, 失败处理, 工具错误 = error_handler, catch, handle_error, fail_tool_call, handle_tool_error, message_error, parse_error
+指纹, 防死循环, 循环守卫 = fingerprint, loop_guard, loop_policy, doom_loop_threshold, tool_loop
+工具调用, 技能, 插件, 执行工具 = tool, tool_call, function_call, skill, plugin, capability, execute_tool, execute_tool_calls
 知识库, 知识检索 = rag, retrieval, knowledge_base, kb, doc_store
 向量, 向量嵌入 = embedding, vector, embed, dense_vector
 记忆, 上下文 = memory, long_term_memory, short_term_memory, context

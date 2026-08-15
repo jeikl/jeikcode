@@ -638,8 +638,8 @@ mod tests {
             (JavaScript, "function fn() {}\nclass C {}\n", &["fn", "C"]),
             (
                 TypeScript,
-                "function fn(): void {}\ninterface I {}\nclass C {}\n",
-                &["fn", "I", "C"],
+                "function fn(): void {}\ninterface I {}\nclass C {}\nconst failToolCall = Effect.fn('proc')(function*() {});\nexport const ToolExecutionResult = Schema.struct({});\n",
+                &["fn", "I", "C", "failToolCall", "ToolExecutionResult"],
             ),
             (Tsx, "function App() { return null; }\n", &["App"]),
             (Go, "package p\nfunc F() {}\ntype T struct{}\n", &["F", "T"]),

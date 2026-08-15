@@ -7,7 +7,8 @@
 //! 4. Verbatim line-numbered source slicing (<line>\t<code>, Read-equivalent)
 //! 5. Proportional adaptive token budgeting & Whole-file buy rules
 //! 6. Session-level duplicate code suppression
-//! 7. Dual-mode presentation: Full Flow Trace vs Ranked Fallback Breakdown
+//! 7. Multi-symbol extraction & overlapping line-range merging
+//! 8. Test file deprioritization & Zero-hit rich diagnostic feedback
 
 use super::bilingual_nlp::{
     calculate_text_similarity, parse_bilingual_query_with_thesaurus, DynamicThesaurus, SearchTokens,
@@ -25,7 +26,6 @@ use std::sync::{Arc, RwLock};
 
 const DEFAULT_MAX_FILES: usize = 8;
 const MAX_ALLOWED_FILES: usize = 20;
-const MAX_OUTPUT_CHARS_CEILING: usize = 24_000;
 
 /// Thread-safe session-level sent code ranges to avoid duplicate context bloat.
 static SESSION_SENT_SPANS: std::sync::LazyLock<RwLock<HashMap<String, Vec<(usize, usize)>>>> =
@@ -77,6 +77,25 @@ struct FileCandidate {
     symbols: Vec<ScoredSymbol>,
     is_test: bool,
     is_generated: bool,
+}
+
+fn normalize_path_for_match(p: &Path) -> String {
+    let s = p.to_string_lossy();
+    let stripped = if let Some(rest) = s.strip_prefix(r"\\?\") {
+        rest
+    } else {
+        &s
+    };
+    stripped.replace('/', "\\").to_ascii_lowercase()
+}
+
+fn path_matches_scope(file_path: &Path, scope: &Path) -> bool {
+    let f_norm = normalize_path_for_match(file_path);
+    let sc_norm = normalize_path_for_match(scope);
+    f_norm.starts_with(&sc_norm)
+        || f_norm.ends_with(&sc_norm)
+        || f_norm.contains(&sc_norm)
+        || sc_norm.contains(&f_norm)
 }
 
 #[async_trait]
@@ -161,11 +180,65 @@ impl Tool for CodeExploreTool {
         let scored_files = score_workspace_symbols(&graph, &query_tokens, scope_path.as_deref());
 
         if scored_files.is_empty() {
+            let total_nodes = graph.nodes.len();
+            let mut files_in_scope = HashSet::new();
+            let mut symbols_in_scope = 0;
+            let mut lang_hints = HashSet::new();
+
+            for (_, node) in &graph.nodes {
+                if let Some(sc) = scope_path.as_deref() {
+                    if path_matches_scope(&node.file, sc) {
+                        files_in_scope.insert(&node.file);
+                        symbols_in_scope += 1;
+                        if let Some(ext) = node.file.extension().and_then(|e| e.to_str()) {
+                            lang_hints.insert(ext);
+                        }
+                    }
+                } else {
+                    files_in_scope.insert(&node.file);
+                    symbols_in_scope += 1;
+                    if let Some(ext) = node.file.extension().and_then(|e| e.to_str()) {
+                        lang_hints.insert(ext);
+                    }
+                }
+            }
+
+            let scope_desc = a.path.as_deref().unwrap_or("<entire workspace>");
+            let langs: Vec<&str> = lang_hints.into_iter().collect();
+            let query_terms_str = if !query_tokens.code_identifiers.is_empty() {
+                format!(
+                    "Identifiers: [{}] | Expanded terms: [{}]",
+                    query_tokens.code_identifiers.join(", "),
+                    query_tokens
+                        .expanded_terms
+                        .iter()
+                        .take(8)
+                        .cloned()
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                )
+            } else {
+                format!("Keywords: [{}]", query_tokens.words.join(", "))
+            };
+
             return ok(format!(
-                "No symbols matching '{}' found in code graph for workspace '{}'.\n\
-                 Tip: Try broader query keywords or check repo_map for top-level modules.",
+                "🔍 Zero-Hit Diagnostic for query '{}':\n\
+                 - Scope Path: `{}` (Matched {} files, {} indexed symbols, Language Exts: {:?})\n\
+                 - Workspace Total: {} symbols indexed across {} files\n\
+                 - Query Analysis: {}\n\
+                 - Diagnostic Assessment:\n\
+                   * Scope file(s) contained {} AST symbols in memory.\n\
+                   * None of the symbols/comments matched query tokens with threshold >= 12.0.\n\
+                 👉 Tip: Verify symbol name case or check repo_map for available module exports.",
                 a.query,
-                root.display()
+                scope_desc,
+                files_in_scope.len(),
+                symbols_in_scope,
+                langs,
+                total_nodes,
+                graph.nodes.values().map(|n| &n.file).collect::<HashSet<_>>().len(),
+                query_terms_str,
+                symbols_in_scope
             ));
         }
 
@@ -197,7 +270,7 @@ fn score_workspace_symbols(
 
     for (_id, node) in &graph.nodes {
         if let Some(sc) = scope {
-            if !node.file.starts_with(sc) {
+            if !path_matches_scope(&node.file, sc) {
                 continue;
             }
         }
@@ -206,13 +279,21 @@ fn score_workspace_symbols(
         let mut name_bonus = 0.0;
         let node_name_lower = node.name.to_ascii_lowercase();
 
-        // Exact symbol name hit bonus
-        if tokens.code_identifiers.iter().any(|id| id.eq_ignore_ascii_case(&node.name)) {
-            name_bonus += 40.0;
+        // Exact query match (highest priority)
+        if tokens.raw_query.eq_ignore_ascii_case(&node.name) {
+            name_bonus += 100.0;
         }
+
+        // Exact identifier token match
+        for id in &tokens.code_identifiers {
+            if id.eq_ignore_ascii_case(&node.name) {
+                name_bonus += if *id == node.name { 70.0 } else { 50.0 };
+            }
+        }
+
         // Bilingual thesaurus term hit in symbol name
-        if tokens.expanded_terms.iter().any(|term| node_name_lower.contains(term)) {
-            name_bonus += 25.0;
+        if tokens.expanded_terms.iter().any(|term| node_name_lower == *term || node_name_lower.contains(term)) {
+            name_bonus += 30.0;
         }
 
         let doc_sim = node
@@ -237,11 +318,11 @@ fn score_workspace_symbols(
             SymbolKind::Class | SymbolKind::Struct | SymbolKind::Interface | SymbolKind::Trait => 0.95,
             SymbolKind::SqlStatement => 0.95,
             SymbolKind::ConfigProperty | SymbolKind::UiElement => 0.85,
-            SymbolKind::Constant | SymbolKind::Variable => 0.6,
-            _ => 0.6,
+            SymbolKind::Constant | SymbolKind::Variable => 0.75,
+            _ => 0.7,
         };
 
-        let raw_score = ((name_sim + name_bonus) * 0.40 + doc_sim * 0.25 + inline_sim * 0.15 + path_sim * 0.10 + graph_mass * 1.0) * kind_weight;
+        let raw_score = ((name_sim + name_bonus) * 0.45 + doc_sim * 0.25 + inline_sim * 0.15 + path_sim * 0.10 + graph_mass * 1.0) * kind_weight;
 
         if raw_score >= 12.0 {
             file_map.entry(node.file.clone()).or_default().push(ScoredSymbol {
@@ -260,15 +341,22 @@ fn score_workspace_symbols(
         syms.sort_by(|a, b| b.total_score.partial_cmp(&a.total_score).unwrap());
         let top_score = syms.first().map(|s| s.total_score).unwrap_or(0.0);
         let path_str = file.to_string_lossy().to_ascii_lowercase();
-        let is_test = path_str.contains("test") || path_str.contains("mock") || path_str.contains("spec");
-        let is_generated = path_str.contains(".g.") || path_str.contains(".generated.") || path_str.contains(".min.");
+        let is_test = path_str.contains("test")
+            || path_str.contains("mock")
+            || path_str.contains("spec")
+            || path_str.contains("fixture");
+        let is_generated = path_str.contains(".g.")
+            || path_str.contains(".generated.")
+            || path_str.contains(".min.")
+            || path_str.contains(".bundle.");
 
         let adjusted_score = if is_generated {
-            top_score * 0.3
+            (top_score * 0.15).max(1.0)
         } else if is_test {
-            top_score * 0.5
+            // Heavily penalize test code so production files always rank first
+            (top_score * 0.25 - 20.0).max(1.0)
         } else {
-            top_score
+            top_score + 25.0 // Production code boost
         };
 
         candidates.push(FileCandidate {
@@ -280,7 +368,10 @@ fn score_workspace_symbols(
         });
     }
 
-    candidates.sort_by(|a, b| b.top_score.partial_cmp(&a.top_score).unwrap());
+    // Sort production files ahead of test files
+    candidates.sort_by(|a, b| {
+        b.top_score.partial_cmp(&a.top_score).unwrap_or(std::cmp::Ordering::Equal)
+    });
     candidates
 }
 
@@ -290,8 +381,8 @@ fn extract_flow_spine(
     candidates: &[FileCandidate],
 ) -> (Vec<(SymbolId, Option<SymbolId>, EdgeKind)>, bool) {
     let mut seeds = Vec::new();
-    for fc in candidates.iter().take(3) {
-        for s in fc.symbols.iter().take(2) {
+    for fc in candidates.iter().take(4) {
+        for s in fc.symbols.iter().take(3) {
             if s.total_score >= 20.0 {
                 seeds.push(s.node.id);
             }
@@ -336,7 +427,7 @@ fn extract_flow_spine(
     (spine_edges, connected)
 }
 
-/// Render formatted explore output with adaptive budgeting and deduplication.
+/// Render formatted explore output with multi-symbol extraction and merged spans.
 fn render_explore_output(
     graph: &CodeGraph,
     root: &Path,
@@ -353,7 +444,7 @@ fn render_explore_output(
         out.push(format!("### 🔗 Flow Trace: \"{query}\"\n"));
         out.push("```mermaid".to_string());
         out.push("graph TD".to_string());
-        for (from, to, kind) in flow_spine.iter().take(12) {
+        for (from, to, kind) in flow_spine.iter().take(16) {
             let from_name = graph.node(*from).map(|n| n.name.as_str()).unwrap_or("unknown");
             if let Some(target) = to {
                 let to_name = graph.node(*target).map(|n| n.name.as_str()).unwrap_or("unknown");
@@ -373,47 +464,101 @@ fn render_explore_output(
         out.push("> ℹ️ No multi-hop continuous flow detected. Displaying top-scored weighted symbols & code blocks below:\n".to_string());
     }
 
-    // Render source code sections for top files
-    let _budget_per_file = (MAX_OUTPUT_CHARS_CEILING / top_files.len().max(1)).clamp(1500, 5000);
-    let mut session_spans = SESSION_SENT_SPANS.write().unwrap();
+    // Top Matched Candidates Overview Table
+    out.push("#### 📋 Matched Symbol Candidates:".to_string());
+    out.push("| Score | File | Symbols & Lines | Match Signal |".to_string());
+    out.push("| :--- | :--- | :--- | :--- |".to_string());
 
     for fc in top_files {
         let rel_path = fc.file.strip_prefix(root).unwrap_or(&fc.file).display().to_string();
         let top_sym = &fc.symbols[0];
-
-        let reason = if top_sym.name_score > 35.0 {
-            format!("(Score: {:.1} | 🎯 命中符号名/标识符)", top_sym.total_score)
+        let sym_summary: Vec<String> = fc
+            .symbols
+            .iter()
+            .take(4)
+            .map(|s| format!("`{}`:L{}", s.node.name, s.node.start_line))
+            .collect();
+        let reason = if top_sym.name_score > 40.0 {
+            "🎯 精确符号/标识符"
         } else if top_sym.doc_score > 30.0 {
-            format!("(Score: {:.1} | 📝 命中注释/文档)", top_sym.total_score)
+            "📝 注释/文档"
         } else if top_sym.inline_score > 30.0 {
-            format!("(Score: {:.1} | 🔍 命中内部行内逻辑)", top_sym.total_score)
+            "🔍 内部代码逻辑"
         } else {
-            format!("(Score: {:.1} | 🌐 拓扑/语义相关)", top_sym.total_score)
+            "🌐 语义/拓扑相关"
+        };
+        out.push(format!(
+            "| **{:.1}** | `{rel_path}` | {} | {reason} |",
+            fc.top_score,
+            sym_summary.join(", ")
+        ));
+    }
+    out.push("".to_string());
+
+    let mut session_spans = SESSION_SENT_SPANS.write().unwrap();
+
+    for fc in top_files {
+        let rel_path = fc.file.strip_prefix(root).unwrap_or(&fc.file).display().to_string();
+
+        // Collect all high-scoring symbols for this file (up to 4 per file)
+        let relevant_syms: Vec<&ScoredSymbol> = fc
+            .symbols
+            .iter()
+            .take(4)
+            .filter(|s| s.total_score >= 15.0 || s.name_score >= 25.0)
+            .collect();
+        let relevant_syms = if relevant_syms.is_empty() {
+            vec![&fc.symbols[0]]
+        } else {
+            relevant_syms
         };
 
-        out.push(format!("**`{rel_path}`** — `{}` {reason}", top_sym.node.name));
+        let sym_names: Vec<String> = relevant_syms.iter().map(|s| format!("`{}`", s.node.name)).collect();
+        out.push(format!("**`{rel_path}`** — {}", sym_names.join(", ")));
 
         if let Ok(content) = std::fs::read_to_string(&fc.file) {
             let lines: Vec<&str> = content.lines().collect();
-            let start_line = top_sym.node.start_line.saturating_sub(2).max(1);
-            let end_line = (top_sym.node.end_line + 4).min(lines.len());
 
-            // Check Session-level Dedup
-            let sent_list = session_spans.entry(rel_path.clone()).or_default();
-            let already_sent = sent_list.iter().any(|(s, e)| *s <= start_line && end_line <= *e);
+            // Build line spans for each relevant symbol
+            let mut spans: Vec<(usize, usize, String)> = Vec::new();
+            for s in &relevant_syms {
+                let start = s.node.start_line.saturating_sub(2).max(1);
+                let end = (s.node.end_line + 3).min(lines.len());
+                spans.push((start, end, format!("{}:L{}", s.node.name, s.node.start_line)));
+            }
 
-            if already_sent {
-                out.push(format!("> `[Already sent in this conversation: {rel_path} L{start_line}-L{end_line} — refer to previous turns]`\n"));
-            } else {
-                sent_list.push((start_line, end_line));
-                let mut snippet = Vec::new();
-                for l in start_line..=end_line {
-                    if l - 1 < lines.len() {
-                        snippet.push(format!("{l}\t{}", lines[l - 1]));
+            // Merge overlapping or adjacent spans
+            spans.sort_by_key(|s| s.0);
+            let mut merged_spans: Vec<(usize, usize, Vec<String>)> = Vec::new();
+            for (st, en, label) in spans {
+                if let Some(last) = merged_spans.last_mut() {
+                    if st <= last.1 + 4 {
+                        last.1 = last.1.max(en);
+                        last.2.push(label);
+                        continue;
                     }
                 }
-                let ext = fc.file.extension().and_then(|e| e.to_str()).unwrap_or("");
-                out.push(format!("```{ext}\n{}\n```\n", snippet.join("\n")));
+                merged_spans.push((st, en, vec![label]));
+            }
+
+            let sent_list = session_spans.entry(rel_path.clone()).or_default();
+
+            for (start_line, end_line, labels) in merged_spans {
+                let already_sent = sent_list.iter().any(|(s, e)| *s <= start_line && end_line <= *e);
+
+                if already_sent {
+                    out.push(format!("> `[Already sent: {rel_path} L{start_line}-L{end_line} ({}) — refer to previous turns]`\n", labels.join(", ")));
+                } else {
+                    sent_list.push((start_line, end_line));
+                    let mut snippet = Vec::new();
+                    for l in start_line..=end_line {
+                        if l - 1 < lines.len() {
+                            snippet.push(format!("{l}\t{}", lines[l - 1]));
+                        }
+                    }
+                    let ext = fc.file.extension().and_then(|e| e.to_str()).unwrap_or("");
+                    out.push(format!("// Symbols: {}\n```{ext}\n{}\n```\n", labels.join(", "), snippet.join("\n")));
+                }
             }
         }
     }
@@ -430,3 +575,4 @@ fn render_explore_output(
 
     out.join("\n")
 }
+

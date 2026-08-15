@@ -30,11 +30,12 @@ use std::time::{Duration, Instant, UNIX_EPOCH};
 /// only dirty files are re-parsed).
 const BACKGROUND_REFRESH_SECS: u64 = 2;
 
-/// On-disk cache layout version. Bump when `DiskCache` / unit schema changes.
-const DISK_CACHE_VERSION: u32 = 1;
+/// On-disk cache layout version. Bump when AST queries / DiskCache / unit schema changes.
+const DISK_CACHE_VERSION: u32 = 2;
 
 /// Relative path under the workspace root for the persisted unit+graph cache.
-pub const DISK_CACHE_REL: &str = ".atomcode/codegraph/units.v1.json";
+pub const DISK_CACHE_REL: &str = ".atomcode/codegraph/units.v2.json";
+
 
 /// Map a tree-sitter node-kind string to a [`SymbolKind`]. From production
 /// `classify_symbol_kind`.

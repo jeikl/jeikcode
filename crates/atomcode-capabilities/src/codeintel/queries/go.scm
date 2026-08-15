@@ -1,4 +1,4 @@
-; Go: functions, methods, types, interfaces
+; Go: functions, methods, types, interfaces, const, var declarations
 
 (function_declaration
   name: (identifier) @name) @definition
@@ -9,3 +9,12 @@
 (type_declaration
   (type_spec
     name: (type_identifier) @name)) @definition
+
+(const_declaration
+  (const_spec
+    name: (identifier) @name)) @definition
+
+(var_declaration
+  (var_spec
+    name: (identifier) @name)) @definition
+

@@ -189,6 +189,26 @@ pub(crate) fn extract_semantic_symbols(source: &str, lang: Lang) -> Vec<Symbol> 
                             end_byte: byte_offset + line.len(),
                         });
                     }
+                } else if let Some(rest) = trimmed
+                    .strip_prefix("val ")
+                    .or_else(|| trimmed.strip_prefix("var "))
+                    .or_else(|| trimmed.strip_prefix("const val "))
+                    .or_else(|| trimmed.strip_prefix("typealias "))
+                {
+                    let name = rest
+                        .split(|c: char| !c.is_alphanumeric() && c != '_')
+                        .next()
+                        .unwrap_or("");
+                    if !name.is_empty() {
+                        symbols.push(Symbol {
+                            name: name.to_string(),
+                            kind: "var".into(),
+                            start_line: line_num,
+                            end_line: line_num,
+                            start_byte: byte_offset,
+                            end_byte: byte_offset + line.len(),
+                        });
+                    }
                 }
             }
             Lang::Swift => {
@@ -229,6 +249,25 @@ pub(crate) fn extract_semantic_symbols(source: &str, lang: Lang) -> Vec<Symbol> 
                             end_byte: byte_offset + line.len(),
                         });
                     }
+                } else if let Some(rest) = trimmed
+                    .strip_prefix("let ")
+                    .or_else(|| trimmed.strip_prefix("var "))
+                    .or_else(|| trimmed.strip_prefix("typealias "))
+                {
+                    let name = rest
+                        .split(|c: char| !c.is_alphanumeric() && c != '_')
+                        .next()
+                        .unwrap_or("");
+                    if !name.is_empty() {
+                        symbols.push(Symbol {
+                            name: name.to_string(),
+                            kind: "var".into(),
+                            start_line: line_num,
+                            end_line: line_num,
+                            start_byte: byte_offset,
+                            end_byte: byte_offset + line.len(),
+                        });
+                    }
                 }
             }
             Lang::Dart => {
@@ -247,6 +286,32 @@ pub(crate) fn extract_semantic_symbols(source: &str, lang: Lang) -> Vec<Symbol> 
                         symbols.push(Symbol {
                             name: name.to_string(),
                             kind: "class".into(),
+                            start_line: line_num,
+                            end_line: line_num,
+                            start_byte: byte_offset,
+                            end_byte: byte_offset + line.len(),
+                        });
+                    }
+                } else if let Some(rest) = trimmed
+                    .strip_prefix("void ")
+                    .or_else(|| trimmed.strip_prefix("Future<"))
+                    .or_else(|| trimmed.strip_prefix("Future "))
+                    .or_else(|| trimmed.strip_prefix("Stream<"))
+                    .or_else(|| trimmed.strip_prefix("Widget "))
+                {
+                    let after_type = if rest.contains('>') {
+                        rest.split('>').nth(1).unwrap_or(rest).trim()
+                    } else {
+                        rest.trim()
+                    };
+                    let name = after_type
+                        .split(|c: char| !c.is_alphanumeric() && c != '_')
+                        .next()
+                        .unwrap_or("");
+                    if !name.is_empty() {
+                        symbols.push(Symbol {
+                            name: name.to_string(),
+                            kind: "fn".into(),
                             start_line: line_num,
                             end_line: line_num,
                             start_byte: byte_offset,
@@ -311,7 +376,10 @@ pub(crate) fn extract_semantic_symbols(source: &str, lang: Lang) -> Vec<Symbol> 
                             end_byte: byte_offset + line.len(),
                         });
                     }
-                } else if let Some(rest) = trimmed.strip_prefix("function ") {
+                } else if let Some(rest) = trimmed
+                    .strip_prefix("function ")
+                    .or_else(|| trimmed.strip_prefix("modifier "))
+                {
                     let name = rest
                         .split(|c: char| !c.is_alphanumeric() && c != '_')
                         .next()
@@ -320,6 +388,26 @@ pub(crate) fn extract_semantic_symbols(source: &str, lang: Lang) -> Vec<Symbol> 
                         symbols.push(Symbol {
                             name: name.to_string(),
                             kind: "fn".into(),
+                            start_line: line_num,
+                            end_line: line_num,
+                            start_byte: byte_offset,
+                            end_byte: byte_offset + line.len(),
+                        });
+                    }
+                } else if let Some(rest) = trimmed
+                    .strip_prefix("struct ")
+                    .or_else(|| trimmed.strip_prefix("enum "))
+                    .or_else(|| trimmed.strip_prefix("event "))
+                    .or_else(|| trimmed.strip_prefix("error "))
+                {
+                    let name = rest
+                        .split(|c: char| !c.is_alphanumeric() && c != '_')
+                        .next()
+                        .unwrap_or("");
+                    if !name.is_empty() {
+                        symbols.push(Symbol {
+                            name: name.to_string(),
+                            kind: "type".into(),
                             start_line: line_num,
                             end_line: line_num,
                             start_byte: byte_offset,

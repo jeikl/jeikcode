@@ -5,7 +5,7 @@
 //! are dropped.
 
 use super::read::lenient_usize;
-use super::{err, is_skip_dir, ok, resolve_path};
+use super::{err, is_skip_dir, not_found_hint, ok, resolve_path};
 use crate::tool_feedback::{format_path_not_found, parse_tool_args};
 use async_trait::async_trait;
 use atomcode_kernel::tool::{Tool, ToolContext, ToolResult};
@@ -83,11 +83,10 @@ impl Tool for GrepTool {
         let raw = a.path.clone().unwrap_or_else(|| ".".to_string());
         let root = resolve_path(&raw, &ctx.working_dir);
         if tokio::fs::metadata(&root).await.is_err() {
-            return err(format_path_not_found(
-                "grep",
-                &raw,
-                &root,
-                &ctx.working_dir,
+            let hint = not_found_hint(&root, &ctx.working_dir).await;
+            return err(format!(
+                "{}{hint}",
+                format_path_not_found("grep", &raw, &root, &ctx.working_dir)
             ));
         }
         let max = a

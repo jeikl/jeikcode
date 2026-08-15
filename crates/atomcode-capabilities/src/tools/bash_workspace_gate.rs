@@ -1363,7 +1363,14 @@ mod tests {
         let ws = tempfile::tempdir().unwrap();
         let gate = BashWorkspaceGate::pinned(ws.path().to_path_buf());
         let tool = bash_tool();
-        let mut call = bash_call("mv /tmp/atomcode-a /tmp/atomcode-b");
+        // Use the REAL system temp dir (canonicalizes on every platform): a literal
+        // POSIX `/tmp/...` cannot canonicalize on Windows, so it was being classified
+        // as out-of-workspace and prompting. The production concern is a move whose
+        // targets all land in the writable temp roots — assert THAT, cross-platform.
+        let tmp = std::env::temp_dir();
+        let a = tmp.join("atomcode-mv-a").display().to_string();
+        let b = tmp.join("atomcode-mv-b").display().to_string();
+        let mut call = bash_call(&format!("mv {a} {b}"));
         assert_eq!(
             gate.before(&mut call, &tool, &silent_rt()).await,
             BeforeOutcome::Proceed

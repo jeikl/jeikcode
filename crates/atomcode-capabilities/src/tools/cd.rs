@@ -132,7 +132,7 @@ mod tests {
     #[tokio::test]
     async fn cd_into_subdir_updates_shared_handle() {
         let d = tempfile::tempdir().unwrap();
-        let root = std::fs::canonicalize(d.path()).unwrap();
+        let root = crate::pathnorm::canonicalize(d.path()).unwrap();
         std::fs::create_dir(root.join("sub")).unwrap();
         let cwd = Arc::new(RwLock::new(root.clone()));
         let tool = ChangeDirTool::new(cwd.clone());
@@ -147,7 +147,7 @@ mod tests {
     #[tokio::test]
     async fn cd_absolute_path() {
         let d = tempfile::tempdir().unwrap();
-        let root = std::fs::canonicalize(d.path()).unwrap();
+        let root = crate::pathnorm::canonicalize(d.path()).unwrap();
         let cwd = Arc::new(RwLock::new(PathBuf::from("/")));
         let tool = ChangeDirTool::new(cwd.clone());
         let r = tool
@@ -163,7 +163,7 @@ mod tests {
     #[tokio::test]
     async fn cd_relative_is_resolved_against_current_cwd() {
         let d = tempfile::tempdir().unwrap();
-        let root = std::fs::canonicalize(d.path()).unwrap();
+        let root = crate::pathnorm::canonicalize(d.path()).unwrap();
         std::fs::create_dir_all(root.join("a/b")).unwrap();
         let cwd = Arc::new(RwLock::new(root.join("a")));
         let tool = ChangeDirTool::new(cwd.clone());

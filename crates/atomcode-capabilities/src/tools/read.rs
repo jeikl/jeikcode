@@ -2,7 +2,7 @@
 //! slicing. Non-destructive ⇒ always `Safe`. Neutral core ported from the production
 //! reader, minus the coding enrichments (semantic skeleton, read_cache, file_store).
 
-use super::{err, looks_binary, ok, ok_with_images, resolve_path};
+use super::{err, looks_binary, not_found_hint, ok, ok_with_images, resolve_path};
 use crate::tool_feedback::{format_path_not_found, parse_tool_args};
 use async_trait::async_trait;
 use atomcode_kernel::message::ImageContent;
@@ -223,12 +223,11 @@ impl Tool for ReadFileTool {
         let meta = match tokio::fs::metadata(&path).await {
             Ok(m) => m,
             Err(_) => {
-                return err(format_path_not_found(
-                    "read_file",
-                    &a.file_path,
-                    &path,
-                    &ctx.working_dir,
-                ))
+                let hint = not_found_hint(&path, &ctx.working_dir).await;
+                return err(format!(
+                    "{}{hint}",
+                    format_path_not_found("read_file", &a.file_path, &path, &ctx.working_dir)
+                ));
             }
         };
 

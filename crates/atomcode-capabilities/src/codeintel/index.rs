@@ -294,11 +294,33 @@ struct Walked {
 /// Walk `root` (assumed already canonical) for indexable source files + staleness inputs.
 fn collect_files(root: &Path) -> Vec<Walked> {
     let mut out = Vec::new();
-    for entry in WalkBuilder::new(root)
+    let mut builder = WalkBuilder::new(root);
+    builder
         .hidden(true)
         .git_ignore(true)
         .git_global(true)
         .git_exclude(true)
+        .add_custom_ignore_filename(".codegraphignore")
+        .add_custom_ignore_filename(".codegraignore");
+
+    // Add global ignore files if present (~/.atomcode/.codegraphignore, ~/.atomcode/.codegraignore)
+    let global_config = crate::paths::config_dir();
+    let global_ignore1 = global_config.join(".codegraphignore");
+    if global_ignore1.is_file() {
+        builder.add_ignore(global_ignore1);
+    }
+    let global_ignore2 = global_config.join(".codegraignore");
+    if global_ignore2.is_file() {
+        builder.add_ignore(global_ignore2);
+    }
+
+    // Also check .atomcode/.codegraphignore inside project root
+    let project_atomcode_ignore = root.join(".atomcode").join(".codegraphignore");
+    if project_atomcode_ignore.is_file() {
+        builder.add_ignore(project_atomcode_ignore);
+    }
+
+    for entry in builder
         .filter_entry(|e| {
             // Prune known build/vendor directories early (gitignore may be missing).
             if e.file_type().map(|t| t.is_dir()).unwrap_or(false) {
@@ -1375,5 +1397,26 @@ public class OrderController
             !b_callees.iter().any(|e| e.to == alpha.id),
             "b.rs::handler must NOT call alpha"
         );
+    }
+
+    #[test]
+    fn test_codegraphignore_skips_configured_patterns() {
+        let d = tempfile::tempdir().unwrap();
+        std::fs::write(d.path().join("main.rs"), "pub fn main() {}").unwrap();
+        std::fs::create_dir_all(d.path().join("custom_dist")).unwrap();
+        std::fs::write(d.path().join("custom_dist").join("dist_code.rs"), "pub fn dist() {}").unwrap();
+        std::fs::write(d.path().join("test_generated.rs"), "pub fn gen() {}").unwrap();
+
+        // Write .codegraphignore
+        std::fs::write(
+            d.path().join(".codegraphignore"),
+            "custom_dist/\n*_generated.rs\n",
+        )
+        .unwrap();
+
+        let g = build_graph(d.path());
+        assert!(!g.find_by_name("main").is_empty(), "main should be indexed");
+        assert!(g.find_by_name("dist").is_empty(), "custom_dist should be ignored");
+        assert!(g.find_by_name("gen").is_empty(), "test_generated.rs should be ignored");
     }
 }

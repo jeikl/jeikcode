@@ -1,0 +1,144 @@
+# ==============================================================================
+# .codegraphignore — 代码图谱与探索工具忽略规则 (Code Graph & Explore Ignore Rules)
+# ==============================================================================
+# 类似于 .gitignore，用于指定在生成图谱、符号索引和 code_explore 探索时忽略的文件和目录。
+# 
+# 语法说明 (Syntax Guide):
+# ------------------------------------------------------------------------------
+# 1. 文件夹忽略 (以 / 结尾):
+#    node_modules/        - 忽略所有层级下名为 node_modules 的文件夹
+#    /dist/               - 仅忽略根目录下的 dist 文件夹
+# 
+# 2. 文件后缀/扩展名模糊匹配 (*.ext):
+#    *.pyc                - 忽略所有 .pyc 编译字节码文件
+#    *.min.js             - 忽略所有压缩后的 JavaScript 文件
+#    *.map                - 忽略所有 SourceMap 调试映射文件
+# 
+# 3. 前缀与通配符模糊匹配:
+#    temp_*               - 忽略所有以 temp_ 开头的文件或目录
+#    cmake-build-*        - 忽略 cmake-build-debug、cmake-build-release 等
+#    *.generated.cs       - 忽略所有自动生成的代码文件
+# 
+# 4. 指定特定路径:
+#    src/generated/       - 忽略 src 目录下的 generated 子目录
+# 
+# 5. 取消忽略 / 白名单 (! 前缀):
+#    !src/vendor/keep.js  - 即使 vendor 被忽略，依然强制索引 keep.js
+# ------------------------------------------------------------------------------
+
+# =========================
+# 1. 前端与 JavaScript / TypeScript
+# =========================
+node_modules/
+dist/
+build/
+out/
+.output/
+.next/
+.nuxt/
+.turbo/
+.cache/
+.parcel-cache/
+coverage/
+*.min.js
+*.min.css
+*.bundle.js
+*.bundle.css
+*.chunk.js
+*.map
+
+# =========================
+# 2. Python 编译缓存与虚拟环境
+# =========================
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.pyd
+.Python
+.venv/
+venv/
+env/
+ENV/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+*.egg-info/
+.eggs/
+
+# =========================
+# 3. Java / Kotlin / JVM
+# =========================
+target/
+.gradle/
+build/
+bin/
+out/
+*.class
+*.jar
+*.war
+*.ear
+*.nar
+
+# =========================
+# 4. Rust
+# =========================
+target/
+*.rlib
+*.rmeta
+
+# =========================
+# 5. C / C++
+# =========================
+cmake-build-*/
+*.o
+*.obj
+*.a
+*.lib
+*.so
+*.so.*
+*.dylib
+*.dll
+*.exe
+*.pdb
+*.ilk
+*.exp
+
+# =========================
+# 6. C# / .NET
+# =========================
+bin/
+obj/
+packages/
+TestResults/
+*.designer.cs
+*.g.cs
+*.g.i.cs
+*.generated.cs
+AssemblyInfo.cs
+*.AssemblyAttributes.cs
+
+# =========================
+# 7. Go
+# =========================
+vendor/
+
+# =========================
+# 8. IDE、系统与临时文件
+# =========================
+.git/
+.svn/
+.hg/
+.idea/
+.vscode/
+.vs/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+*.tmp
+*.temp
+*.log

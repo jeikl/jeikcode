@@ -349,14 +349,37 @@ fn score_workspace_symbols(
             || path_str.contains(".generated.")
             || path_str.contains(".min.")
             || path_str.contains(".bundle.");
+        let is_peripheral = path_str.contains("/script/")
+            || path_str.contains(r"\script\")
+            || path_str.contains("/scripts/")
+            || path_str.contains(r"\scripts\")
+            || path_str.contains("/examples/")
+            || path_str.contains(r"\examples\")
+            || path_str.contains("/benchmarks/")
+            || path_str.contains(r"\benchmarks\")
+            || path_str.contains("/docs/")
+            || path_str.contains(r"\docs\");
+        let is_core_src = path_str.contains("/src/")
+            || path_str.contains(r"\src\")
+            || path_str.contains("/packages/")
+            || path_str.contains(r"\packages\")
+            || path_str.contains("/crates/")
+            || path_str.contains(r"\crates\")
+            || path_str.contains("/lib/")
+            || path_str.contains(r"\lib\");
 
         let adjusted_score = if is_generated {
-            (top_score * 0.15).max(1.0)
+            (top_score * 0.10).max(1.0)
         } else if is_test {
             // Heavily penalize test code so production files always rank first
-            (top_score * 0.25 - 20.0).max(1.0)
+            (top_score * 0.20 - 30.0).max(1.0)
+        } else if is_peripheral {
+            // Heavily penalize peripheral maintenance scripts and helper scripts
+            (top_score * 0.30 - 15.0).max(1.0)
+        } else if is_core_src {
+            top_score + 35.0 // Core production source boost!
         } else {
-            top_score + 25.0 // Production code boost
+            top_score + 15.0
         };
 
         candidates.push(FileCandidate {
@@ -368,7 +391,7 @@ fn score_workspace_symbols(
         });
     }
 
-    // Sort production files ahead of test files
+    // Sort production files ahead of test files and peripheral scripts
     candidates.sort_by(|a, b| {
         b.top_score.partial_cmp(&a.top_score).unwrap_or(std::cmp::Ordering::Equal)
     });

@@ -45,8 +45,9 @@ struct Args {
     path: Option<String>,
     #[serde(default)]
     max_files: Option<usize>,
-    /// "full" (default) = complete tree + budgeted symbol detail;
-    /// "tree" = complete tree only; "symbols" = symbol detail only.
+    /// "tree" (default) = complete directory tree only (structure exploration);
+    /// "full" = directory tree + budgeted symbol detail;
+    /// "symbols" = symbol detail only.
     #[serde(default)]
     mode: Option<String>,
 }
@@ -58,14 +59,14 @@ impl Tool for RepoMapTool {
     }
 
     fn description(&self) -> &str {
-        "MANDATORY Round 1 architecture radar: prints the COMPLETE index-backed \
-         directory tree (every source file code_explore can resolve — NEVER truncated \
-         by max_files) plus a budgeted AST symbol outline (structs, traits, classes, \
-         functions) per file, across all indexed languages. ALWAYS call this in Round 1 \
-         on any unfamiliar project, multi-project workspace, or broad inquiry to see the \
-         full file/module topology in 1 round without blind searches. If the symbol \
-         section is cut by its budget marker, the tree above it is still complete — \
-         drill with a narrower `path:` or `mode: \"tree\"`."
+        "MANDATORY Round 1 architecture radar: prints the COMPLETE index-backed DIRECTORY \
+         tree (every indexed directory — files summarized per directory as a count) plus, \
+         optionally, a budgeted AST symbol outline. Default `mode: tree` is structure-only \
+         so the output stays small enough to never be truncated by the host; pass \
+         `mode: full` (or `symbols`) when you also need types/functions, and narrow with \
+         `path:` for a single repo in a multi-project workspace. ALWAYS call this in \
+         Round 1 on any unfamiliar project to see the real module/layer layout in 1 round \
+         without blind searches."
     }
 
     fn parameters_schema(&self) -> serde_json::Value {
@@ -78,12 +79,12 @@ impl Tool for RepoMapTool {
                 },
                 "max_files": {
                     "type": "integer",
-                    "description": "Maximum number of files whose SYMBOLS are rendered (default 100, max 300). The directory tree always shows every file."
+                    "description": "Maximum number of files whose SYMBOLS are rendered in mode full/symbols (default 100, max 300). The directory tree always shows every directory."
                 },
                 "mode": {
                     "type": "string",
-                    "enum": ["full", "tree", "symbols"],
-                    "description": "full (default): complete tree + budgeted symbol detail; tree: complete tree only; symbols: symbol detail only"
+                    "enum": ["tree", "full", "symbols"],
+                    "description": "tree (default): complete directory tree only (structure exploration); full: directory tree + budgeted symbol detail; symbols: symbol detail only"
                 }
             }
         })
@@ -125,7 +126,7 @@ impl Tool for RepoMapTool {
         let max_files = a.max_files.unwrap_or(DEFAULT_MAX_FILES).min(MAX_ALLOWED_FILES);
         let mode = a
             .mode
-            .unwrap_or_else(|| "full".to_string())
+            .unwrap_or_else(|| "tree".to_string())
             .to_ascii_lowercase();
         let working_dir = ctx.working_dir.clone();
         let index = self.index.clone();
@@ -235,12 +236,42 @@ fn build_repo_map(
         ));
     }
 
+    // Multi-repo workspace detection: when the target root itself contains
+    // multiple git repos (a parent folder opened over several projects), say so
+    // and steer the agent to map each repo with a `path:` scope — a tree over
+    // the whole workspace mixes projects and can exceed output budgets.
+    let sub_repos: Vec<String> = match std::fs::read_dir(target_dir) {
+        Ok(entries) => entries
+            .filter_map(|entry| entry.ok())
+            .filter_map(|entry| {
+                let p = entry.path();
+                if p.is_dir() && p.join(".git").exists() {
+                    p.file_name()
+                        .map(|n| n.to_string_lossy().into_owned())
+                } else {
+                    None
+                }
+            })
+            .collect(),
+        Err(_) => Vec::new(),
+    };
+    if sub_repos.len() > 1 {
+        out.push_str(&format!(
+            "\n⚠️ Multi-repo workspace: {} git repos detected under the target root — \
+             `{}`. The tree below spans ALL of them. For a focused map, call `repo_map` \
+             with `path` set to one repo (e.g. `path: {}`).\n",
+            sub_repos.len(),
+            sub_repos.join("`, `"),
+            sub_repos[0]
+        ));
+    }
+
     let want_tree = mode != "symbols";
     let want_symbols = mode != "tree";
 
     if want_tree {
-        out.push_str("\n-- DIRECTORY TREE (complete: every indexed source file) --\n");
-        out.push_str(&render_file_tree(target_dir, &files));
+        out.push_str("\n-- DIRECTORY TREE (complete: every indexed directory) --\n");
+        out.push_str(&render_dir_tree(target_dir, &files));
     }
 
     if want_symbols {
@@ -260,13 +291,18 @@ fn build_repo_map(
     out
 }
 
-/// A complete, deterministic, compact file tree. Directories render before
-/// files, each level sorted — no `max_files` cut, no output-budget cut.
-fn render_file_tree(root: &Path, files: &[PathBuf]) -> String {
+/// A complete, deterministic, compact DIRECTORY tree (no file leaves). The
+/// default view for structure exploration: small enough to never be truncated
+/// by the host, while still showing every indexed directory.
+///
+/// Files directly under the root (entry points like `main.rs` / `Cargo.toml`)
+/// are summarized as a count line so the tree stays directory-only but the
+/// root's shape is not silently hidden.
+fn render_dir_tree(root: &Path, files: &[PathBuf]) -> String {
     #[derive(Default)]
     struct Dir {
         dirs: BTreeMap<String, Dir>,
-        files: Vec<String>,
+        files: usize,
     }
 
     let mut top = Dir::default();
@@ -283,16 +319,10 @@ fn render_file_tree(root: &Path, files: &[PathBuf]) -> String {
             continue;
         }
         let mut node = &mut top;
-        for (i, comp) in comps.iter().enumerate() {
-            if i + 1 == comps.len() {
-                node.files.push(comp.clone());
-            } else {
-                node = node.dirs.entry(comp.clone()).or_default();
-            }
+        for comp in &comps[..comps.len() - 1] {
+            node = node.dirs.entry(comp.clone()).or_default();
         }
-    }
-    for node in top.dirs.values_mut() {
-        node.files.sort();
+        node.files += 1;
     }
 
     let mut out = String::new();
@@ -301,8 +331,12 @@ fn render_file_tree(root: &Path, files: &[PathBuf]) -> String {
             out.push_str(&format!("{prefix}{name}/\n"));
             emit(child, &format!("{prefix}  "), out);
         }
-        for f in &node.files {
-            out.push_str(&format!("{prefix}{f}\n"));
+        if node.files > 0 {
+            out.push_str(&format!(
+                "{prefix}({count} file{plural})\n",
+                count = node.files,
+                plural = if node.files == 1 { "" } else { "s" },
+            ));
         }
     }
     emit(&top, "", &mut out);
@@ -457,8 +491,48 @@ mod tests {
         let map_output = build_repo_map(&index, root, root, 10, "tree");
         assert!(map_output.contains("DIRECTORY TREE"));
         assert!(!map_output.contains("SYMBOL DETAIL"));
-        assert!(map_output.contains("a.rs"));
-        assert!(map_output.contains("b.rs"));
+        // Tree mode is directory-only: root files are summarized as a count,
+        // never listed as leaves.
+        assert!(map_output.contains("(2 files)"));
+        assert!(!map_output.contains("a.rs"));
+        assert!(!map_output.contains("b.rs"));
+    }
+
+    #[tokio::test]
+    async fn test_default_mode_is_tree() {
+        // The tool's default (no mode arg) must be the small structure-only view,
+        // so a huge workspace never produces a host-truncated blob.
+        let dir = TempDir::new().unwrap();
+        let root = dir.path();
+        std::fs::write(root.join("a.rs"), "pub fn a() {}\n").unwrap();
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        std::fs::write(root.join("src/lib.rs"), "pub fn b() {}\n").unwrap();
+
+        let index = Arc::new(CodeIndex::new());
+        let map_output = build_repo_map(&index, root, root, 10, "tree");
+        assert!(map_output.contains("src/"));
+        assert!(map_output.contains("(1 file)"));
+        assert!(!map_output.contains("SYMBOL DETAIL"));
+        assert!(!map_output.contains("fn a:"));
+    }
+
+    #[tokio::test]
+    async fn test_multi_repo_workspace_is_flagged() {
+        let dir = TempDir::new().unwrap();
+        let root = dir.path();
+        for repo in ["repo-a", "repo-b"] {
+            let r = root.join(repo);
+            std::fs::create_dir_all(r.join("src")).unwrap();
+            std::fs::write(r.join("src/lib.rs"), "pub fn f() {}\n").unwrap();
+            std::fs::create_dir(r.join(".git")).unwrap();
+        }
+        let index = Arc::new(CodeIndex::new());
+        let map_output = build_repo_map(&index, root, root, 10, "tree");
+        assert!(
+            map_output.contains("Multi-repo workspace"),
+            "must flag a multi-repo workspace root"
+        );
+        assert!(map_output.contains("repo-a") && map_output.contains("repo-b"));
     }
 
     #[tokio::test]

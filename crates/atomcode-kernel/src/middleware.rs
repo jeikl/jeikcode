@@ -50,7 +50,12 @@ pub trait ToolMiddleware: Send + Sync {
     /// After a tool executes (or is blocked). Transform / observe the result in place
     /// (truncate / redact — CC's `updatedToolOutput`) and return an [`AfterOutcome`]
     /// CONTINUATION decision. Runs for every middleware in registration order.
-    async fn after(&self, _result: &mut ToolResult) -> AfterOutcome {
+    ///
+    /// `tool` is the tool that produced this result — the mirror of `before`'s
+    /// `tool` argument, so an `after` implementation can make TOOL-aware decisions
+    /// (e.g. skip truncation for a tool that declares structured output). `None`
+    /// means no real tool executed (stub / blocked / unknown-call result).
+    async fn after(&self, _result: &mut ToolResult, _tool: Option<&dyn Tool>) -> AfterOutcome {
         AfterOutcome::Proceed
     }
 }

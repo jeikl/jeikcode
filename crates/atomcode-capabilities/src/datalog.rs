@@ -362,7 +362,7 @@ impl ToolMiddleware for DatalogHook {
         atomcode_kernel::middleware::BeforeOutcome::Proceed
     }
 
-    async fn after(&self, result: &mut ToolResult) -> AfterOutcome {
+    async fn after(&self, result: &mut ToolResult, _tool: Option<&dyn Tool>) -> AfterOutcome {
         let mut state = self.lock();
         if !state.active {
             return AfterOutcome::Proceed;
@@ -629,7 +629,7 @@ mod tests {
             is_error: false,
             images: Vec::new(),
         };
-        hook.after(&mut tool_result).await;
+        hook.after(&mut tool_result, None).await;
         hook.on_error("sample failure").await;
         hook.turn_complete(
             &Conversation::new(),

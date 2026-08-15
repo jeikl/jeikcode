@@ -2888,7 +2888,7 @@ mod tests {
             is_error: false,
             images: vec![],
         };
-        mw.after(&mut result).await;
+        mw.after(&mut result, None).await;
         assert!(
             result.content.len() < big.len(),
             "middleware must shorten the content"

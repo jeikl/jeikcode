@@ -125,7 +125,7 @@ impl ToolMiddleware for GitPushLabelMiddleware {
         BeforeOutcome::Proceed
     }
 
-    async fn after(&self, result: &mut ToolResult) -> AfterOutcome {
+    async fn after(&self, result: &mut ToolResult, _tool: Option<&dyn Tool>) -> AfterOutcome {
         let was_push = self
             .pending
             .lock()

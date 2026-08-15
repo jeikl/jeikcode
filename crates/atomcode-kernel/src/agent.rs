@@ -3421,10 +3421,18 @@ impl RunningAgent {
                 };
                 // ToolMiddleware after-chain: transform / observe the result and
                 // collect any CONTINUATION decision. Middleware sees the RAW
-                // (uncapped) result. The first `Block` reason wins.
+                // (uncapped) result. The first `Block` reason wins. The executing
+                // tool (when one ran) is threaded in so after-hooks can make
+                // tool-aware decisions (e.g. skip truncation for structured output).
                 let mut post_block: Option<String> = None;
+                let executed_tool: Option<Arc<dyn crate::tool::Tool>> = match plan {
+                    CallPlan::Execute { tool, .. } => Some(Arc::clone(tool)),
+                    _ => None,
+                };
                 for mw in &self.middlewares {
-                    if let AfterOutcome::Block { reason } = mw.after(&mut result).await {
+                    if let AfterOutcome::Block { reason } =
+                        mw.after(&mut result, executed_tool.as_deref()).await
+                    {
                         post_block.get_or_insert(reason);
                     }
                 }
@@ -3435,7 +3443,14 @@ impl RunningAgent {
                 // keeping context bounded and history growth predictable
                 // (deterministic → prefix-cache safe). The tiny `(cancelled)`/error
                 // stubs never reach the cap, so they pass through untouched.
-                cap_tool_result(&mut result, self.max_tool_result_bytes);
+                // A tool that opted its results out of truncation (e.g. repo_map's
+                // complete directory tree) is honored here too.
+                let tool_opted_out = executed_tool
+                    .as_ref()
+                    .is_some_and(|t| t.never_truncate_result());
+                if !tool_opted_out {
+                    cap_tool_result(&mut result, self.max_tool_result_bytes);
+                }
 
                 // Build the fingerprint from what ACTUALLY executed and what the
                 // model will ACTUALLY see: middleware-final args, execution-time

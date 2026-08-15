@@ -113,9 +113,12 @@ impl atomcode_kernel::middleware::ToolMiddleware for ArtifactMiddleware {
     async fn after(
         &self,
         result: &mut atomcode_kernel::tool::ToolResult,
+        tool: Option<&dyn atomcode_kernel::tool::Tool>,
     ) -> atomcode_kernel::middleware::AfterOutcome {
         let total = result.content.len();
-        if total <= THRESHOLD_BYTES {
+        // A tool that declares its result must reach the model verbatim
+        // (e.g. repo_map's complete directory tree) skips the fold entirely.
+        if tool.is_some_and(|t| t.never_truncate_result()) || total <= THRESHOLD_BYTES {
             return atomcode_kernel::middleware::AfterOutcome::Proceed;
         }
         let head_end = head_boundary(&result.content, PREVIEW_HALF);
@@ -208,7 +211,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let mw = super::ArtifactMiddleware::new(std::sync::Arc::new(super::ArtifactStore::new(dir.path())));
         let mut r = ToolResult { call_id: "c".into(), content: "small".into(), is_error: false, images: vec![] };
-        assert!(matches!(mw.after(&mut r).await, AfterOutcome::Proceed));
+        assert!(matches!(mw.after(&mut r, None).await, AfterOutcome::Proceed));
         assert_eq!(r.content, "small");
         assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 0); // nothing stored
     }
@@ -224,7 +227,7 @@ mod tests {
         let mk = || ToolResult { call_id: "c".into(), content: big.clone(), is_error: false, images: vec![] };
 
         let mut r1 = mk();
-        mw.after(&mut r1).await;
+        mw.after(&mut r1, None).await;
         // rewritten: smaller, has head+tail+marker, names fetch_output + the id
         assert!(r1.content.len() < big.len());
         assert!(r1.content.contains("fetch_output"));
@@ -235,7 +238,7 @@ mod tests {
 
         // determinism: same output → byte-identical rewritten content
         let mut r2 = mk();
-        mw.after(&mut r2).await;
+        mw.after(&mut r2, None).await;
         assert_eq!(r1.content, r2.content);
         assert!(!r1.is_error);
     }
@@ -248,9 +251,57 @@ mod tests {
         let mw = super::ArtifactMiddleware::new(std::sync::Arc::new(super::ArtifactStore::new(dir.path())));
         let huge = "y".repeat(5 * 1024 * 1024);
         let mut r = ToolResult { call_id: "c".into(), content: huge, is_error: false, images: vec![] };
-        mw.after(&mut r).await;
+        mw.after(&mut r, None).await;
         assert!(r.content.contains("Full output unavailable"));
         assert!(!r.content.contains("fetch_output"));
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 0);
+    }
+
+    /// A tool that declares `never_truncate_result() == true` (like repo_map).
+    struct NeverTruncateProbe;
+
+    #[async_trait::async_trait]
+    impl atomcode_kernel::tool::Tool for NeverTruncateProbe {
+        fn name(&self) -> &str {
+            "never_truncate_probe"
+        }
+        fn description(&self) -> &str {
+            "probe that opts out of result truncation"
+        }
+        fn parameters_schema(&self) -> serde_json::Value {
+            serde_json::json!({"type": "object"})
+        }
+        fn never_truncate_result(&self) -> bool {
+            true
+        }
+        async fn execute(
+            &self,
+            _args: &str,
+            _ctx: &atomcode_kernel::tool::ToolContext,
+        ) -> atomcode_kernel::tool::ToolResult {
+            atomcode_kernel::tool::ToolResult {
+                call_id: String::new(),
+                content: String::new(),
+                is_error: false,
+                images: vec![],
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn never_truncate_tool_output_skips_the_fold() {
+        use atomcode_kernel::middleware::ToolMiddleware;
+        use atomcode_kernel::tool::ToolResult;
+        let dir = tempfile::tempdir().unwrap();
+        let store = std::sync::Arc::new(super::ArtifactStore::new(dir.path()));
+        let mw = super::ArtifactMiddleware::new(store.clone());
+        let big = "T".repeat(20 * 1024); // well over THRESHOLD_BYTES
+        let mut r = ToolResult { call_id: "c".into(), content: big.clone(), is_error: false, images: vec![] };
+        let probe = NeverTruncateProbe;
+        mw.after(&mut r, Some(&probe)).await;
+        // Verbatim: no head/tail fold, no marker, no artifact stored.
+        assert_eq!(r.content, big);
+        assert!(!r.content.contains("output truncated"));
         assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 0);
     }
 }

@@ -213,11 +213,14 @@ fn parse_xml_mapper(path: &Path, source: &str) -> Option<(Vec<SymbolNode>, Vec<R
     }
 }
 
-/// Extensions walked into the graph (matches production's INDEXED set + C# + XML/SQL).
+/// Extensions walked into the graph (matches production's full language matrix).
 const INDEXED_EXTS: &[&str] = &[
-    "rs", "py", "js", "jsx", "mjs", "cjs", "ts", "mts", "tsx", "go", "java", "c", "h", "cc", "cpp",
-    "cxx", "hpp", "hh", "cs", "xml", "sql",
+    "rs", "py", "pyi", "js", "jsx", "mjs", "cjs", "ts", "mts", "cts", "tsx", "vue",
+    "go", "java", "c", "h", "cc", "cpp", "cxx", "hpp", "hh", "cs", "php", "phtml",
+    "kt", "kts", "swift", "dart", "rb", "scala", "sc", "sol", "lua", "tf", "tfvars",
+    "erl", "hrl", "r", "nix", "xml", "sql",
 ];
+
 
 /// Directory basenames skipped even when not covered by `.gitignore` (common on
 /// C#/Node/Rust monorepos that ship without ignore rules, or when agents open a

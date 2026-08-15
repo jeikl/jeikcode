@@ -124,6 +124,13 @@ impl Tool for RepoMapTool {
         true
     }
 
+    /// The complete directory tree is a structured, load-bearing payload: it
+    /// must reach the model verbatim, so ArtifactMiddleware and the kernel size
+    /// cap both skip it.
+    fn never_truncate_result(&self) -> bool {
+        true
+    }
+
     async fn execute(&self, args: &str, ctx: &ToolContext) -> ToolResult {
         let a: Args = match serde_json::from_str(args) {
             Ok(a) => a,

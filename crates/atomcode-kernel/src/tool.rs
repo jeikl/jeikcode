@@ -224,6 +224,16 @@ pub trait Tool: Send + Sync {
     fn always_grant_scope(&self, args: &str) -> String {
         args.to_string()
     }
+    /// Whether THIS tool's result is a structured, complete payload that must
+    /// reach the model verbatim (e.g. `repo_map`'s full directory tree). When
+    /// true, the artifact head/tail fold and the kernel size cap both skip the
+    /// result. Trust-based (same posture as `read_only_hint` / the sandbox
+    /// contract): a tool can already emit arbitrarily large content, so this
+    /// only opts THAT tool's results out of truncation, never expands any
+    /// tool's authority. Default `false`.
+    fn never_truncate_result(&self) -> bool {
+        false
+    }
     async fn execute(&self, args: &str, ctx: &ToolContext) -> ToolResult;
 }
 

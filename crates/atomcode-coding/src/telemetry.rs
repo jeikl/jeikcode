@@ -413,7 +413,7 @@ impl ToolMiddleware for ToolTelemetryMiddleware {
         BeforeOutcome::Proceed
     }
 
-    async fn after(&self, result: &mut ToolResult) -> AfterOutcome {
+    async fn after(&self, result: &mut ToolResult, _tool: Option<&dyn Tool>) -> AfterOutcome {
         // No stamp ⇒ this middleware's `before` never ran (a prior middleware blocked
         // the call); nothing to attribute.
         let Some((name, started)) = self
@@ -868,7 +868,7 @@ mod tests {
             is_error: true,
             images: vec![],
         };
-        mw.after(&mut result).await;
+        mw.after(&mut result, None).await;
 
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
         let records = captured.lock().await;
@@ -909,7 +909,7 @@ mod tests {
             is_error: false,
             images: vec![],
         };
-        mw.after(&mut result).await;
+        mw.after(&mut result, None).await;
 
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
         let records = captured.lock().await;

@@ -785,7 +785,7 @@ impl ToolMiddleware for CCExternalHooks {
         gate
     }
 
-    async fn after(&self, result: &mut ToolResult) -> AfterOutcome {
+    async fn after(&self, result: &mut ToolResult, _tool: Option<&dyn Tool>) -> AfterOutcome {
         // Recover the tool name `before` stashed for this call_id (kernel doesn't thread
         // it into `after`), so PostToolUse tool-name matchers are honored. Absent ⇒ the
         // call never ran our `before` (e.g. denied earlier) ⇒ only all-tools hooks fire.
@@ -1351,7 +1351,7 @@ mod tests {
             is_error: false,
             images: vec![],
         };
-        cc.after(&mut result).await;
+        cc.after(&mut result, None).await;
         assert_eq!(
             result.content, "REWRITTEN",
             "matcher 'bash' must fire for tool bash"
@@ -1370,7 +1370,7 @@ mod tests {
             is_error: false,
             images: vec![],
         };
-        cc.after(&mut result).await;
+        cc.after(&mut result, None).await;
         assert_eq!(
             result.content, "orig",
             "matcher 'bash' must NOT fire for tool grep"

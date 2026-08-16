@@ -1054,7 +1054,8 @@ struct RefreshStats {
 
 fn parse_unit(w: &Walked) -> Option<FileUnit> {
     let source = std::fs::read_to_string(&w.path).ok()?;
-    let (nodes, calls) = parse_file(&w.path, &source)?;
+    let source = super::strip_utf8_bom(&source);
+    let (nodes, calls) = parse_file(&w.path, source)?;
     Some(FileUnit {
         mtime_ns: w.mtime_ns,
         len: w.len,

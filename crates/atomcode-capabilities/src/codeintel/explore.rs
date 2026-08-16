@@ -1521,6 +1521,7 @@ fn render_explore_output(
         }
 
         if let Ok(content) = std::fs::read_to_string(&fc.file) {
+            let content = super::strip_utf8_bom(&content);
             let lines: Vec<&str> = content.lines().collect();
 
             // Build line spans for each relevant symbol

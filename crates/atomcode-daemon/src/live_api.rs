@@ -457,6 +457,7 @@ pub(crate) fn chat_runtime_config(
             .ok()
             .and_then(|v| v.trim().parse::<usize>().ok())
             .or(config.tools.tool_output.max_bytes),
+        tool_output_no_fold_tools: config.tools.tool_output.no_fold_tools.clone(),
     }
 }
 

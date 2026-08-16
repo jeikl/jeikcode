@@ -110,6 +110,13 @@ pub struct ToolOutputConfig {
     /// (`THRESHOLD_BYTES`, 64 KiB). `0` disables folding entirely.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_bytes: Option<usize>,
+    /// Tool names whose output must reach the model verbatim (never folded),
+    /// regardless of size. Batch whitelist: list any built-in tool name
+    /// (see `.atomcode/builtin-tools.txt` for the full catalog) and its
+    /// results skip the fold preview entirely — like the intrinsic
+    /// `never_truncate_result()` contract (repo_map / code_explore).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub no_fold_tools: Vec<String>,
 }
 impl Default for CodingConfig {
     fn default() -> Self {

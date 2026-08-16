@@ -45,25 +45,45 @@ pub struct CodeExploreTool {
 }
 
 /// Process-wide query-result cache, keyed by (graph fingerprint, query, scope,
-/// max_files). `max_files` is part of the key because it directly changes the
-/// rendered output (how many candidate files are expanded vs. listed in
-/// Remaining) — omitting it would serve a 30-file render to a 12-file request.
-/// Reuses the rendered output verbatim when the same query runs against the
-/// same graph snapshot with the same rendering params (30-40 concurrent
-/// read-heavy sessions asking similar questions). The fingerprint changes when
-/// files change, so results never go stale. Bounded by a max-entry cap.
-static QUERY_RESULT_CACHE: std::sync::LazyLock<RwLock<std::collections::HashMap<(u64, String, String, usize), String>>> =
+/// max_files, bm25_enabled, concept_enabled). `max_files` is part of the key
+/// because it directly changes the rendered output (how many candidate files
+/// are expanded vs. listed in Remaining); the BM25 / concept-vector flags are
+/// part of the key because they change the SCORING (opt-in env switches add
+/// bounded bonuses to raw_score) — omitting them would serve a
+/// concept-boosted render to a plain-text request. Reuses the rendered output
+/// verbatim when the same query runs against the same graph snapshot with the
+/// same rendering + scoring params (30-40 concurrent read-heavy sessions asking
+/// similar questions). The fingerprint changes when files change, so results
+/// never go stale. Bounded by a max-entry cap.
+static QUERY_RESULT_CACHE: std::sync::LazyLock<RwLock<std::collections::HashMap<(u64, String, String, usize, bool, bool), String>>> =
     std::sync::LazyLock::new(|| RwLock::new(std::collections::HashMap::new()));
 const QUERY_CACHE_MAX_ENTRIES: usize = 128;
 
-fn query_cache_get(fingerprint: u64, query: &str, scope: &str, max_files: usize) -> Option<String> {
+#[allow(clippy::too_many_arguments)]
+fn query_cache_get(
+    fingerprint: u64,
+    query: &str,
+    scope: &str,
+    max_files: usize,
+    bm25_enabled: bool,
+    concept_enabled: bool,
+) -> Option<String> {
     let guard = QUERY_RESULT_CACHE.read().unwrap();
     guard
-        .get(&(fingerprint, query.to_string(), scope.to_string(), max_files))
+        .get(&(fingerprint, query.to_string(), scope.to_string(), max_files, bm25_enabled, concept_enabled))
         .cloned()
 }
 
-fn query_cache_insert(fingerprint: u64, query: &str, scope: &str, max_files: usize, output: String) {
+#[allow(clippy::too_many_arguments)]
+fn query_cache_insert(
+    fingerprint: u64,
+    query: &str,
+    scope: &str,
+    max_files: usize,
+    bm25_enabled: bool,
+    concept_enabled: bool,
+    output: String,
+) {
     let mut guard = QUERY_RESULT_CACHE.write().unwrap();
     if guard.len() >= QUERY_CACHE_MAX_ENTRIES {
         // Simple FIFO eviction: drop the oldest entry.
@@ -71,7 +91,7 @@ fn query_cache_insert(fingerprint: u64, query: &str, scope: &str, max_files: usi
             guard.remove(&oldest);
         }
     }
-    guard.insert((fingerprint, query.to_string(), scope.to_string(), max_files), output);
+    guard.insert((fingerprint, query.to_string(), scope.to_string(), max_files, bm25_enabled, concept_enabled), output);
 }
 
 impl CodeExploreTool {
@@ -394,7 +414,12 @@ impl Tool for CodeExploreTool {
         // file edits, so results never go stale.
         let fp = self.index.fingerprint(&root).unwrap_or(0);
         let scope_key = scope_path.as_deref().map(|s| s.display().to_string()).unwrap_or_default();
-        if let Some(cached) = query_cache_get(fp, &a.query, &scope_key, max_files) {
+        // These two flags are part of the query-cache key: they change the
+        // SCORING (BM25 bonus / concept-vector bonus in raw_score), so a
+        // cached render produced with them ON is wrong for a plain request.
+        let bm25_enabled = std::env::var("ATOMCODE_EXPLORE_BM25").as_deref() == Ok("1");
+        let concept_enabled = std::env::var("ATOMCODE_EXPLORE_CONCEPT").as_deref() == Ok("1");
+        if let Some(cached) = query_cache_get(fp, &a.query, &scope_key, max_files, bm25_enabled, concept_enabled) {
             return ok(cached);
         }
         let dirindex = self.index.get_dirindex(&root);
@@ -410,7 +435,7 @@ impl Tool for CodeExploreTool {
             &query_tokens,
             dirindex.as_deref(),
         );
-        query_cache_insert(fp, &a.query, &scope_key, max_files, output.clone());
+        query_cache_insert(fp, &a.query, &scope_key, max_files, bm25_enabled, concept_enabled, output.clone());
 
         ok(output)
     }

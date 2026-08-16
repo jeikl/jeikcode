@@ -1614,8 +1614,15 @@ pub fn assemble(
         let threshold = cfg
             .tool_output_max_bytes
             .unwrap_or(atomcode_capabilities::tools::THRESHOLD_BYTES);
-        builder = builder
-            .middleware(Arc::new(ArtifactMiddleware::new(store).with_threshold_bytes(threshold)));
+        // Config-driven no-fold whitelist (`[tools.tool_output] no_fold_tools`):
+        // listed tool names skip folding entirely, like the intrinsic
+        // `never_truncate_result()` contract (repo_map / code_explore).
+        let no_fold = cfg.tool_output_no_fold_tools.clone();
+        builder = builder.middleware(Arc::new(
+            ArtifactMiddleware::new(store)
+                .with_threshold_bytes(threshold)
+                .with_no_fold_tools(no_fold),
+        ));
     }
     let agent = builder.build();
     // Commit model attribution only after every fallible assembly step has

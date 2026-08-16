@@ -84,8 +84,16 @@ pub const THRESHOLD_BYTES: usize = 64 * 1024;
 /// Stable prefix embedded in a conversation-visible result when the complete
 /// tool output was replaced by an artifact-backed head/tail preview.
 pub const ARTIFACT_TRUNCATION_MARKER_PREFIX: &str = "[atomcode: output truncated";
-const PREVIEW_HALF: usize = 4 * 1024;
+/// Max bytes an artifact may store; larger results are inline-truncated only.
 const MAX_ARTIFACT_BYTES: usize = 4 * 1024 * 1024;
+
+/// Preview half-size for a result above the fold threshold. Scales WITH the
+/// threshold (`threshold/2` on each side, so a 64 KiB threshold keeps 64 KiB
+/// of head+tail = 100% retention instead of a fixed tiny window) — matching
+/// grok-build's "head half + tail half, retention ≈ limit" design.
+fn preview_half(threshold_bytes: usize) -> usize {
+    (threshold_bytes / 2).clamp(8 * 1024, 256 * 1024)
+}
 
 /// Largest char-boundary index ≤ n.
 fn head_boundary(s: &str, n: usize) -> usize {
@@ -109,6 +117,11 @@ pub struct ArtifactMiddleware {
     store: Arc<ArtifactStore>,
     /// Fold threshold for THIS instance. `0` disables folding entirely.
     threshold_bytes: usize,
+    /// Tool names whose output must reach the model verbatim (never folded),
+    /// configured via `[tools.tool_output] no_fold_tools`. Batch-friendly:
+    /// every listed tool name opts out of folding, on top of the intrinsic
+    /// `Tool::never_truncate_result()` contract.
+    no_fold_tools: std::collections::HashSet<String>,
 }
 
 impl ArtifactMiddleware {
@@ -116,6 +129,7 @@ impl ArtifactMiddleware {
         Self {
             store,
             threshold_bytes: THRESHOLD_BYTES,
+            no_fold_tools: std::collections::HashSet::new(),
         }
     }
 
@@ -123,6 +137,17 @@ impl ArtifactMiddleware {
     /// folding — every result passes through verbatim.
     pub fn with_threshold_bytes(mut self, bytes: usize) -> Self {
         self.threshold_bytes = bytes;
+        self
+    }
+
+    /// Batch-register tool names that are exempt from folding (config-driven
+    /// whitelist). Empty/duplicate names are ignored.
+    pub fn with_no_fold_tools<I: IntoIterator<Item = String>>(mut self, names: I) -> Self {
+        self.no_fold_tools = names
+            .into_iter()
+            .filter(|n| !n.trim().is_empty())
+            .map(|n| n.trim().to_string())
+            .collect();
         self
     }
 }
@@ -135,17 +160,26 @@ impl atomcode_kernel::middleware::ToolMiddleware for ArtifactMiddleware {
         tool: Option<&dyn atomcode_kernel::tool::Tool>,
     ) -> atomcode_kernel::middleware::AfterOutcome {
         let total = result.content.len();
-        // A tool that declares its result must reach the model verbatim
-        // (e.g. repo_map's complete directory tree) skips the fold entirely.
-        // threshold_bytes == 0 disables folding for this instance.
+        // Never fold when:
+        // 1. the tool declares its result must reach the model verbatim
+        //    (intrinsic contract, e.g. repo_map / code_explore), OR
+        // 2. the tool is in the config-driven no-fold whitelist, OR
+        // 3. threshold_bytes == 0 (folding disabled for this instance), OR
+        // 4. the result fits within the threshold.
+        let in_whitelist = tool.is_some_and(|t| self.no_fold_tools.contains(t.name()));
         if tool.is_some_and(|t| t.never_truncate_result())
+            || in_whitelist
             || self.threshold_bytes == 0
             || total <= self.threshold_bytes
         {
             return atomcode_kernel::middleware::AfterOutcome::Proceed;
         }
-        let head_end = head_boundary(&result.content, PREVIEW_HALF);
-        let tail_begin = tail_start(&result.content, PREVIEW_HALF);
+        // Preview scales with the threshold: each side keeps threshold/2, so
+        // retention ≈ 100% of the allowed budget (grok-style), not a fixed
+        // tiny window. Clamped so previews never get pathological.
+        let half = preview_half(self.threshold_bytes);
+        let head_end = head_boundary(&result.content, half);
+        let tail_begin = tail_start(&result.content, half);
         let head = &result.content[..head_end];
         let tail = &result.content[tail_begin..];
 

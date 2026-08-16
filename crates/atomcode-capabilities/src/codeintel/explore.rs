@@ -154,6 +154,14 @@ impl Tool for CodeExploreTool {
         true
     }
 
+    /// code_explore 的输出是模型做架构判断的完整上下文(候选表/目录全景/
+    /// 调用链/源码片段),中途折叠成「预览+fetch_output 取回」会打断阅读流。
+    /// 与 repo_map 同款:声明完整载荷 → ArtifactMiddleware 与内核大小上限都跳过,
+    /// 直接全量展示(超大仓库场景仍受工具自身的 max_files/span 折叠控制)。
+    fn never_truncate_result(&self) -> bool {
+        true
+    }
+
     async fn execute(&self, args: &str, ctx: &ToolContext) -> ToolResult {
         let a: Args = match serde_json::from_str(args) {
             Ok(a) => a,

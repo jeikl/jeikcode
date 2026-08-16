@@ -219,6 +219,10 @@ pub struct CodingAgentConfig {
     /// `[tools.tool_output] max_bytes` (config) / `ATOMCODE_TOOL_OUTPUT_THRESHOLD_BYTES` (env,
     /// wins).
     pub tool_output_max_bytes: Option<usize>,
+    /// Tool names exempt from output folding (config `[tools.tool_output]
+    /// no_fold_tools`). Their results reach the model verbatim regardless of
+    /// size, like the intrinsic `never_truncate_result()` contract.
+    pub tool_output_no_fold_tools: Vec<String>,
 }
 
 /// Host-resolved inputs shared by CLI and daemon runtime construction.
@@ -275,6 +279,8 @@ pub struct CodingRuntimeConfig {
     /// Tool-result fold threshold in bytes (`[tools.tool_output] max_bytes`).
     /// `None` → built-in default (64 KiB); `Some(0)` disables folding.
     pub tool_output_max_bytes: Option<usize>,
+    /// Tool names exempt from output folding (`[tools.tool_output] no_fold_tools`).
+    pub tool_output_no_fold_tools: Vec<String>,
 }
 
 pub fn lsp_settings_from_config(
@@ -382,6 +388,7 @@ impl CodingRuntimeConfig {
                 .ok()
                 .and_then(|v| v.trim().parse::<usize>().ok())
                 .or(config.tools.tool_output.max_bytes),
+            tool_output_no_fold_tools: config.tools.tool_output.no_fold_tools.clone(),
         }
     }
 
@@ -424,6 +431,7 @@ impl CodingRuntimeConfig {
         config.pricing = self.pricing;
         config.lsp = self.lsp.clone();
         config.tool_output_max_bytes = self.tool_output_max_bytes;
+        config.tool_output_no_fold_tools = self.tool_output_no_fold_tools.clone();
         config
     }
 }
@@ -738,6 +746,7 @@ impl CodingAgentConfig {
             subagent_fast_provider: None,
             subagent_capable_provider: None,
             tool_output_max_bytes: None,
+            tool_output_no_fold_tools: Vec::new(),
         }
     }
 }

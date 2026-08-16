@@ -1607,8 +1607,15 @@ pub fn assemble(
     // Artifact spill middleware: intercepts oversized tool results and saves them to disk so
     // the conversation only carries a preview + handle. Only wired when a session is present
     // (no session = no on-disk store; the fetch_output tool is not registered either).
+    // Fold threshold: `cfg.tool_output_max_bytes` (env `ATOMCODE_TOOL_OUTPUT_THRESHOLD_BYTES`
+    // wins over `[tools.tool_output] max_bytes`); `None` → built-in default (64 KiB);
+    // `Some(0)` disables folding.
     if let Some(store) = artifact_store {
-        builder = builder.middleware(Arc::new(ArtifactMiddleware::new(store)));
+        let threshold = cfg
+            .tool_output_max_bytes
+            .unwrap_or(atomcode_capabilities::tools::THRESHOLD_BYTES);
+        builder = builder
+            .middleware(Arc::new(ArtifactMiddleware::new(store).with_threshold_bytes(threshold)));
     }
     let agent = builder.build();
     // Commit model attribution only after every fallible assembly step has

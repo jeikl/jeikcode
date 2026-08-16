@@ -214,6 +214,11 @@ pub struct CodingAgentConfig {
     pub subagent_fast_provider: Option<Arc<TierProvider>>,
     /// Swap-aware, lazily-built CAPABLE-tier provider (same contract as above).
     pub subagent_capable_provider: Option<Arc<TierProvider>>,
+    /// Tool-result fold threshold in bytes. `None` → built-in default
+    /// (64 KiB); `Some(0)` disables folding entirely. Sourced from
+    /// `[tools.tool_output] max_bytes` (config) / `ATOMCODE_TOOL_OUTPUT_THRESHOLD_BYTES` (env,
+    /// wins).
+    pub tool_output_max_bytes: Option<usize>,
 }
 
 /// Host-resolved inputs shared by CLI and daemon runtime construction.
@@ -267,6 +272,9 @@ pub struct CodingRuntimeConfig {
     /// existing sessions keep their stored name.
     pub session_display_name: Option<String>,
     pub lsp: atomcode_capabilities::codeintel::LspSettings,
+    /// Tool-result fold threshold in bytes (`[tools.tool_output] max_bytes`).
+    /// `None` → built-in default (64 KiB); `Some(0)` disables folding.
+    pub tool_output_max_bytes: Option<usize>,
 }
 
 pub fn lsp_settings_from_config(
@@ -369,6 +377,11 @@ impl CodingRuntimeConfig {
             extra_system_append: None,
             session_display_name: None,
             lsp: lsp_settings_from_config(&config.lsp),
+            // env wins over `[tools.tool_output] max_bytes`; missing → None (default).
+            tool_output_max_bytes: std::env::var("ATOMCODE_TOOL_OUTPUT_THRESHOLD_BYTES")
+                .ok()
+                .and_then(|v| v.trim().parse::<usize>().ok())
+                .or(config.tools.tool_output.max_bytes),
         }
     }
 
@@ -410,6 +423,7 @@ impl CodingRuntimeConfig {
         config.next_prompt_suggestions = self.next_prompt_suggestions;
         config.pricing = self.pricing;
         config.lsp = self.lsp.clone();
+        config.tool_output_max_bytes = self.tool_output_max_bytes;
         config
     }
 }
@@ -723,6 +737,7 @@ impl CodingAgentConfig {
             subagent_config: None,
             subagent_fast_provider: None,
             subagent_capable_provider: None,
+            tool_output_max_bytes: None,
         }
     }
 }

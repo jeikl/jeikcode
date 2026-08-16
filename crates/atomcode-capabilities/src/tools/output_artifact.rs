@@ -73,7 +73,14 @@ impl ArtifactStore {
     }
 }
 
-pub const THRESHOLD_BYTES: usize = 16 * 1024;
+/// Default fold threshold: results larger than this (bytes) are replaced by a
+/// head+tail preview and spilled to an artifact. 64 KiB — aligned with the
+/// kernel's `DEFAULT_MAX_TOOL_RESULT_BYTES`, so a result that survives the
+/// middleware is never re-folded by the kernel cap (and a result the kernel
+/// would cap anyway is folded here FIRST, keeping the preview + fetch_output
+/// recovery path instead of a bare kernel marker). Configurable per instance
+/// via [`ArtifactMiddleware::with_threshold_bytes`]; `0` disables folding.
+pub const THRESHOLD_BYTES: usize = 64 * 1024;
 /// Stable prefix embedded in a conversation-visible result when the complete
 /// tool output was replaced by an artifact-backed head/tail preview.
 pub const ARTIFACT_TRUNCATION_MARKER_PREFIX: &str = "[atomcode: output truncated";
@@ -100,11 +107,23 @@ fn tail_start(s: &str, n: usize) -> usize {
 
 pub struct ArtifactMiddleware {
     store: Arc<ArtifactStore>,
+    /// Fold threshold for THIS instance. `0` disables folding entirely.
+    threshold_bytes: usize,
 }
 
 impl ArtifactMiddleware {
     pub fn new(store: Arc<ArtifactStore>) -> Self {
-        Self { store }
+        Self {
+            store,
+            threshold_bytes: THRESHOLD_BYTES,
+        }
+    }
+
+    /// Override the fold threshold for this instance (bytes). `0` disables
+    /// folding — every result passes through verbatim.
+    pub fn with_threshold_bytes(mut self, bytes: usize) -> Self {
+        self.threshold_bytes = bytes;
+        self
     }
 }
 
@@ -118,7 +137,11 @@ impl atomcode_kernel::middleware::ToolMiddleware for ArtifactMiddleware {
         let total = result.content.len();
         // A tool that declares its result must reach the model verbatim
         // (e.g. repo_map's complete directory tree) skips the fold entirely.
-        if tool.is_some_and(|t| t.never_truncate_result()) || total <= THRESHOLD_BYTES {
+        // threshold_bytes == 0 disables folding for this instance.
+        if tool.is_some_and(|t| t.never_truncate_result())
+            || self.threshold_bytes == 0
+            || total <= self.threshold_bytes
+        {
             return atomcode_kernel::middleware::AfterOutcome::Proceed;
         }
         let head_end = head_boundary(&result.content, PREVIEW_HALF);
@@ -223,7 +246,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let store = std::sync::Arc::new(super::ArtifactStore::new(dir.path()));
         let mw = super::ArtifactMiddleware::new(store.clone());
-        let big = "x".repeat(20 * 1024);
+        let big = "x".repeat(super::THRESHOLD_BYTES + 1);
         let mk = || ToolResult { call_id: "c".into(), content: big.clone(), is_error: false, images: vec![] };
 
         let mut r1 = mk();
@@ -295,12 +318,49 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let store = std::sync::Arc::new(super::ArtifactStore::new(dir.path()));
         let mw = super::ArtifactMiddleware::new(store.clone());
-        let big = "T".repeat(20 * 1024); // well over THRESHOLD_BYTES
+        let big = "T".repeat(super::THRESHOLD_BYTES + 1); // well over the default threshold
         let mut r = ToolResult { call_id: "c".into(), content: big.clone(), is_error: false, images: vec![] };
         let probe = NeverTruncateProbe;
         mw.after(&mut r, Some(&probe)).await;
         // Verbatim: no head/tail fold, no marker, no artifact stored.
         assert_eq!(r.content, big);
+        assert!(!r.content.contains("output truncated"));
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 0);
+    }
+
+    #[tokio::test]
+    async fn custom_threshold_folds_sooner() {
+        use atomcode_kernel::middleware::ToolMiddleware;
+        use atomcode_kernel::tool::ToolResult;
+        let dir = tempfile::tempdir().unwrap();
+        let store = std::sync::Arc::new(super::ArtifactStore::new(dir.path()));
+        // A small instance threshold: 20 KiB now folds even though it is well
+        // under the 64 KiB default.
+        let mw = super::ArtifactMiddleware::new(store.clone()).with_threshold_bytes(1024);
+        let mid = "m".repeat(20 * 1024);
+        let mut r = ToolResult { call_id: "c".into(), content: mid.clone(), is_error: false, images: vec![] };
+        mw.after(&mut r, None).await;
+        assert!(r.content.len() < mid.len(), "must fold under a lowered threshold");
+        assert!(r.content.contains("fetch_output"), "must carry the fetch hint");
+        // The default instance leaves the same 20 KiB untouched.
+        let mw2 = super::ArtifactMiddleware::new(store.clone());
+        let mut r2 = ToolResult { call_id: "c".into(), content: mid.clone(), is_error: false, images: vec![] };
+        mw2.after(&mut r2, None).await;
+        assert_eq!(r2.content, mid, "default 64 KiB threshold must pass 20 KiB verbatim");
+    }
+
+    #[tokio::test]
+    async fn zero_threshold_disables_folding() {
+        use atomcode_kernel::middleware::ToolMiddleware;
+        use atomcode_kernel::tool::ToolResult;
+        let dir = tempfile::tempdir().unwrap();
+        let store = std::sync::Arc::new(super::ArtifactStore::new(dir.path()));
+        let mw = super::ArtifactMiddleware::new(store.clone()).with_threshold_bytes(0);
+        let huge = "z".repeat(2 * 1024 * 1024); // far over any default
+        let mut r = ToolResult { call_id: "c".into(), content: huge.clone(), is_error: false, images: vec![] };
+        mw.after(&mut r, None).await;
+        // Verbatim: no fold, no inline ceiling truncation, no artifact.
+        assert_eq!(r.content, huge);
         assert!(!r.content.contains("output truncated"));
         assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 0);
     }

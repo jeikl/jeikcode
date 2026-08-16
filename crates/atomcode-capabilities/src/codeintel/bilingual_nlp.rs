@@ -46,7 +46,8 @@ impl DynamicThesaurus {
                     let ext = p.extension().and_then(|e| e.to_str()).unwrap_or("");
                     if ext == "txt" || ext == "dict" {
                         if let Ok(content) = std::fs::read_to_string(&p) {
-                            self.parse_and_append(&content);
+                            let content = super::strip_utf8_bom(&content);
+                            self.parse_and_append(content);
                         }
                     }
                 }

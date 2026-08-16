@@ -380,6 +380,17 @@ macro_rules! graph_tool_desc {
 }
 pub(crate) use graph_tool_desc;
 
+/// Strip a UTF-8 BOM (U+FEFF) prefix from source text.
+///
+/// Windows editors (Notepad / VS Code with "UTF-8 with BOM") frequently save
+/// files with a BOM; without stripping, the FIRST symbol / first line of every
+/// parsed file carries a `\u{feff}` prefix that breaks symbol-name matching
+/// (find_symbol / code_explore name bonus), line-number rendering, thesaurus
+/// parsing, and reference scans on Windows.
+pub(crate) fn strip_utf8_bom(s: &str) -> &str {
+    s.strip_prefix('\u{feff}').unwrap_or(s)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -100,7 +100,7 @@ fn render(path: &Path, display: &str, cwd: &Path, offset: usize, limit: usize) -
         }
     };
     let source = match std::fs::read_to_string(path) {
-        Ok(s) => s,
+        Ok(s) => super::strip_utf8_bom(&s).to_string(),
         Err(e) => {
             if e.kind() == std::io::ErrorKind::NotFound {
                 return err(format_path_not_found("list_symbols", display, path, cwd));

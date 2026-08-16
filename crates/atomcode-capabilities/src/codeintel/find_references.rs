@@ -123,7 +123,7 @@ fn render(dir: &Path, display_dir: &str, symbol: &str) -> ToolResult {
             continue;
         }
         let content = match std::fs::read_to_string(p) {
-            Ok(c) => c,
+            Ok(c) => super::strip_utf8_bom(&c).to_string(),
             Err(_) => continue, // binary / unreadable
         };
         let rel = p.strip_prefix(dir).unwrap_or(p).display().to_string();

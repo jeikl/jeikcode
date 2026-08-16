@@ -7,8 +7,15 @@
 
 use std::collections::HashMap;
 
+use serde::{Deserialize, Serialize};
+
 use super::super::bilingual_nlp::is_cjk;
 use super::super::graph::{CodeGraph, SymbolNode};
+
+/// On-disk sidecar name next to `units.v3.json` for corpus statistics.
+pub const STATS_REL: &str = ".atomcode/codegraph/stats.v1.json";
+
+const STATS_VERSION: u32 = 1;
 
 /// Tokenization helpers shared by corpus stats and query scoring.
 pub fn symbol_ascii_terms(node: &SymbolNode) -> Vec<String> {
@@ -74,7 +81,7 @@ pub fn symbol_text(node: &SymbolNode) -> String {
 }
 
 /// Corpus statistics for BM25: document frequency per term + corpus size.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct IdfStats {
     /// term (lowercased ascii word or CJK phrase) → number of symbols containing it.
     pub df: HashMap<String, u32>,
@@ -84,6 +91,20 @@ pub struct IdfStats {
     pub total_ascii_terms: u64,
     /// total CJK phrase occurrences across the corpus (for avgdl).
     pub total_cjk_phrases: u64,
+    /// sidecar format version (gate for loading).
+    pub version: u32,
+}
+
+impl Default for IdfStats {
+    fn default() -> Self {
+        Self {
+            df: HashMap::new(),
+            total_symbols: 0,
+            total_ascii_terms: 0,
+            total_cjk_phrases: 0,
+            version: STATS_VERSION,
+        }
+    }
 }
 
 impl IdfStats {
@@ -126,6 +147,31 @@ impl IdfStats {
         let total = (self.total_ascii_terms + self.total_cjk_phrases) as f64;
         let n = self.total_symbols.max(1) as f64;
         (total / n).max(1.0)
+    }
+
+    /// Persist to disk (atomic tmp+rename, mirrors units.v3.json).
+    pub fn save(&self, path: &std::path::Path) -> std::io::Result<()> {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        let bytes = serde_json::to_vec(self)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+        let tmp = path.with_extension("json.tmp");
+        std::fs::write(&tmp, &bytes)?;
+        std::fs::rename(&tmp, path)?;
+        Ok(())
+    }
+
+    /// Load from disk. Returns `None` on missing/corrupt/version-mismatch so
+    /// the caller falls back to `IdfStats::build`.
+    pub fn load(path: &std::path::Path) -> Option<Self> {
+        let bytes = std::fs::read(path).ok()?;
+        let stats: IdfStats = serde_json::from_slice(&bytes).ok()?;
+        if stats.version == STATS_VERSION {
+            Some(stats)
+        } else {
+            None
+        }
     }
 }
 

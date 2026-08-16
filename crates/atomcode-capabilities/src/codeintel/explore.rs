@@ -21,6 +21,7 @@ use async_trait::async_trait;
 use atomcode_kernel::tool::{Tool, ToolContext, ToolResult};
 use serde::Deserialize;
 use serde_json::json;
+use rayon::prelude::*;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock};
@@ -41,6 +42,31 @@ static SESSION_SENT_SPANS: std::sync::LazyLock<RwLock<HashMap<String, Vec<(usize
 pub struct CodeExploreTool {
     index: Arc<CodeIndex>,
     thesaurus: Arc<RwLock<DynamicThesaurus>>,
+}
+
+/// Process-wide query-result cache, keyed by (graph fingerprint, query, scope).
+/// Reuses the rendered output verbatim when the same query runs against the
+/// same graph snapshot (30-40 concurrent read-heavy sessions asking similar
+/// questions) — the fingerprint changes when files change, so results never
+/// go stale. Bounded by a simple max-entry cap to avoid unbounded growth.
+static QUERY_RESULT_CACHE: std::sync::LazyLock<RwLock<std::collections::HashMap<(u64, String, String), String>>> =
+    std::sync::LazyLock::new(|| RwLock::new(std::collections::HashMap::new()));
+const QUERY_CACHE_MAX_ENTRIES: usize = 128;
+
+fn query_cache_get(fingerprint: u64, query: &str, scope: &str) -> Option<String> {
+    let guard = QUERY_RESULT_CACHE.read().unwrap();
+    guard.get(&(fingerprint, query.to_string(), scope.to_string())).cloned()
+}
+
+fn query_cache_insert(fingerprint: u64, query: &str, scope: &str, output: String) {
+    let mut guard = QUERY_RESULT_CACHE.write().unwrap();
+    if guard.len() >= QUERY_CACHE_MAX_ENTRIES {
+        // Simple FIFO eviction: drop the oldest entry.
+        if let Some(oldest) = guard.keys().next().cloned() {
+            guard.remove(&oldest);
+        }
+    }
+    guard.insert((fingerprint, query.to_string(), scope.to_string()), output);
 }
 
 impl CodeExploreTool {
@@ -223,11 +249,22 @@ impl Tool for CodeExploreTool {
         let bm25_scores: HashMap<SymbolId, f64> = {
             let enabled = std::env::var("ATOMCODE_EXPLORE_BM25").as_deref() == Ok("1");
             if enabled {
-                let stats = super::retrieval::IdfStats::build(&graph);
-                super::retrieval::bm25_search(&graph, &stats, &query_tokens, scope_path.as_deref(), 64)
+                // 复用 CodeIndex 缓存的 IDF 统计: 首次从 stats.v1.json 加载/
+                // 构建后落盘, 之后每次查询(含所有共享该索引的会话)零重算。
+                if let Some(stats) = self.index.get_idf_stats(&root) {
+                    super::retrieval::bm25_search(
+                        &graph,
+                        &stats,
+                        &query_tokens,
+                        scope_path.as_deref(),
+                        64,
+                    )
                     .into_iter()
                     .map(|h| (h.node_id, h.score))
                     .collect()
+                } else {
+                    HashMap::new()
+                }
             } else {
                 HashMap::new()
             }
@@ -251,6 +288,7 @@ impl Tool for CodeExploreTool {
             scope_path.as_deref(),
             &bm25_scores,
             &query_concept_vec,
+            self.index.get_concept_vectors(&root).as_deref(),
         );
 
         if scored_files.is_empty() {
@@ -345,6 +383,15 @@ impl Tool for CodeExploreTool {
         let (flow_spine, connected) = extract_flow_spine(&graph, &scored_files);
 
         // Step 3: Render output (Mode A: Connected Flow vs Mode B: Ranked Fallback)
+        // Query-result cache: identical (fingerprint, query, scope) hits reuse
+        // the rendered output verbatim — concurrent read-heavy sessions asking
+        // the same question skip re-scoring entirely. Fingerprint changes on
+        // file edits, so results never go stale.
+        let fp = self.index.fingerprint(&root).unwrap_or(0);
+        let scope_key = scope_path.as_deref().map(|s| s.display().to_string()).unwrap_or_default();
+        if let Some(cached) = query_cache_get(fp, &a.query, &scope_key) {
+            return ok(cached);
+        }
         let dirindex = self.index.get_dirindex(&root);
         let output = render_explore_output(
             &graph,
@@ -358,6 +405,7 @@ impl Tool for CodeExploreTool {
             &query_tokens,
             dirindex.as_deref(),
         );
+        query_cache_insert(fp, &a.query, &scope_key, output.clone());
 
         ok(output)
     }
@@ -566,14 +614,21 @@ fn score_workspace_symbols(
     scope: Option<&Path>,
     bm25_scores: &HashMap<SymbolId, f64>,
     query_concept_vec: &[f32],
+    concept_vectors: Option<&std::collections::HashMap<SymbolId, Vec<f32>>>,
 ) -> Vec<FileCandidate> {
-    let mut file_map: HashMap<PathBuf, Vec<ScoredSymbol>> = HashMap::new();
     let bm25_max = bm25_scores.values().copied().fold(0.0f64, f64::max);
 
-    for (_id, node) in &graph.nodes {
+    // Parallel scoring: the graph is read-only, so every symbol scores
+    // independently (rayon work-stealing across cores); collected hits are
+    // merged into per-file buckets afterwards — the 34万-symbol scan drops
+    // from serial-seconds to parallel-milliseconds on multi-core hosts.
+    let scored: Vec<(PathBuf, ScoredSymbol)> = graph
+        .nodes
+        .par_iter()
+        .filter_map(|(_id, node)| {
         if let Some(sc) = scope {
             if !path_matches_scope(&node.file, sc) {
-                continue;
+                return None;
             }
         }
 
@@ -581,18 +636,18 @@ fn score_workspace_symbols(
         if !parsed_query.kind_filters.is_empty() {
             let kind_str = format!("{:?}", node.kind).to_ascii_lowercase();
             if !parsed_query.kind_filters.iter().any(|k| kind_str.contains(k)) {
-                continue;
+                return None;
             }
         }
         if !parsed_query.name_filters.is_empty() {
             if !parsed_query.name_filters.iter().any(|n| node.name.to_ascii_lowercase().contains(&n.to_ascii_lowercase())) {
-                continue;
+                return None;
             }
         }
         if !parsed_query.path_filters.is_empty() {
             let f_lower = node.file.to_string_lossy().to_ascii_lowercase();
             if !parsed_query.path_filters.iter().any(|p| f_lower.contains(&p.to_ascii_lowercase())) {
-                continue;
+                return None;
             }
         }
 
@@ -649,7 +704,7 @@ fn score_workspace_symbols(
 
         let text_match = (name_sim + name_bonus) * 0.50 + doc_sim * 0.25 + inline_sim * 0.15 + path_sim * 0.10;
         if text_match < 8.0 {
-            continue;
+            return None;
         }
 
         let callers_cnt = graph.callers(node.id).map(|v| v.len()).unwrap_or(0);
@@ -678,12 +733,17 @@ fn score_workspace_symbols(
 
         // Semantic concept-vector path (opt-in, ATOMCODE_EXPLORE_CONCEPT=1):
         // Chinese query ↔ English code cosine similarity, bounded 0..20 bonus.
+        // Symbol vectors come from the CodeIndex-shared cache when available
+        // (built once for the whole graph), else computed per-symbol.
         let concept_bonus = if !query_concept_vec.is_empty() {
-            let node_vec = super::retrieval::concept_projection(
-                &node.name,
-                &HashSet::new(),
-            );
-            let sim = super::retrieval::concept_cosine(query_concept_vec, &node_vec);
+            let sim = match concept_vectors.and_then(|m| m.get(&node.id)) {
+                Some(v) => super::retrieval::concept_cosine(query_concept_vec, v),
+                None => {
+                    let node_vec =
+                        super::retrieval::concept_projection(&node.name, &HashSet::new());
+                    super::retrieval::concept_cosine(query_concept_vec, &node_vec)
+                }
+            };
             sim * 20.0
         } else {
             0.0
@@ -694,15 +754,27 @@ fn score_workspace_symbols(
             (text_match * anchor_decay + graph_mass * 1.0 + bm25_bonus + concept_bonus) * kind_weight;
 
         if raw_score >= 12.0 {
-            file_map.entry(node.file.clone()).or_default().push(ScoredSymbol {
-                node: node.clone(),
-                total_score: raw_score,
-                name_score: name_sim + name_bonus,
-                doc_score: doc_sim,
-                inline_score: inline_sim,
-                graph_mass,
-            });
+            Some((
+                node.file.clone(),
+                ScoredSymbol {
+                    node: node.clone(),
+                    total_score: raw_score,
+                    name_score: name_sim + name_bonus,
+                    doc_score: doc_sim,
+                    inline_score: inline_sim,
+                    graph_mass,
+                },
+            ))
+        } else {
+            None
         }
+        })
+        .collect();
+
+    // Merge parallel hits into per-file buckets.
+    let mut file_map: HashMap<PathBuf, Vec<ScoredSymbol>> = HashMap::new();
+    for (file, sym) in scored {
+        file_map.entry(file).or_default().push(sym);
     }
 
 

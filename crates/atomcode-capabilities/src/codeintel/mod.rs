@@ -128,10 +128,31 @@ pub fn register_codeintel_tools(reg: &mut ToolRegistry) {
     register_codeintel_tools_with_mode(reg, &mode);
 }
 
+/// Process-wide shared code index.
+///
+/// Every session/runtime that registers codeintel tools reuses this ONE
+/// instance, so N concurrent sessions (daemon /chat, /live, CLI, subagents)
+/// share a single in-memory graph + sidecar caches (`dirindex` / `idf_stats` /
+/// `concept_vectors`) instead of N copies — the key optimization for the
+/// 30-40 concurrent read-heavy session scenario. `CodeIndex` is already
+/// thread-safe (Mutex + single-flight + background refresh guarded by an
+/// AtomicBool), so sharing is safe. A session operating on a different
+/// project root will swap the index via the normal per-root get path.
+pub fn shared_code_index() -> Arc<CodeIndex> {
+    static SHARED: std::sync::OnceLock<Arc<CodeIndex>> = std::sync::OnceLock::new();
+    SHARED
+        .get_or_init(|| {
+            let idx = Arc::new(CodeIndex::new());
+            idx.start_background_refresh();
+            idx
+        })
+        .clone()
+}
+
 /// Register graph/symbol tools according to the chosen [`CodeIntelMode`].
+/// All tools share the process-wide [`shared_code_index`].
 pub fn register_codeintel_tools_with_mode(reg: &mut ToolRegistry, mode: &CodeIntelMode) {
-    let index = Arc::new(CodeIndex::new());
-    index.start_background_refresh();
+    let index = shared_code_index();
 
     match mode {
         CodeIntelMode::Unified => {

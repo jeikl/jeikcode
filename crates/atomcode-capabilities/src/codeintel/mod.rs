@@ -34,6 +34,7 @@ pub mod lang;
 pub mod list_symbols;
 pub mod read_symbol;
 pub mod repo_map;
+pub mod retrieval;
 pub mod symbols;
 pub mod trace_callees;
 pub mod trace_callers;

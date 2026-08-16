@@ -60,9 +60,11 @@ impl Lang {
             Lang::Rust => include_str!("queries/rust.scm"),
             Lang::Python => include_str!("queries/python.scm"),
             Lang::JavaScript => include_str!("queries/javascript.scm"),
-            // TSX = typed JSX → the TS symbol query matches the TSX grammar's node types
-            // (the JS query does NOT compile against the TSX grammar).
-            Lang::TypeScript | Lang::Tsx => include_str!("queries/typescript.scm"),
+            // TSX = typed JSX → its own query (the base TS query does NOT
+            // compile against the TSX grammar, and vice versa: JSX element
+            // nodes only exist in the TSX grammar).
+            Lang::TypeScript => include_str!("queries/typescript.scm"),
+            Lang::Tsx => include_str!("queries/tsx.scm"),
             Lang::Go => include_str!("queries/go.scm"),
             Lang::Java => include_str!("queries/java.scm"),
             Lang::C => include_str!("queries/c.scm"),
@@ -91,8 +93,9 @@ impl Lang {
     }
 
     /// Whether this language is walked into the cross-file code graph (`build_graph`).
-    /// Code languages with symbol + call extraction; HTML/PHP stay single-file only
-    /// (outline via `list_symbols`, no cross-file edges).
+    /// Code languages with symbol + call extraction; PHP stays single-file only
+    /// (no calls query). HTML IS indexed (element tags → UiElement symbols),
+    /// but contributes no call edges (no calls query).
     pub fn is_indexed(&self) -> bool {
         matches!(
             self,
@@ -112,6 +115,7 @@ impl Lang {
                 | Lang::Ruby
                 | Lang::Scala
                 | Lang::Solidity
+                | Lang::Html
         )
     }
 

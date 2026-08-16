@@ -3537,4 +3537,20 @@ context_window = 131072
         assert!(!configured.tools.todo.enabled);
         assert_eq!(configured.tools.todo.eager, TodoEagerness::Always);
     }
+
+    #[test]
+    fn tool_output_config_defaults_and_parses() {
+        // Absent section → None (the runtime falls back to THRESHOLD_BYTES).
+        let defaulted: Config = toml::from_str("").unwrap();
+        assert_eq!(defaulted.tools.tool_output.max_bytes, None);
+
+        // Explicit value round-trips.
+        let configured: Config =
+            toml::from_str("[tools.tool_output]\nmax_bytes = 131072\n").unwrap();
+        assert_eq!(configured.tools.tool_output.max_bytes, Some(131072));
+
+        // 0 explicitly disables folding (distinct from absent).
+        let zero: Config = toml::from_str("[tools.tool_output]\nmax_bytes = 0\n").unwrap();
+        assert_eq!(zero.tools.tool_output.max_bytes, Some(0));
+    }
 }

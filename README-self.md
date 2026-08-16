@@ -109,20 +109,21 @@ auto_update = true  # 打开后重启自动无感更新(默认关,按需开)
 
 ## 四·五、项目级自定义指令:与官方 md 的差异(⚠ 更新时别忘)
 
-**官方**:项目指令只认三/四层 Markdown 约定 —— `<project>/.atomcode.md` / `ATOMCODE.md` / `AGENTS.md` / `CLAUDE.md`(`instructions.rs` 查找顺序),外加用户层 `.atomcode.user.md`。
+**官方**:项目指令只认三/四层 Markdown 约定 —— `<project>/.atomcode.md` / `ATOMCODE.md` / `AGENTS.md` / `CLAUDE.md`(`instructions.rs` 查找顺序,首中即止),外加用户层 `.atomcode.user.md`。
 
-**本 fork 额外支持:项目级"业务词/领域词"词林**(explore.rs:311-319):
+**本 fork 额外支持:Project Knowledge Packs(多 md 加载)** —— 提交 `1ff6bc68f`(2026-08-03,"project knowledge packs with per-turn hot-reload",作者 Jeik 即本 fork 维护者),实现在 `crates/atomcode-capabilities/src/session/instructions.rs`:
 
-```
-<project>/.atomcode/thesaurus/*.txt   ← 项目自己的业务术语表
-```
+> 在 AGENTS 级指令之外,**附加加载三组 knowledge md,每组多路径首中即止,互不替代**;每次用户回合热重载(无大小上限);术语表还指导 find_symbol 做符号升级定位(业务词 → 代码符号)。
 
-- 格式与全局词林相同:`中文词, 同义词 = en1, en2`(每行一条);
-- 在每次 `code_explore` 查询时按项目加载(`execute` 入口 `load_from_dir`),**项目私有词不污染全局**;
-- 用途:电商项目的 `下单=place_order`、医疗项目的 `处方=prescription` 等业务黑话,写进项目的 `.atomcode/thesaurus/` 即可让该项目的检索/词林命中率大幅提升。
+| 知识包 | 用途 | 候选路径(首中即止) |
+|---|---|---|
+| **Glossary(业务词表)** | 业务术语 → 代码别名;提示模型"用户说业务词时先扩成代码词再 find_symbol" | `.atomcode/glossary.md` · `.atomcode/domain-glossary.md` · `docs/domain-glossary.md` · `docs/glossary.md` · `domain-glossary.md` · `DOMAIN.md` |
+| **Rules(业务规则)** | 组织结构/审批流/业务约束,实现时视为权威 | `.atomcode/rules.md` · `.atomcode/business-rules.md` · `docs/rules.md` · `docs/business-rules.md` · `rules.md` |
+| **DbWords(库表/字段词)** | 数据库 schema / 表 / 字段的业务词 | `.atomcode/dbwords.md` · `.atomcode/db-words.md` · `.atomcode/schema.md` · `docs/dbwords.md` · `docs/db-words.md` |
 
-> **这就是"db.md / 业务词点 md"的落点**:官方没有项目级术语表机制;本 fork 用 `<project>/.atomcode/thesaurus/*.txt` 承担"业务词定义文件"的角色。工作区历史里没有找到名为 `db.md` 的文件 —— 若你记忆中的是项目里某业务词表,它就是这个目录下的 txt(或按同样格式补一份即可,`/init` 不生成它,需手建)。
-> **⚠ 这是官方之外的 fork 独有改动,升级/合入官方时不要丢。**
+> **这就是你记忆中的 "db.md"**:不是单个 `db.md` 文件,而是本 fork 的 **DbWords 知识包**(候选含 `.atomcode/dbwords.md` / `.atomcode/db-words.md` / `.atomcode/schema.md`)—— 官方只加载一个 md,本 fork 加载**多组多个 md**。这是官方分支之外的 fork 独有改动,升级/合入官方时不要丢。
+>
+> 补充:此外还有项目级词林 `<project>/.atomcode/thesaurus/*.txt`(explore.rs:311-319,查询侧业务词扩展,与 knowledge packs 互补:词林管检索命中、knowledge 管上下文注入)。
 
 ## 四·六、用户独有默认配置(新电脑参考模板,⚠ 更新时别忘)
 

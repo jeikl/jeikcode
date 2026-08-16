@@ -44,21 +44,26 @@ pub struct CodeExploreTool {
     thesaurus: Arc<RwLock<DynamicThesaurus>>,
 }
 
-/// Process-wide query-result cache, keyed by (graph fingerprint, query, scope).
+/// Process-wide query-result cache, keyed by (graph fingerprint, query, scope,
+/// max_files). `max_files` is part of the key because it directly changes the
+/// rendered output (how many candidate files are expanded vs. listed in
+/// Remaining) — omitting it would serve a 30-file render to a 12-file request.
 /// Reuses the rendered output verbatim when the same query runs against the
-/// same graph snapshot (30-40 concurrent read-heavy sessions asking similar
-/// questions) — the fingerprint changes when files change, so results never
-/// go stale. Bounded by a simple max-entry cap to avoid unbounded growth.
-static QUERY_RESULT_CACHE: std::sync::LazyLock<RwLock<std::collections::HashMap<(u64, String, String), String>>> =
+/// same graph snapshot with the same rendering params (30-40 concurrent
+/// read-heavy sessions asking similar questions). The fingerprint changes when
+/// files change, so results never go stale. Bounded by a max-entry cap.
+static QUERY_RESULT_CACHE: std::sync::LazyLock<RwLock<std::collections::HashMap<(u64, String, String, usize), String>>> =
     std::sync::LazyLock::new(|| RwLock::new(std::collections::HashMap::new()));
 const QUERY_CACHE_MAX_ENTRIES: usize = 128;
 
-fn query_cache_get(fingerprint: u64, query: &str, scope: &str) -> Option<String> {
+fn query_cache_get(fingerprint: u64, query: &str, scope: &str, max_files: usize) -> Option<String> {
     let guard = QUERY_RESULT_CACHE.read().unwrap();
-    guard.get(&(fingerprint, query.to_string(), scope.to_string())).cloned()
+    guard
+        .get(&(fingerprint, query.to_string(), scope.to_string(), max_files))
+        .cloned()
 }
 
-fn query_cache_insert(fingerprint: u64, query: &str, scope: &str, output: String) {
+fn query_cache_insert(fingerprint: u64, query: &str, scope: &str, max_files: usize, output: String) {
     let mut guard = QUERY_RESULT_CACHE.write().unwrap();
     if guard.len() >= QUERY_CACHE_MAX_ENTRIES {
         // Simple FIFO eviction: drop the oldest entry.
@@ -66,7 +71,7 @@ fn query_cache_insert(fingerprint: u64, query: &str, scope: &str, output: String
             guard.remove(&oldest);
         }
     }
-    guard.insert((fingerprint, query.to_string(), scope.to_string()), output);
+    guard.insert((fingerprint, query.to_string(), scope.to_string(), max_files), output);
 }
 
 impl CodeExploreTool {
@@ -389,7 +394,7 @@ impl Tool for CodeExploreTool {
         // file edits, so results never go stale.
         let fp = self.index.fingerprint(&root).unwrap_or(0);
         let scope_key = scope_path.as_deref().map(|s| s.display().to_string()).unwrap_or_default();
-        if let Some(cached) = query_cache_get(fp, &a.query, &scope_key) {
+        if let Some(cached) = query_cache_get(fp, &a.query, &scope_key, max_files) {
             return ok(cached);
         }
         let dirindex = self.index.get_dirindex(&root);
@@ -405,7 +410,7 @@ impl Tool for CodeExploreTool {
             &query_tokens,
             dirindex.as_deref(),
         );
-        query_cache_insert(fp, &a.query, &scope_key, output.clone());
+        query_cache_insert(fp, &a.query, &scope_key, max_files, output.clone());
 
         ok(output)
     }
@@ -1515,7 +1520,13 @@ fn render_explore_output(
                 merged_spans.push((st, en, vec![label]));
             }
 
-            let sent_list = session_spans.entry(rel_path.clone()).or_default();
+            // Dedup key must be root-scoped: the same relative path (e.g.
+            // `src/main.rs`) exists in many projects — without the root prefix
+            // a multi-repo workspace would wrongly suppress spans across
+            // projects (project A's sent span hides project B's identical path).
+            let sent_list = session_spans
+                .entry(format!("{}|{rel_path}", root.display()))
+                .or_default();
 
             for (start_line, end_line, labels) in merged_spans {
                 let already_sent = sent_list.iter().any(|(s, e)| *s <= start_line && end_line <= *e);

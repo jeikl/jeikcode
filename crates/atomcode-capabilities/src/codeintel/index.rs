@@ -19,7 +19,7 @@ use super::symbols::{
 };
 use ignore::WalkBuilder;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::hash::{DefaultHasher, Hash, Hasher};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -35,6 +35,10 @@ const DISK_CACHE_VERSION: u32 = 3;
 
 /// Relative path under the workspace root for the persisted unit+graph cache.
 pub const DISK_CACHE_REL: &str = ".atomcode/codegraph/units.v3.json";
+
+/// Relative path for the BINARY (bincode+zstd) index cache. Written whenever
+/// possible; `units.v3.json` stays as a read fallback for older workspaces.
+pub const DISK_CACHE_REL_BIN: &str = ".atomcode/codegraph/units.v4.bin";
 
 
 /// Map a tree-sitter node-kind string to a [`SymbolKind`]. From production
@@ -864,7 +868,18 @@ pub fn disk_cache_path(root: &Path) -> PathBuf {
     super::canonical(root).join(DISK_CACHE_REL)
 }
 
+/// Absolute path of the BINARY (bincode+zstd) codegraph cache for `root`.
+pub fn disk_cache_path_bin(root: &Path) -> PathBuf {
+    super::canonical(root).join(DISK_CACHE_REL_BIN)
+}
+
 fn load_disk_cache(root: &Path) -> Option<DiskCache> {
+    // 1. Prefer the binary (bincode+zstd) cache — ~10× smaller, 10-50× faster
+    //    to load (cold start). Version-gated like the JSON cache.
+    if let Some(bin) = load_disk_cache_bin(root) {
+        return Some(bin);
+    }
+    // 2. Fall back to the legacy JSON cache (old workspaces / downgrade path).
     let path = disk_cache_path(root);
     let bytes = std::fs::read(&path).ok()?;
     let mut cache: DiskCache = serde_json::from_slice(&bytes).ok()?;
@@ -876,12 +891,36 @@ fn load_disk_cache(root: &Path) -> Option<DiskCache> {
     Some(cache)
 }
 
+/// Load the binary cache (`units.v4.bin`): bincode-decode + zstd-decompress.
+fn load_disk_cache_bin(root: &Path) -> Option<DiskCache> {
+    let path = disk_cache_path_bin(root);
+    let bytes = std::fs::read(&path).ok()?;
+    let decompressed = zstd::stream::decode_all(&bytes[..]).ok()?;
+    let mut cache: DiskCache = bincode::deserialize(&decompressed).ok()?;
+    if cache.version != DISK_CACHE_VERSION {
+        return None;
+    }
+    cache.graph.rebuild_name_index();
+    Some(cache)
+}
+
 fn save_disk_cache(
     root: &Path,
     walk_fp: u64,
     units: &HashMap<PathBuf, FileUnit>,
     graph: &CodeGraph,
 ) -> std::io::Result<PathBuf> {
+    // Cross-process write lock: serialize concurrent `atomcode init` / refresh
+    // writes so a later process never overwrites a fresher cache mid-write
+    // (atomic tmp+rename already prevents torn reads; the lock prevents
+    // wasteful duplicate full writes when two processes rebuild at once).
+    let lock_path = root.join(DISK_CACHE_REL).with_extension("lock");
+    if let Some(parent) = lock_path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let lock_file = std::fs::File::create(&lock_path)?;
+    let _lock_guard = fs2::FileExt::lock_exclusive(&lock_file);
+
     let path = disk_cache_path(root);
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
@@ -897,10 +936,29 @@ fn save_disk_cache(
         units: unit_map,
         graph: graph.clone(),
     };
+    // Write both formats: the binary one is the fast cold-start path, the JSON
+    // one keeps old workspaces / downgrades readable. Both atomic (tmp+rename).
+    let _ = save_disk_cache_bin(root, &cache);
     let tmp = path.with_extension("json.tmp");
     let json = serde_json::to_vec(&cache)
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
     std::fs::write(&tmp, json)?;
+    std::fs::rename(&tmp, &path)?;
+    Ok(path)
+}
+
+/// Write the binary cache (`units.v4.bin`): zstd-compress + bincode-encode.
+fn save_disk_cache_bin(root: &Path, cache: &DiskCache) -> std::io::Result<PathBuf> {
+    let path = disk_cache_path_bin(root);
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let bytes = bincode::serialize(cache)
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+    let compressed = zstd::stream::encode_all(&bytes[..], 3)
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+    let tmp = path.with_extension("bin.tmp");
+    std::fs::write(&tmp, compressed)?;
     std::fs::rename(&tmp, &path)?;
     Ok(path)
 }
@@ -937,12 +995,35 @@ pub fn init_workspace_index(
     let idx = CodeIndex::new();
     let _g = idx.get_with_progress(&root, on_progress);
 
-    let guard = idx.inner.lock().map_err(|e| e.to_string())?;
-    // Always rewrite so CLI leaves a durable cache even on pure hits.
-    if let Some(g) = guard.graph.as_ref() {
-        let path = save_disk_cache(&root, guard.walk_fp, &guard.units, g)
-            .map_err(|e| format!("failed to write {}: {e}", path_for_display(&cache_path)))?;
-        on_progress(&format!("Code graph: wrote {}", path_for_display(&path)));
+    let mut guard = idx.inner.lock().map_err(|e| e.to_string())?;
+    // Incremental save: only rewrite the durable cache when the graph actually
+    // changed (a file was re-parsed or removed). A pure cache hit (nothing
+    // dirty) leaves the on-disk cache untouched — for the 30-40 concurrent
+    // read-heavy session scenario this means `atomcode init` after small
+    // edits no longer re-serializes the whole graph.
+    let changed = guard
+        .last_stats
+        .as_ref()
+        .map(|s| s.reparsed > 0 || s.removed > 0)
+        .unwrap_or(true);
+    if changed {
+        if let Some(g) = guard.graph.as_ref() {
+            let path = save_disk_cache(&root, guard.walk_fp, &guard.units, g)
+                .map_err(|e| format!("failed to write {}: {e}", path_for_display(&cache_path)))?;
+            on_progress(&format!("Code graph: wrote {}", path_for_display(&path)));
+            // Explicitly persist the retrieval sidecars (dirindex / idf_stats)
+            // at init time so every subsequent query (all sessions sharing the
+            // process-wide index) loads them from disk instead of lazily
+            // rebuilding — the 30-40 concurrent session case.
+            let dirindex = super::retrieval::DirIndex::build(g);
+            let _ = dirindex.save(&root.join(super::retrieval::DIRINDEX_REL));
+            let stats = super::retrieval::IdfStats::build(g);
+            let _ = stats.save(&root.join(super::retrieval::stats::STATS_REL));
+            guard.dirindex = Some(Arc::new(dirindex));
+            guard.idf_stats = Some(Arc::new(stats));
+        }
+    } else {
+        on_progress("Code graph: unchanged, cache kept");
     }
     let stats = guard.last_stats.unwrap_or(RefreshStats {
         reparsed: 0,
@@ -1151,6 +1232,14 @@ struct IndexState {
     /// sidecar `dirindex.v1.json` next to `units.v3.json`. `None` = not yet
     /// built / sidecar missing → tools fall back to a live graph walk.
     dirindex: Option<Arc<super::retrieval::DirIndex>>,
+    /// Corpus statistics for BM25 (IDF / avgdl), persisted as
+    /// `stats.v1.json` and reused across sessions. `None` = not yet built →
+    /// the query path builds once and caches here.
+    idf_stats: Option<Arc<super::retrieval::IdfStats>>,
+    /// Per-symbol concept vectors (symbol name → concept projection), lazily
+    /// built and cached so every query / session sharing this `CodeIndex`
+    /// reuses them instead of re-projecting every symbol on every query.
+    concept_vectors: Option<Arc<std::collections::HashMap<SymbolId, Vec<f32>>>>,
     building: bool,
     /// Stats from the most recent refresh (for `atomcode init` reporting).
     last_stats: Option<RefreshStats>,
@@ -1164,6 +1253,8 @@ impl Default for IndexState {
             units: HashMap::new(),
             graph: None,
             dirindex: None,
+            idf_stats: None,
+            concept_vectors: None,
             building: false,
             last_stats: None,
         }
@@ -1222,6 +1313,20 @@ impl CodeIndex {
         self.get_with_progress(root, &|_| {})
     }
 
+    /// Current graph fingerprint (walk fingerprint) for `root`, or `None` if
+    /// no graph is loaded. Callers can key result caches on this — when the
+    /// fingerprint changes (files added/removed/edited), cached results
+    /// derived from the old graph are automatically stale.
+    pub fn fingerprint(&self, root: &Path) -> Option<u64> {
+        let root = super::canonical(root);
+        let guard = self.inner.lock().unwrap();
+        if guard.root.as_ref() == Some(&root) {
+            Some(guard.walk_fp)
+        } else {
+            None
+        }
+    }
+
     /// Directory aggregate index for `root` (lazily built if the sidecar is
     /// missing). Returns `None` if no graph is loaded for `root`.
     pub fn get_dirindex(&self, root: &Path) -> Option<Arc<super::retrieval::DirIndex>> {
@@ -1232,6 +1337,62 @@ impl CodeIndex {
         } else {
             None
         }
+    }
+
+    /// Corpus statistics for BM25 (`IdfStats`) for `root`. Lazily loads the
+    /// `stats.v1.json` sidecar; if missing/stale it builds from the graph once
+    /// and caches in memory so every subsequent query (any session sharing this
+    /// `CodeIndex`) reuses it instead of re-scanning all symbols.
+    pub fn get_idf_stats(&self, root: &Path) -> Option<Arc<super::retrieval::IdfStats>> {
+        let root = super::canonical(root);
+        let mut guard = self.inner.lock().unwrap();
+        if guard.root.as_ref() != Some(&root) {
+            return None;
+        }
+        if let Some(stats) = guard.idf_stats.clone() {
+            return Some(stats);
+        }
+        let Some(g) = guard.graph.clone() else {
+            return None;
+        };
+        let path = root.join(super::retrieval::stats::STATS_REL);
+        let stats = Arc::new(
+            super::retrieval::IdfStats::load(&path).unwrap_or_else(|| {
+                let built = super::retrieval::IdfStats::build(&g);
+                let _ = built.save(&path);
+                built
+            }),
+        );
+        guard.idf_stats = Some(stats.clone());
+        Some(stats)
+    }
+
+    /// Per-symbol concept vectors for `root`, lazily built once and cached in
+    /// memory. Every query / session sharing this `CodeIndex` reuses them
+    /// instead of re-projecting every symbol (34万级) on every query.
+    /// Returns `None` if no graph is loaded for `root`.
+    pub fn get_concept_vectors(
+        &self,
+        root: &Path,
+    ) -> Option<Arc<std::collections::HashMap<SymbolId, Vec<f32>>>> {
+        let root = super::canonical(root);
+        let mut guard = self.inner.lock().unwrap();
+        if guard.root.as_ref() != Some(&root) {
+            return None;
+        }
+        if let Some(vectors) = guard.concept_vectors.clone() {
+            return Some(vectors);
+        }
+        let Some(g) = guard.graph.clone() else {
+            return None;
+        };
+        let mut map = std::collections::HashMap::with_capacity(g.nodes.len());
+        for node in g.nodes.values() {
+            map.insert(node.id, super::retrieval::concept_projection(&node.name, &HashSet::new()));
+        }
+        let vectors = Arc::new(map);
+        guard.concept_vectors = Some(vectors.clone());
+        Some(vectors)
     }
 
     /// Ensure the index matches `root` on disk. Unchanged files keep their units;
@@ -1547,6 +1708,49 @@ export function CouponPanel() {
         assert!(names.contains(&"#coupon-app".to_string()), "id: {names:?}");
         assert!(names.contains(&"fadeIn".to_string()), "keyframes: {names:?}");
         assert!(names.contains(&"mobile-only".to_string()), "media-nested: {names:?}");
+    }
+
+    #[test]
+    fn binary_cache_roundtrip_and_json_fallback() {
+        let d = tempfile::tempdir().unwrap();
+        // Build a tiny graph.
+        std::fs::write(d.path().join("a.rs"), "pub fn alpha() {}\n").unwrap();
+        let g = build_graph(d.path());
+        assert!(!g.nodes.is_empty());
+
+        // Save both formats; verify the binary file exists and is much smaller.
+        let file = d.path().join("a.rs");
+        let meta = std::fs::metadata(&file).unwrap();
+        let mtime = meta
+            .modified()
+            .unwrap()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let unit = FileUnit {
+            mtime_ns: mtime,
+            len: meta.len(),
+            nodes: g.nodes.values().cloned().collect(),
+            calls: vec![],
+        };
+        let units = HashMap::from([(file, unit)]);
+        let _ = save_disk_cache(d.path(), 1, &units, &g);
+        let bin_path = disk_cache_path_bin(d.path());
+        let json_path = disk_cache_path(d.path());
+        assert!(bin_path.exists(), "units.v4.bin must be written");
+        assert!(json_path.exists(), "units.v3.json must still be written for fallback");
+        let bin_size = std::fs::metadata(&bin_path).unwrap().len();
+        let json_size = std::fs::metadata(&json_path).unwrap().len();
+        assert!(bin_size < json_size, "binary cache should be smaller: {bin_size} vs {json_size}");
+
+        // Binary load path round-trips the graph.
+        let loaded_bin = load_disk_cache_bin(d.path()).expect("binary cache must load");
+        assert_eq!(loaded_bin.graph.nodes.len(), g.nodes.len());
+
+        // Delete the binary cache → JSON fallback still serves.
+        std::fs::remove_file(&bin_path).unwrap();
+        let loaded_json = load_disk_cache(d.path()).expect("JSON fallback must load");
+        assert_eq!(loaded_json.graph.nodes.len(), g.nodes.len());
     }
 
     #[test]

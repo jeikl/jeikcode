@@ -137,6 +137,8 @@ sysinfo = { version = "0.32", default-features = false, features = ["system"], o
 # `setup` seeds.rs decompresses/unpacks the embedded tar.zst seed archive at first
 # run. Same crates as the build-dependencies packer (separate dep trees). Optional.
 zstd = { version = "0.13", optional = true }
+bincode = { version = "1", optional = true }
+rayon = { version = "1", optional = true }
 tar = { version = "0.4", optional = true }
 
 [features]
@@ -164,6 +166,13 @@ codeintel = [
     "dep:tree-sitter-c-sharp", "dep:tree-sitter-html", "dep:tree-sitter-php",
     # the cross-file graph layer (build_graph) walks the repo gitignore-aware
     "dep:ignore",
+    # binary index cache (units.v4.bin): bincode for fast (de)serialization,
+    # zstd for ~10× smaller on-disk size (crate is already a build dependency).
+    "dep:bincode", "dep:zstd",
+    # fs2 file lock serializes concurrent cache writes across processes.
+    "dep:fs2",
+    # rayon parallelizes workspace-wide symbol scoring (read-only graph).
+    "dep:rayon",
 ]
 # Read-only LSP code intelligence (spawns local language servers, JSON-RPC over stdio).
 # Runtime exposure stays opt-in and missing binaries degrade gracefully.

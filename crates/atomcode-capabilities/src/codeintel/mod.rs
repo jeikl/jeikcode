@@ -291,8 +291,22 @@ pub(crate) fn resolve_path(raw: &str, working_dir: &Path) -> PathBuf {
 /// error. The graph build AND the tool lookups both canonicalize, so a file referenced
 /// via a different alias (e.g. macOS `/var` vs `/private/var`) still matches the graph's
 /// stored paths instead of a false "not found".
+///
+/// Windows note: `std::fs::canonicalize` yields `\\?\E:\...` (extended-length
+/// prefix) while the ignore-walker emits plain `E:\...` paths — the mismatch
+/// breaks `strip_prefix(root)` (used for scope matching, relative display, and
+/// dedup keys) and pollutes `DiskCache.root` / sidecars with `\\?\` noise.
+/// We strip the prefix here so EVERY consumer (IndexState.root, disk caches,
+/// find_symbol/blast_radius lookups, path_matches_scope) sees one consistent
+/// path form that matches the graph's stored file paths.
 pub(crate) fn canonical(p: &Path) -> PathBuf {
-    p.canonicalize().unwrap_or_else(|_| p.to_path_buf())
+    let c = p.canonicalize().unwrap_or_else(|_| p.to_path_buf());
+    let s = c.to_string_lossy();
+    let stripped = s
+        .strip_prefix(r"\\?\")
+        .or_else(|| s.strip_prefix("//?/"))
+        .unwrap_or(&s);
+    PathBuf::from(stripped)
 }
 
 /// Human-readable path for CLI/logs. Windows `canonicalize` yields `\\?\E:\...`, which
@@ -365,3 +379,32 @@ macro_rules! graph_tool_desc {
     };
 }
 pub(crate) use graph_tool_desc;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn canonical_strips_windows_extended_length_prefix() {
+        // Windows canonicalize yields `\\?\E:\...`; the ignore-walker emits
+        // plain `E:\...`. The stripped form must match the walker form so
+        // strip_prefix(root) / scope matching / dedup keys all agree.
+        let p = Path::new(r"\\?\E:\code\agents\atomcode");
+        let c = canonical(p);
+        let s = c.to_string_lossy();
+        assert!(!s.starts_with(r"\\?\"), "prefix must be stripped, got: {s}");
+        assert!(s.contains("E:"), "drive letter must survive: {s}");
+        // Unix-style `//?/` variant is also stripped.
+        let p2 = Path::new("//?/E:/code/agents");
+        let c2 = canonical(p2);
+        assert!(!c2.to_string_lossy().starts_with("//?/"));
+    }
+
+    #[test]
+    fn canonical_keeps_plain_paths_unchanged() {
+        // A normal (non-prefixed) path passes through untouched.
+        let p = Path::new("E:/code/agents/atomcode");
+        let c = canonical(p);
+        assert_eq!(c, PathBuf::from("E:/code/agents/atomcode"));
+    }
+}

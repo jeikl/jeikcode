@@ -1,0 +1,29 @@
+# AI、大模型与智能体领域词林
+# 格式：中文 = 英文 (支持逗号隔开多个词)
+
+大模型, 语言模型 = llm, model, language_model, foundation_model
+提示词, 系统指令 = prompt, system_prompt, instruction, template
+推理, 生成, 补全 = inference, generate, prediction, complete
+流式输出, 打字机 = stream, streaming, sse, chunk, delta
+微调, 对齐 = fine_tune, align, rlhf, dpo, lora
+采样温度, 核采样 = temperature, top_p, top_k
+分词, 词元 = token, tokenizer, tokenize, token_count
+
+智能体, 代理, 助手 = agent, assistant, bot, subagent, worker
+角色, 人设 = role, persona, identity
+工具调用, 技能, 插件 = tool, tool_call, function_call, skill, plugin, capability
+规划, 拆解, 思考链 = plan, planning, task_plan, cot, chain_of_thought, reflection
+执行, 调度, 编排 = execute, dispatch, schedule, orchestrate, pipeline
+审批门禁, 拦截 = approval, gate, guardrail, human_in_the_loop, hitl
+
+知识库, 知识检索 = rag, retrieval, knowledge_base, kb, doc_store
+向量, 向量嵌入 = embedding, vector, embed, dense_vector
+向量数据库 = vector_db, vector_index, milvus, pgvector, qdrant, faiss, chroma
+语义搜索, 倒排检索 = semantic_search, hybrid_search, fts, bm25
+重排, 评分 = rerank, reranker, cross_encoder, score
+文本切片, 分块 = chunk, chunking, slice, text_splitter
+
+记忆, 上下文 = memory, long_term_memory, short_term_memory, context
+上下文压缩, 总结 = compaction, summarize, truncate, condense, prune
+快照, 状态持久化 = snapshot, checkpoint, session_state, persist
+对话历史, 轮次 = conversation, history, turns, messages, transcript

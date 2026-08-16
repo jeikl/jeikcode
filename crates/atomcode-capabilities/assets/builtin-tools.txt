@@ -1,0 +1,66 @@
+# AtomCode 内置工具清单(built-in tools catalog)
+# =====================================================
+# 用途: 此文件仅供你(用户)查看 AtomCode 内置了哪些工具,
+#       以便把工具名加入 config.toml 的「不折叠白名单」:
+#
+#   [tools.tool_output]
+#   max_bytes = 65536
+#   no_fold_tools = ["repo_map", "code_explore", "find_symbol"]
+#
+# 白名单效果: 列出的工具输出永不折叠(哪怕超过 max_bytes),
+#   直接完整展示, 不需要 fetch_output 手动取回。
+#   等价于工具自带的 never_truncate_result() 契约(repo_map / code_explore 默认已豁免)。
+#
+# 提示: 名称大小写敏感; 按需批量添加, 逗号分隔。
+# =====================================================
+
+## 一、文件与代码操作
+bash                  # 执行 shell 命令(风险分级, 写操作需审批)
+cd                    # 切换工作目录
+read                  # 读取文件(read_file)
+write                 # 写入文件(write_file)
+edit                  # 精确文本替换编辑(edit_file)
+search_replace        # 多文件查找替换(search_replace)
+parallel_edit         # 并行编辑多个文件
+glob                  # 按 glob 模式找文件
+grep                  # 按正则搜索文件内容
+list                  # 列出目录(list_directory)
+open_file             # 在 GUI 打开文件/目录
+memory                # 长期记忆存取(memory 工具)
+todo                  # 任务清单(todowrite)
+task                  # 派生子代理任务
+
+## 二、网络
+web_fetch             # 抓取网页内容
+web_search            # 网页搜索
+
+## 三、代码智能(codeintel 系列)
+repo_map              # 完整目录树(默认已豁免折叠)
+code_explore          # 语义检索+调用链+目录全景(默认已豁免折叠)
+find_symbol           # 按符号名查定义
+list_symbols          # 列文件内符号
+read_symbol           # 读单个符号
+find_references       # 找符号引用
+trace_callers         # 找调用者
+trace_callees         # 找被调用者
+trace_chain           # 找两符号间调用链
+blast_radius          # 改文件影响面
+file_dependencies     # 文件依赖
+
+## 四、工具输出恢复
+fetch_output          # 按 artifact_id 分片取回被折叠的输出
+
+## 五、交互 / 其他
+request_user_input    # 向用户提问
+report_finding        # 报告发现项
+
+## 六、AtomGit(feature: atomgit, 按需注册)
+atomgit_issue         # 操作 AtomGit issue
+atomgit_pr            # 操作 AtomGit pull request
+atomgit_repo          # 操作 AtomGit 仓库
+
+## 常见白名单推荐
+# 想彻底告别 fetch_output, 建议至少加入:
+#   no_fold_tools = ["repo_map", "code_explore", "find_symbol", "trace_chain", "blast_radius"]
+# 注意: 白名单是「工具输出不折叠」; 工具内部自带的智能裁剪
+#   (code_explore 的 max_files / span 折叠)不受影响, 仍会控制上下文体积。

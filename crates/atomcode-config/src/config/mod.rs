@@ -238,6 +238,15 @@ pub struct Config {
     /// → defaults to `false` (safe).
     #[serde(default)]
     pub auto_update: bool,
+    /// Self-update source overrides (fork channel). When set, these take
+    /// precedence over the built-in default release channel (this fork's
+    /// `local-dev` branch) but LOSE to the env vars
+    /// `ATOMCODE_UPDATE_MANIFEST_URL` / `ATOMCODE_UPDATE_DOWNLOAD_BASE`.
+    /// Leave unset to use the built-in fork channel.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub update_manifest_url: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub update_download_base: Option<String>,
     /// Telemetry configuration. Missing from older configs → defaults to
     /// enabled=None (consent-pending), endpoint=None (use the built-in default).
     /// Uses `#[serde(default)]` because `TelemetryConfig` has its own `Default`
@@ -568,6 +577,8 @@ impl Default for Config {
             notifications: Default::default(),
             network: Default::default(),
             auto_update: false,
+            update_manifest_url: None,
+            update_download_base: None,
             telemetry: Default::default(),
             lsp: Default::default(),
             auto_commit: false,
@@ -2450,6 +2461,8 @@ model = "missing-type"
             notifications: NotificationConfig::default(),
             network: NetworkConfig::default(),
             auto_update: true,
+            update_manifest_url: None,
+            update_download_base: None,
             telemetry: Default::default(),
             lsp: Default::default(),
             auto_commit: false,

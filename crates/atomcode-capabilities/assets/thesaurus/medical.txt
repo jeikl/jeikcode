@@ -1,0 +1,25 @@
+# 医疗健康与医院信息系统词林 (HIS / EMR / LIS / PACS)
+# 格式：中文 = 英文 (支持逗号隔开多个词)
+
+患者, 病人 = patient, sufferer, subject
+就诊, 看病, 门诊 = visit, encounter, outpatient, clinic
+住院, 出院 = inpatient, hospitalization, admission, discharge
+挂号, 预约 = register, registration, appointment, booking
+科室, 诊室 = department, dept, clinic_room, ward
+医生, 护士 = doctor, physician, nurse, practitioner
+
+病历, 电子病历, 病史 = medical_record, emr, ehr, anamnesis, case_history
+主诉, 现病史 = chief_complaint, present_illness, symptom
+诊断, 鉴别诊断 = diagnosis, diagnose, assessment, icd10, icd11
+处方, 开药 = prescription, rx, prescribe, recipe
+药品, 药物, 剂型 = medicine, drug, medication, pharmaceutical, dosage
+
+检验, 化验 (LIS) = lab_test, laboratory, assay, specimen, sample
+检查, 影像 (PACS) = examination, exam, imaging, radiology, ct, mri, xray
+医嘱 = medical_order, doctor_order, physician_order
+手术, 麻醉 = surgery, operation, surgical, anesthesia
+生命体征, 血压, 心率 = vital_signs, blood_pressure, heart_rate, pulse
+
+医保, 统筹结算 = medical_insurance, medicare, insurance_settle, reimbursement
+过敏史, 禁忌症 = allergy, allergic_history, contraindication
+体检 = physical_examination, checkup, health_screening

@@ -1,0 +1,31 @@
+# 管理系统与组织权限领域词林 (RBAC / OA / ERP / CRM)
+# 格式：中文 = 英文 (支持逗号隔开多个词)
+
+用户, 账号 = user, account, member, employee
+组织, 部门, 机构 = organization, org, department, dept, team
+岗位, 职务 = post, position, job_title
+租户, 多租户 = tenant, multi_tenant, workspace
+
+角色, 用户组 = role, user_group, authority
+权限, 资源权限, 按钮权限 = permission, perm, privilege, access, capability
+菜单, 导航栏, 侧边栏 = menu, navigation, navbar, sidebar, route_menu
+数据权限 = data_permission, data_scope, row_security
+鉴权, 授权 = authorize, check_permission, access_control, guard, rbac
+
+流程, 审批流, 工作流 = workflow, bpm, flow, approval_flow, state_machine
+审批, 审核, 通过 = approve, approval, pass, confirm, verify
+驳回, 拒绝, 退回 = reject, decline, refuse, roll_back
+转办, 委派, 会签 = transfer, delegate, countersign
+待办, 任务 = todo, task, pending_task, activity
+已办, 抄送 = done, finished, cc, notify
+
+数据字典 = dict, data_dict, dictionary, dict_item
+系统配置, 参数, 开关 = config, parameter, sys_param, setting, toggle, switch
+操作日志, 审计日志 = log, audit_log, operation_log, trace
+通知, 站内信, 弹窗 = notification, notice, announcement, internal_msg, modal
+附件, 上传, 导出 = attachment, upload, file, import, export, excel, csv
+
+报表, 仪表盘 = report, statistic, dashboard, overview
+工单, 缺陷, 反馈 = ticket, issue, bug, feedback
+客户, 商机, 线索 (CRM) = customer, client, lead, opportunity
+供应商, 采购 (ERP) = supplier, vendor, procurement, purchase

@@ -1,0 +1,100 @@
+# Agent 智能体核心词林 (Loop / 工具调用 / 上下文 / 记忆 / 多智能体 / 评估)
+# 来源：2025-2026 agent 工程实践(Anthropic / LangChain / OpenAI Agents SDK / 多篇 arxiv 综述)
+# 格式：中文 = 英文 (支持逗号隔开多个词，英文词尽量与代码标识符子串匹配)
+
+## Agent Loop 主循环
+智能体循环, 代理循环, 主循环 = agent_loop, agentic_loop, run_loop, event_loop, main_loop, loop_engine
+回合, 轮次, 迭代 = turn, round, iteration, step, cycle
+观察, 感知 = observe, observe_result, perception, perceive, gather_context
+推理, 思考 = reason, reasoning, think, deliberation, cot, chain_of_thought
+行动, 执行 = act, action, execute, invoke, take_action
+重入, 反馈回路 = feedback_loop, reentry, feed_back, iterate
+停止条件, 终止条件 = stop_condition, termination, exit_criterion, done, finish
+循环检测, 死循环 = loop_detection, loop_guard, doom_loop, infinite_loop, livelock, stagnation
+重试上限, 工具预算 = retry_cap, retry_limit, tool_budget, max_retries, budget
+无限循环, 不停止 = infinite_loop, never_terminate, runaway, non_stopping
+
+## 工具调用
+工具调用, 函数调用 = tool_call, tool_calling, function_call, tool_use, call_tool, invoke_tool
+工具定义, 工具模式 = tool_definition, tool_schema, function_schema, tool_spec
+工具结果, 返回 = tool_result, function_result, tool_output, return_value
+工具参数, 参数校验 = tool_args, tool_arguments, parameters, param_schema, argument
+工具选择, 工具发现 = tool_selection, tool_discovery, pick_tool, choose_tool
+工具描述, 工具说明 = tool_description, docstring, description
+权限系统, 审批 = permission, approval, allowlist, consent, authorize_tool
+内置工具, 系统工具 = builtin_tool, native_tool, system_tool, internal_tool
+外部工具, 第三方 = external_tool, third_party, plugin_tool, mcp_tool
+工具执行器, 调度 = tool_executor, tool_runner, dispatch, execute_batch
+
+## 上下文管理
+上下文工程, 上下文组装 = context_engineering, context_assembly, assemble_context, context_build
+上下文窗口, 上下文长度 = context_window, context_length, max_tokens, window_size
+上下文压缩, 上下文裁剪 = context_compaction, context_pruning, compaction, prune, truncate, condense
+对话历史, 消息历史 = conversation_history, message_history, transcript, chat_log, history
+系统提示, 系统指令 = system_prompt, system_instruction, sys_prompt
+用户消息, 助手消息 = user_message, assistant_message, human_turn, ai_turn
+工具消息, 结果消息 = tool_message, tool_result_message, function_message
+工作记忆, 暂存 = working_memory, scratchpad, ephemeral, short_term
+长期记忆 = long_term_memory, persistent_memory, durable_memory, memory_store
+上下文超限, 溢出 = context_overflow, token_overflow, context_exceed, too_large
+摘要, 压缩摘要 = summarization, summarize, summary, digest, recap
+遗忘, 丢弃旧消息 = forget, evict, drop_old, prune_history, retention
+
+## 记忆系统
+记忆, 记忆模块 = memory, memory_module, memory_manager, mem0, memgpt
+语义记忆, 事实记忆 = semantic_memory, factual_memory, knowledge_store
+情景记忆, 事件记忆 = episodic_memory, event_memory, experience_store
+程序记忆, 技能记忆 = procedural_memory, skill_memory, how_to
+记忆巩固, 记忆写入 = memory_consolidation, consolidate, memory_write, encode
+记忆检索, 回忆 = memory_retrieval, recall, memory_lookup, retrieve_memory
+反思, 内省 = reflection, introspect, self_reflect, critique, ponder
+记忆库, 记忆银行 = memory_bank, memory_store, knowledge_base, vault
+检索增强, 外部知识 = rag, retrieval_augmented, retrieve, knowledge_retrieval
+向量记忆, 相似检索 = vector_memory, similarity_search, semantic_search, embedding_retrieval
+记忆评分, 重要性 = memory_score, importance, salience, relevance_rank
+会话记忆, 跨会话 = cross_session, session_memory, persistent_conversation
+
+## 规划与推理模式
+规划, 任务拆解 = plan, planning, task_decomposition, decompose, breakdown, subtask
+执行器, 执行计划 = executor, plan_execution, execute_plan, worker
+重新规划, 动态调整 = re_plan, replanner, replan, adjust_plan
+先规划后执行 = plan_execute, plan_and_execute, plan_then_act
+反射式推理 = reflect, reflection, self_critique, reason_and_act
+工具增强推理 = tool_augmented, tool_enhanced, reasoning_with_tools
+子目标, 分步 = subgoal, intermediate_goal, milestone, step_goal
+层级规划 = hierarchical_planning, htn, layered_plan, top_down
+
+## 多智能体
+子代理, 子任务代理 = subagent, child_agent, subtask_agent, worker_agent, spawn_agent
+多智能体, 多代理 = multi_agent, multiagent, agent_swarm, multi_agent_system
+编排, 协调 = orchestration, orchestrator, coordinator, controller_agent, conductor
+消息传递, 通信 = message_passing, agent_communication, inter_agent, handoff
+交接, 转移 = handoff, hand_off, transfer, delegate, handover
+主管代理, 管理者 = supervisor, manager_agent, master_agent, lead_agent
+群体智能, 协作 = swarm, collaboration, cooperative, collective
+角色分配, 分工 = role_assignment, role_play, specialist, division
+
+## 评估与质量
+评估, 基准 = evaluation, eval, benchmark, metric, evaluate, scoring
+任务完成率, 成功率 = task_completion, success_rate, completion_rate, pass_rate
+工具正确性, 调用准确 = tool_correctness, tool_accuracy, call_correctness
+计划遵循, 一致性 = plan_adherence, adherence, consistency, alignment
+步骤效率, 步数 = step_efficiency, efficiency, steps_taken, minimal_steps
+追踪评估, 过程评估 = trace_eval, trace_based, trajectory_eval, process_eval
+大模型评判, 评审者 = llm_as_judge, judge, grader, critic, reviewer
+验证循环, 检查 = verification_loop, verify, validator, check_output, self_check
+回放, 重放 = replay, trace_replay, record_replay, rerun
+正确性, 保真 = faithfulness, correctness, fidelity, groundedness
+
+## 架构与协议
+模型与框架分离, 框架 = harness, model_and_harness, framework, sdk
+模型上下文协议, MCP = mcp, model_context_protocol, context_protocol
+智能体运行时 = agent_runtime, runtime, execution_engine
+事件驱动, 消息驱动 = event_driven, message_driven, event_loop, dispatch_event
+流式, 流式输出 = streaming, stream, chunk, token_stream, delta
+钩子, 中间件 = hook, middleware, interceptor, lifecycle_hook, callback
+会话管理, 会话状态 = session_manager, session_state, session_store, conversation_manager
+智能体 SDK, 框架 = agents_sdk, agent_sdk, langgraph, smolagents, autogen, crewai
+循环工程, 嵌套循环 = loop_engineering, inner_loop, outer_loop, nested_loop
+RL 微调, 强化 = rl_finetune, reinforcement, rlhf, training_signal, hill_climbing
+自主智能体, 自动代理 = autonomous_agent, agentic_ai, autonomous, self_driving

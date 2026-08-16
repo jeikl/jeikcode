@@ -1,0 +1,97 @@
+# 计算机科学核心词林 (数据结构 / 算法 / 图 / 索引 / 并发)
+# 格式：中文 = 英文 (支持逗号隔开多个词，英文词尽量与代码标识符子串匹配)
+
+## 数据结构
+数组, 列表 = array, list, vec, vector
+链表 = linked_list, linklist, listnode, node
+栈, 堆栈 = stack, lifo
+队列, 先进先出 = queue, fifo, deque
+双端队列 = deque, double_ended
+哈希表, 散列表 = hash, hashmap, hashtable, dict, unordered_map
+集合, 去重 = set, hashset, dedup, unique
+映射, 键值对 = map, mapping, key_value, kv
+树, 二叉树 = tree, binary_tree, bst
+二叉搜索树, 排序树 = bst, binary_search_tree
+平衡树, 红黑树 = avl, red_black, rbtree, balanced
+堆, 优先队列 = heap, priority_queue, min_heap, max_heap
+图, 顶点, 边 = graph, node, vertex, edge, adjacency
+邻接表, 邻接矩阵 = adjacency_list, adjacency_matrix
+字典树, 前缀树 = trie, prefix_tree
+并查集 = union_find, dsu, disjoint_set
+字符串, 子串 = string, str, substring, substr
+字节数组, 二进制 = bytes, byte_array, binary, buffer
+
+## 算法
+排序, 快排 = sort, sorting, quicksort, mergesort, heap_sort
+查找, 二分 = search, binary_search, bisect, find_index
+遍历, 前序中序后序 = traverse, traversal, bfs, dfs, inorder, preorder, postorder
+递归, 回溯 = recursion, recursive, backtrack, dfs_backtrack
+动态规划 = dp, dynamic_programming
+贪心 = greedy, greedy_algorithm
+双指针 = two_pointer, two_pointers, sliding_window
+滑动窗口 = sliding_window, window
+前缀和, 差分 = prefix_sum, prefix, difference
+分治 = divide_conquer, dac
+位运算, 异或 = bitwise, bit_operation, xor, shift_left, shift_right
+取模, 余数 = modulo, mod, remainder
+复杂度, 时间复杂度 = complexity, time_complexity, big_o, o_n
+空间复杂度 = space_complexity
+边界条件, 越界 = boundary, out_of_bounds, edge_case, overflow
+去重排序 = dedup, distinct, sorted_unique
+
+## 索引与检索（本会话核心）
+索引, 倒排索引 = index, inverted_index, idx, indexed
+倒排, 倒排表 = inverted, postings, posting_list
+向量, 向量检索 = vector, embedding, dense_vector, semantic
+余弦相似度 = cosine, similarity, sim, cos_sim
+词频, 逆文档频率 = tfidf, tf_idf, term_frequency, idf, df
+BM25, 词法检索 = bm25, lexical, keyword_match
+召回, 检索, 命中 = recall, retrieval, retrieve, search, hit, match
+排序, 排名, 打分 = rank, ranking, score, scoring, relevance
+候选, 候选集 = candidate, candidates, hit_set
+文档频率, 语料 = corpus, document_frequency, df
+分词, 词元化 = token, tokenize, tokenizer, segmentation
+词林, 同义词 = thesaurus, synonym, expand, expansion
+近似最近邻 = ann, hnsw, approximate_nearest
+跳表, 磁盘索引 = skiplist, btree, bplustree, lsm
+缓存命中, 冷启动 = cache_hit, cold_start, warmup, miss
+
+## 图与调用链
+调用链, 调用关系 = call_chain, callgraph, call_graph, caller, callee
+调用者, 被调用者 = caller, callee, invoke, calling
+依赖, 依赖图 = depend, dependency, depends_on, import_graph
+引用, 引用关系 = reference, references, refs, usages
+继承, 实现, 接口 = inherit, extends, implements, interface, trait
+流, 流程, 主链路 = flow, pipeline, main_flow, spine, chain
+拓扑, 有向无环 = topolog, dag, directed_acyclic
+连通, 强连通 = connected, connected_component, scc, reachable
+遍历图, 深度广度 = bfs, dfs, traverse_graph, graph_walk
+
+## 并发与异步
+线程, 线程池 = thread, threading, thread_pool, spawn_thread
+协程, 异步 = async, await, coroutine, future, promise
+并发, 并行 = concurrent, concurrency, parallel, parallelism
+锁, 互斥 = lock, mutex, rwlock, semaphore, synchronized
+原子操作 = atomic, atomicity, cas, compare_and_swap
+信号量, 屏障 = semaphore, barrier, countdown_latch
+通道, 消息队列 = channel, chan, mq, message_queue, kafka, rabbitmq
+生产者消费者 = producer, consumer, pubsub, publish_subscribe
+死锁, 活锁 = deadlock, livelock, race_condition, data_race
+上下文切换, 挂起 = context_switch, suspend, yield, park
+超时, 取消, 中断 = timeout, cancel, abort, interrupt, deadline
+重试, 退避 = retry, backoff, retryable, exponential_backoff
+节流, 限流, 熔断 = throttle, rate_limit, circuit_breaker, quota, token_bucket
+池化, 复用 = pool, pooling, reuse, connection_pool
+
+## 编译与语言机制
+类型, 泛型, 接口 = type, generic, trait, interface, typename
+枚举, 联合 = enum, union, tagged_union, variant
+指针, 引用, 借用 = pointer, reference, borrow, rc, arc
+生命周期 = lifetime, borrow_checker
+闭包, 匿名函数 = closure, lambda, anonymous_function, fn
+宏, 注解, 装饰器 = macro, annotation, decorator, attribute
+序列化, 反序列化 = serialize, deserialize, json, marshal, unmarshal, serde
+内存, 分配, 回收 = memory, alloc, allocate, dealloc, free, gc, drop
+异常, 错误处理 = exception, error_handling, try_catch, panic, unwrap
+日志, 追踪, 监控 = log, logger, tracing, telemetry, metric, observability
+配置, 开关, 参数 = config, configuration, option, setting, flag, param

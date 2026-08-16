@@ -450,6 +450,13 @@ pub(crate) fn chat_runtime_config(
         extra_system_append: None,
         session_display_name: None,
         lsp: atomcode_coding::config::lsp_settings_from_config(&config.lsp),
+        // env wins over `[tools.tool_output] max_bytes`; missing → None (default).
+        // Mirrors `CodingRuntimeConfig::from_config` so the daemon path honors the
+        // same fold threshold as CLI/TUI.
+        tool_output_max_bytes: std::env::var("ATOMCODE_TOOL_OUTPUT_THRESHOLD_BYTES")
+            .ok()
+            .and_then(|v| v.trim().parse::<usize>().ok())
+            .or(config.tools.tool_output.max_bytes),
     }
 }
 

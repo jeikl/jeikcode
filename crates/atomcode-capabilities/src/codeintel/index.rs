@@ -1356,13 +1356,19 @@ impl CodeIndex {
             return None;
         };
         let path = root.join(super::retrieval::stats::STATS_REL);
-        let stats = Arc::new(
-            super::retrieval::IdfStats::load(&path).unwrap_or_else(|| {
+        // Disk cache freshness check: the sidecar is only trusted when its
+        // symbol count matches the CURRENT graph snapshot. If a graph rebuild
+        // didn't persist new stats (crash between graph save and stats save,
+        // or another process overwrote units without stats), the stale sidecar
+        // would silently produce wrong IDF weights — rebuild instead.
+        let stats = Arc::new(match super::retrieval::IdfStats::load(&path) {
+            Some(loaded) if loaded.total_symbols as usize == g.node_count() => loaded,
+            _ => {
                 let built = super::retrieval::IdfStats::build(&g);
                 let _ = built.save(&path);
                 built
-            }),
-        );
+            }
+        });
         guard.idf_stats = Some(stats.clone());
         Some(stats)
     }
@@ -1470,6 +1476,11 @@ impl CodeIndex {
                         guard.units = units;
                         guard.graph = Some(g.clone());
                         guard.dirindex = Some(Arc::new(super::retrieval::DirIndex::build(&g)));
+                        // Derived caches must follow the graph snapshot: any
+                        // graph (re)build invalidates the in-memory IDF stats
+                        // and concept vectors computed from the previous graph.
+                        guard.idf_stats = None;
+                        guard.concept_vectors = None;
                         guard.last_stats = Some(RefreshStats {
                             reparsed: 0,
                             removed: 0,
@@ -1537,6 +1548,11 @@ impl CodeIndex {
             guard.units = units;
             guard.graph = Some(g.clone());
             guard.dirindex = Some(Arc::new(super::retrieval::DirIndex::build(&g)));
+            // Derived caches must follow the graph snapshot: any graph
+            // (re)build invalidates the in-memory IDF stats and concept
+            // vectors computed from the previous graph.
+            guard.idf_stats = None;
+            guard.concept_vectors = None;
             guard.last_stats = Some(stats);
             guard.building = false;
             self.cv.notify_all();

@@ -115,15 +115,12 @@ impl CodeExploreTool {
 }
 
 /// Seed this fork's bundled defaults (thesaurus dictionaries + builtin-tools
-/// list) into the user config dir, once per file. Pure additive: an existing
-/// file (user-edited or previously seeded) is left untouched.
+/// list + mcp.json + .codegraphignore) into the user config dir, once per
+/// file. Pure additive: an existing file (user-edited or previously seeded)
+/// is left untouched.
 fn seed_fork_defaults() {
     let dir = crate::paths::config_dir();
     let thes_dir = dir.join("thesaurus");
-    if let Ok(entries) = std::fs::read_dir(&thes_dir) {
-        // Directory exists; nothing more to seed unless it is empty.
-        let _ = entries.count();
-    }
     // Best-effort: any failure is silently ignored (the user can copy the
     // assets manually; a read-only home must not break startup).
     let _ = std::fs::create_dir_all(&thes_dir);
@@ -146,9 +143,22 @@ fn seed_fork_defaults() {
             let _ = std::fs::write(&dest, embedded);
         }
     }
+    // builtin-tools catalog (which tool names may enter no_fold_tools).
     let tools_dest = dir.join("builtin-tools.txt");
     if !tools_dest.exists() {
         let _ = std::fs::write(&tools_dest, BUILTIN_TOOLS_ASSET);
+    }
+    // mcp.json — the fork's default MCP server wiring (brave-search /
+    // ddg-search / js-reverse). Only seeded when the user has no mcp.json.
+    let mcp_dest = dir.join("mcp.json");
+    if !mcp_dest.exists() {
+        let _ = std::fs::write(&mcp_dest, MCP_JSON_ASSET);
+    }
+    // .codegraphignore — the fork's default code-graph ignore rules (generated
+    // artifacts / minified bundles / vendored deps). Only seeded when absent.
+    let ignore_dest = dir.join(".codegraphignore");
+    if !ignore_dest.exists() {
+        let _ = std::fs::write(&ignore_dest, CODEGRAPH_IGNORE_ASSET);
     }
 }
 
@@ -172,6 +182,14 @@ static THESAURUS_ASSETS: std::sync::LazyLock<std::collections::HashMap<&'static 
 /// Bundled builtin-tools catalog (what tool names may be whitelisted in
 /// `[tools.tool_output] no_fold_tools`), embedded for first-run seeding.
 static BUILTIN_TOOLS_ASSET: &str = include_str!("../../assets/builtin-tools.txt");
+
+/// Bundled default MCP server wiring (brave-search / ddg-search / js-reverse),
+/// seeded as `~/.atomcode/mcp.json` on first run (never overwrites existing).
+static MCP_JSON_ASSET: &str = include_str!("../../assets/mcp.json");
+
+/// Bundled default code-graph ignore rules (generated/minified artifacts,
+/// vendored deps), seeded as `~/.atomcode/.codegraphignore` on first run.
+static CODEGRAPH_IGNORE_ASSET: &str = include_str!("../../assets/.codegraphignore");
 
 #[derive(Deserialize)]
 struct Args {

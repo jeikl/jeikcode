@@ -15,7 +15,7 @@ use super::graph::{CodeGraph, Edge, EdgeKind, SymbolId, SymbolKind, SymbolNode, 
 use super::lang::Lang;
 use super::path_for_display;
 use super::symbols::{
-    extract_call_sites_from_tree, extract_symbols_from_tree, parse_source, Symbol,
+    extract_call_sites_from_tree, extract_symbols_from_tree, parse_source, CallSite, Symbol,
 };
 use ignore::WalkBuilder;
 use serde::{Deserialize, Serialize};
@@ -62,6 +62,10 @@ fn classify_symbol_kind(ts: &str) -> SymbolKind {
         "use_declaration" | "import_statement" | "import_declaration" => SymbolKind::Import,
         "type_item" | "type_alias_declaration" => SymbolKind::TypeAlias,
         "impl_item" => SymbolKind::Other("impl".to_string()),
+        // JSX/TSX UI elements: `<el-button>`, `<CouponDialog />` → UiElement.
+        "jsx_element" | "jsx_self_closing_element" | "element" | "self_closing_tag" => {
+            SymbolKind::UiElement
+        }
         other => SymbolKind::Other(other.to_string()),
     }
 }
@@ -224,6 +228,17 @@ fn parse_file(path: &Path, source: &str) -> Option<(Vec<SymbolNode>, Vec<RawCall
                     return Some(json_res);
                 }
             }
+        } else if matches!(ext_lower.as_str(), "vue" | "svelte" | "astro") {
+            // SFC dual-parse: `<script>` block → TSX (component logic + imports),
+            // `<template>` block → HTML element tags (buttons/titles/UI nodes).
+            if let Some(sfc) = parse_sfc(path, source, &ext_lower) {
+                return Some(sfc);
+            }
+        } else if matches!(ext_lower.as_str(), "css" | "scss" | "less" | "sass") {
+            // Stylesheet: textual class/id/at-rule extraction (zero new deps).
+            if let Some(css_res) = parse_css_styles(path, source) {
+                return Some(css_res);
+            }
         }
     }
 
@@ -256,6 +271,264 @@ fn parse_file(path: &Path, source: &str) -> Option<(Vec<SymbolNode>, Vec<RawCall
     super::comment_index::bind_comments_to_symbols(&mut nodes, &comment_blocks);
 
     Some((nodes, calls))
+}
+
+/// SFC (Single-File Component) dual-parse for `.vue` / `.svelte` / `.astro`.
+///
+/// Splits the file into its `<script>…</script>` and `<template>…</template>`
+/// blocks, parses the script as TSX (component logic, imports, methods) and the
+/// template as HTML (element tags → `UiElement` symbols for buttons/titles/UI
+/// nodes), then merges the two symbol sets with line offsets so line numbers
+/// stay file-absolute. `<style>` blocks are intentionally skipped here (CSS
+/// class extraction is a separate textual pass; see `parse_css_styles`).
+///
+/// Falls back to a plain TSX parse of the whole file when the script/template
+/// split fails (non-SFC content, malformed blocks).
+fn parse_sfc(
+    path: &Path,
+    source: &str,
+    ext: &str,
+) -> Option<(Vec<SymbolNode>, Vec<RawCall>)> {
+    let script = extract_sfc_block(source, "script");
+    let template = extract_sfc_block(source, "template");
+
+    let mut nodes: Vec<SymbolNode> = Vec::new();
+    let mut calls: Vec<RawCall> = Vec::new();
+
+    // 1. `<script>` → TSX symbol extraction (with line offset).
+    if let Some((body, start_line)) = script {
+        if let Some((raw_syms, raw_calls)) = parse_sfc_tsx_block(&body) {
+            // Shift symbol lines to file-absolute BEFORE call attribution, so
+            // `attribute_calls` (line-enclosure matching) works on real lines.
+            let shifted_syms: Vec<Symbol> = raw_syms
+                .iter()
+                .map(|s| Symbol {
+                    name: s.name.clone(),
+                    kind: s.kind.clone(),
+                    start_line: s.start_line + start_line - 1,
+                    end_line: s.end_line + start_line - 1,
+                    start_byte: s.start_byte,
+                    end_byte: s.end_byte,
+                })
+                .collect();
+            let shifted_sites: Vec<CallSite> = raw_calls
+                .iter()
+                .map(|c| CallSite {
+                    callee_name: c.callee_name.clone(),
+                    line: c.line + start_line - 1,
+                })
+                .collect();
+            calls.extend(attribute_calls(&shifted_syms, shifted_sites));
+            for s in shifted_syms {
+                nodes.push(SymbolNode {
+                    id: CodeGraph::make_id(path, &s.name, s.start_line),
+                    name: s.name.clone(),
+                    kind: classify_symbol_kind(&s.kind),
+                    visibility: Visibility::Unknown,
+                    file: path.to_path_buf(),
+                    start_line: s.start_line,
+                    end_line: s.end_line,
+                    signature: None,
+                    docstring: None,
+                    inline_comments: Vec::new(),
+                });
+            }
+        }
+    }
+
+    // 2. `<template>` → HTML element tags (`UiElement`).
+    if let Some((body, start_line)) = template {
+        if let Some((raw_syms, _)) = parse_sfc_html_block(&body) {
+            for s in raw_syms {
+                let l = s.start_line + start_line - 1;
+                nodes.push(SymbolNode {
+                    id: CodeGraph::make_id(path, &s.name, l),
+                    name: s.name.clone(),
+                    kind: SymbolKind::UiElement,
+                    visibility: Visibility::Public,
+                    file: path.to_path_buf(),
+                    start_line: l,
+                    end_line: s.end_line + start_line - 1,
+                    signature: None,
+                    docstring: None,
+                    inline_comments: Vec::new(),
+                });
+            }
+        }
+    }
+
+    if nodes.is_empty() {
+        return None;
+    }
+    // Dedup by (name, line) — script and template rarely collide, but a
+    // `Component` variable in script vs `<Component>` tag in template would.
+    nodes.sort_by(|a, b| a.start_line.cmp(&b.start_line).then(a.name.cmp(&b.name)));
+    nodes.dedup_by(|a, b| a.name == b.name && a.start_line == b.start_line);
+
+    // Bind comments across the whole file (both blocks).
+    let mut comment_blocks = super::comment_index::extract_comment_blocks(source);
+    comment_blocks.sort_by_key(|b| b.start_line);
+    super::comment_index::bind_comments_to_symbols(&mut nodes, &comment_blocks);
+
+    Some((nodes, calls))
+}
+
+/// Extract a `<tag>…</tag>` block's body + its 1-based start line.
+/// Handles `<script setup>` / `<template lang="pug">` opening tags.
+fn extract_sfc_block(source: &str, tag: &str) -> Option<(String, usize)> {
+    let lines: Vec<&str> = source.lines().collect();
+    let mut start_line = None;
+    let mut depth = 0usize;
+    let mut body = String::new();
+    for (idx, line) in lines.iter().enumerate() {
+        let line_num = idx + 1;
+        let trimmed = line.trim();
+        if start_line.is_none() {
+            if trimmed.starts_with(&format!("<{tag}")) && !trimmed.starts_with(&format!("</{tag}")) {
+                start_line = Some(line_num);
+                // After the `>` of the opening tag, the rest of the line is body.
+                if let Some(gt) = trimmed.find('>') {
+                    let rest = trimmed[gt + 1..].trim();
+                    if !rest.is_empty() {
+                        body.push_str(rest);
+                        body.push('\n');
+                    }
+                } else {
+                    // Multi-line opening tag: next line starts the body.
+                    depth = 1;
+                }
+                continue;
+            }
+        } else if trimmed.starts_with(&format!("<{tag}")) && !trimmed.starts_with(&format!("</{tag}")) {
+            depth += 1;
+        } else if trimmed.starts_with(&format!("</{tag}")) {
+            if depth == 0 {
+                // This line is the closing tag; body ends before it.
+                return Some((body, start_line?));
+            }
+            depth -= 1;
+        } else {
+            body.push_str(line);
+            body.push('\n');
+        }
+    }
+    // Reached EOF without a close (malformed) — still return what we have.
+    if start_line.is_some() {
+        Some((body, start_line?))
+    } else {
+        None
+    }
+}
+
+/// Parse an SFC script body as TSX (symbols + call sites).
+fn parse_sfc_tsx_block(body: &str) -> Option<(Vec<Symbol>, Vec<CallSite>)> {
+    let tree = parse_source(body, Lang::Tsx)?;
+    let raw = extract_symbols_from_tree(body, Lang::Tsx, &tree)?;
+    let sites = extract_call_sites_from_tree(body, Lang::Tsx, &tree);
+    Some((raw, sites))
+}
+
+/// Parse an SFC template body as HTML (element tags only).
+fn parse_sfc_html_block(body: &str) -> Option<(Vec<Symbol>, Vec<CallSite>)> {
+    let tree = parse_source(body, Lang::Html)?;
+    let raw = extract_symbols_from_tree(body, Lang::Html, &tree)?;
+    Some((raw, Vec::new()))
+}
+
+/// Textual CSS/SCSS/LESS/SASS selector extraction (zero new tree-sitter deps).
+///
+/// Character-scan each line for:
+/// - `.class` selectors (anywhere — handles `.a .b` spacing, `.a,.b` commas,
+///   single-line nesting like `@media { .x { … } }`, and `:pseudo` stripping)
+/// - `#id` selectors (kept as `#id`)
+/// - `@keyframes name` animation names
+///
+/// Every hit becomes a `UiElement` symbol so a natural-language query for a
+/// class name ("coupon-panel" / 优惠券面板 via thesaurus) can recall the
+/// stylesheet. Property values like `0.5` or `color: red` produce no hits
+/// (a `.` only starts a class when followed by a letter/underscore/CJK).
+fn parse_css_styles(path: &Path, source: &str) -> Option<(Vec<SymbolNode>, Vec<RawCall>)> {
+    let mut nodes: Vec<SymbolNode> = Vec::new();
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+
+    for (idx, line) in source.lines().enumerate() {
+        let line_num = idx + 1;
+        let chars: Vec<char> = line.chars().collect();
+        let mut i = 0;
+        while i < chars.len() {
+            let ch = chars[i];
+            if (ch == '.' || ch == '#') && i + 1 < chars.len() && chars[i + 1].is_ascii_alphabetic() {
+                // Collect identifier after the . / # marker.
+                let mut j = i + 1;
+                while j < chars.len()
+                    && (chars[j].is_ascii_alphanumeric() || chars[j] == '-' || chars[j] == '_')
+                {
+                    j += 1;
+                }
+                let ident: String = chars[i + 1..j].iter().collect();
+                if ident.len() >= 2 {
+                    let name = if ch == '#' { format!("#{ident}") } else { ident };
+                    let key = format!("{name}@{line_num}");
+                    if seen.insert(key) {
+                        nodes.push(SymbolNode {
+                            id: CodeGraph::make_id(path, &name, line_num),
+                            name,
+                            kind: SymbolKind::UiElement,
+                            visibility: Visibility::Public,
+                            file: path.to_path_buf(),
+                            start_line: line_num,
+                            end_line: line_num,
+                            signature: None,
+                            docstring: None,
+                            inline_comments: Vec::new(),
+                        });
+                    }
+                }
+                i = j;
+                continue;
+            }
+            if ch == '@' && chars[i..].iter().collect::<String>().starts_with("@keyframes") {
+                // Jump past "@keyframes" then take the next identifier.
+                let mut j = i + "@keyframes".len();
+                while j < chars.len() && (chars[j].is_whitespace()) {
+                    j += 1;
+                }
+                let start = j;
+                while j < chars.len()
+                    && (chars[j].is_ascii_alphanumeric() || chars[j] == '-' || chars[j] == '_')
+                {
+                    j += 1;
+                }
+                let name: String = chars[start..j].iter().collect();
+                if name.len() >= 2 {
+                    let key = format!("{name}@{line_num}");
+                    if seen.insert(key) {
+                        nodes.push(SymbolNode {
+                            id: CodeGraph::make_id(path, &name, line_num),
+                            name,
+                            kind: SymbolKind::UiElement,
+                            visibility: Visibility::Public,
+                            file: path.to_path_buf(),
+                            start_line: line_num,
+                            end_line: line_num,
+                            signature: None,
+                            docstring: None,
+                            inline_comments: Vec::new(),
+                        });
+                    }
+                }
+                i = j;
+                continue;
+            }
+            i += 1;
+        }
+    }
+
+    if nodes.is_empty() {
+        None
+    } else {
+        Some((nodes, Vec::new()))
+    }
 }
 
 fn parse_xml_mapper(path: &Path, source: &str) -> Option<(Vec<SymbolNode>, Vec<RawCall>)> {
@@ -329,6 +602,8 @@ pub const INDEXED_EXTS: &[&str] = &[
     "go", "java", "c", "h", "cc", "cpp", "cxx", "hpp", "hh", "cs", "php", "phtml",
     "kt", "kts", "swift", "dart", "rb", "scala", "sc", "sol", "lua", "tf", "tfvars",
     "erl", "hrl", "r", "nix", "xml", "sql", "yml", "yaml", "json", "toml",
+    // Frontend stylesheets + SFC flavors: textual selector extraction (zero deps).
+    "css", "scss", "less", "sass", "svelte", "astro", "html",
 ];
 
 pub fn is_indexed_ext(ext: &str) -> bool {
@@ -872,6 +1147,10 @@ struct IndexState {
     units: HashMap<PathBuf, FileUnit>,
     /// Composed query graph (derived from `units`).
     graph: Option<Arc<CodeGraph>>,
+    /// Directory aggregate index (derived from `graph`), persisted as a
+    /// sidecar `dirindex.v1.json` next to `units.v3.json`. `None` = not yet
+    /// built / sidecar missing → tools fall back to a live graph walk.
+    dirindex: Option<Arc<super::retrieval::DirIndex>>,
     building: bool,
     /// Stats from the most recent refresh (for `atomcode init` reporting).
     last_stats: Option<RefreshStats>,
@@ -884,6 +1163,7 @@ impl Default for IndexState {
             walk_fp: 0,
             units: HashMap::new(),
             graph: None,
+            dirindex: None,
             building: false,
             last_stats: None,
         }
@@ -942,6 +1222,18 @@ impl CodeIndex {
         self.get_with_progress(root, &|_| {})
     }
 
+    /// Directory aggregate index for `root` (lazily built if the sidecar is
+    /// missing). Returns `None` if no graph is loaded for `root`.
+    pub fn get_dirindex(&self, root: &Path) -> Option<Arc<super::retrieval::DirIndex>> {
+        let root = super::canonical(root);
+        let guard = self.inner.lock().unwrap();
+        if guard.root.as_ref() == Some(&root) {
+            guard.dirindex.clone()
+        } else {
+            None
+        }
+    }
+
     /// Ensure the index matches `root` on disk. Unchanged files keep their units;
     /// only dirty/new files are re-parsed, then the graph is recomposed if needed.
     ///
@@ -956,8 +1248,16 @@ impl CodeIndex {
         loop {
             let same_root = guard.root.as_ref() == Some(&root);
             if same_root && guard.walk_fp == fp {
-                if let Some(g) = guard.graph.as_ref() {
-                    return g.clone();
+                if let Some(g) = guard.graph.clone() {
+                    // Lazy-build the directory index if it is missing (old
+                    // cache or a graph that predates the sidecar).
+                    if guard.dirindex.is_none() {
+                        let di = Arc::new(super::retrieval::DirIndex::build(&g));
+                        let path = root.join(super::retrieval::DIRINDEX_REL);
+                        let _ = di.save(&path);
+                        guard.dirindex = Some(di);
+                    }
+                    return g;
                 }
             }
             if guard.building {
@@ -1008,6 +1308,7 @@ impl CodeIndex {
                         guard.walk_fp = fp;
                         guard.units = units;
                         guard.graph = Some(g.clone());
+                        guard.dirindex = Some(Arc::new(super::retrieval::DirIndex::build(&g)));
                         guard.last_stats = Some(RefreshStats {
                             reparsed: 0,
                             removed: 0,
@@ -1074,6 +1375,7 @@ impl CodeIndex {
             guard.walk_fp = fp;
             guard.units = units;
             guard.graph = Some(g.clone());
+            guard.dirindex = Some(Arc::new(super::retrieval::DirIndex::build(&g)));
             guard.last_stats = Some(stats);
             guard.building = false;
             self.cv.notify_all();
@@ -1134,6 +1436,117 @@ mod tests {
                 .any(|e| e.to == compute.id),
             "run → compute across files"
         );
+    }
+
+    #[test]
+    fn sfc_vue_dual_parse_extracts_script_and_template() {
+        let d = tempfile::tempdir().unwrap();
+        let src = r#"<template>
+  <div class="coupon-panel">
+    <el-button @click="claimCoupon">领取优惠券</el-button>
+    <el-dialog title="优惠券详情"></el-dialog>
+  </div>
+</template>
+
+<script setup lang="ts">
+import { ref } from 'vue'
+const loading = ref(false)
+function claimCoupon() {
+  loading.value = true
+}
+</script>
+
+<style scoped>
+.coupon-panel { color: red; }
+</style>
+"#;
+        std::fs::write(d.path().join("CouponPanel.vue"), src).unwrap();
+        let g = build_graph(d.path());
+
+        // Script block: function + variable symbols are indexed.
+        let claim = g
+            .find_by_name("claimCoupon")
+            .into_iter()
+            .next()
+            .expect("claimCoupon must be extracted from <script>");
+        assert_eq!(claim.kind, SymbolKind::Function);
+
+        // Template block: element tags are indexed as UiElement symbols —
+        // the exact "按钮/标题/UI 节点" recall the user asked for.
+        let button = g
+            .nodes
+            .values()
+            .find(|n| n.name == "el-button")
+            .expect("el-button must be extracted from <template>");
+        assert_eq!(button.kind, SymbolKind::UiElement);
+        assert!(
+            g.nodes.values().any(|n| n.name == "el-dialog"),
+            "el-dialog must also be extracted"
+        );
+        // No double-count from re-parse: exactly one claimCoupon.
+        assert_eq!(g.find_by_name("claimCoupon").len(), 1);
+    }
+
+    #[test]
+    fn tsx_jsx_elements_are_extracted_as_uielements() {
+        let d = tempfile::tempdir().unwrap();
+        let src = r#"import { Button, Dialog } from 'ui'
+export function CouponPanel() {
+  return (
+    <div className="coupon-panel">
+      <el-button onClick={claimCoupon}>领取优惠券</el-button>
+      <CouponDialog visible={show} />
+      <span>优惠券标题</span>
+    </div>
+  )
+}
+"#;
+        std::fs::write(d.path().join("CouponPanel.tsx"), src).unwrap();
+        let g = build_graph(d.path());
+
+        // Function still extracted normally.
+        assert!(g.find_by_name("CouponPanel").len() >= 1, "CouponPanel fn");
+
+        // JSX elements (pair + self-closing) extracted as UiElement.
+        let names: Vec<String> = g
+            .nodes
+            .values()
+            .filter(|n| n.kind == SymbolKind::UiElement)
+            .map(|n| n.name.clone())
+            .collect();
+        assert!(names.contains(&"el-button".to_string()), "el-button: {names:?}");
+        assert!(names.contains(&"CouponDialog".to_string()), "CouponDialog: {names:?}");
+        assert!(names.contains(&"span".to_string()), "span: {names:?}");
+    }
+
+    #[test]
+    fn css_scss_selectors_are_extracted_as_uielements() {
+        let d = tempfile::tempdir().unwrap();
+        let src = r#".coupon-panel {
+  color: red;
+}
+.coupon-panel .btn, .coupon-btn:hover {
+  padding: 4px;
+}
+#coupon-app { margin: 0; }
+@keyframes fadeIn { from { opacity: 0; } }
+@media (max-width: 600px) { .mobile-only { display: none; } }
+"#;
+        std::fs::write(d.path().join("coupon.scss"), src).unwrap();
+        let g = build_graph(d.path());
+
+        let names: Vec<String> = g
+            .nodes
+            .values()
+            .filter(|n| n.kind == SymbolKind::UiElement)
+            .map(|n| n.name.clone())
+            .collect();
+        assert!(names.contains(&"coupon-panel".to_string()), "class: {names:?}");
+        assert!(names.contains(&"btn".to_string()), "comma-split class: {names:?}");
+        assert!(names.contains(&"coupon-btn".to_string()), "pseudo-stripped: {names:?}");
+        assert!(names.contains(&"#coupon-app".to_string()), "id: {names:?}");
+        assert!(names.contains(&"fadeIn".to_string()), "keyframes: {names:?}");
+        assert!(names.contains(&"mobile-only".to_string()), "media-nested: {names:?}");
     }
 
     #[test]

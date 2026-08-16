@@ -94,7 +94,7 @@ fn normalize_path_for_match(p: &Path) -> String {
     stripped.replace('/', "\\").to_ascii_lowercase()
 }
 
-fn path_matches_scope(file_path: &Path, scope: &Path) -> bool {
+pub(crate) fn path_matches_scope(file_path: &Path, scope: &Path) -> bool {
     let f_norm = normalize_path_for_match(file_path);
     let sc_norm = normalize_path_for_match(scope);
     f_norm.starts_with(&sc_norm)
@@ -208,13 +208,41 @@ impl Tool for CodeExploreTool {
             })
         };
 
-        // Step 1: Score all symbols in the workspace
+        // Step 1: Score all symbols in the workspace.
+        // Opt-in BM25 lexical recall (ATOMCODE_EXPLORE_BM25=1): surface naming-plain
+        // core files (run_loop.rs / turn.rs / tool_calls.rs) that the semantic-anchor
+        // gate would otherwise drop before scoring.
+        let bm25_scores: HashMap<SymbolId, f64> = {
+            let enabled = std::env::var("ATOMCODE_EXPLORE_BM25").as_deref() == Ok("1");
+            if enabled {
+                let stats = super::retrieval::IdfStats::build(&graph);
+                super::retrieval::bm25_search(&graph, &stats, &query_tokens, scope_path.as_deref(), 64)
+                    .into_iter()
+                    .map(|h| (h.node_id, h.score))
+                    .collect()
+            } else {
+                HashMap::new()
+            }
+        };
+        // Opt-in semantic concept-vector path (ATOMCODE_EXPLORE_CONCEPT=1):
+        // project the query (with thesaurus expansions) onto concept axes so a
+        // Chinese query can cosine-match English code without any model.
+        let query_concept_vec: Vec<f32> = {
+            let enabled = std::env::var("ATOMCODE_EXPLORE_CONCEPT").as_deref() == Ok("1");
+            if enabled {
+                super::retrieval::concept_projection(search_text, &query_tokens.expanded_terms)
+            } else {
+                Vec::new()
+            }
+        };
         let scored_files = score_workspace_symbols(
             &graph,
             &query_tokens,
             &parsed_query,
             &project_tokens,
             scope_path.as_deref(),
+            &bm25_scores,
+            &query_concept_vec,
         );
 
         if scored_files.is_empty() {
@@ -309,6 +337,7 @@ impl Tool for CodeExploreTool {
         let (flow_spine, connected) = extract_flow_spine(&graph, &scored_files);
 
         // Step 3: Render output (Mode A: Connected Flow vs Mode B: Ranked Fallback)
+        let dirindex = self.index.get_dirindex(&root);
         let output = render_explore_output(
             &graph,
             &root,
@@ -318,6 +347,8 @@ impl Tool for CodeExploreTool {
             connected,
             max_files,
             scope_path.as_deref(),
+            &query_tokens,
+            dirindex.as_deref(),
         );
 
         ok(output)
@@ -508,14 +539,28 @@ fn has_genuine_match_anchor(tokens: &SearchTokens, node: &SymbolNode) -> bool {
 }
 
 /// Score all symbols across files using multi-field similarity & graph topology.
+///
+/// `bm25_scores` is the opt-in BM25 lexical recall (symbol id → raw BM25 score).
+/// Two effects:
+/// 1. SOFT-ANCHOR: a symbol that fails the semantic-anchor gate is NOT dropped —
+///    it gets a 0.3 decay instead, so naming-plain core files (run_loop.rs /
+///    turn.rs / tool_calls.rs) still reach the corpus; pure noise is filtered
+///    by the `text_match` threshold below (relevance floor, separate from the
+///    semantic gate).
+/// 2. RRF-FUSION: the BM25 score contributes a bounded bonus (0..25) to the
+///    final raw score, so lexical recall is a real ranking signal, not just a
+///    rescue set.
 fn score_workspace_symbols(
     graph: &CodeGraph,
     tokens: &SearchTokens,
     parsed_query: &ParsedQuery,
     project_tokens: &HashSet<String>,
     scope: Option<&Path>,
+    bm25_scores: &HashMap<SymbolId, f64>,
+    query_concept_vec: &[f32],
 ) -> Vec<FileCandidate> {
     let mut file_map: HashMap<PathBuf, Vec<ScoredSymbol>> = HashMap::new();
+    let bm25_max = bm25_scores.values().copied().fold(0.0f64, f64::max);
 
     for (_id, node) in &graph.nodes {
         if let Some(sc) = scope {
@@ -543,10 +588,17 @@ fn score_workspace_symbols(
             }
         }
 
-        // HARD SEMANTIC ANCHOR: Reject false-positive background noise from Dense Vector n-grams.
-        if !has_genuine_match_anchor(tokens, node) {
-            continue;
-        }
+        // SOFT SEMANTIC ANCHOR: symbols failing the genuine-anchor gate are NOT
+        // dropped — they get a 0.3 decay so naming-plain core files (run_loop.rs /
+        // turn.rs / tool_calls.rs) still reach the corpus. BM25 lexical hits skip
+        // the decay (a word-level match is genuine relevance).
+        let anchor_decay = if bm25_scores.contains_key(&node.id) {
+            1.0
+        } else if has_genuine_match_anchor(tokens, node) {
+            1.0
+        } else {
+            0.3
+        };
 
         let name_sim = calculate_text_similarity(tokens, &node.name);
         let mut name_bonus = 0.0;
@@ -606,7 +658,32 @@ fn score_workspace_symbols(
             _ => 0.7,
         };
 
-        let raw_score = (text_match + graph_mass * 1.0) * kind_weight;
+        // RRF-style BM25 fusion: normalized BM25 score contributes a bounded 0..25
+        // bonus (position-based weighting, so lexical recall is a real ranking
+        // signal rather than a rescue set).
+        let bm25_bonus = if bm25_max > 0.0 {
+            let norm = bm25_scores.get(&node.id).copied().unwrap_or(0.0) / bm25_max;
+            norm * 25.0
+        } else {
+            0.0
+        };
+
+        // Semantic concept-vector path (opt-in, ATOMCODE_EXPLORE_CONCEPT=1):
+        // Chinese query ↔ English code cosine similarity, bounded 0..20 bonus.
+        let concept_bonus = if !query_concept_vec.is_empty() {
+            let node_vec = super::retrieval::concept_projection(
+                &node.name,
+                &HashSet::new(),
+            );
+            let sim = super::retrieval::concept_cosine(query_concept_vec, &node_vec);
+            sim * 20.0
+        } else {
+            0.0
+        };
+
+        // anchor_decay × text_match, plus BM25/概念向量 bonus, times kind weight.
+        let raw_score =
+            (text_match * anchor_decay + graph_mass * 1.0 + bm25_bonus + concept_bonus) * kind_weight;
 
         if raw_score >= 12.0 {
             file_map.entry(node.file.clone()).or_default().push(ScoredSymbol {
@@ -753,55 +830,395 @@ fn extract_flow_spine(
     (spine_edges, connected)
 }
 
-/// Collect directories NEAR the top-ranked hits: the hit's own directory, its
-/// direct subdirectories, and its parent directory — WITHOUT listing individual
-/// files (a directory can hold many files; the point is to point the model at
-/// where to look next, not to enumerate filenames). Only directories that
-/// actually contain indexed files are reported, and a `path:` scope is respected.
-fn collect_adjacent_dirs(
+/// 目录全景分组的六类优先级:锚定 > 子树 > 父链 > 兄弟 > 图连通 > 路径词命中。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum DirGroup {
+    Anchor,
+    Subtree,
+    ParentChain,
+    Sibling,
+    GraphLinked,
+    PathHit,
+}
+
+impl DirGroup {
+    fn label(self) -> &'static str {
+        match self {
+            DirGroup::Anchor => "① 锚定目录(有锚定符号的文件)",
+            DirGroup::Subtree => "② 子树(锚定目录的更深子目录)",
+            DirGroup::ParentChain => "③ 父链(锚定目录的祖先目录)",
+            DirGroup::Sibling => "④ 兄弟目录(与锚定目录同级未命中)",
+            DirGroup::GraphLinked => "⑤ 图连通目录(锚定符号的 callee/caller 所在)",
+            DirGroup::PathHit => "⑥ 路径词命中目录(路径含查询词/词林词)",
+        }
+    }
+}
+
+/// 一个目录候选:路径 + 分组 + 分数 + 统计 + 可执行 grep 关键词。
+#[derive(Debug, Clone)]
+struct DirCandidate {
+    path: PathBuf,
+    group: DirGroup,
+    /// 目录分 0..100,可解释(锚定类 = ratio/peak/diversity;弱类 = 结构兜底)。
+    score: f64,
+    /// 目录内锚定文件数。
+    anchored_files: usize,
+    /// 目录内索引文件总数。
+    total_files: usize,
+    /// 目录内最高文件分。
+    peak_file_score: f64,
+    /// 目录内命中文件(路径 + 分数)。
+    hits: Vec<(PathBuf, f64)>,
+    /// 自动派生的 grep 关键词(查询词 + 词林扩展 + 目录内锚定符号名)。
+    grep_terms: Vec<String>,
+}
+
+/// 每组输出的目录行上限;超出折叠成 `… 及 N 个`(带计数,不丢弃)。
+const MAX_DIRS_PER_GROUP: usize = 15;
+
+/// Collect a FULL six-group directory panorama around the top-ranked hits:
+/// anchored dirs, their subtrees, parent chains, siblings, graph-linked dirs,
+/// and path-term-hit dirs. Groups are mutually exclusive (a dir joins the
+/// highest-priority group it qualifies for) and the union covers every
+/// query-related directory — nothing related is dropped, and every entry
+/// carries a scorable ranking plus grep keywords for fallback search.
+fn collect_directory_panorama(
     graph: &CodeGraph,
     top_files: &[FileCandidate],
+    tokens: &SearchTokens,
     scope: Option<&Path>,
-    max_adjacent: usize,
-) -> Vec<PathBuf> {
-    // Directories that contain indexed files (respecting scope).
-    let mut indexed_dirs: HashSet<PathBuf> = HashSet::new();
-    for file in graph.file_symbols.keys() {
-        if let Some(sc) = scope {
-            if !path_matches_scope(file, sc) {
-                continue;
+    dirindex: Option<&super::retrieval::DirIndex>,
+) -> Vec<DirCandidate> {
+    // 1. 索引目录集合(目录 -> 文件数),尊重 scope。
+    //    dirindex 直查:sidecar 预计算目录统计,免全树扫描;缺失则回退遍历。
+    let mut dir_files: HashMap<PathBuf, usize> = HashMap::new();
+    if let Some(di) = dirindex {
+        for key in di.all_dirs() {
+            let dir = super::retrieval::DirIndex::key_to_path(key);
+            if let Some(sc) = scope {
+                if !path_matches_scope(&dir, sc) {
+                    continue;
+                }
+            }
+            if let Some(e) = di.entry(&dir) {
+                dir_files.insert(dir, e.file_count);
             }
         }
-        if let Some(dir) = file.parent() {
-            indexed_dirs.insert(dir.to_path_buf());
+    } else {
+        for file in graph.file_symbols.keys() {
+            if let Some(sc) = scope {
+                if !path_matches_scope(file, sc) {
+                    continue;
+                }
+            }
+            if let Some(dir) = file.parent() {
+                *dir_files.entry(dir.to_path_buf()).or_insert(0) += 1;
+            }
         }
     }
+    if dir_files.is_empty() {
+        return Vec::new();
+    }
+    let indexed_dirs: HashSet<PathBuf> = dir_files.keys().cloned().collect();
 
-    let mut near_dirs: HashSet<PathBuf> = HashSet::new();
+    // 2. 锚定目录:候选文件所在目录 -> (锚定文件数, 峰值分, 命中文件)。
+    let mut anchor_dirs: HashMap<PathBuf, (usize, f64, Vec<(PathBuf, f64)>)> = HashMap::new();
     for fc in top_files {
         let Some(dir) = fc.file.parent() else { continue };
-        // The hit's own directory.
-        if indexed_dirs.contains(dir) {
-            near_dirs.insert(dir.to_path_buf());
+        let e = anchor_dirs.entry(dir.to_path_buf()).or_default();
+        e.0 += 1;
+        if fc.top_score > e.1 {
+            e.1 = fc.top_score;
         }
-        // Direct subdirectories of the hit's directory.
-        for d in &indexed_dirs {
-            if d.parent().is_some_and(|p| p == dir) {
-                near_dirs.insert(d.clone());
+        e.2.push((fc.file.clone(), fc.top_score));
+    }
+    let anchor_set: HashSet<PathBuf> = anchor_dirs.keys().cloned().collect();
+
+    // 3. 归属:每个索引目录进入优先级最高的分组(互斥,不重复)。
+    let mut group_of: HashMap<PathBuf, DirGroup> = HashMap::new();
+    for d in &anchor_set {
+        group_of.entry(d.clone()).or_insert(DirGroup::Anchor);
+    }
+    // 子树 / 父链:与锚定目录的包含关系(向下 / 向上)。
+    for d in &indexed_dirs {
+        if group_of.contains_key(d) {
+            continue;
+        }
+        let mut is_subtree = false;
+        let mut is_parent_chain = false;
+        for a in &anchor_set {
+            if d.starts_with(a) && d != a {
+                is_subtree = true;
+                break;
+            }
+            if a.starts_with(d) && a != d {
+                is_parent_chain = true;
+                break;
             }
         }
-        // The hit's parent directory (sibling modules one level up).
-        if let Some(parent) = dir.parent() {
-            if indexed_dirs.contains(parent) {
-                near_dirs.insert(parent.to_path_buf());
+        if is_subtree {
+            group_of.entry(d.clone()).or_insert(DirGroup::Subtree);
+        } else if is_parent_chain {
+            group_of.entry(d.clone()).or_insert(DirGroup::ParentChain);
+        }
+    }
+    // 兄弟:与锚定目录同父的其它目录。
+    for d in &indexed_dirs {
+        if group_of.contains_key(d) {
+            continue;
+        }
+        let parent_dir = d.parent();
+        let has_anchor_sibling = anchor_set.iter().any(|a| match (a.parent(), parent_dir) {
+            (Some(ap), Some(pd)) => ap == pd,
+            _ => false,
+        });
+        if has_anchor_sibling {
+            group_of.entry(d.clone()).or_insert(DirGroup::Sibling);
+        }
+    }
+    // 图连通:锚定符号的 callee/caller 所在目录。
+    {
+        let mut linked: HashSet<PathBuf> = HashSet::new();
+        for fc in top_files {
+            for s in &fc.symbols {
+                if let Some(callees) = graph.callees(s.node.id) {
+                    for e in callees {
+                        if let Some(n) = graph.node(e.to) {
+                            if let Some(dir) = n.file.parent() {
+                                linked.insert(dir.to_path_buf());
+                            }
+                        }
+                    }
+                }
+                if let Some(callers) = graph.callers(s.node.id) {
+                    for e in callers {
+                        if let Some(n) = graph.node(e.to) {
+                            if let Some(dir) = n.file.parent() {
+                                linked.insert(dir.to_path_buf());
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        for d in linked {
+            group_of.entry(d).or_insert(DirGroup::GraphLinked);
+        }
+    }
+    // 路径词命中:目录路径含查询词/词林扩展词/标识符。
+    {
+        let mut terms: Vec<String> = Vec::new();
+        for w in &tokens.words {
+            if w.len() >= 3 {
+                terms.push(w.clone());
+            }
+        }
+        terms.extend(tokens.expanded_terms.iter().cloned());
+        terms.extend(tokens.code_identifiers.iter().cloned());
+        if !terms.is_empty() {
+            for d in &indexed_dirs {
+                if group_of.contains_key(d) {
+                    continue;
+                }
+                let p = normalize_path_for_match(d);
+                if terms.iter().any(|t| p.contains(&t.to_ascii_lowercase())) {
+                    group_of.entry(d.clone()).or_insert(DirGroup::PathHit);
+                }
             }
         }
     }
 
-    let mut out: Vec<PathBuf> = near_dirs.into_iter().collect();
-    out.sort();
-    out.truncate(max_adjacent);
+    // 4. 计算每个目录的分数与 grep 关键词。
+    let mut out: Vec<DirCandidate> = Vec::new();
+    for (dir, group) in group_of {
+        let total = dir_files.get(&dir).copied().unwrap_or(0);
+        let (anchored, peak, hits) = anchor_dirs
+            .get(&dir)
+            .cloned()
+            .unwrap_or((0, 0.0, Vec::new()));
+
+        // grep 词只含与本次查询相关的词(防污染:目录内无关符号名不得混入)。
+        let mut grep_terms: Vec<String> = Vec::new();
+        // 1. 查询标识符(最精确)。
+        for id in &tokens.code_identifiers {
+            if !grep_terms.contains(id) {
+                grep_terms.push(id.clone());
+            }
+        }
+        // 2. 查询单词(≥3 字母,切词时已滤停用词)。
+        for w in &tokens.words {
+            if w.len() >= 3 && !grep_terms.contains(w) {
+                grep_terms.push(w.clone());
+            }
+        }
+        // 3. 词林扩展词(≥3,避免单字母噪声)。
+        for t in &tokens.expanded_terms {
+            if t.len() >= 3 && !grep_terms.contains(t) {
+                grep_terms.push(t.clone());
+            }
+        }
+        // 4. 锚定目录:仅纳入与查询词/扩展词/标识符有词法关联的同族符号名
+        //    (名称包含查询词,或查询词包含该名称 —— 无关符号名一律排除)。
+        if anchor_set.contains(&dir) {
+            let query_terms: Vec<String> = tokens
+                .words
+                .iter()
+                .chain(tokens.code_identifiers.iter())
+                .chain(tokens.expanded_terms.iter())
+                .map(|s| s.to_ascii_lowercase())
+                .collect();
+            for id in symbols_in_dir(graph, &dir) {
+                if let Some(n) = graph.node(*id) {
+                    let name_lower = n.name.to_ascii_lowercase();
+                    let related = query_terms
+                        .iter()
+                        .any(|t| t.len() >= 3 && (name_lower.contains(t) || t.contains(&name_lower)));
+                    if related && n.name.len() >= 3 && !grep_terms.contains(&n.name) {
+                        grep_terms.push(n.name.clone());
+                        if grep_terms.len() >= 6 {
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+        grep_terms.truncate(6);
+
+        let score = match group {
+            DirGroup::Anchor | DirGroup::GraphLinked => {
+                let ratio = if total > 0 { anchored as f64 / total as f64 } else { 0.0 };
+                let peak_norm = (peak / 80.0).min(1.0);
+                let div_norm = directory_term_diversity(tokens, graph, &dir);
+                (0.60 * ratio + 0.25 * peak_norm + 0.15 * div_norm) * 100.0
+            }
+            _ => weak_dir_score(&dir, &anchor_set, tokens, graph),
+        };
+
+        out.push(DirCandidate {
+            path: dir,
+            group,
+            score,
+            anchored_files: anchored,
+            total_files: total,
+            peak_file_score: peak,
+            hits,
+            grep_terms,
+        });
+    }
+
+    // 5. 组间固定顺序(①→⑥)+ 组内按分数降序。
+    out.sort_by(|a, b| {
+        a.group
+            .cmp(&b.group)
+            .then_with(|| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal))
+    });
     out
+}
+
+/// 目录下所有符号 id(file_symbols 的 key 是文件,目录需遍历)。
+fn symbols_in_dir<'g>(graph: &'g CodeGraph, dir: &Path) -> Vec<&'g SymbolId> {
+    let mut out: Vec<&SymbolId> = Vec::new();
+    for (f, ids) in &graph.file_symbols {
+        if f.parent() == Some(dir) {
+            out.extend(ids.iter());
+        }
+    }
+    out
+}
+
+/// 目录内锚定符号命中的不同查询词种类(归一 0..1,上限 5 种)。
+fn directory_term_diversity(tokens: &SearchTokens, graph: &CodeGraph, dir: &Path) -> f64 {
+    let query_terms: Vec<String> = tokens
+        .words
+        .iter()
+        .chain(tokens.expanded_terms.iter())
+        .chain(tokens.code_identifiers.iter())
+        .map(|s| s.to_ascii_lowercase())
+        .collect();
+    if query_terms.is_empty() {
+        return 0.0;
+    }
+    let mut hit: HashSet<String> = HashSet::new();
+    for id in symbols_in_dir(graph, dir) {
+        if let Some(n) = graph.node(*id) {
+            let name = n.name.to_ascii_lowercase();
+            for t in &query_terms {
+                if name.contains(t) {
+                    hit.insert(t.clone());
+                }
+            }
+        }
+    }
+    (hit.len() as f64 / 5.0).min(1.0)
+}
+
+/// 弱类目录分:父链近距 + 路径词法 + 兄弟锚定比 + 活跃度,保证可排序。
+fn weak_dir_score(
+    dir: &Path,
+    anchor_set: &HashSet<PathBuf>,
+    tokens: &SearchTokens,
+    graph: &CodeGraph,
+) -> f64 {
+    // 父链近距:离最近锚定目录的层级距离(1 级 = 1.0,2 级 = 0.5,……)。
+    let mut proximity: f64 = 0.0;
+    for a in anchor_set {
+        let mut d = dir.to_path_buf();
+        let mut depth = 1.0;
+        loop {
+            if d == *a {
+                proximity = proximity.max(1.0 / depth);
+                break;
+            }
+            match d.parent() {
+                Some(p) if !p.as_os_str().is_empty() => {
+                    d = p.to_path_buf();
+                    depth += 1.0;
+                }
+                _ => break,
+            }
+        }
+    }
+
+    // 路径词法:目录路径含查询词/词林扩展词。
+    let p = normalize_path_for_match(dir);
+    let mut path_sim = 0.0;
+    for w in &tokens.words {
+        if w.len() >= 3 && p.contains(&w.to_ascii_lowercase()) {
+            path_sim = 1.0;
+            break;
+        }
+    }
+    if path_sim == 0.0 {
+        for t in &tokens.expanded_terms {
+            if p.contains(&t.to_ascii_lowercase()) {
+                path_sim = 1.0;
+                break;
+            }
+        }
+    }
+
+    // 兄弟锚定比:同级目录中被锚定的比例。
+    let parent_dir = dir.parent();
+    let mut siblings_total = 0usize;
+    let mut siblings_anchored = 0usize;
+    for a in anchor_set {
+        if let (Some(ap), Some(pd)) = (a.parent(), parent_dir) {
+            if ap == pd {
+                siblings_total += 1;
+                siblings_anchored += 1;
+            }
+        }
+    }
+    let sib_ratio = if siblings_total > 0 {
+        siblings_anchored as f64 / siblings_total as f64
+    } else {
+        0.0
+    };
+
+    // 活跃度:目录在索引中是否含符号文件。
+    let active = if symbols_in_dir(graph, dir).is_empty() { 0.8 } else { 1.0 };
+
+    (0.30 * proximity + 0.25 * path_sim + 0.25 * sib_ratio + 0.20 * active) * 100.0
 }
 
 /// Per-symbol match signal, so the candidate table marks EACH symbol (a file
@@ -829,6 +1246,8 @@ fn render_explore_output(
     connected: bool,
     max_files: usize,
     scope: Option<&Path>,
+    tokens: &SearchTokens,
+    dirindex: Option<&super::retrieval::DirIndex>,
 ) -> String {
     let mut out = Vec::new();
     let top_files = &candidates[..candidates.len().min(max_files)];
@@ -1085,22 +1504,58 @@ fn render_explore_output(
         }
     }
 
-    // 📁 Adjacent DIRECTORIES near the top hits: the hit's own directory, its
-    // direct subdirectories, and its parent directory. Directories only — a dir
-    // can hold many files; the point is to point where to look next, not to
-    // enumerate filenames.
-    const MAX_ADJACENT_DIRS: usize = 16;
-    let adjacent = collect_adjacent_dirs(graph, top_files, scope, MAX_ADJACENT_DIRS);
-    if !adjacent.is_empty() {
-        out.push("\n> 📁 **Adjacent directories** (hit's dir + nearby sub/parent dirs — likely related, NOT matched by your query; explore these next):".to_string());
-        let listed_adj: Vec<String> = adjacent
-            .iter()
-            .map(|d| {
-                let rel = d.strip_prefix(root).unwrap_or(d).display().to_string();
-                format!("`{rel}/`")
-            })
-            .collect();
-        out.push(format!("> {}", listed_adj.join(" ")));
+    // 📁 相邻目录全景:六类分组(锚定/子树/父链/兄弟/图连通/路径词命中),带分 + grep 提示。
+    let dirs = collect_directory_panorama(graph, top_files, tokens, scope, dirindex);
+    if !dirs.is_empty() {
+        out.push("\n> 📁 **Directory Panorama** (six groups, scored + grep fallback):".to_string());
+        let mut last_group: Option<DirGroup> = None;
+        let mut group_count = 0usize;
+        let mut group_overflow = 0usize;
+        for d in &dirs {
+            if last_group != Some(d.group) {
+                if let Some(_) = last_group {
+                    if group_overflow > 0 {
+                        out.push(format!(">   … 及 {group_overflow} 个同级目录(带计数,不丢弃)"));
+                    }
+                    group_overflow = 0;
+                }
+                out.push(format!("> **{}**", d.group.label()));
+                last_group = Some(d.group);
+                group_count = 0;
+            }
+            if group_count >= MAX_DIRS_PER_GROUP {
+                group_overflow += 1;
+                continue;
+            }
+            group_count += 1;
+            let rel = d.path.strip_prefix(root).unwrap_or(&d.path).display().to_string();
+            let hits_desc = if d.hits.is_empty() {
+                "(未命中,结构相关)".to_string()
+            } else {
+                let hs: Vec<String> = d
+                    .hits
+                    .iter()
+                    .take(3)
+                    .map(|(f, s)| {
+                        let rf = f.strip_prefix(root).unwrap_or(f).display().to_string();
+                        format!("{}({:.1})", rf, s)
+                    })
+                    .collect();
+                hs.join(", ")
+            };
+            let grep = if d.grep_terms.is_empty() {
+                String::new()
+            } else {
+                format!(" └ grep: `grep -rn \"{}\" {rel}/`", d.grep_terms.join("|"))
+            };
+            out.push(format!(
+                "> | {:.1} | `{rel}/` | {}/{} 文件锚定 · peak {:.1} | {hits_desc} |{grep}",
+                d.score, d.anchored_files, d.total_files, d.peak_file_score
+            ));
+        }
+        if group_overflow > 0 {
+            out.push(format!(">   … 及 {group_overflow} 个同级目录(带计数,不丢弃)"));
+        }
     }
 
     out.push("\n> 🔍 **Deep Investigation Tip**: To inspect any folded function body, use `read_file` with the line numbers provided above. To trace cross-module callers/callees in full detail, supply the exact symbol or file path to `code_explore`.\n".to_string());
@@ -1164,7 +1619,7 @@ fn render_explore_output(
         spine_shown = spine_shown,
         spine_total = spine_total,
         remaining = remaining,
-        adjacent = adjacent.len(),
+        adjacent = dirs.len(),
     );
     out.insert(1, coverage);
 
@@ -1278,7 +1733,7 @@ mod tests {
             symbols,
         }];
         let root = PathBuf::from(".");
-        let out = render_explore_output(&graph, &root, "coverage probe", &candidates, &[], false, 8, None);
+        let out = render_explore_output(&graph, &root, "coverage probe", &candidates, &[], false, 8, None, &SearchTokens::default(), None);
         assert!(out.contains("📊 **Coverage**"), "coverage summary missing:\n{out}");
         assert!(out.contains("showing 1/1 candidate file(s)"), "shown/total missing:\n{out}");
         assert!(out.contains("2 high-scoring symbol(s) omitted"), "omitted count missing:\n{out}");
@@ -1324,7 +1779,7 @@ mod tests {
         let flow_spine: Vec<(u64, Option<u64>, super::super::graph::EdgeKind)> = (0..40u64)
             .map(|i| (i, Some(i + 1), super::super::graph::EdgeKind::Calls))
             .collect();
-        let out = render_explore_output(&graph, &root, "q", &candidates, &flow_spine, true, 8, None);
+        let out = render_explore_output(&graph, &root, "q", &candidates, &flow_spine, true, 8, None, &SearchTokens::default(), None);
         assert!(out.contains("showing 8/15 candidate file(s)"), "shown/total:\n{out}");
         assert!(
             out.contains("7 remaining candidate file(s) — ALL listed with full paths below"),
@@ -1475,6 +1930,8 @@ mod tests {
             false,
             8,
             Some(&scope),
+            &SearchTokens::default(),
+            None,
         );
         assert!(out.contains("🔭 **Search scope**"), "scope hint missing:\n{out}");
         assert!(out.contains("SIBLING layers"), "sibling-layers hint missing:\n{out}");
@@ -1507,7 +1964,7 @@ mod tests {
                 graph_mass: 10.0,
             }],
         }];
-        let no_contract = render_explore_output(&graph, &root, "q", &func_candidates, &[], false, 8, None);
+        let no_contract = render_explore_output(&graph, &root, "q", &func_candidates, &[], false, 8, None, &SearchTokens::default(), None);
         assert!(!no_contract.contains("🧩 **Contract hit**"), "contract hint should not fire for a function:\n{no_contract}");
         assert!(no_contract.contains("🎯 **Low hit count**"), "low-hit should still fire:\n{no_contract}");
     }
@@ -1575,7 +2032,7 @@ mod tests {
             }],
         }];
         let root = PathBuf::from(".");
-        let out = render_explore_output(&graph, &root, "repair_tool_args", &candidates, &[], false, 8, None);
+        let out = render_explore_output(&graph, &root, "repair_tool_args", &candidates, &[], false, 8, None, &SearchTokens::default(), None);
         // 📁 now lists the hit's DIRECTORY (not sibling filenames): the tools/
         // dir must appear; the far kernel/src dir must not.
         assert!(
@@ -1647,6 +2104,8 @@ mod tests {
             false,
             8,
             Some(&scope),
+            &SearchTokens::default(),
+            None,
         );
         // The Coverage line must surface the workspace contrast: only 1 of 2 files /
         // 1 of 2 symbols were searched, and 1 symbol is OUTSIDE the scope — so a

@@ -107,6 +107,93 @@ auto_update = true  # 打开后重启自动无感更新(默认关,按需开)
 
 ---
 
+## 四·五、项目级自定义指令:与官方 md 的差异(⚠ 更新时别忘)
+
+**官方**:项目指令只认三/四层 Markdown 约定 —— `<project>/.atomcode.md` / `ATOMCODE.md` / `AGENTS.md` / `CLAUDE.md`(`instructions.rs` 查找顺序),外加用户层 `.atomcode.user.md`。
+
+**本 fork 额外支持:项目级"业务词/领域词"词林**(explore.rs:311-319):
+
+```
+<project>/.atomcode/thesaurus/*.txt   ← 项目自己的业务术语表
+```
+
+- 格式与全局词林相同:`中文词, 同义词 = en1, en2`(每行一条);
+- 在每次 `code_explore` 查询时按项目加载(`execute` 入口 `load_from_dir`),**项目私有词不污染全局**;
+- 用途:电商项目的 `下单=place_order`、医疗项目的 `处方=prescription` 等业务黑话,写进项目的 `.atomcode/thesaurus/` 即可让该项目的检索/词林命中率大幅提升。
+
+> **这就是"db.md / 业务词点 md"的落点**:官方没有项目级术语表机制;本 fork 用 `<project>/.atomcode/thesaurus/*.txt` 承担"业务词定义文件"的角色。工作区历史里没有找到名为 `db.md` 的文件 —— 若你记忆中的是项目里某业务词表,它就是这个目录下的 txt(或按同样格式补一份即可,`/init` 不生成它,需手建)。
+> **⚠ 这是官方之外的 fork 独有改动,升级/合入官方时不要丢。**
+
+## 四·六、用户独有默认配置(新电脑参考模板,⚠ 更新时别忘)
+
+以下配置都是**官方分支之外**的 fork 独有项,默认值已在代码里内置(写不写行为一致),但**在新电脑上需要知道自己有哪些可调项**,故完整列出(仅结构,不含密钥):
+
+```toml
+# ── fork 独有:codeintel 图谱工具可见性 ──────────────────────────
+[codeintel]
+# "unified"(默认)= 只暴露 repo_map + code_explore(报告/探索两件套)
+# "full" = 暴露全部底层图谱工具(find_symbol/trace_*/blast_radius/file_deps…)
+mode = "unified"
+
+[codeintel.ignore]
+enabled = true                                   # 编译产物/缓存过滤开关
+ignore_file = "~/.atomcode/.codegraphignore"     # 全局忽略规则文件
+patterns = [                                     # 额外自定义忽略通配符
+    "*cache*", "*temp*", "node_modules/", "dist/", "target/",
+    "bin/", "obj/", "__pycache__/", "*.min.js", "*.map",
+]
+
+# ── fork 独有:工具输出折叠阈值 + 不折叠白名单 ──────────────────
+[tools.tool_output]
+max_bytes = 65536                                # 超此字节折叠为头尾预览;0=禁用折叠
+no_fold_tools = ["repo_map", "code_explore", "find_symbol",
+                 "trace_chain", "blast_radius", "web_fetch", "web_search"]
+
+# ── 官方字段但默认值常被自定义(保持手写以便新机可调) ──────────
+[tools.todo]
+enabled = true
+eager = "auto"
+
+[lsp]
+enabled = false                                  # fork 默认关 LSP(快)
+auto_detect = false
+
+[subagent]
+enabled = true
+initial_turns = 4
+max_turns = 12
+max_concurrent = 3
+timeout_secs = 900
+max_rounds = 200
+
+[loop_config]
+max_rounds = 100
+[coding]
+max_rounds = 200
+
+[datalog]
+enabled = true
+dir = "~/.atomcode/datalog"
+[notifications]
+enabled = true
+min_duration_secs = 8
+terminal = true
+system = true
+bell = true
+background_only = true
+
+[ui]
+theme = "auto"
+auto_copy_on_select = false
+auto_copy_code_blocks = false
+ai_session_naming = true
+terminal_status_glyph = true
+```
+
+> **⚠ 这两节(`[codeintel]` 模式 / `[codeintel.ignore]` 存在但官方无对应字段,以及 `[tools.tool_output] no_fold_tools`)都是 fork 独有**:升级/合入官方、或换新电脑重建配置时,记得带过来;不写则用代码内置默认值(行为不变),但你就看不到这些可调项了。API key 等敏感字段不在本模板内,请自行从原 `~/.atomcode/config.toml` 迁移。
+
+---
+
 ## 五、部署与更新
 
 ```bash

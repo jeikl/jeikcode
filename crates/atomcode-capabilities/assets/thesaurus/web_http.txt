@@ -1,0 +1,57 @@
+# Web / HTTP / 网络协议词林 (HTTP / API / 网络 / 前端通信)
+# 格式：中文 = 英文 (支持逗号隔开多个词，英文词尽量与代码标识符子串匹配)
+
+## HTTP 基础
+超文本传输协议, HTTP协议 = http, https, http_client, http_server
+请求, 响应 = request, req, response, resp, exchange
+请求头, 响应头 = header, headers, request_header, response_header
+请求体, 响应体 = body, payload, request_body, response_body
+方法, 动词 = method, get, post, put, delete, patch, options, head
+状态码, 状态 = status_code, status, http_status, ok, not_found, bad_request
+GET 请求 = get, query, fetch_get
+POST 提交 = post, submit, create, insert_request
+DELETE 删除请求 = delete, remove_request, destroy
+PUT 更新 = put, update_request, replace
+PATCH 部分更新 = patch, partial_update
+重定向 = redirect, redirect_uri, location
+幂等, 安全方法 = idempotent, idempotency, safe_method
+
+## API 与接口
+接口, 端点 = api, endpoint, route, url, path
+控制器, 处理器 = controller, handler, action, resource
+服务, 业务逻辑 = service, business_logic, facade, usecase
+数据访问, 持久层 = repository, dao, mapper, persistence, dal
+数据传输对象 = dto, vo, bo, entity, model, schema
+接口文档, 契约 = swagger, openapi, contract, spec, schema
+版本, 兼容 = version, versioning, api_version, compat, v1, v2
+鉴权, 认证 = auth, authenticate, authorize, token, jwt, oauth, login
+会话, 登录态 = session, cookie, credential, login_state
+跨域, 同源 = cors, cross_origin, same_origin, origin
+网关, 代理 = gateway, proxy, reverse_proxy, nginx
+限流, 频率限制 = rate_limit, throttle, api_quota, usage_limit
+
+## 网络与协议
+网络, 套接字 = network, socket, tcp, udp, ip, dns
+连接, 握手 = connect, connection, handshake, tls, ssl
+端口, 监听 = port, listen, bind, addr, address
+超时重连 = timeout, reconnect, retry_connect, keepalive, keep_alive
+轮询, 长轮询 = poll, long_poll, polling
+长连接, 心跳 = heartbeat, ping, pong, keepalive
+流式, 推送 = stream, streaming, push, sse, chunk, delta
+网页套接字, 实时 = websocket, ws, wss, realtime
+远程调用 = rpc, grpc, rmi, remoting, thrift
+消息, 发布订阅 = message, pubsub, publish, subscribe, broker, mqtt
+下载, 上传 = download, upload, multipart, file_upload, streaming_upload
+本地回环, 内网 = localhost, loopback, private_ip, internal_network
+代理绕过, 直连 = proxy, no_proxy, direct_connect, bypass
+
+## 前端通信与缓存
+异步请求, AJAX = ajax, xhr, xmlhttprequest, fetch
+axios 请求 = axios, http_client, request_util
+缓存, 缓存策略 = cache, caching, cache_control, etag, max_age
+强制缓存, 协商缓存 = cache_control, etag, last_modified, if_none_match
+Cookie 管理 = cookie, set_cookie, cookie_jar, session_cookie
+跨域请求 = cors, preflight, with_credentials
+超时配置 = timeout, connect_timeout, read_timeout, request_timeout
+重试请求 = retry, retry_request, max_retries
+响应拦截 = interceptor, middleware, interceptor, response_wrapper

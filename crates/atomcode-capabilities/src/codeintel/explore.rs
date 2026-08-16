@@ -97,6 +97,11 @@ fn query_cache_insert(
 impl CodeExploreTool {
     pub fn new(index: Arc<CodeIndex>) -> Self {
         let mut dt = DynamicThesaurus::new();
+        // Fork channel bootstrap: on first run, seed the user config dir with
+        // this fork's bundled thesaurus + builtin-tools list. Idempotent —
+        // existing files are NEVER overwritten (the user owns their copies),
+        // so subsequent launches / upgrades leave user edits untouched.
+        seed_fork_defaults();
         // Load default user-level thesaurus from ~/.atomcode/thesaurus (or ATOMCODE_HOME)
         let global_thesaurus = crate::paths::config_dir().join("thesaurus");
         if global_thesaurus.is_dir() {
@@ -108,6 +113,65 @@ impl CodeExploreTool {
         }
     }
 }
+
+/// Seed this fork's bundled defaults (thesaurus dictionaries + builtin-tools
+/// list) into the user config dir, once per file. Pure additive: an existing
+/// file (user-edited or previously seeded) is left untouched.
+fn seed_fork_defaults() {
+    let dir = crate::paths::config_dir();
+    let thes_dir = dir.join("thesaurus");
+    if let Ok(entries) = std::fs::read_dir(&thes_dir) {
+        // Directory exists; nothing more to seed unless it is empty.
+        let _ = entries.count();
+    }
+    // Best-effort: any failure is silently ignored (the user can copy the
+    // assets manually; a read-only home must not break startup).
+    let _ = std::fs::create_dir_all(&thes_dir);
+    for name in [
+        "admin_system.txt",
+        "agent_core.txt",
+        "ai_agent.txt",
+        "computer_science.txt",
+        "ecommerce.txt",
+        "fullstack_dev.txt",
+        "medical.txt",
+        "robotics.txt",
+        "web_http.txt",
+    ] {
+        let dest = thes_dir.join(name);
+        if dest.exists() {
+            continue;
+        }
+        if let Some(embedded) = THESAURUS_ASSETS.get(name) {
+            let _ = std::fs::write(&dest, embedded);
+        }
+    }
+    let tools_dest = dir.join("builtin-tools.txt");
+    if !tools_dest.exists() {
+        let _ = std::fs::write(&tools_dest, BUILTIN_TOOLS_ASSET);
+    }
+}
+
+/// Bundled thesaurus dictionaries (this fork's domain word-lists), embedded so
+/// a fresh install starts with the same thesaurus the fork was developed with.
+static THESAURUS_ASSETS: std::sync::LazyLock<std::collections::HashMap<&'static str, &'static str>> =
+    std::sync::LazyLock::new(|| {
+        let mut m = std::collections::HashMap::new();
+        m.insert("admin_system.txt", include_str!("../../assets/thesaurus/admin_system.txt"));
+        m.insert("agent_core.txt", include_str!("../../assets/thesaurus/agent_core.txt"));
+        m.insert("ai_agent.txt", include_str!("../../assets/thesaurus/ai_agent.txt"));
+        m.insert("computer_science.txt", include_str!("../../assets/thesaurus/computer_science.txt"));
+        m.insert("ecommerce.txt", include_str!("../../assets/thesaurus/ecommerce.txt"));
+        m.insert("fullstack_dev.txt", include_str!("../../assets/thesaurus/fullstack_dev.txt"));
+        m.insert("medical.txt", include_str!("../../assets/thesaurus/medical.txt"));
+        m.insert("robotics.txt", include_str!("../../assets/thesaurus/robotics.txt"));
+        m.insert("web_http.txt", include_str!("../../assets/thesaurus/web_http.txt"));
+        m
+    });
+
+/// Bundled builtin-tools catalog (what tool names may be whitelisted in
+/// `[tools.tool_output] no_fold_tools`), embedded for first-run seeding.
+static BUILTIN_TOOLS_ASSET: &str = include_str!("../../assets/builtin-tools.txt");
 
 #[derive(Deserialize)]
 struct Args {

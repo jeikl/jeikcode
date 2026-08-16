@@ -2310,11 +2310,11 @@ async fn run() -> Result<i32> {
                 && !is_running_as_backup()
                 && !cli.dev
                 && !atomcode_updater::is_package_managed()
-                // Source/self-built binaries must not stage official releases;
-                // applying them overwrites the local build and has left users
-                // with a frozen TUI after a failed CodingPlan onboarding.
-                && atomcode_capabilities::provider::signer_available()
             {
+                // Fork channel: auto_update=true stages a newer build from the
+                // built-in fork release channel (local-dev branch) or the
+                // env/config override. No signer gate — the fork's releases are
+                // plain binaries with manifest sha256 verification.
                 spawn_detached_upgrade_prep();
             }
 

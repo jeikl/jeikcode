@@ -1,0 +1,32 @@
+# 电商与交易领域词林
+# 格式：中文 = 英文 (支持逗号隔开多个词)
+
+订单, 下单, 购买 = order, trade, deal, purchase, checkout, place_order
+购物车 = cart, shopping_cart, basket
+收货地址 = shipping_address, delivery_address, address
+订单状态 = order_status, trade_state
+
+商品, 货品, 物料 = item, product, goods, sku, spu
+品类, 分类 = category, catalog
+规格, 属性 = spec, attribute, prop, variant
+上下架 = shelf_status, on_sale, publish_status
+
+库存, 仓储, 余量 = stock, inventory, warehouse, quota, balance
+扣减, 扣除, 扣减库存 = deduct, decrease, reduce, sub, decrement
+防超卖, 超卖, 缺货 = oversell, prevent_oversell, out_of_stock, sold_out
+补货, 入库 = restock, replenish, inbound, add_stock
+
+支付, 付款, 扣款 = pay, payment, charge, pay_order
+结算, 结账, 对账 = settle, settlement, checkout, reconcile
+退款, 撤销, 冲正 = refund, revert, rollback, cancel, void
+发票, 开票 = invoice, bill, receipt
+
+优惠券, 折扣券 = coupon, voucher, discount_ticket
+折扣, 满减 = discount, rebate, full_reduction
+秒杀, 促销, 团购 = seckill, flash_sale, promotion, group_buy
+积分 = points, score, credits
+会员, 权益 = member, membership, vip, privilege
+
+物流, 快递, 发货 = shipping, logistics, delivery, dispatch
+运单号 = tracking_number, waybill_no
+运费 = shipping_fee, freight

@@ -33,12 +33,37 @@ use tokio::sync::mpsc;
 
 /// Version manifest URL for self-update. A function rather than a const because
 /// the address follows the deployment profile; see `atomcode_config::endpoints`.
+///
+/// Resolution order (fork channel):
+/// 1. env `ATOMCODE_UPDATE_MANIFEST_URL` (highest, e.g. CI / one-off override)
+/// 2. config `[config] update_manifest_url` (user-set override in config.toml)
+/// 3. built-in default (this fork's `local-dev` branch channel)
 pub fn manifest_url() -> &'static str {
+    let env = std::env::var(atomcode_config::endpoints::UPDATE_MANIFEST_URL_ENV).ok();
+    if let Some(v) = env.filter(|s| !s.trim().is_empty()) {
+        return Box::leak(v.into_boxed_str());
+    }
+    if let Some(cfg) = atomcode_config::config::Config::load(&atomcode_config::config::Config::default_path()).ok() {
+        if let Some(v) = cfg.update_manifest_url.filter(|s| !s.trim().is_empty()) {
+            return Box::leak(v.into_boxed_str());
+        }
+    }
     atomcode_config::endpoints::update_manifest_url()
 }
 
 /// Base for release binary downloads; [`binary_url`] appends `/<version>/<asset>`.
+///
+/// Same resolution order as [`manifest_url`]: env > config > built-in fork channel.
 pub fn download_base() -> &'static str {
+    let env = std::env::var(atomcode_config::endpoints::UPDATE_DOWNLOAD_BASE_ENV).ok();
+    if let Some(v) = env.filter(|s| !s.trim().is_empty()) {
+        return Box::leak(v.into_boxed_str());
+    }
+    if let Some(cfg) = atomcode_config::config::Config::load(&atomcode_config::config::Config::default_path()).ok() {
+        if let Some(v) = cfg.update_download_base.filter(|s| !s.trim().is_empty()) {
+            return Box::leak(v.into_boxed_str());
+        }
+    }
     atomcode_config::endpoints::update_download_base()
 }
 
@@ -1197,7 +1222,7 @@ mod tests {
     fn binary_url_shape() {
         assert_eq!(
             binary_url("v4.19.0", "darwin-arm64"),
-            "https://atomgit.com/atomgit_atomcode/atomcode/releases/download/v4.19.0/atomcode-v4.19.0-darwin-arm64"
+            "https://atomgit.com/jeikls/atomcode/releases/download/v4.19.0/atomcode-v4.19.0-darwin-arm64"
         );
     }
 

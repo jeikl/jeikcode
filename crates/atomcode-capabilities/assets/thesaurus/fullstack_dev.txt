@@ -1,0 +1,38 @@
+# 前后端开发与系统架构通用词林 (Full-Stack & Systems)
+# 格式：中文 = 英文 (支持逗号隔开多个词)
+
+前端, 组件, 页面, 视图 = frontend, component, view, page, ui
+后端, 服务端, 控制器 = backend, server, controller, handler, endpoint
+路由, 路由表, 拦截器 = route, router, routing, interceptor, guard
+状态管理, 响应式 = state, store, pinia, vuex, redux, reactive
+生命周期, 挂载, 销毁 = lifecycle, mount, unmount, created, destroyed
+防抖, 节流 = debounce, throttle
+
+数据库, 数据源, 连接池 = database, db, datasource, connection_pool
+数据表, 实体, 模型 = table, entity, model, schema, dto, vo, po
+字段, 属性, 列名 = column, field, attribute, property
+事务, 提交, 回滚 = transaction, tx, commit, rollback
+持久层, 数据访问 = dao, repository, mapper, orm, dal
+分页, 条数, 游标 = pagination, page, page_size, limit, offset, cursor
+
+缓存, 预热, 击穿 = cache, redis, warm_up, breakdown, evict
+消息队列, 生产者, 消费者 = mq, message_queue, producer, consumer, kafka, rabbitmq
+异步, 并发, 协程, 线程 = async, asynchronous, concurrent, coroutine, thread, task
+互斥锁, 读写锁 = mutex, lock, rwlock, semaphore
+限流, 熔断, 降级 = rate_limit, throttle, circuit_breaker, fallback, degrade
+重试, 退避, 补偿 = retry, backoff, exponential_backoff, compensate
+
+中间件, 过滤器, 钩子 = middleware, filter, hook, pipeline
+配置, 环境变量 = config, configuration, env, properties, settings
+日志, 链路追踪 = log, logger, trace, tracing, span, metric
+异常, 错误码, 统一处理 = exception, error, error_code, error_handler, panic
+单元测试, 模拟 = unit_test, test, mock, stub, fixture, assert
+构建, 打包, 发布 = build, bundle, package, release, deploy, publish
+
+# 通用开发动作词条 (让中文字面无关、语义近似的调用也能召回)
+保存, 持久化, 存档, 落盘 = save, persist, durable, store, write_back, flush, archive
+更新, 修改, 重载, 刷新 = update, reload, refresh, renew, modify, refresh_config
+登录, 登陆, 认证, 会话 = login, authenticate, sign_in, auth, session, token
+发送, 派发, 推送, 传递 = send, dispatch, push, deliver, transmit, emit
+加载, 装载, 读取, 读取文件 = load, read, fetch, mount, read_file
+创建, 新建, 生成, 初始化 = create, new, generate, build, make, init, instantiate

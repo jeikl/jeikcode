@@ -1,0 +1,25 @@
+# 机器人与具身智能领域词林 (Robotics & Embodied AI)
+# 格式：中文 = 英文 (支持逗号隔开多个词)
+
+机器人, 机械臂, 移动底盘 = robot, robotic_arm, manipulator, chassis, agv, amr
+末端执行器, 夹爪, 灵巧手 = end_effector, gripper, dexterous_hand
+关节, 连杆, 自由度 = joint, link, dof, degrees_of_freedom
+驱动器, 电机, 减速器 = actuator, motor, servo, gearbox, reducer
+位姿, 姿态, 坐标系 = pose, position, orientation, frame, transform, tf
+
+正运动学, 逆运动学 = forward_kinematics, inverse_kinematics, fk, ik
+动力学, 力矩, 扭矩 = dynamics, torque, force, effort, payload
+轨迹, 路径规划 = trajectory, path_planning, motion_plan, waypoint
+避障, 碰撞检测 = obstacle_avoidance, collision_detection, safe_distance
+导航, 定位, 建图 = navigation, localization, mapping, slam, nav2
+
+传感器, 激光雷达 = sensor, lidar, laser_scan, pointcloud, rplidar
+相机, 深度图, RGBD = camera, depth_image, rgbd, point_cloud, realsense
+惯导, 陀螺仪, 里程计 = imu, gyroscope, accelerometer, odom, odometry
+控制器, 遥控 = controller, teleoperation, gamepad, joystick
+急停, 保护 = emergency_stop, estop, safety_guard, protection
+
+话题, 服务, 动作 (ROS) = topic, service, srv, action, ros2, msg
+发布者, 订阅者 = publisher, subscriber, pub, sub, listener, broadcaster
+节点, 节点图 = node, node_graph, lifecycle_node
+仿真, 数字孪生 = simulation, sim, gazebo, isaac_sim, mujoco, pybullet

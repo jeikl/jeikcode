@@ -95,6 +95,21 @@ impl Default for TodoToolConfig {
 #[serde(default)]
 pub struct ToolsConfig {
     pub todo: TodoToolConfig,
+    /// Tool-result fold threshold. Persisted as `[tools.tool_output]`.
+    #[serde(default)]
+    pub tool_output: ToolOutputConfig,
+}
+
+/// `[tools.tool_output]` — where oversized tool results are folded into a
+/// head+tail preview and spilled to an artifact (recoverable via fetch_output).
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ToolOutputConfig {
+    /// Fold threshold in bytes. Results larger than this are replaced by a
+    /// preview. `None` (or missing) → the built-in default
+    /// (`THRESHOLD_BYTES`, 64 KiB). `0` disables folding entirely.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_bytes: Option<usize>,
 }
 impl Default for CodingConfig {
     fn default() -> Self {
@@ -2439,6 +2454,7 @@ model = "missing-type"
                     enabled: false,
                     eager: TodoEagerness::Always,
                 },
+                tool_output: ToolOutputConfig::default(),
             },
             vision_preprocessor_provider: None,
             language: None,

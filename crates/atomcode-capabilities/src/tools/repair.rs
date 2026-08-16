@@ -118,6 +118,51 @@ fn repair_stringified_structured_fields(args: &str, schema: &serde_json::Value) 
         }
     }
 
+    // Schema TYPE-layer repair (grok-inspired absorption): weak models emit
+    // JSON-legal but type-wrong values — `"quantity":"3"` for an integer field,
+    // `"retry":"true"` for boolean. The syntax layer above cannot fix these
+    // (they parse fine); this pass coerces string values to the schema's
+    // expected scalar type (number/integer/boolean) when unambiguous.
+    // String-only unions stay untouched (ambiguous); `null` is left alone
+    // (serde handles it). Never touches non-string values.
+    for (name, property_schema) in properties {
+        let Some(raw) = arguments.get(name) else { continue };
+        let Some(s) = raw.as_str() else { continue };
+        let mut types = std::collections::BTreeSet::new();
+        collect_schema_types(property_schema, &mut types, 0);
+        // A union that explicitly permits strings is ambiguous; preserve it.
+        if types.contains("string") {
+            continue;
+        }
+        let coerced = if types.contains("boolean") && !types.contains("number") {
+            match s.trim().to_ascii_lowercase().as_str() {
+                "true" | "1" | "yes" | "on" => Some(serde_json::Value::Bool(true)),
+                "false" | "0" | "no" | "off" => Some(serde_json::Value::Bool(false)),
+                _ => None,
+            }
+        } else if types.contains("number") || types.contains("integer") {
+            let t = s.trim();
+            if let Ok(n) = t.parse::<i64>() {
+                if types.contains("integer") {
+                    Some(serde_json::Value::Number(n.into()))
+                } else {
+                    serde_json::Number::from_f64(n as f64)
+                        .map(serde_json::Value::Number)
+                }
+            } else if let Ok(f) = t.parse::<f64>() {
+                serde_json::Number::from_f64(f).map(serde_json::Value::Number)
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+        if let Some(v) = coerced {
+            arguments.insert(name.clone(), v);
+            changed = true;
+        }
+    }
+
     if changed {
         serde_json::to_string(&value).unwrap_or_else(|_| args.to_string())
     } else {
@@ -1563,7 +1608,7 @@ mod tests {
 use async_trait::async_trait;
 use atomcode_kernel::middleware::{BeforeOutcome, ToolMiddleware};
 use atomcode_kernel::request::RequestCtx;
-use atomcode_kernel::tool::{Tool, ToolCall};
+use atomcode_kernel::tool::{Tool, ToolCall, ToolResult};
 use std::sync::Arc;
 
 /// Repairs a tool call's JSON arguments in place before the call executes.
@@ -1606,6 +1651,39 @@ impl RepairToolArgsMiddleware {
     }
 }
 
+/// Process-wide counter of consecutive unrepairable-arguments rejections per
+/// tool name (absorption 3). Lets the deny diagnostic tell a stuck model how
+/// many times it has re-emitted the same bad arguments, so it changes approach
+/// instead of blindly retrying — the repair chain's own micro loop guard.
+static REPAIR_FAIL_COUNTS: std::sync::LazyLock<std::sync::Mutex<std::collections::HashMap<String, u32>>> =
+    std::sync::LazyLock::new(|| std::sync::Mutex::new(std::collections::HashMap::new()));
+
+/// Build a compact field-level schema description for diagnostic feedback:
+/// `field: type` per property, capped to avoid flooding the model.
+/// grok-inspired: when repair fails, the model gets the EXPECTED shape instead
+/// of a generic parse error, so it can fix the call in one round.
+fn describe_schema(schema: &serde_json::Value) -> String {
+    let Some(props) = schema.get("properties").and_then(serde_json::Value::as_object) else {
+        return "(no properties in schema)".to_string();
+    };
+    let mut descs: Vec<String> = Vec::new();
+    for (name, ps) in props {
+        let mut types = std::collections::BTreeSet::new();
+        collect_schema_types(ps, &mut types, 0);
+        let t = if types.is_empty() {
+            "any".to_string()
+        } else {
+            types.into_iter().collect::<Vec<_>>().join("|")
+        };
+        descs.push(format!("{name}: {t}"));
+        if descs.len() >= 20 {
+            descs.push("…".to_string());
+            break;
+        }
+    }
+    descs.join(", ")
+}
+
 #[async_trait]
 impl ToolMiddleware for RepairToolArgsMiddleware {
     /// Repair arguments before execution; never blocks (non-repairable input is
@@ -1621,6 +1699,41 @@ impl ToolMiddleware for RepairToolArgsMiddleware {
         // tool resolution in the kernel — matching v1, which repaired with the
         // corrected name.
         self.repair_call(tool.name(), &tool.parameters_schema(), call);
+        // grok-inspired STRUCTURED DIAGNOSTIC: when every repair layer fails and
+        // the arguments are still not valid JSON, deny with a field-level schema
+        // description instead of silently passing garbage through. The model sees
+        // exactly which fields and types are expected and can fix in one round —
+        // equivalent to grok's `invalid_arguments` structured error, but fired
+        // BEFORE the tool runs (saves the tool round-trip + the model's blind
+        // retry). Valid JSON always proceeds (repair may still have fixed it).
+        if serde_json::from_str::<serde_json::Value>(&call.arguments).is_err() {
+            // Loop-guard counter (absorption 3): count consecutive repair
+            // failures PER TOOL so a model stuck re-emitting the same bad
+            // arguments sees the count climb and gets an explicit
+            // "change approach" nudge — the repair chain's own micro loop
+            // guard, complementing the kernel's round-signature fuse.
+            let n = *REPAIR_FAIL_COUNTS
+                .lock()
+                .unwrap()
+                .entry(tool.name().to_string())
+                .and_modify(|c| *c += 1)
+                .or_insert(1u32);
+            let steer = if n >= 3 {
+                format!(
+                    " This call has been rejected {n} times in a row — STOP re-emitting the same arguments and change your approach (different field values, or ask the user)."
+                )
+            } else if n >= 2 {
+                " Same arguments rejected twice — double-check the field names and types before retrying.".to_string()
+            } else {
+                String::new()
+            };
+            return BeforeOutcome::deny(format!(
+                "Invalid arguments for {}: the JSON could not be repaired by the local repair chain. Expected fields: {}{}",
+                tool.name(),
+                describe_schema(&tool.parameters_schema()),
+                steer
+            ));
+        }
         BeforeOutcome::Proceed
     }
 }
@@ -1710,6 +1823,41 @@ mod middleware_tests {
     }
 
     #[test]
+    fn coerces_string_values_to_schema_scalar_types() {
+        // grok-inspired TYPE-layer repair: JSON-legal but type-wrong values
+        // get coerced to the schema's expected scalar type.
+        let num_schema = json!({
+            "type": "object",
+            "properties": {
+                "quantity": { "type": "integer" },
+                "price": { "type": "number" },
+                "retry": { "type": "boolean" },
+                "label": { "type": "string" },
+                "amb": { "type": ["string", "number"] }
+            }
+        });
+        let mw = RepairToolArgsMiddleware;
+        let mut c = call(
+            "tool",
+            r#"{"quantity":"3","price":"1.5","retry":"true","label":"ok","amb":"7"}"#,
+        );
+        mw.repair_call("tool", &num_schema, &mut c);
+        let v: serde_json::Value = serde_json::from_str(&c.arguments).unwrap();
+        assert_eq!(v["quantity"], 3, "string→integer: {}", c.arguments);
+        assert_eq!(v["price"], 1.5, "string→number: {}", c.arguments);
+        assert_eq!(v["retry"], true, "string→boolean: {}", c.arguments);
+        // String-only field and string-permitting union stay untouched.
+        assert_eq!(v["label"], "ok");
+        assert_eq!(v["amb"], "7");
+        // Non-coercible string is left as-is.
+        let mut c2 = call("tool", r#"{"quantity":"abc","retry":"maybe"}"#);
+        mw.repair_call("tool", &num_schema, &mut c2);
+        let v2: serde_json::Value = serde_json::from_str(&c2.arguments).unwrap();
+        assert_eq!(v2["quantity"], "abc");
+        assert_eq!(v2["retry"], "maybe");
+    }
+
+    #[test]
     fn does_not_recursively_decode_nested_or_double_stringified_values() {
         let mw = RepairToolArgsMiddleware;
         let mut nested = call("tool", r#"{"metadata":"{\"items\":\"[1,2]\"}"}"#);
@@ -1721,6 +1869,111 @@ mod middleware_tests {
         let mut doubled = call("tool", double);
         mw.repair_call("tool", &schema(), &mut doubled);
         assert_eq!(doubled.arguments, double);
+    }
+
+    #[test]
+    fn structured_diagnostic_denies_unrepairable_arguments() {
+        // grok-inspired absorption: when every repair layer fails and the
+        // arguments are still not valid JSON, `before` denies with a
+        // field-level schema description instead of silently passing garbage
+        // through (so the model sees exactly what's expected).
+        //
+        // Exercise the async `before` path via the tokio test runtime.
+        #[derive(Clone)]
+        struct SchemaTool;
+        #[async_trait]
+        impl Tool for SchemaTool {
+            fn name(&self) -> &str {
+                "tool"
+            }
+            fn description(&self) -> &str {
+                "dummy"
+            }
+            fn parameters_schema(&self) -> serde_json::Value {
+                schema()
+            }
+            async fn execute(&self, _args: &str, _ctx: &atomcode_kernel::tool::ToolContext) -> ToolResult {
+                ToolResult {
+                    call_id: String::new(),
+                    content: String::new(),
+                    is_error: false,
+                    images: vec![],
+                }
+            }
+        }
+
+        let mw = RepairToolArgsMiddleware;
+        // Truly unrepairable input: no key-value pairs, no JSON structure —
+        // every repair layer must fail, so `before` denies with diagnostics.
+        let mut c = call("tool", "garbage###not json");
+        let tool: Arc<dyn Tool> = Arc::new(SchemaTool);
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let rt = RequestCtx::new(tx, None);
+        let outcome = futures::executor::block_on(mw.before(&mut c, &tool, &rt));
+        match outcome {
+            atomcode_kernel::middleware::BeforeOutcome::Deny { reason } => {
+                assert!(reason.contains("Expected fields"), "diagnostic must list schema: {reason}");
+                assert!(reason.contains("todos: array"), "must name the field + type: {reason}");
+            }
+            other => panic!("unrepairable args must be denied, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn repair_fail_counter_escalates_the_steer_nudge() {
+        // Absorption 3: consecutive unrepairable rejections per tool climb a
+        // counter; the third denial tells the model to STOP re-emitting.
+        #[derive(Clone)]
+        struct SchemaTool;
+        #[async_trait]
+        impl Tool for SchemaTool {
+            fn name(&self) -> &str {
+                "loop_tool"
+            }
+            fn description(&self) -> &str {
+                "dummy"
+            }
+            fn parameters_schema(&self) -> serde_json::Value {
+                schema()
+            }
+            async fn execute(&self, _args: &str, _ctx: &atomcode_kernel::tool::ToolContext) -> ToolResult {
+                ToolResult {
+                    call_id: String::new(),
+                    content: String::new(),
+                    is_error: false,
+                    images: vec![],
+                }
+            }
+        }
+
+        let mw = RepairToolArgsMiddleware;
+        let tool: Arc<dyn Tool> = Arc::new(SchemaTool);
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let rt = RequestCtx::new(tx, None);
+        // Reset the per-tool counter for a deterministic test.
+        REPAIR_FAIL_COUNTS.lock().unwrap().remove("loop_tool");
+
+        let mut first_reason = String::new();
+        for i in 1..=3 {
+            let mut c = call("loop_tool", "garbage###not json");
+            let outcome = futures::executor::block_on(mw.before(&mut c, &tool, &rt));
+            match outcome {
+                atomcode_kernel::middleware::BeforeOutcome::Deny { reason } => {
+                    first_reason = reason.clone();
+                    if i < 3 {
+                        assert!(
+                            !reason.contains("STOP re-emitting"),
+                            "steer nudge must only appear from the 3rd rejection (round {i}): {reason}"
+                        );
+                    }
+                }
+                other => panic!("unrepairable args must be denied, got: {other:?}"),
+            }
+        }
+        assert!(
+            first_reason.contains("rejected 3 times in a row") && first_reason.contains("STOP re-emitting"),
+            "3rd denial must carry the stop nudge: {first_reason}"
+        );
     }
 
     #[test]

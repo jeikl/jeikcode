@@ -833,6 +833,10 @@ pub struct Agent {
     /// before any content. `None` (default) = no first-token arm. See
     /// `AgentBuilder::first_token_timeout`.
     first_token_timeout: Option<std::time::Duration>,
+    /// Max re-issues after a first-token timeout (see
+    /// `AgentBuilder::first_token_timeout_retries`). Default
+    /// [`MAX_FIRST_TOKEN_RETRIES`].
+    first_token_retries: u32,
     /// LIVENESS: max time a mid-turn `rt.request(...)` round-trip waits for the
     /// driver's `Respond` before degrading to `Value::Null`. `None` (default) =
     /// unbounded. See `AgentBuilder::request_timeout`.
@@ -938,6 +942,7 @@ impl Agent {
             compaction_checkpoint: self.compaction_checkpoint,
             stream_timeout: self.stream_timeout,
             first_token_timeout: self.first_token_timeout,
+            first_token_retries: self.first_token_retries,
             chat_options: self.chat_options,
             // Resolve the effective working dir into a single shared handle: an explicit
             // `shared_cwd` wins; else wrap the immutable `working_dir` pin so the snapshot
@@ -1049,6 +1054,10 @@ struct RunningAgent {
     /// LIVENESS: first-token wall-clock wait bound (see `Agent::first_token_timeout`).
     /// `None` = no first-token arm.
     first_token_timeout: Option<std::time::Duration>,
+    /// Max times a round is re-issued after a first-token timeout. Set by the
+    /// specialization (config `[coding] first_token_timeout_retries` / env) and
+    /// forwarded to the stream loop, replacing the old hard-coded constant.
+    first_token_retries: u32,
     /// NEUTRAL per-call provider request knobs forwarded to `chat_stream` every
     /// round (see `Agent::chat_options`). Default = a neutral request.
     chat_options: ChatOptions,
@@ -2376,11 +2385,12 @@ impl RunningAgent {
                         // Guarded on `!saw_stream_content` so once ANY token arrives
                         // the first-token arm is inert for the rest of the round.
                         let first_token_secs = self.first_token_timeout.unwrap().as_secs();
-                        if first_token_retries < MAX_FIRST_TOKEN_RETRIES {
+                        let retry_budget = self.first_token_retries;
+                        if first_token_retries < retry_budget {
                             first_token_retries += 1;
                             self.rt.emit(AgentEvent::Warning(format!(
-                                "模型延迟高:{} 秒内无响应,正在重试({}/{MAX_FIRST_TOKEN_RETRIES})…",
-                                first_token_secs, first_token_retries
+                                "模型延迟高:{} 秒内无响应,正在重试({}/{})…",
+                                first_token_secs, first_token_retries, retry_budget
                             )));
                             // Cancellable wait so Esc during the retry gap aborts.
                             tokio::select! {
@@ -2398,7 +2408,7 @@ impl RunningAgent {
                         // error (user-facing expectation: "模型延迟过高,请稍后再试").
                         let msg = format!(
                             "模型延迟过高,请稍后再试(连续 {} 次在 {} 秒内未收到首token)",
-                            MAX_FIRST_TOKEN_RETRIES, first_token_secs
+                            retry_budget, first_token_secs
                         );
                         self.hooks.on_error(&msg).await;
                         self.rt.emit(AgentEvent::Error { message: msg, http_status: None, code: None });
@@ -3745,6 +3755,10 @@ pub struct AgentBuilder {
     /// high latency" terminal error. Once ANY first token arrives, this timer
     /// stops mattering — the ordinary `stream_timeout` takes over.
     first_token_timeout: Option<std::time::Duration>,
+    /// Max re-issues after a first-token timeout before failing the turn.
+    /// Default [`MAX_FIRST_TOKEN_RETRIES`]; config `[coding]
+    /// first_token_timeout_retries` / env `ATOMCODE_FIRST_TOKEN_RETRIES`.
+    first_token_retries: u32,
     request_timeout: Option<std::time::Duration>,
     chat_options: ChatOptions,
     /// SEAM 1: optional per-agent working dir (see `Agent::working_dir`).
@@ -3803,6 +3817,7 @@ impl Default for AgentBuilder {
             stream_timeout: None,
             request_timeout: None,
             first_token_timeout: None,
+            first_token_retries: MAX_FIRST_TOKEN_RETRIES,
             // NEUTRAL default: a no-opinion request (all None + ToolChoice::Auto).
             // The provider receives `ChatOptions::default()` unless a specialization
             // sets values via `AgentBuilder::chat_options`.
@@ -3990,6 +4005,14 @@ impl AgentBuilder {
         self.first_token_timeout = Some(d);
         self
     }
+    /// Set how many times a round is re-issued after a first-token timeout
+    /// (before the turn fails with the "模型延迟过高,请稍后再试" terminal
+    /// error). Default [`MAX_FIRST_TOKEN_RETRIES`]. `0` disables the retry —
+    /// the first first-token timeout fails the turn immediately.
+    pub fn first_token_timeout_retries(mut self, n: u32) -> Self {
+        self.first_token_retries = n;
+        self
+    }
     /// LIVENESS: bound how long a mid-turn `rt.request(...)` round-trip (e.g. an
     /// approval middleware awaiting the driver) waits for the driver's `Respond`.
     /// When set and the driver does not answer within `d` (a crashed/silent/
@@ -4109,6 +4132,7 @@ impl AgentBuilder {
             compaction_checkpoint: self.compaction_checkpoint,
             stream_timeout: self.stream_timeout,
             first_token_timeout: self.first_token_timeout,
+            first_token_retries: self.first_token_retries,
             request_timeout: self.request_timeout,
             chat_options: self.chat_options,
             working_dir: self.working_dir,

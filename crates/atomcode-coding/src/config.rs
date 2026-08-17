@@ -98,10 +98,15 @@ pub struct CodingAgentConfig {
     /// Liveness: max wall-clock wait for the FIRST stream token of a round
     /// (the model emits nothing — high latency / silent hidden reasoning).
     /// Complementary to `stream_timeout` (which bounds EVERY inter-token gap).
-    /// Default 60s, override via `ATOMCODE_FIRST_TOKEN_TIMEOUT_SECS`. On
-    /// timeout BEFORE any token, the round is retried up to 3 times, then the
-    /// turn fails with "模型延迟过高,请稍后再试". `0` disables the arm.
+    /// Default 60s, override via config `[coding] first_token_timeout_secs`
+    /// (env `ATOMCODE_FIRST_TOKEN_TIMEOUT_SECS` wins). On timeout BEFORE any
+    /// token, the round is retried up to `first_token_timeout_retries`, then
+    /// the turn fails with "模型延迟过高,请稍后再试". `0` disables the arm.
     pub first_token_timeout: Duration,
+    /// How many times the round is re-issued after a first-token timeout.
+    /// Config `[coding] first_token_timeout_retries`; env
+    /// `ATOMCODE_FIRST_TOKEN_RETRIES` wins. Default 3.
+    pub first_token_timeout_retries: u32,
     /// Liveness: max wait for a driver approval response before it degrades to deny.
     /// `Some(d)` ⇒ fail-closed after `d` — for HEADLESS / no-human drivers where a never-
     /// answered approval must not park a turn forever. `None` ⇒ PARK: block until the driver
@@ -261,6 +266,11 @@ pub struct CodingRuntimeConfig {
     pub skip_tls_verify: bool,
     pub loop_max_rounds: u32,
     pub turn_max_rounds: u32,
+    /// Liveness: max wall-clock wait for the FIRST model token of a round
+    /// (high latency / silent hidden reasoning). `0` disables the arm.
+    pub first_token_timeout: Duration,
+    /// How many times the round is re-issued after a first-token timeout.
+    pub first_token_timeout_retries: u32,
     pub subagent_config: Option<Arc<atomcode_config::config::Config>>,
     /// When true, a `max_rounds` hit becomes an interactive continue/stop
     /// checkpoint (the kernel sends a `ROUND_CAP_CHECKPOINT_KIND` Request)
@@ -380,6 +390,20 @@ impl CodingRuntimeConfig {
                 config.coding.max_rounds,
                 std::env::var("ATOMCODE_TURN_MAX_ROUNDS").ok().as_deref(),
             ),
+            // First-token liveness: env overrides `[coding]`, else defaults.
+            first_token_timeout: {
+                let secs = std::env::var("ATOMCODE_FIRST_TOKEN_TIMEOUT_SECS")
+                    .ok()
+                    .and_then(|s| s.trim().parse::<u64>().ok())
+                    .unwrap_or(config.coding.first_token_timeout_secs);
+                Duration::from_secs(secs)
+            },
+            first_token_timeout_retries: {
+                std::env::var("ATOMCODE_FIRST_TOKEN_RETRIES")
+                    .ok()
+                    .and_then(|s| s.trim().parse::<u32>().ok())
+                    .unwrap_or(config.coding.first_token_timeout_retries)
+            },
             subagent_config: Some(Arc::new(config.clone())),
             // Default off; only the interactive TUI opts in (see the CLI's
             // TUI spawn sites and `event_loop::reload_runtime_provider_from`).
@@ -428,6 +452,10 @@ impl CodingRuntimeConfig {
         config.extra_system_append = self.extra_system_append.clone();
         config.loop_max_rounds = self.loop_max_rounds;
         config.max_rounds = self.turn_max_rounds;
+        // First-token liveness: propagate the config/env-resolved value down to
+        // the agent config (so `[coding]`/env actually governs the kernel).
+        config.first_token_timeout = self.first_token_timeout;
+        config.first_token_timeout_retries = self.first_token_timeout_retries;
         config.subagent_config = self.subagent_config.clone();
         if self.interactive {
             config.request_timeout = None;
@@ -732,6 +760,7 @@ impl CodingAgentConfig {
             context_window: 128_000,
             stream_timeout: default_stream_timeout(),
             first_token_timeout: default_first_token_timeout(),
+            first_token_timeout_retries: 3,
             request_timeout: Some(Duration::from_secs(300)),
             max_continuations: 50,
             max_rounds: default_turn_max_rounds(),

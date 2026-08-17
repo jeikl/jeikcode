@@ -58,6 +58,13 @@ pub fn platform_rules() -> &'static str {
 #[serde(default)]
 pub struct CodingConfig {
     pub max_rounds: u32,
+    /// Liveness: max wall-clock seconds to wait for the FIRST model token of a
+    /// round (high latency / silent hidden reasoning). `0` disables the arm.
+    /// Env `ATOMCODE_FIRST_TOKEN_TIMEOUT_SECS` overrides. Default 60.
+    pub first_token_timeout_secs: u64,
+    /// How many times the round is re-issued after a first-token timeout.
+    /// Env `ATOMCODE_FIRST_TOKEN_RETRIES` overrides. Default 3.
+    pub first_token_timeout_retries: u32,
 }
 
 /// How aggressively the coding agent should start a structured todo list.
@@ -120,7 +127,11 @@ pub struct ToolOutputConfig {
 }
 impl Default for CodingConfig {
     fn default() -> Self {
-        Self { max_rounds: 200 }
+        Self {
+            max_rounds: 200,
+            first_token_timeout_secs: 60,
+            first_token_timeout_retries: 3,
+        }
     }
 }
 

@@ -50,6 +50,14 @@ env  ATOMCODE_UPDATE_MANIFEST_URL / ATOMCODE_UPDATE_DOWNLOAD_BASE   (最高)
 - 移除了官方的 `signer_available()` 门控(官方渠道专用,会阻塞自建源);
 - 发版脚本:`scripts/release-self-update.sh <version>`(编译各平台 → 生成 latest.json → 上传指引)。
 
+### 3.5 首 token 活性超时(fork 独有)
+
+模型发送后迟迟不吐任何 token(高延迟 / 隐藏推理静默过长)时,不再干等满 300s 流空闲超时:
+
+- 独立于 `stream_timeout`(300s 管流内任意两次事件间间隔):**`first_token_timeout` 只对每个 round 的首个 token 计时**(首个 reasoning/tool-call/text),一旦有内容即失效,交回流空闲超时 —— 互补不重复;
+- 超时(尚未产 token)自动重发,至多 `first_token_timeout_retries` 次;满预算以 **"模型延迟过高,请稍后再试"** 终止回合;
+- 可在 `config.toml [coding] first_token_timeout_secs / first_token_timeout_retries` 配置,env `ATOMCODE_FIRST_TOKEN_TIMEOUT_SECS` / `ATOMCODE_FIRST_TOKEN_RETRIES` 覆盖;`secs=0` 关闭该臂。
+
 ### 4. 默认配置扩充(首次启动自动写入)
 
 `CodeExploreTool::new` 时幂等 seed(不覆盖用户已有文件):
@@ -171,6 +179,8 @@ max_rounds = 200
 max_rounds = 100
 [coding]
 max_rounds = 200
+first_token_timeout_secs = 60    # fork 独有: 首个模型 token 的等待秒数,0 关闭
+first_token_timeout_retries = 3  # fork 独有: 首token超时后重发次数,满则提示"模型延迟过高"
 
 [datalog]
 enabled = true

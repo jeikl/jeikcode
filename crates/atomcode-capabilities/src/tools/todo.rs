@@ -151,10 +151,11 @@ pub fn todo_counts(todos: &[TodoItem]) -> (usize, usize, usize) {
 
 /// Apply ONE incremental `todo` action call's args to `list`. The item `id` is the
 /// 1-based POSITION in the list (stable because the list is append-only + status-only:
-/// `add` appends, `update` patches in place — nothing reorders or removes). Malformed /
-/// unknown-id calls are IGNORED (the tool already returned an error to the model; the
-/// derived state must stay consistent). `update` to `in_progress` first clears any OTHER
-/// in_progress, so the "exactly one in_progress" invariant holds regardless of the model.
+/// `add` appends, `update` patches in place, `delete`/`remove` drops by id — renumbering
+/// the remaining items). Malformed / unknown-id calls are IGNORED (the tool already
+/// returned an error to the model; the derived state must stay consistent). `update` to
+/// `in_progress` first clears any OTHER in_progress, so the "exactly one in_progress"
+/// invariant holds regardless of the model.
 pub fn apply_todo_action(list: &mut Vec<TodoItem>, args: &str) {
     let Ok(v) = serde_json::from_str::<serde_json::Value>(args) else {
         return;
@@ -171,8 +172,8 @@ pub fn apply_todo_action(list: &mut Vec<TodoItem>, args: &str) {
                 }
             }
         }
-        Some("update") => {
-            let (Some(id), Some(status)) = (
+        Some("update" | "delete" | "remove") => {
+            let (Some(id), status) = (
                 v.get("id").and_then(|x| x.as_u64()),
                 v.get("status")
                     .and_then(|x| x.as_str())
@@ -183,14 +184,27 @@ pub fn apply_todo_action(list: &mut Vec<TodoItem>, args: &str) {
             if id == 0 || (id as usize) > list.len() {
                 return; // unknown id → ignore (1-based)
             }
-            if status == TodoStatus::InProgress {
-                for it in list.iter_mut() {
-                    if it.status == TodoStatus::InProgress {
-                        it.status = TodoStatus::Pending;
+            let idx = (id - 1) as usize;
+            match v.get("action").and_then(|a| a.as_str()) {
+                // delete/remove: drop the item outright (renumber the rest).
+                Some("delete") | Some("remove") => {
+                    list.remove(idx);
+                }
+                _ => {
+                    if status == Some(TodoStatus::InProgress) {
+                        for it in list.iter_mut() {
+                            if it.status == TodoStatus::InProgress {
+                                it.status = TodoStatus::Pending;
+                            }
+                        }
                     }
+                    list[idx].status = status.unwrap_or(TodoStatus::Pending);
                 }
             }
-            list[(id - 1) as usize].status = status;
+        }
+        // clear: reset the whole list ("no tasks").
+        Some("clear") => {
+            list.clear();
         }
         _ => {}
     }
@@ -291,7 +305,7 @@ impl Tool for TodoTool {
                         "required": ["content", "status"]
                     }
                 },
-                "action": { "type": "string", "enum": ["add", "update"], "description": "UPDATE ONE ITEM (do NOT resend the whole list): `add` a task, or `update` one task's status." },
+                "action": { "type": "string", "enum": ["add", "update", "delete", "remove", "clear"], "description": "UPDATE ONE ITEM (do NOT resend the whole list): `add` a task, `update` one task's status, `delete`/`remove` a task by id, or `clear` the whole list." },
                 "id": { "type": "integer", "description": "For action=update: the 1-based task number to change (as shown, e.g. #3)." },
                 "status": { "type": "string", "enum": ["pending", "in_progress", "completed"], "description": "For action=update: the new status." },
                 "content": { "type": "string", "description": "For action=add: the new task description." }
@@ -338,7 +352,15 @@ impl Tool for TodoTool {
                         }
                     }
                 }
-                _ => err("todowrite: `action` must be `add` or `update`.".to_string()),
+                "delete" | "remove" => {
+                    let id = v.get("id").and_then(|x| x.as_u64());
+                    match id {
+                        Some(id) if id >= 1 => ok(format!("#{id} \u{2192} removed")),
+                        _ => err("todowrite: `delete`/`remove` needs an `id` (the task number).".to_string()),
+                    }
+                }
+                "clear" => ok("all tasks cleared".to_string()),
+                _ => err("todowrite: `action` must be `add`, `update`, `delete`/`remove`, or `clear`.".to_string()),
             };
         }
         err("todowrite: provide either `todos` (full list to plan) or `action` (add|update one item).".to_string())
@@ -748,6 +770,55 @@ mod tests {
             .await;
         assert!(!upd.is_error, "{}", upd.content);
         assert_eq!(upd.content, "#2 \u{2192} completed");
+    }
+
+    #[tokio::test]
+    async fn todowrite_execute_accepts_delete_remove_clear() {
+        let t = TodoTool::new();
+        // delete by 1-based id.
+        let del = t
+            .execute(r#"{"action":"delete","id":2}"#, &ctx())
+            .await;
+        assert!(!del.is_error, "{}", del.content);
+        assert_eq!(del.content, "#2 \u{2192} removed");
+        // remove is an alias.
+        let rm = t
+            .execute(r#"{"action":"remove","id":1}"#, &ctx())
+            .await;
+        assert!(!rm.is_error, "{}", rm.content);
+        assert_eq!(rm.content, "#1 \u{2192} removed");
+        // clear wipes the list.
+        let clr = t.execute(r#"{"action":"clear"}"#, &ctx()).await;
+        assert!(!clr.is_error, "{}", clr.content);
+        assert_eq!(clr.content, "all tasks cleared");
+        // delete without id → error, not silent.
+        let bad = t.execute(r#"{"action":"delete"}"#, &ctx()).await;
+        assert!(bad.is_error);
+    }
+
+    #[tokio::test]
+    async fn apply_todo_action_delete_remove_clear_preserves_state() {
+        // Fold the transcript: plan → delete → remove → clear.
+        let plan = r#"{"todos":[{"content":"a","status":"pending"},{"content":"b","status":"in_progress"},{"content":"c","status":"completed"}]}"#;
+        let mut list = parse_todos(plan).unwrap();
+        assert_eq!(list.len(), 3);
+
+        apply_todo_action(&mut list, r#"{"action":"delete","id":2}"#);
+        assert_eq!(list.len(), 2);
+        assert_eq!(list[0].content, "a");
+        assert_eq!(list[1].content, "c", "delete renumbers remaining items");
+
+        apply_todo_action(&mut list, r#"{"action":"remove","id":1}"#);
+        assert_eq!(list.len(), 1);
+        assert_eq!(list[0].content, "c");
+
+        apply_todo_action(&mut list, r#"{"action":"clear"}"#);
+        assert!(list.is_empty());
+
+        // Unknown id is ignored (list unchanged, no panic).
+        let mut list2 = parse_todos(plan).unwrap();
+        apply_todo_action(&mut list2, r#"{"action":"delete","id":99}"#);
+        assert_eq!(list2.len(), 3);
     }
 
     #[tokio::test]

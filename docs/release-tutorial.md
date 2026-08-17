@@ -79,7 +79,7 @@ gh release create 0.0.0-dev.2 dist/* --title "0.0.0-dev.2"
 ```
 
 > **关键**:Release 的 **tag 名必须与版本号一致**(如 `0.0.0-dev.2`),因为
-> updater 的下载 URL 是 `https://atomgit.com/jeikls/atomcode/releases/download/<version>/atomcode-<version>-<target>`。
+> updater 的下载 URL 是 `https://github.com/jeikl/jeikcode/releases/download/<version>/atomcode-<version>-<target>`。
 
 ### 4. 推送 latest.json 到 local-dev 分支
 
@@ -87,7 +87,7 @@ gh release create 0.0.0-dev.2 dist/* --title "0.0.0-dev.2"
 git add latest.json && git commit -m "release: 0.0.0-dev.2" && git push origin local-dev
 ```
 
-> **关键**:updater 从 `https://raw.atomgit.com/jeikls/atomcode/raw/local-dev/latest.json`
+> **关键**:updater 从 `https://raw.githubusercontent.com/jeikl/jeikcode/local-dev/latest.json`
 > 读清单 —— **latest.json 必须推到 local-dev 分支**(不是 main,不是 Release 资产)。
 
 ### 5. 验证
@@ -97,7 +97,7 @@ git add latest.json && git commit -m "release: 0.0.0-dev.2" && git push origin l
 atomcode upgrade
 
 # 或检查清单可读
-curl -s https://raw.atomgit.com/jeikls/atomcode/raw/local-dev/latest.json | head -5
+curl -s https://raw.githubusercontent.com/jeikl/jeikcode/local-dev/latest.json | head -5
 ```
 
 ---

@@ -1,6 +1,6 @@
 # AtomCode Self — fork 版一键安装(Windows / PowerShell)
 #
-#   powershell -ExecutionPolicy Bypass -c "irm https://raw.atomgit.com/jeikls/atomcode/raw/local-dev/scripts/install-self.ps1 | iex"
+#   powershell -ExecutionPolicy Bypass -c "irm https://raw.githubusercontent.com/jeikl/jeikcode/local-dev/scripts/install-self.ps1 | iex"
 #
 # Env overrides:
 #   $env:ATOMCODE_VERSION    release tag(默认从 fork latest.json 检测)
@@ -11,8 +11,8 @@
 
 $ErrorActionPreference = "Stop"
 
-$ManifestBase = if ($env:ATOMCODE_MANIFEST_URL) { $env:ATOMCODE_MANIFEST_URL.TrimEnd('/') } else { "https://raw.atomgit.com/jeikls/atomcode/raw/local-dev" }
-$RepoBase     = if ($env:ATOMCODE_DOWNLOAD_BASE) { $env:ATOMCODE_DOWNLOAD_BASE.TrimEnd('/') } else { "https://atomgit.com/jeikls/atomcode/releases/download" }
+$ManifestBase = if ($env:ATOMCODE_MANIFEST_URL) { $env:ATOMCODE_MANIFEST_URL.TrimEnd('/') } else { "https://raw.githubusercontent.com/jeikl/jeikcode/local-dev" }
+$RepoBase     = if ($env:ATOMCODE_DOWNLOAD_BASE) { $env:ATOMCODE_DOWNLOAD_BASE.TrimEnd('/') } else { "https://github.com/jeikl/jeikcode/releases/download" }
 $DefaultVersion = "v0.0.0-dev.1"
 
 # --- detect platform ---

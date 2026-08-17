@@ -38,26 +38,18 @@ build_target() { # <rust-target> <asset-name>
   cp "$src" "dist/${asset}"
 }
 
-# target key 与 updater detect_target() 完全一致(darwin-arm64/x64, linux-x64/arm64,
-# windows-x64, ohos-arm64); 没打鸿蒙就去掉最后一行。
+# target key 与 updater detect_target() 完全一致; 本 fork 仅发布两个平台:
+# linux-x64 + windows-x64(其余 target 行已按需移除)。
 build_target x86_64-unknown-linux-gnu      atomcode-linux-x64
-build_target aarch64-unknown-linux-gnu     atomcode-linux-arm64
-build_target x86_64-apple-darwin           atomcode-darwin-x64
-build_target aarch64-apple-darwin          atomcode-darwin-arm64
 build_target x86_64-pc-windows-msvc        atomcode-windows-x64.exe
-# build_target aarch64-unknown-linux-ohos    atomcode-ohos-arm64
 
 echo "==> 生成 latest.json"
 python3 - "$VERSION" <<'PY'
 import hashlib, json, os, sys, datetime
 version = sys.argv[1]
 target_map = {
-    "atomcode-darwin-arm64": "darwin-arm64",
-    "atomcode-darwin-x64": "darwin-x64",
     "atomcode-linux-x64": "linux-x64",
-    "atomcode-linux-arm64": "linux-arm64",
     "atomcode-windows-x64.exe": "windows-x64",
-    "atomcode-ohos-arm64": "ohos-arm64",
 }
 binaries = {}
 for asset, key in target_map.items():

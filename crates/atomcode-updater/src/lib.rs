@@ -1221,8 +1221,8 @@ mod tests {
     #[test]
     fn binary_url_shape() {
         assert_eq!(
-            binary_url("v4.19.0", "darwin-arm64"),
-            "https://atomgit.com/jeikls/atomcode/releases/download/v4.19.0/atomcode-v4.19.0-darwin-arm64"
+            binary_url("6.0.0", "windows-x64"),
+            "https://github.com/jeikl/jeikcode/releases/download/6.0.0/atomcode-6.0.0-windows-x64.exe"
         );
     }
 

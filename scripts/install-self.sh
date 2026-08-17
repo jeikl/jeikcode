@@ -1,7 +1,7 @@
 #!/bin/sh
 # AtomCode Self — fork 版一键安装脚本(指向本 fork 的 local-dev 渠道)
 #
-#   curl -fsSL https://raw.atomgit.com/jeikls/atomcode/raw/local-dev/scripts/install-self.sh | sh
+#   curl -fsSL https://raw.githubusercontent.com/jeikl/jeikcode/local-dev/scripts/install-self.sh | sh
 #
 # Env overrides:
 #   ATOMCODE_VERSION   release tag 安装(默认 latest; 格式 v0.0.0 需与 latest.json 一致)
@@ -12,8 +12,8 @@
 set -eu
 
 # fork 渠道(默认: 本 fork 的 local-dev 分支 + releases)
-MANIFEST_BASE="${ATOMCODE_MANIFEST_URL:-https://raw.atomgit.com/jeikls/atomcode/raw/local-dev}"
-REPO_BASE="${ATOMCODE_DOWNLOAD_BASE:-https://atomgit.com/jeikls/atomcode/releases/download}"
+MANIFEST_BASE="${ATOMCODE_MANIFEST_URL:-https://raw.githubusercontent.com/jeikl/jeikcode/local-dev}"
+REPO_BASE="${ATOMCODE_DOWNLOAD_BASE:-https://github.com/jeikl/jeikcode/releases/download}"
 DEFAULT_VERSION="v0.0.0-dev.1"
 
 # --- detect platform ---
@@ -118,7 +118,7 @@ if [ "$os" = "windows" ]; then
     echo ""
     echo "Note: installed for this Unix shell (MSYS/MinGW/Git-Bash/Cygwin)."
     echo "      For a system-wide Windows install use instead:"
-    echo "      powershell -c \"irm https://raw.atomgit.com/jeikls/atomcode/raw/local-dev/scripts/install-self.ps1 | iex\""
+    echo "      powershell -c \"irm https://raw.githubusercontent.com/jeikl/jeikcode/local-dev/scripts/install-self.ps1 | iex\""
 fi
 
 # --- PATH (与官方一致) ---

@@ -69,9 +69,9 @@ const HOSTED_PLATFORM_SERVER: &str = "https://acs.atomgit.com";
 const HOSTED_CODINGPLAN_API_BASE: &str = "https://api.gitcode.com/api/v5";
 const HOSTED_CODINGPLAN_LLM_BASE_URL: &str = "https://llm-api.atomgit.com/v1";
 const HOSTED_UPDATE_MANIFEST_URL: &str =
-    "https://raw.atomgit.com/jeikls/atomcode/raw/local-dev/latest.json";
+    "https://raw.githubusercontent.com/jeikl/jeikcode/local-dev/latest.json";
 const HOSTED_UPDATE_DOWNLOAD_BASE: &str =
-    "https://atomgit.com/jeikls/atomcode/releases/download";
+    "https://github.com/jeikl/jeikcode/releases/download";
 const HOSTED_DESKTOP_DOWNLOAD_URL: &str =
     "https://atomgit.com/atomgit_atomcode/atomCode-air-releases/releases";
 const HOSTED_RELAY_URL: &str = "https://relay-atomcode.atomgit.com";

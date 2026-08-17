@@ -38,7 +38,7 @@
 
 ### 3. 自建无感更新(本 fork 最核心的部署差异)
 
-**更新源内置绑定** `https://raw.atomgit.com/jeikls/atomcode/raw/local-dev/latest.json` + `https://atomgit.com/jeikls/atomcode/releases/download`,解析顺序:
+**更新源内置绑定** `https://raw.githubusercontent.com/jeikl/jeikcode/local-dev/latest.json` + `https://github.com/jeikl/jeikcode/releases/download`,解析顺序:
 
 ```
 env  ATOMCODE_UPDATE_MANIFEST_URL / ATOMCODE_UPDATE_DOWNLOAD_BASE   (最高)

@@ -16,13 +16,13 @@
 ### macOS / Linux / HarmonyOS PC(Unix 系)
 
 ```bash
-curl -fsSL https://raw.atomgit.com/jeikls/atomcode/raw/local-dev/scripts/install-self.sh | sh
+curl -fsSL https://raw.githubusercontent.com/jeikl/jeikcode/local-dev/scripts/install-self.sh | sh
 ```
 
 没有 curl 时用 wget:
 
 ```bash
-wget -qO- https://raw.atomgit.com/jeikls/atomcode/raw/local-dev/scripts/install-self.sh | sh
+wget -qO- https://raw.githubusercontent.com/jeikl/jeikcode/local-dev/scripts/install-self.sh | sh
 ```
 
 ### Windows
@@ -30,7 +30,7 @@ wget -qO- https://raw.atomgit.com/jeikls/atomcode/raw/local-dev/scripts/install-
 在 PowerShell 里执行:
 
 ```powershell
-powershell -ExecutionPolicy Bypass -c "irm https://raw.atomgit.com/jeikls/atomcode/raw/local-dev/scripts/install-self.ps1 | iex"
+powershell -ExecutionPolicy Bypass -c "irm https://raw.githubusercontent.com/jeikl/jeikcode/local-dev/scripts/install-self.ps1 | iex"
 ```
 
 > Git-Bash / MSYS / Cygwin 用户也可用上面的 Unix 命令(脚本会自动装原生 Windows 版 `.exe`)。
@@ -48,7 +48,7 @@ powershell -ExecutionPolicy Bypass -c "irm https://raw.atomgit.com/jeikls/atomco
 
 ```bash
 ATOMCODE_VERSION=0.0.0-dev.2 ATOMCODE_PREFIX=$HOME/bin \
-  curl -fsSL https://raw.atomgit.com/jeikls/atomcode/raw/local-dev/scripts/install-self.sh | sh
+  curl -fsSL https://raw.githubusercontent.com/jeikl/jeikcode/local-dev/scripts/install-self.sh | sh
 ```
 
 ### 安装后
@@ -141,6 +141,6 @@ powershell -ExecutionPolicy Bypass -File scripts\dev-install.ps1 -Uninstall   # 
 
 ## 五、更新渠道说明(本 fork 内置)
 
-- **默认渠道**:`https://raw.atomgit.com/jeikls/atomcode/raw/local-dev/latest.json` + `https://atomgit.com/jeikls/atomcode/releases/download`(内置,无需配置);
+- **默认渠道**:`https://raw.githubusercontent.com/jeikl/jeikcode/local-dev/latest.json` + `https://github.com/jeikl/jeikcode/releases/download`(内置,无需配置);
 - **覆盖方式**(按优先级):环境变量 `ATOMCODE_UPDATE_MANIFEST_URL` / `ATOMCODE_UPDATE_DOWNLOAD_BASE` > config.toml `[config] update_manifest_url` / `update_download_base` > 内置;
 - 详见 `docs/release-tutorial.md` 与 `README-self.md`。

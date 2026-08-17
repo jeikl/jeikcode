@@ -125,6 +125,14 @@ const MAX_PROVIDER_RETRIES: u32 = 3;
 /// `MAX_PROVIDER_RETRIES` (which covers failures at OPEN, before any token).
 const MAX_STREAM_RETRIES: u32 = 5;
 
+/// Max round re-issues after a FIRST-TOKEN timeout (model hasn't emitted ANY
+/// token within `first_token_timeout`). Each retry opens a FRESH connection and
+/// re-issues the same round (per-round accumulators reset on `continue`, so
+/// partial output is never double-pushed). After this budget the turn fails with
+/// the explicit "model unresponsive / high latency" terminal error. User-facing
+/// expectation: 60s wait × retry3 → "模型延迟过高,请稍后再试".
+const MAX_FIRST_TOKEN_RETRIES: u32 = 3;
+
 /// Safety fuse: maximum consecutive `WaitAndRetry` rate-limit sleeps within a
 /// single turn before the kernel forces a `Pause` stop (RateLimited), regardless
 /// of what the host hook returns. Guards against a livelock if the host hook is
@@ -821,6 +829,10 @@ pub struct Agent {
     /// first-token and inter-token latency). `None` (default) = unbounded. See
     /// `AgentBuilder::stream_timeout`.
     stream_timeout: Option<std::time::Duration>,
+    /// LIVENESS: max wall-clock wait for the FIRST stream token of a round,
+    /// before any content. `None` (default) = no first-token arm. See
+    /// `AgentBuilder::first_token_timeout`.
+    first_token_timeout: Option<std::time::Duration>,
     /// LIVENESS: max time a mid-turn `rt.request(...)` round-trip waits for the
     /// driver's `Respond` before degrading to `Value::Null`. `None` (default) =
     /// unbounded. See `AgentBuilder::request_timeout`.
@@ -925,6 +937,7 @@ impl Agent {
             compact_threshold: self.compact_threshold,
             compaction_checkpoint: self.compaction_checkpoint,
             stream_timeout: self.stream_timeout,
+            first_token_timeout: self.first_token_timeout,
             chat_options: self.chat_options,
             // Resolve the effective working dir into a single shared handle: an explicit
             // `shared_cwd` wins; else wrap the immutable `working_dir` pin so the snapshot
@@ -1033,6 +1046,9 @@ struct RunningAgent {
     compaction_checkpoint: Option<Arc<dyn CompactionCheckpoint>>,
     /// LIVENESS: per-stream-event wait bound. `None` = unbounded (no timer arm).
     stream_timeout: Option<std::time::Duration>,
+    /// LIVENESS: first-token wall-clock wait bound (see `Agent::first_token_timeout`).
+    /// `None` = no first-token arm.
+    first_token_timeout: Option<std::time::Duration>,
     /// NEUTRAL per-call provider request knobs forwarded to `chat_stream` every
     /// round (see `Agent::chat_options`). Default = a neutral request.
     chat_options: ChatOptions,
@@ -1866,6 +1882,11 @@ impl RunningAgent {
         // deliberately NOT reset on `open` (a re-open must not refill it mid-round,
         // else a permanently-stalling stream would retry forever within one round).
         let mut stream_retry: u32 = 0;
+        // FIRST-TOKEN retry counter for the WHOLE turn: incremented on each
+        // re-issue caused by a first-token timeout (model hasn't emitted ANY
+        // token within `first_token_timeout`). Budget is per-turn so a model
+        // that never emits a first token can't spin forever across rounds.
+        let mut first_token_retries: u32 = 0;
         // RATE-LIMIT WaitAndRetry counter for the WHOLE turn: incremented on each
         // WaitAndRetry sleep (OPEN or mid-stream); reset to 0 on a successful open
         // (the window has reopened). Capped at MAX_RATE_LIMIT_WAITS to prevent a
@@ -2342,6 +2363,46 @@ impl RunningAgent {
                     biased;
                     _ = cancel.cancelled() => {
                         self.finish_cancelled(convo, rollback_len, &turn_ctx).await;
+                        return;
+                    }
+                    _ = async { tokio::time::sleep(self.first_token_timeout.unwrap()).await }, if !saw_stream_content && self.first_token_timeout.is_some() => {
+                        // FIRST-TOKEN TIMEOUT: the model has emitted NO token within
+                        // `first_token_timeout` this round. Distinct from the stream
+                        // timeout arm below (which bounds EVERY inter-token gap): this
+                        // only fires when SO FAR the provider has produced nothing.
+                        // Re-issue the same round up to MAX_FIRST_TOKEN_RETRIES times
+                        // (fresh connection + reset per-round accumulators via
+                        // `continue`, so no partial output is ever double-pushed).
+                        // Guarded on `!saw_stream_content` so once ANY token arrives
+                        // the first-token arm is inert for the rest of the round.
+                        let first_token_secs = self.first_token_timeout.unwrap().as_secs();
+                        if first_token_retries < MAX_FIRST_TOKEN_RETRIES {
+                            first_token_retries += 1;
+                            self.rt.emit(AgentEvent::Warning(format!(
+                                "模型延迟高:{} 秒内无响应,正在重试({}/{MAX_FIRST_TOKEN_RETRIES})…",
+                                first_token_secs, first_token_retries
+                            )));
+                            // Cancellable wait so Esc during the retry gap aborts.
+                            tokio::select! {
+                                biased;
+                                _ = cancel.cancelled() => {
+                                    self.finish_cancelled(convo, rollback_len, &turn_ctx).await;
+                                    return;
+                                }
+                                _ = tokio::time::sleep(std::time::Duration::from_millis(500)) => {}
+                            }
+                            retry_this_round = true;
+                            break;
+                        }
+                        // Budget spent: fail with the explicit high-latency terminal
+                        // error (user-facing expectation: "模型延迟过高,请稍后再试").
+                        let msg = format!(
+                            "模型延迟过高,请稍后再试(连续 {} 次在 {} 秒内未收到首token)",
+                            MAX_FIRST_TOKEN_RETRIES, first_token_secs
+                        );
+                        self.hooks.on_error(&msg).await;
+                        self.rt.emit(AgentEvent::Error { message: msg, http_status: None, code: None });
+                        self.finish_turn(convo, StopReason::Timeout, &turn_ctx).await;
                         return;
                     }
                     _ = async { tokio::time::sleep(self.stream_timeout.unwrap()).await }, if self.stream_timeout.is_some() => {
@@ -3669,6 +3730,21 @@ pub struct AgentBuilder {
     compact_threshold: Option<f32>,
     compaction_checkpoint: Option<Arc<dyn CompactionCheckpoint>>,
     stream_timeout: Option<std::time::Duration>,
+    /// LIVENESS: max wall-clock wait for the FIRST stream event (the first
+    /// reasoning/tool-call/text token) of each round, BEFORE any content has
+    /// been produced. Complementary to `stream_timeout` (which bounds the wait
+    /// for EVERY event inter-token gap): a model that silently goes quiet for
+    /// a long stretch during hidden reasoning before emitting its first byte
+    /// is caught here at a finer granularity. `None` (default) = no
+    /// first-token arm — wait for the first event with only `stream_timeout`.
+    ///
+    /// On timeout BEFORE any content this round, the round is RETRIED up to
+    /// `MAX_FIRST_TOKEN_RETRIES` times (a fresh connection + reset
+    /// accumulators, so partial output is never double-pushed); once the
+    /// budget is spent the turn fails with an explicit "model unresponsive /
+    /// high latency" terminal error. Once ANY first token arrives, this timer
+    /// stops mattering — the ordinary `stream_timeout` takes over.
+    first_token_timeout: Option<std::time::Duration>,
     request_timeout: Option<std::time::Duration>,
     chat_options: ChatOptions,
     /// SEAM 1: optional per-agent working dir (see `Agent::working_dir`).
@@ -3726,6 +3802,7 @@ impl Default for AgentBuilder {
             // never park forever on a stalled provider or a silent driver.
             stream_timeout: None,
             request_timeout: None,
+            first_token_timeout: None,
             // NEUTRAL default: a no-opinion request (all None + ToolChoice::Auto).
             // The provider receives `ChatOptions::default()` unless a specialization
             // sets values via `AgentBuilder::chat_options`.
@@ -3896,6 +3973,23 @@ impl AgentBuilder {
         self.stream_timeout = Some(d);
         self
     }
+    /// LIVENESS: bound the wall-clock wait for the FIRST stream event of each
+    /// round (first reasoning / tool-call / text token), before any content has
+    /// been produced. Complementary to [`Self::stream_timeout`]: a model that
+    /// goes quiet during hidden reasoning before emitting its first byte is
+    /// caught here at fine granularity; once the first token arrives this arm
+    /// stops and `stream_timeout` governs the inter-token gap.
+    ///
+    /// On timeout BEFORE any content, the round is retried up to
+    /// [`MAX_FIRST_TOKEN_RETRIES`] times (fresh connection, reset accumulators
+    /// — partial output is never double-pushed); after the budget, the turn
+    /// FAILS with the explicit "model unresponsive / high latency" terminal
+    /// error ([`STOP_REASON_FIRST_TOKEN`]). Without this call the default is
+    /// `None` → no first-token arm (only `stream_timeout` bounds the wait).
+    pub fn first_token_timeout(mut self, d: std::time::Duration) -> Self {
+        self.first_token_timeout = Some(d);
+        self
+    }
     /// LIVENESS: bound how long a mid-turn `rt.request(...)` round-trip (e.g. an
     /// approval middleware awaiting the driver) waits for the driver's `Respond`.
     /// When set and the driver does not answer within `d` (a crashed/silent/
@@ -4014,6 +4108,7 @@ impl AgentBuilder {
             compact_threshold: self.compact_threshold,
             compaction_checkpoint: self.compaction_checkpoint,
             stream_timeout: self.stream_timeout,
+            first_token_timeout: self.first_token_timeout,
             request_timeout: self.request_timeout,
             chat_options: self.chat_options,
             working_dir: self.working_dir,

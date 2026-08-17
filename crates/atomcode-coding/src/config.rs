@@ -95,6 +95,13 @@ pub struct CodingAgentConfig {
     /// for a long stretch after a large (~200K) prompt before the first reasoning byte; the
     /// old 120s cut them off mid-think and surfaced as a spurious "stream timeout".
     pub stream_timeout: Duration,
+    /// Liveness: max wall-clock wait for the FIRST stream token of a round
+    /// (the model emits nothing — high latency / silent hidden reasoning).
+    /// Complementary to `stream_timeout` (which bounds EVERY inter-token gap).
+    /// Default 60s, override via `ATOMCODE_FIRST_TOKEN_TIMEOUT_SECS`. On
+    /// timeout BEFORE any token, the round is retried up to 3 times, then the
+    /// turn fails with "模型延迟过高,请稍后再试". `0` disables the arm.
+    pub first_token_timeout: Duration,
     /// Liveness: max wait for a driver approval response before it degrades to deny.
     /// `Some(d)` ⇒ fail-closed after `d` — for HEADLESS / no-human drivers where a never-
     /// answered approval must not park a turn forever. `None` ⇒ PARK: block until the driver
@@ -576,6 +583,16 @@ fn default_stream_timeout() -> Duration {
         .map(Duration::from_secs)
         .unwrap_or_else(|| Duration::from_secs(300))
 }
+
+/// Default first-token liveness timeout: `ATOMCODE_FIRST_TOKEN_TIMEOUT_SECS`
+/// if a valid positive integer, else 60s. `0` disables the first-token arm.
+fn default_first_token_timeout() -> Duration {
+    std::env::var("ATOMCODE_FIRST_TOKEN_TIMEOUT_SECS")
+        .ok()
+        .and_then(|s| s.trim().parse::<u64>().ok())
+        .map(Duration::from_secs)
+        .unwrap_or_else(|| Duration::from_secs(60))
+}
 /// Share of the CodingPlan 5h rolling `call_limit` a single `/goal` may consume
 /// (percent). A goal that eats more than this starves the user's interactive work
 /// and other controllers within the same rolling window.
@@ -714,6 +731,7 @@ impl CodingAgentConfig {
             working_dir: working_dir.into(),
             context_window: 128_000,
             stream_timeout: default_stream_timeout(),
+            first_token_timeout: default_first_token_timeout(),
             request_timeout: Some(Duration::from_secs(300)),
             max_continuations: 50,
             max_rounds: default_turn_max_rounds(),

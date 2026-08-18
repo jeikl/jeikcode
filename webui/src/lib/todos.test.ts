@@ -76,3 +76,49 @@ test('applyTodoAction add appends', () => {
   assert.equal(next.length, 2);
   assert.equal(next[1]?.content, 'b');
 });
+
+test('applyTodoAction insert places item between elements', () => {
+  const list = [
+    { content: 'a', status: 'pending' as const },
+    { content: 'c', status: 'pending' as const },
+  ];
+  const next = applyTodoAction(
+    list,
+    JSON.stringify({ action: 'insert', position: 2, content: 'b' }),
+  );
+  assert.equal(next.length, 3);
+  assert.equal(next[0]?.content, 'a');
+  assert.equal(next[1]?.content, 'b');
+  assert.equal(next[2]?.content, 'c');
+});
+
+test('applyTodoAction delete, remove, clear', () => {
+  const list = [
+    { content: 'a', status: 'pending' as const },
+    { content: 'b', status: 'in_progress' as const },
+    { content: 'c', status: 'completed' as const },
+  ];
+  const afterDel = applyTodoAction(list, JSON.stringify({ action: 'delete', id: 2 }));
+  assert.equal(afterDel.length, 2);
+  assert.equal(afterDel[0]?.content, 'a');
+  assert.equal(afterDel[1]?.content, 'c');
+
+  const afterRm = applyTodoAction(afterDel, JSON.stringify({ action: 'remove', id: 1 }));
+  assert.equal(afterRm.length, 1);
+  assert.equal(afterRm[0]?.content, 'c');
+
+  const afterClear = applyTodoAction(afterRm, JSON.stringify({ action: 'clear' }));
+  assert.equal(afterClear.length, 0);
+});
+
+test('foldTodoToolCall handles clear and delete', () => {
+  let cur = foldTodoToolCall(
+    null,
+    'todowrite',
+    JSON.stringify({ todos: [{ content: 'x', status: 'pending' }] }),
+  );
+  assert.equal(cur?.length, 1);
+  cur = foldTodoToolCall(cur, 'todowrite', JSON.stringify({ action: 'clear' }));
+  assert.equal(cur, null);
+});
+

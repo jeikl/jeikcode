@@ -430,7 +430,7 @@ fn build_request_body(
             .map(|td| {
                 json!({
                     "type": "function",
-                    "function": { "name": td.name, "description": td.description, "parameters": td.parameters }
+                    "function": { "name": td.name, "description": td.description, "parameters": super::sanitize_schema_for_wire(&td.parameters) }
                 })
             })
             .collect();

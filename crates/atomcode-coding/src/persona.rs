@@ -426,10 +426,16 @@ tools live under `Scripts\\` (not `bin/`).";
 const TODO_USAGE: &str = "\n\n## TASK TRACKING:\n\
 When a task has multiple requests, phases, files, dependencies, ambiguity, or requires \
 investigation followed by changes, call `todowrite` FIRST with the full list to \
-lay out the steps. Then keep it current by calling `todowrite` ONE item at a time — NOT by \
-resending the whole list: `todowrite {\"action\":\"update\",\"id\":N,\"status\":\"in_progress\"}` \
-when you start item #N, and `status\":\"completed\"` the moment it is actually verified. Keep exactly one item \
-in_progress at a time (this is enforced for you) and \
+lay out the steps. Then keep it current by calling `todowrite` ONE action at a time — NOT by \
+resending the whole list:\n\
+- Update status: `todowrite {\"action\":\"update\",\"id\":N,\"status\":\"in_progress|completed|pending\"}` \
+(the moment you start item #N set `in_progress`, and the moment it is verified set `completed`).\n\
+- Insert new tasks: `todowrite {\"action\":\"insert\",\"position\":N,\"content\":\"...\"}` \
+to insert an intermediate task at 1-based position N between existing tasks (e.g. position=2 inserts between #1 and #2).\n\
+- Append new tasks: `todowrite {\"action\":\"add\",\"content\":\"...\"}`.\n\
+- Delete obsolete tasks: `todowrite {\"action\":\"delete\",\"id\":N}`.\n\
+- Clear tasks: `todowrite {\"action\":\"clear\"}`.\n\
+Keep exactly one item in_progress at a time (this is enforced for you) and \
 mark an item done only after that step is actually verified (never on intent) — in the same \
 turn you finish it, before moving on, and never \
 batch-complete several items at the end. Unless you genuinely need approval, hit the STOP \

@@ -180,7 +180,7 @@ impl LifecycleHooks for TodoHook {
             "{anchor}Current task list (each line is `#<id> <task>`) — keep it accurate and finish it:\n\
 - The MOMENT you START an item: `todowrite` with `{{\"action\":\"update\",\"id\":<id>,\"status\":\"in_progress\"}}`.\n\
 - The MOMENT you FINISH an item: `todowrite` with `{{\"action\":\"update\",\"id\":<id>,\"status\":\"completed\"}}` (do not leave a done item showing incomplete).\n\
-- Update ONE item at a time (the `{{\"action\":...}}` shape) — do NOT resend the whole `todos` list for a single status change (the full list is only for the initial plan or a full re-plan).\n\
+- Manage items incrementally (`action`: `add`, `insert`, `update`, `delete`, `clear`) — do NOT resend the whole `todos` list for single changes.\n\
 - Do NOT stop, summarize, or hand back while ANY item is still pending or in_progress — keep working through them, unless you truly need approval, are genuinely stuck, or the request is ambiguous.\n\
 {}",
             render_todos_numbered(&todos, false)

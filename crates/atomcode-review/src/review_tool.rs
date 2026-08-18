@@ -369,12 +369,17 @@ impl Tool for ReviewTool {
             "type": "object",
             "properties": {
                 "scope": {
-                    "oneOf": [
-                        { "type": "object", "properties": { "kind": { "const": "working_tree" } }, "required": ["kind"] },
-                        { "type": "object", "properties": { "kind": { "const": "staged" } }, "required": ["kind"] },
-                        { "type": "object", "properties": { "kind": { "const": "range" }, "base": { "type": "string" }, "head": { "type": "string", "default": "HEAD" } }, "required": ["kind", "base"] },
-                        { "type": "object", "properties": { "kind": { "const": "commit" }, "rev": { "type": "string" } }, "required": ["kind", "rev"] }
-                    ],
+                    "type": "object",
+                    "properties": {
+                        "kind": {
+                            "type": "string",
+                            "enum": ["working_tree", "staged", "range", "commit"],
+                            "description": "The scope kind: working_tree, staged, range, or commit."
+                        },
+                        "base": { "type": "string", "description": "For kind=range: the base git ref." },
+                        "head": { "type": "string", "description": "For kind=range: the head git ref (defaults to HEAD)." },
+                        "rev": { "type": "string", "description": "For kind=commit: the commit revision." }
+                    },
                     "description": "Explicit mutually-exclusive review scope. Omit for working-tree changes."
                 },
                 "paths": { "type": "array", "items": { "type": "string" }, "description": "Optional repo-relative path filters." },

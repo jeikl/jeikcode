@@ -8779,7 +8779,10 @@ pub async fn run_loop(mut ctx: LoopCtx, renderer: &mut dyn Renderer) -> Result<E
                     // running turn (matching keyboard-path behaviour)
                     // rather than shut down the whole application.
                     crate::tuix_trace!("KEY", "windows ctrl_c signal -> Cancel (streaming)");
-                    cancel_active_turn(&ctx);
+                    let send_ok = cancel_active_turn(&ctx);
+                    if send_ok {
+                        app.interrupt_drain_pending = true;
+                    }
                     clear_capturing_modal_on_cancel(&mut app);
                     restore_cancelled_message_to_buf(&mut app, renderer, &ctx);
                 } else {
@@ -10973,7 +10976,7 @@ fn handle_input(
                 // Ctrl+C to cancel the turn, not quit; the Idle gate excludes it.
                 // Mirrors the non-capturing Ctrl+C guard just below.
                 if matches!(app.state.phase, UiPhase::Idle)
-                    && code == KeyCode::Char('c')
+                    && (code == KeyCode::Char('c') || code == KeyCode::Char('C'))
                     && modifiers.contains(crossterm::event::KeyModifiers::CONTROL)
                 {
                     app.active_modal = None;
@@ -11020,7 +11023,7 @@ fn handle_input(
             // forwarding it. Dismiss the modal and send Shutdown so
             // the run-loop tears down cleanly.
             if matches!(app.state.phase, UiPhase::Idle)
-                && code == KeyCode::Char('c')
+                && (code == KeyCode::Char('c') || code == KeyCode::Char('C'))
                 && modifiers.contains(crossterm::event::KeyModifiers::CONTROL)
                 && app.active_modal.is_some()
             {
@@ -11583,7 +11586,7 @@ fn handle_idle_key(
     // The runtime owns both transitions so pending requests, snapshots, and the
     // next-submit resume stay synchronized.
     if app.state.goal_condition.is_some() {
-        let is_ctrl_c = code == KeyCode::Char('c')
+        let is_ctrl_c = (code == KeyCode::Char('c') || code == KeyCode::Char('C'))
             && modifiers.contains(crossterm::event::KeyModifiers::CONTROL);
         let is_bare_esc = code == KeyCode::Esc && app.buf.text.is_empty();
         let should_pause = is_bare_esc
@@ -13967,7 +13970,9 @@ fn handle_streaming_key(
     modifiers: crossterm::event::KeyModifiers,
 ) -> Result<()> {
     // Ctrl+O toggles verbose mode (real-time tool output + reasoning visibility)
-    if code == KeyCode::Char('o') && modifiers.contains(crossterm::event::KeyModifiers::CONTROL) {
+    if (code == KeyCode::Char('o') || code == KeyCode::Char('O'))
+        && modifiers.contains(crossterm::event::KeyModifiers::CONTROL)
+    {
         app.state.toggle_tool_output();
         // Show feedback to the user about the current state
         // Use muted style matching ToolResult's summary_style:
@@ -14002,7 +14007,9 @@ fn handle_streaming_key(
     // users have a reliable escape hatch even mid-edit. Also drops
     // the type-ahead queue: a user yanking the escape cord doesn't
     // want queued messages to auto-fire after the current one dies.
-    if code == KeyCode::Char('c') && modifiers.contains(crossterm::event::KeyModifiers::CONTROL) {
+    if (code == KeyCode::Char('c') || code == KeyCode::Char('C'))
+        && modifiers.contains(crossterm::event::KeyModifiers::CONTROL)
+    {
         let send_ok = cancel_active_turn(ctx);
         if send_ok {
             app.interrupt_drain_pending = true;

@@ -172,6 +172,48 @@ pub fn apply_todo_action(list: &mut Vec<TodoItem>, args: &str) {
                 }
             }
         }
+        Some("insert") => {
+            if let Some(content) = v.get("content").and_then(|c| c.as_str()) {
+                let content = content.trim();
+                if !content.is_empty() {
+                    let status = v
+                        .get("status")
+                        .and_then(|s| s.as_str())
+                        .and_then(TodoStatus::parse)
+                        .unwrap_or(TodoStatus::Pending);
+                    if status == TodoStatus::InProgress {
+                        for it in list.iter_mut() {
+                            if it.status == TodoStatus::InProgress {
+                                it.status = TodoStatus::Pending;
+                            }
+                        }
+                    }
+                    let pos = v
+                        .get("position")
+                        .or_else(|| v.get("id"))
+                        .and_then(|x| x.as_u64())
+                        .map(|p| p as usize)
+                        .or_else(|| {
+                            v.get("after")
+                                .or_else(|| v.get("after_id"))
+                                .and_then(|x| x.as_u64())
+                                .map(|p| (p + 1) as usize)
+                        });
+                    let idx = match pos {
+                        Some(p) if p <= 1 => 0,
+                        Some(p) if p - 1 <= list.len() => p - 1,
+                        _ => list.len(),
+                    };
+                    list.insert(
+                        idx,
+                        TodoItem {
+                            content: content.to_string(),
+                            status,
+                        },
+                    );
+                }
+            }
+        }
         Some("update" | "delete" | "remove") => {
             let (Some(id), status) = (
                 v.get("id").and_then(|x| x.as_u64()),
@@ -271,13 +313,14 @@ Call it in one of TWO ways:\n\
 (REPLACES the previous list). Use when the work has multiple requests, phases, files, dependencies, ambiguity, or \
 requires investigation followed by changes. Also use it for a non-trivial refactor even when the exact steps emerge \
 during exploration. SKIP only for a genuinely simple single edit, an informational question, or a one-command ask.\n\
-• UPDATE ONE ITEM (preferred after the initial plan — do NOT resend the whole list): \
-`{\"action\":\"update\",\"id\":N,\"status\":\"in_progress|completed|pending\"}` changes ONE task (`id` is its number in \
-the list, e.g. `#3`); `{\"action\":\"add\",\"content\":\"…\"}` appends a new pending task. The MOMENT you START a task \
-set it `in_progress`; the MOMENT it is actually done (verified) set it `completed`.\n\
-Each task is ONE specific, verifiable action — write `add error handling to load_config`, not `handle errors`. Keep \
-EXACTLY ONE task `in_progress` at a time (enforced automatically). Mark a task `completed` ONLY after the work is \
-actually done, never on intent.";
+• INCREMENTAL ACTIONS (preferred after the initial plan — do NOT resend the whole list):\n  \
+- `add`: `{\"action\":\"add\",\"content\":\"…\"}` appends a new pending task.\n  \
+- `insert`: `{\"action\":\"insert\",\"position\":N,\"content\":\"…\"}` inserts a task at 1-based position N (e.g. position=2 inserts between #1 and #2).\n  \
+- `update`: `{\"action\":\"update\",\"id\":N,\"status\":\"in_progress|completed|pending\"}` changes status of task #N.\n  \
+- `delete`/`remove`: `{\"action\":\"delete\",\"id\":N}` removes task #N and renumbers the rest.\n  \
+- `clear`: `{\"action\":\"clear\"}` clears the entire task list.\n\
+The MOMENT you START a task set it `in_progress`; the MOMENT it is actually done (verified) set it `completed`.\n\
+Each task is ONE specific, verifiable action. Keep EXACTLY ONE task `in_progress` at a time (enforced automatically).";
 
 #[async_trait]
 impl Tool for TodoTool {
@@ -289,7 +332,7 @@ impl Tool for TodoTool {
     }
     fn parameters_schema(&self) -> serde_json::Value {
         // Flat union (NOT `oneOf`, which weaker models handle poorly): send `todos` to (re)plan,
-        // OR `action`(+`id`/`status`/`content`) to change one item. `execute` picks by shape.
+        // OR `action`(+`id`/`position`/`status`/`content`) to change one item. `execute` picks by shape.
         json!({
             "type": "object",
             "properties": {
@@ -305,10 +348,11 @@ impl Tool for TodoTool {
                         "required": ["content", "status"]
                     }
                 },
-                "action": { "type": "string", "enum": ["add", "update", "delete", "remove", "clear"], "description": "UPDATE ONE ITEM (do NOT resend the whole list): `add` a task, `update` one task's status, `delete`/`remove` a task by id, or `clear` the whole list." },
-                "id": { "type": "integer", "description": "For action=update: the 1-based task number to change (as shown, e.g. #3)." },
-                "status": { "type": "string", "enum": ["pending", "in_progress", "completed"], "description": "For action=update: the new status." },
-                "content": { "type": "string", "description": "For action=add: the new task description." }
+                "action": { "type": "string", "enum": ["add", "insert", "update", "delete", "remove", "clear"], "description": "UPDATE ONE ITEM / LIST: `add` (append), `insert` (insert at position), `update` (change status), `delete`/`remove` (delete by id), or `clear` (clear all)." },
+                "position": { "type": "integer", "description": "For action=insert: the 1-based position to insert at (e.g. position=2 inserts between #1 and #2). Defaults to end if omitted." },
+                "id": { "type": "integer", "description": "For action=update/delete/remove (or action=insert): the 1-based task number to target." },
+                "status": { "type": "string", "enum": ["pending", "in_progress", "completed"], "description": "For action=update (or action=insert): the task status (defaults to pending)." },
+                "content": { "type": "string", "description": "For action=add/insert: the new task description." }
             }
         })
     }
@@ -339,6 +383,19 @@ impl Tool for TodoTool {
                     Some(c) if !c.trim().is_empty() => ok(format!("Added task: {}", c.trim())),
                     _ => err("todowrite: `add` needs non-empty `content`.".to_string()),
                 },
+                "insert" => {
+                    let content = v.get("content").and_then(|c| c.as_str());
+                    let Some(content) = content.map(|c| c.trim()).filter(|c| !c.is_empty()) else {
+                        return err("todowrite: `insert` needs non-empty `content`.".to_string());
+                    };
+                    let pos = v
+                        .get("position")
+                        .or_else(|| v.get("id"))
+                        .and_then(|x| x.as_u64())
+                        .map(|p| p.max(1))
+                        .unwrap_or(1);
+                    ok(format!("#{pos} \u{2192} inserted: {content}"))
+                }
                 "update" => {
                     let id = v.get("id").and_then(|x| x.as_u64());
                     let status = v.get("status").and_then(|x| x.as_str());
@@ -360,10 +417,10 @@ impl Tool for TodoTool {
                     }
                 }
                 "clear" => ok("all tasks cleared".to_string()),
-                _ => err("todowrite: `action` must be `add`, `update`, `delete`/`remove`, or `clear`.".to_string()),
+                _ => err("todowrite: `action` must be `add`, `insert`, `update`, `delete`/`remove`, or `clear`.".to_string()),
             };
         }
-        err("todowrite: provide either `todos` (full list to plan) or `action` (add|update one item).".to_string())
+        err("todowrite: provide either `todos` (full list to plan) or `action` (add|insert|update|delete|clear).".to_string())
     }
 }
 
@@ -901,7 +958,7 @@ mod tests {
             "uses semantic complexity triggers: {d}"
         );
         assert!(
-            d.contains("PLAN") && d.contains("UPDATE ONE ITEM"),
+            d.contains("PLAN") && d.contains("INCREMENTAL ACTIONS"),
             "covers both modes: {d}"
         );
         assert!(
@@ -909,4 +966,57 @@ mod tests {
             "sets item-quality bar: {d}"
         );
     }
+
+    #[tokio::test]
+    async fn todowrite_execute_accepts_insert() {
+        let t = TodoTool::new();
+        let ins = t
+            .execute(
+                r#"{"action":"insert","position":2,"content":"intermediate step"}"#,
+                &ctx(),
+            )
+            .await;
+        assert!(!ins.is_error, "{}", ins.content);
+        assert_eq!(ins.content, "#2 \u{2192} inserted: intermediate step");
+
+        let bad = t
+            .execute(r#"{"action":"insert","content":""}"#, &ctx())
+            .await;
+        assert!(bad.is_error);
+    }
+
+    #[tokio::test]
+    async fn apply_todo_action_insert_between_items() {
+        let plan = r#"{"todos":[{"content":"a","status":"pending"},{"content":"c","status":"pending"}]}"#;
+        let mut list = parse_todos(plan).unwrap();
+        assert_eq!(list.len(), 2);
+
+        // Insert at position 2 (between #1 'a' and #2 'c')
+        apply_todo_action(
+            &mut list,
+            r#"{"action":"insert","position":2,"content":"b"}"#,
+        );
+        assert_eq!(list.len(), 3);
+        assert_eq!(list[0].content, "a");
+        assert_eq!(list[1].content, "b");
+        assert_eq!(list[2].content, "c");
+
+        // Insert at position 1 (at head)
+        apply_todo_action(
+            &mut list,
+            r#"{"action":"insert","position":1,"content":"head"}"#,
+        );
+        assert_eq!(list.len(), 4);
+        assert_eq!(list[0].content, "head");
+        assert_eq!(list[1].content, "a");
+
+        // Insert at position beyond length (appends)
+        apply_todo_action(
+            &mut list,
+            r#"{"action":"insert","position":99,"content":"tail"}"#,
+        );
+        assert_eq!(list.len(), 5);
+        assert_eq!(list[4].content, "tail");
+    }
 }
+

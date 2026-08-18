@@ -2895,7 +2895,7 @@ mod tests {
         let fetch = FetchOutputTool::new(store.clone());
 
         // (a) a big result gets spilled and the content is replaced with a preview+handle
-        let big = "Z".repeat(THRESHOLD_BYTES + 1);
+        let big = "Z".repeat(THRESHOLD_BYTES * 2);
         let mut result = ToolResult {
             call_id: "t1".into(),
             content: big.clone(),

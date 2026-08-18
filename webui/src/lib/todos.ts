@@ -77,18 +77,53 @@ export function applyTodoAction(list: TodoItem[], args: string): TodoItem[] {
     if (!content) return list;
     return [...list, { content, status: 'pending' as const }];
   }
-  if (action === 'update') {
-    const id = typeof v.id === 'number' ? v.id : Number(v.id);
-    const status = typeof v.status === 'string' ? parseStatus(v.status) : null;
-    if (!Number.isFinite(id) || id < 1 || id > list.length || !status) return list;
+  if (action === 'insert') {
+    const content = typeof v.content === 'string' ? v.content.trim() : '';
+    if (!content) return list;
+    const status = typeof v.status === 'string' ? (parseStatus(v.status) ?? 'pending') : 'pending';
     const next = list.map((item) => ({ ...item }));
     if (status === 'in_progress') {
       for (const item of next) {
         if (item.status === 'in_progress') item.status = 'pending';
       }
     }
-    next[id - 1] = { ...next[id - 1]!, status };
+    const rawPos = v.position !== undefined ? v.position : v.id;
+    const pos = typeof rawPos === 'number' ? rawPos : typeof rawPos === 'string' ? Number(rawPos) : NaN;
+    let idx = next.length;
+    if (Number.isFinite(pos)) {
+      if (pos <= 1) idx = 0;
+      else if (pos - 1 <= next.length) idx = pos - 1;
+    }
+    next.splice(idx, 0, { content, status });
     return next;
+  }
+  if (action === 'update') {
+    const id = typeof v.id === 'number' ? v.id : Number(v.id);
+    const status = typeof v.status === 'string' ? parseStatus(v.status) : null;
+    const content = typeof v.content === 'string' ? v.content.trim() : null;
+    if (!Number.isFinite(id) || id < 1 || id > list.length || (!status && !content)) return list;
+    const next = list.map((item) => ({ ...item }));
+    if (status === 'in_progress') {
+      for (const item of next) {
+        if (item.status === 'in_progress') item.status = 'pending';
+      }
+    }
+    const target = next[id - 1]!;
+    next[id - 1] = {
+      content: content && content.length > 0 ? content : target.content,
+      status: status ?? target.status,
+    };
+    return next;
+  }
+  if (action === 'delete' || action === 'remove') {
+    const id = typeof v.id === 'number' ? v.id : Number(v.id);
+    if (!Number.isFinite(id) || id < 1 || id > list.length) return list;
+    const next = list.map((item) => ({ ...item }));
+    next.splice(id - 1, 1);
+    return next;
+  }
+  if (action === 'clear') {
+    return [];
   }
   return list;
 }
@@ -129,11 +164,8 @@ export function foldTodoToolCall(
   if (!isTodoTool(name)) return current;
   const plan = parseTodoPlan(args);
   if (plan) return plan.length > 0 ? plan : null;
-  if (!current || current.length === 0) {
-    // Incremental before any plan — ignore (same as reduce_todos).
-    return current;
-  }
-  const next = applyTodoAction(current, args);
+  const base = current ?? [];
+  const next = applyTodoAction(base, args);
   return next.length > 0 ? next : null;
 }
 

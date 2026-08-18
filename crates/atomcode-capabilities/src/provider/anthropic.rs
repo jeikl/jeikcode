@@ -460,7 +460,7 @@ fn build_request_body(
                 json!({
                     "name": td.name,
                     "description": td.description,
-                    "input_schema": td.parameters,
+                    "input_schema": super::sanitize_schema_for_wire(&td.parameters),
                 })
             })
             .collect();

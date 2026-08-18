@@ -4002,7 +4002,7 @@ impl AgentBuilder {
     /// error ([`STOP_REASON_FIRST_TOKEN`]). Without this call the default is
     /// `None` → no first-token arm (only `stream_timeout` bounds the wait).
     pub fn first_token_timeout(mut self, d: std::time::Duration) -> Self {
-        self.first_token_timeout = Some(d);
+        self.first_token_timeout = if d.is_zero() { None } else { Some(d) };
         self
     }
     /// Set how many times a round is re-issued after a first-token timeout

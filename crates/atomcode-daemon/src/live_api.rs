@@ -437,6 +437,20 @@ pub(crate) fn chat_runtime_config(
             config.coding.max_rounds,
             std::env::var("ATOMCODE_TURN_MAX_ROUNDS").ok().as_deref(),
         ),
+        // First-token liveness: mirror the canonical resolution (env > [coding]).
+        first_token_timeout: {
+            let secs = std::env::var("ATOMCODE_FIRST_TOKEN_TIMEOUT_SECS")
+                .ok()
+                .and_then(|s| s.trim().parse::<u64>().ok())
+                .unwrap_or(config.coding.first_token_timeout_secs);
+            std::time::Duration::from_secs(secs)
+        },
+        first_token_timeout_retries: {
+            std::env::var("ATOMCODE_FIRST_TOKEN_RETRIES")
+                .ok()
+                .and_then(|s| s.trim().parse::<u32>().ok())
+                .unwrap_or(config.coding.first_token_timeout_retries)
+        },
         subagent_config: Some(Arc::new(config.clone())),
         // Daemon path has no TUI checkpoint picker; keep the hard round-cap.
         round_cap_checkpoint: false,

@@ -1011,11 +1011,23 @@ fn build_request_body(
     body.insert("stream".into(), json!(true));
     body.insert("stream_options".into(), json!({ "include_usage": true }));
 
+    let m_lower = model.to_ascii_lowercase();
+    let is_o_series = m_lower.starts_with("o1")
+        || m_lower.starts_with("o3")
+        || m_lower.contains("o1-")
+        || m_lower.contains("o3-");
+
     if let Some(mt) = options.max_tokens.or(cfg.max_tokens) {
-        body.insert("max_tokens".into(), json!(mt));
+        if is_o_series {
+            body.insert("max_completion_tokens".into(), json!(mt));
+        } else {
+            body.insert("max_tokens".into(), json!(mt));
+        }
     }
     if let Some(t) = options.temperature {
-        body.insert("temperature".into(), json!(t));
+        if !is_o_series {
+            body.insert("temperature".into(), json!(t));
+        }
     }
     if supports_tool_choice(model) {
         match &options.tool_choice {
@@ -1055,7 +1067,7 @@ fn build_request_body(
                     "function": {
                         "name": td.name,
                         "description": td.description,
-                        "parameters": td.parameters,
+                        "parameters": super::sanitize_schema_for_wire(&td.parameters),
                     }
                 })
             })
@@ -1076,8 +1088,14 @@ fn supports_tool_choice(model: &str) -> bool {
 /// Whether a model accepts a top-level `reasoning_effort` control. Exposed so a UI
 /// (the TUI effort hint) and the request-body gate can never diverge.
 pub fn reason_effort_applicable(model: &str) -> bool {
-    // Only DeepSeek-V4 takes a top-level `reasoning_effort`; others reject/ignore it.
-    model.to_ascii_lowercase().contains("deepseek-v4")
+    let m = model.to_ascii_lowercase();
+    m.contains("deepseek-v4")
+        || m.starts_with("o1")
+        || m.starts_with("o3")
+        || m.contains("o1-")
+        || m.contains("o3-")
+        || m.contains("gemini-3.7")
+        || m.contains("gemini-2.5")
 }
 
 /// True when an OPEN failure is a 400 specifically complaining about

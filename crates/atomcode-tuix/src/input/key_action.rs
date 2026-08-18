@@ -39,21 +39,21 @@ pub fn classify(code: KeyCode, modifiers: KeyModifiers) -> Action {
         // from Enter and gives users another newline chord when their primary
         // one is intercepted by the host terminal (e.g. Windows Terminal binds
         // Alt+Enter to toggleFullscreen by default).
-        (KeyCode::Char('j'), true) => Action::InsertNewline,
-        (KeyCode::Char('c'), true) => Action::Cancel,
-        (KeyCode::Char('u'), true) => Action::ClearLine,
-        (KeyCode::Char('w'), true) => Action::DeleteWordBackward,
-        (KeyCode::Char('k'), true) => Action::DeleteToEnd,
+        (KeyCode::Char('j') | KeyCode::Char('J'), true) => Action::InsertNewline,
+        (KeyCode::Char('c') | KeyCode::Char('C'), true) => Action::Cancel,
+        (KeyCode::Char('u') | KeyCode::Char('U'), true) => Action::ClearLine,
+        (KeyCode::Char('w') | KeyCode::Char('W'), true) => Action::DeleteWordBackward,
+        (KeyCode::Char('k') | KeyCode::Char('K'), true) => Action::DeleteToEnd,
         // Emacs-style line navigation — Home/End aliases. Docs already
         // promise these in site/docs/keybindings.html.
-        (KeyCode::Char('a'), true) => Action::LineStart,
-        (KeyCode::Char('e'), true) => Action::LineEnd,
+        (KeyCode::Char('a') | KeyCode::Char('A'), true) => Action::LineStart,
+        (KeyCode::Char('e') | KeyCode::Char('E'), true) => Action::LineEnd,
         // Ctrl+O toggles real-time tool output visibility.
-        (KeyCode::Char('o'), true) => Action::ToggleToolOutput,
+        (KeyCode::Char('o') | KeyCode::Char('O'), true) => Action::ToggleToolOutput,
         // Ctrl+R enters reverse-i-search over input history. Bash/zsh
         // users expect the chord; it was previously unmapped (NoOp), so
         // nothing depends on the old behaviour.
-        (KeyCode::Char('r'), true) => Action::HistorySearch,
+        (KeyCode::Char('r') | KeyCode::Char('R'), true) => Action::HistorySearch,
         // Ctrl+H is the POSIX / readline alias for Backspace. MobaXterm,
         // PuTTY and other Windows SSH clients often ship with "Backspace
         // sends ^H" turned on by default, so the physical Backspace key
@@ -61,7 +61,7 @@ pub fn classify(code: KeyCode, modifiers: KeyModifiers) -> Action {
         // Without this arm the key is a no-op on those terminals — the
         // user sees their input line accumulate characters they can't
         // erase.
-        (KeyCode::Char('h'), true) => Action::Backspace,
+        (KeyCode::Char('h') | KeyCode::Char('H'), true) => Action::Backspace,
         // Ctrl+? (ASCII 0x7F with modifier coerced) — some xterm-family
         // terminals emit this for the literal Delete key. Keep the
         // behaviour symmetric with the bare `KeyCode::Delete` arm below.

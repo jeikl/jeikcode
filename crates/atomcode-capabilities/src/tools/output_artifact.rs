@@ -280,7 +280,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let store = std::sync::Arc::new(super::ArtifactStore::new(dir.path()));
         let mw = super::ArtifactMiddleware::new(store.clone());
-        let big = "x".repeat(super::THRESHOLD_BYTES + 1);
+        let big = "x".repeat(super::THRESHOLD_BYTES * 2);
         let mk = || ToolResult { call_id: "c".into(), content: big.clone(), is_error: false, images: vec![] };
 
         let mut r1 = mk();

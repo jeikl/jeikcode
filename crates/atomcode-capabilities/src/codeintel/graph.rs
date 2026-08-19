@@ -157,6 +157,43 @@ impl CodeGraph {
         }
     }
 
+    pub fn remove_symbol(&mut self, id: SymbolId) {
+        if let Some(node) = self.nodes.remove(&id) {
+            if let Some(ids) = self.by_name.get_mut(&node.name) {
+                ids.retain(|&x| x != id);
+            }
+            if let Some(ids) = self.file_symbols.get_mut(&node.file) {
+                ids.retain(|&x| x != id);
+            }
+            // remove outgoing edges from id
+            if let Some(outs) = self.edges_out.remove(&id) {
+                for edge in outs {
+                    if let Some(ins) = self.edges_in.get_mut(&edge.to) {
+                        ins.retain(|e| e.to != id);
+                    }
+                }
+            }
+            // remove incoming edges to id
+            if let Some(ins) = self.edges_in.remove(&id) {
+                for edge in ins {
+                    if let Some(outs) = self.edges_out.get_mut(&edge.to) {
+                        outs.retain(|e| e.to != id);
+                    }
+                }
+            }
+        }
+    }
+
+    pub fn remove_file(&mut self, file: &Path) {
+        if let Some(ids) = self.file_symbols.get(file).cloned() {
+            for id in ids {
+                self.remove_symbol(id);
+            }
+        }
+        self.file_symbols.remove(file);
+        self.file_mtimes.remove(file);
+    }
+
     pub fn node_count(&self) -> usize {
         self.nodes.len()
     }

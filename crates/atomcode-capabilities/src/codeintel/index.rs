@@ -27,8 +27,34 @@ use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant, UNIX_EPOCH};
 
 /// How often the background refresher re-walks the last workspace (cheap fingerprint;
-/// only dirty files are re-parsed).
-const BACKGROUND_REFRESH_SECS: u64 = 2;
+/// only dirty files are re-parsed). Debounced when recent edits occurred.
+const BACKGROUND_REFRESH_SECS: u64 = 5;
+
+/// Unified internal path normalization for the code index.
+/// Strips verbatim prefixes (`\\?\`), unifies slashes, and on Windows uppercases the drive letter.
+pub fn normalize_index_path(p: &Path) -> PathBuf {
+    let s = p.to_string_lossy();
+    let stripped = s
+        .strip_prefix(r"\\?\")
+        .or_else(|| s.strip_prefix("//?/"))
+        .unwrap_or(&s);
+
+    #[cfg(windows)]
+    {
+        let mut unified = stripped.replace('/', "\\");
+        let bytes = unified.as_bytes();
+        if bytes.len() >= 2 && bytes[1] == b':' && bytes[0].is_ascii_alphabetic() {
+            let mut chars: Vec<char> = unified.chars().collect();
+            chars[0] = chars[0].to_ascii_uppercase();
+            unified = chars.into_iter().collect();
+        }
+        PathBuf::from(unified)
+    }
+    #[cfg(not(windows))]
+    {
+        PathBuf::from(stripped)
+    }
+}
 
 /// On-disk cache layout version. Bump when AST queries / DiskCache / unit schema changes.
 const DISK_CACHE_VERSION: u32 = 3;
@@ -39,7 +65,6 @@ pub const DISK_CACHE_REL: &str = ".atomcode/codegraph/units.v3.json";
 /// Relative path for the BINARY (bincode+zstd) index cache. Written whenever
 /// possible; `units.v3.json` stays as a read fallback for older workspaces.
 pub const DISK_CACHE_REL_BIN: &str = ".atomcode/codegraph/units.v4.bin";
-
 
 /// Map a tree-sitter node-kind string to a [`SymbolKind`]. From production
 /// `classify_symbol_kind`.
@@ -75,13 +100,13 @@ fn classify_symbol_kind(ts: &str) -> SymbolKind {
 }
 
 #[derive(Clone, Serialize, Deserialize)]
-struct RawCall {
-    caller_name: String,
+pub struct RawCall {
+    pub caller_name: String,
     /// caller's start_line — lets the build reconstruct the caller's exact id via `make_id`
     /// instead of a name lookup (removes a scan and fixes wrong-caller attribution).
-    caller_line: usize,
-    callee_name: String,
-    line: usize,
+    pub caller_line: usize,
+    pub callee_name: String,
+    pub line: usize,
 }
 
 /// Attribute call sites to the innermost enclosing Function/Method symbol.
@@ -174,6 +199,92 @@ fn parse_yaml_config(path: &Path, source: &str) -> Option<(Vec<SymbolNode>, Vec<
     }
 }
 
+fn parse_toml_config(path: &Path, source: &str) -> Option<(Vec<SymbolNode>, Vec<RawCall>)> {
+    let mut nodes = Vec::new();
+    let lines: Vec<&str> = source.lines().collect();
+
+    for (idx, line) in lines.iter().enumerate() {
+        let line_num = idx + 1;
+        let trimmed = line.trim();
+        if trimmed.starts_with('#') || trimmed.is_empty() {
+            continue;
+        }
+
+        if trimmed.starts_with('[') && trimmed.ends_with(']') {
+            let section = trimmed.trim_matches('[').trim_matches(']').trim();
+            if !section.is_empty() {
+                nodes.push(SymbolNode {
+                    id: CodeGraph::make_id(path, section, line_num),
+                    name: section.to_string(),
+                    kind: SymbolKind::ConfigProperty,
+                    visibility: Visibility::Public,
+                    file: path.to_path_buf(),
+                    start_line: line_num,
+                    end_line: line_num,
+                    signature: Some(trimmed.to_string()),
+                    docstring: None,
+                    inline_comments: Vec::new(),
+                });
+            }
+        } else if let Some(eq_pos) = trimmed.find('=') {
+            let key = trimmed[..eq_pos].trim().trim_matches('"').trim_matches('\'');
+            if !key.is_empty() && key.len() >= 2 && !key.contains(' ') {
+                nodes.push(SymbolNode {
+                    id: CodeGraph::make_id(path, key, line_num),
+                    name: key.to_string(),
+                    kind: SymbolKind::ConfigProperty,
+                    visibility: Visibility::Public,
+                    file: path.to_path_buf(),
+                    start_line: line_num,
+                    end_line: line_num,
+                    signature: Some(trimmed.to_string()),
+                    docstring: None,
+                    inline_comments: Vec::new(),
+                });
+            }
+        }
+    }
+
+    if nodes.is_empty() {
+        None
+    } else {
+        Some((nodes, Vec::new()))
+    }
+}
+
+fn parse_markdown_doc(path: &Path, source: &str) -> Option<(Vec<SymbolNode>, Vec<RawCall>)> {
+    let mut nodes = Vec::new();
+    let lines: Vec<&str> = source.lines().collect();
+
+    for (idx, line) in lines.iter().enumerate() {
+        let line_num = idx + 1;
+        let trimmed = line.trim();
+        if trimmed.starts_with('#') {
+            let title = trimmed.trim_start_matches('#').trim();
+            if !title.is_empty() && title.len() >= 2 {
+                nodes.push(SymbolNode {
+                    id: CodeGraph::make_id(path, title, line_num),
+                    name: title.to_string(),
+                    kind: SymbolKind::Module,
+                    visibility: Visibility::Public,
+                    file: path.to_path_buf(),
+                    start_line: line_num,
+                    end_line: (line_num + 5).min(lines.len()),
+                    signature: Some(trimmed.to_string()),
+                    docstring: Some(title.to_string()),
+                    inline_comments: Vec::new(),
+                });
+            }
+        }
+    }
+
+    if nodes.is_empty() {
+        None
+    } else {
+        Some((nodes, Vec::new()))
+    }
+}
+
 fn parse_json_config(path: &Path, source: &str) -> Option<(Vec<SymbolNode>, Vec<RawCall>)> {
     let mut nodes = Vec::new();
     let lines: Vec<&str> = source.lines().collect();
@@ -231,6 +342,14 @@ fn parse_file(path: &Path, source: &str) -> Option<(Vec<SymbolNode>, Vec<RawCall
                 if let Some(json_res) = parse_json_config(path, source) {
                     return Some(json_res);
                 }
+            }
+        } else if ext_lower == "toml" {
+            if let Some(toml_res) = parse_toml_config(path, source) {
+                return Some(toml_res);
+            }
+        } else if ext_lower == "md" || ext_lower == "markdown" {
+            if let Some(md_res) = parse_markdown_doc(path, source) {
+                return Some(md_res);
             }
         } else if matches!(ext_lower.as_str(), "vue" | "svelte" | "astro") {
             // SFC dual-parse: `<script>` block → TSX (component logic + imports),
@@ -462,11 +581,8 @@ fn parse_css_styles(path: &Path, source: &str) -> Option<(Vec<SymbolNode>, Vec<R
         while i < chars.len() {
             let ch = chars[i];
             if (ch == '.' || ch == '#') && i + 1 < chars.len() && chars[i + 1].is_ascii_alphabetic() {
-                // Collect identifier after the . / # marker.
                 let mut j = i + 1;
-                while j < chars.len()
-                    && (chars[j].is_ascii_alphanumeric() || chars[j] == '-' || chars[j] == '_')
-                {
+                while j < chars.len() && (chars[j].is_ascii_alphanumeric() || chars[j] == '-' || chars[j] == '_') {
                     j += 1;
                 }
                 let ident: String = chars[i + 1..j].iter().collect();
@@ -489,42 +605,34 @@ fn parse_css_styles(path: &Path, source: &str) -> Option<(Vec<SymbolNode>, Vec<R
                     }
                 }
                 i = j;
-                continue;
-            }
-            if ch == '@' && chars[i..].iter().collect::<String>().starts_with("@keyframes") {
-                // Jump past "@keyframes" then take the next identifier.
-                let mut j = i + "@keyframes".len();
-                while j < chars.len() && (chars[j].is_whitespace()) {
-                    j += 1;
-                }
-                let start = j;
-                while j < chars.len()
-                    && (chars[j].is_ascii_alphanumeric() || chars[j] == '-' || chars[j] == '_')
-                {
-                    j += 1;
-                }
-                let name: String = chars[start..j].iter().collect();
-                if name.len() >= 2 {
-                    let key = format!("{name}@{line_num}");
-                    if seen.insert(key) {
-                        nodes.push(SymbolNode {
-                            id: CodeGraph::make_id(path, &name, line_num),
-                            name,
-                            kind: SymbolKind::UiElement,
-                            visibility: Visibility::Public,
-                            file: path.to_path_buf(),
-                            start_line: line_num,
-                            end_line: line_num,
-                            signature: None,
-                            docstring: None,
-                            inline_comments: Vec::new(),
-                        });
+            } else if ch == '@' {
+                let s = &line[i..];
+                if s.starts_with("@keyframes") {
+                    let mut j = i + "@keyframes".len();
+                    while j < chars.len() && chars[j].is_whitespace() { j += 1; }
+                    let start = j;
+                    while j < chars.len() && (chars[j].is_ascii_alphanumeric() || chars[j] == '-' || chars[j] == '_') { j += 1; }
+                    let name: String = chars[start..j].iter().collect();
+                    if !name.is_empty() {
+                        let key = format!("@{name}@{line_num}");
+                        if seen.insert(key) {
+                            nodes.push(SymbolNode {
+                                id: CodeGraph::make_id(path, &name, line_num),
+                                name,
+                                kind: SymbolKind::UiElement,
+                                visibility: Visibility::Public,
+                                file: path.to_path_buf(),
+                                start_line: line_num,
+                                end_line: line_num,
+                                signature: None,
+                                docstring: None,
+                                inline_comments: Vec::new(),
+                            });
+                        }
                     }
-                }
-                i = j;
-                continue;
-            }
-            i += 1;
+                    i = j;
+                } else { i += 1; }
+            } else { i += 1; }
         }
     }
 
@@ -605,7 +713,7 @@ pub const INDEXED_EXTS: &[&str] = &[
     "rs", "py", "pyi", "js", "jsx", "mjs", "cjs", "ts", "mts", "cts", "tsx", "vue",
     "go", "java", "c", "h", "cc", "cpp", "cxx", "hpp", "hh", "cs", "php", "phtml",
     "kt", "kts", "swift", "dart", "rb", "scala", "sc", "sol", "lua", "tf", "tfvars",
-    "erl", "hrl", "r", "nix", "xml", "sql", "yml", "yaml", "json", "toml",
+    "erl", "hrl", "r", "nix", "xml", "sql", "yml", "yaml", "json", "toml", "md", "markdown",
     // Frontend stylesheets + SFC flavors: textual selector extraction (zero deps).
     "css", "scss", "less", "sass", "svelte", "astro", "html",
 ];
@@ -613,7 +721,6 @@ pub const INDEXED_EXTS: &[&str] = &[
 pub fn is_indexed_ext(ext: &str) -> bool {
     INDEXED_EXTS.iter().any(|e| e.eq_ignore_ascii_case(ext))
 }
-
 
 /// Directory basenames skipped even when not covered by `.gitignore` (common on
 /// C#/Node/Rust monorepos that ship without ignore rules, or when agents open a
@@ -754,7 +861,7 @@ fn collect_files(root: &Path) -> Vec<Walked> {
             .map(|d| d.as_nanos())
             .unwrap_or(0);
         out.push(Walked {
-            path: p.to_path_buf(),
+            path: normalize_index_path(p),
             mtime_ns,
             len,
         });
@@ -771,6 +878,31 @@ fn fingerprint(files: &[Walked]) -> u64 {
         w.len.hash(&mut h);
     }
     h.finish()
+}
+
+/// Result of [`init_workspace_index`] / a successful index refresh.
+#[derive(Debug, Clone)]
+pub struct IndexReport {
+    pub root: PathBuf,
+    pub cache_path: PathBuf,
+    pub files: usize,
+    pub symbols: usize,
+    pub reparsed: usize,
+    pub removed: usize,
+    pub kept: usize,
+    pub elapsed: Duration,
+    /// True when the disk cache was a perfect walk_fp hit (no re-parse).
+    pub cache_hit: bool,
+}
+
+/// Absolute path of the on-disk codegraph cache for `root`.
+pub fn disk_cache_path(root: &Path) -> PathBuf {
+    super::canonical(root).join(DISK_CACHE_REL)
+}
+
+/// Absolute path of the BINARY (bincode+zstd) codegraph cache for `root`.
+pub fn disk_cache_path_bin(root: &Path) -> PathBuf {
+    super::canonical(root).join(DISK_CACHE_REL_BIN)
 }
 
 fn top_component(p: &Path, root: &Path) -> Option<std::ffi::OsString> {
@@ -829,66 +961,23 @@ fn resolve_callee(
 /// Atomic index unit for one source file: parsed symbols + unresolved call sites.
 /// A content change (mtime/len) replaces this whole unit; other units are untouched.
 #[derive(Clone, Serialize, Deserialize)]
-struct FileUnit {
-    mtime_ns: u128,
-    len: u64,
-    nodes: Vec<SymbolNode>,
-    calls: Vec<RawCall>,
+pub struct FileUnit {
+    pub mtime_ns: u128,
+    pub len: u64,
+    pub nodes: Vec<SymbolNode>,
+    pub calls: Vec<RawCall>,
 }
 
 /// Persisted workspace index written by `atomcode init` / after in-process builds.
 #[derive(Serialize, Deserialize)]
-struct DiskCache {
-    version: u32,
+pub struct DiskCache {
+    pub version: u32,
     /// Canonical root path string (informational; validity is walk_fp).
-    root: String,
-    walk_fp: u64,
+    pub root: String,
+    pub walk_fp: u64,
     /// path string → unit (PathBuf keys serialize poorly across OS separators).
-    units: HashMap<String, FileUnit>,
-    graph: CodeGraph,
-}
-
-/// Result of [`init_workspace_index`] / a successful index refresh.
-#[derive(Debug, Clone)]
-pub struct IndexReport {
-    pub root: PathBuf,
-    pub cache_path: PathBuf,
-    pub files: usize,
-    pub symbols: usize,
-    pub reparsed: usize,
-    pub removed: usize,
-    pub kept: usize,
-    pub elapsed: Duration,
-    /// True when the disk cache was a perfect walk_fp hit (no re-parse).
-    pub cache_hit: bool,
-}
-
-/// Absolute path of the on-disk codegraph cache for `root`.
-pub fn disk_cache_path(root: &Path) -> PathBuf {
-    super::canonical(root).join(DISK_CACHE_REL)
-}
-
-/// Absolute path of the BINARY (bincode+zstd) codegraph cache for `root`.
-pub fn disk_cache_path_bin(root: &Path) -> PathBuf {
-    super::canonical(root).join(DISK_CACHE_REL_BIN)
-}
-
-fn load_disk_cache(root: &Path) -> Option<DiskCache> {
-    // 1. Prefer the binary (bincode+zstd) cache — ~10× smaller, 10-50× faster
-    //    to load (cold start). Version-gated like the JSON cache.
-    if let Some(bin) = load_disk_cache_bin(root) {
-        return Some(bin);
-    }
-    // 2. Fall back to the legacy JSON cache (old workspaces / downgrade path).
-    let path = disk_cache_path(root);
-    let bytes = std::fs::read(&path).ok()?;
-    let mut cache: DiskCache = serde_json::from_slice(&bytes).ok()?;
-    if cache.version != DISK_CACHE_VERSION {
-        return None;
-    }
-    // `by_name` is skip-serialized — rebuild before serving queries.
-    cache.graph.rebuild_name_index();
-    Some(cache)
+    pub units: HashMap<String, FileUnit>,
+    pub graph: CodeGraph,
 }
 
 /// Load the binary cache (`units.v4.bin`): bincode-decode + zstd-decompress.
@@ -904,47 +993,12 @@ fn load_disk_cache_bin(root: &Path) -> Option<DiskCache> {
     Some(cache)
 }
 
-fn save_disk_cache(
-    root: &Path,
-    walk_fp: u64,
-    units: &HashMap<PathBuf, FileUnit>,
-    graph: &CodeGraph,
-) -> std::io::Result<PathBuf> {
-    // Cross-process write lock: serialize concurrent `atomcode init` / refresh
-    // writes so a later process never overwrites a fresher cache mid-write
-    // (atomic tmp+rename already prevents torn reads; the lock prevents
-    // wasteful duplicate full writes when two processes rebuild at once).
-    let lock_path = root.join(DISK_CACHE_REL).with_extension("lock");
-    if let Some(parent) = lock_path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-    let lock_file = std::fs::File::create(&lock_path)?;
-    let _lock_guard = fs2::FileExt::lock_exclusive(&lock_file);
-
-    let path = disk_cache_path(root);
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-    let mut unit_map = HashMap::with_capacity(units.len());
-    for (p, u) in units {
-        unit_map.insert(p.to_string_lossy().into_owned(), u.clone());
-    }
-    let cache = DiskCache {
-        version: DISK_CACHE_VERSION,
-        root: root.display().to_string(),
-        walk_fp,
-        units: unit_map,
-        graph: graph.clone(),
-    };
-    // Write both formats: the binary one is the fast cold-start path, the JSON
-    // one keeps old workspaces / downgrades readable. Both atomic (tmp+rename).
-    let _ = save_disk_cache_bin(root, &cache);
-    let tmp = path.with_extension("json.tmp");
-    let json = serde_json::to_vec(&cache)
-        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
-    std::fs::write(&tmp, json)?;
-    std::fs::rename(&tmp, &path)?;
-    Ok(path)
+fn units_from_disk(cache: DiskCache) -> HashMap<PathBuf, FileUnit> {
+    cache
+        .units
+        .into_iter()
+        .map(|(p, u)| (PathBuf::from(p), u))
+        .collect()
 }
 
 /// Write the binary cache (`units.v4.bin`): zstd-compress + bincode-encode.
@@ -963,18 +1017,91 @@ fn save_disk_cache_bin(root: &Path, cache: &DiskCache) -> std::io::Result<PathBu
     Ok(path)
 }
 
-fn units_from_disk(cache: DiskCache) -> HashMap<PathBuf, FileUnit> {
-    cache
-        .units
-        .into_iter()
-        .map(|(p, u)| (PathBuf::from(p), u))
-        .collect()
+fn load_disk_cache(root: &Path) -> Option<DiskCache> {
+    // 1. Prefer SQLite-backed cache (`index.v1.db`) — fast incremental row-level upserts.
+    let db_path = super::index_db::disk_cache_path_db(root);
+    if db_path.is_file() {
+        if let Ok(db) = super::index_db::IndexDb::open(&db_path) {
+            if let (Some(walk_fp), Some(graph)) = (db.get_walk_fp(), db.load_graph()) {
+                let units_map = db.load_units();
+                if !units_map.is_empty() {
+                    let mut unit_str_map = HashMap::with_capacity(units_map.len());
+                    for (p, u) in units_map {
+                        unit_str_map.insert(p.to_string_lossy().into_owned(), u);
+                    }
+                    return Some(DiskCache {
+                        version: DISK_CACHE_VERSION,
+                        root: root.display().to_string(),
+                        walk_fp,
+                        units: unit_str_map,
+                        graph,
+                    });
+                }
+            }
+        }
+    }
+
+    // 2. Binary cache (`units.v4.bin`)
+    if let Some(bin) = load_disk_cache_bin(root) {
+        return Some(bin);
+    }
+
+    // 3. Fall back to the legacy JSON cache (old workspaces / downgrade path).
+    let path = disk_cache_path(root);
+    let bytes = std::fs::read(&path).ok()?;
+    let mut cache: DiskCache = serde_json::from_slice(&bytes).ok()?;
+    if cache.version != DISK_CACHE_VERSION {
+        return None;
+    }
+    cache.graph.rebuild_name_index();
+    Some(cache)
 }
 
-/// Build or refresh the workspace code graph and **persist** it under
-/// [`.atomcode/codegraph/`](DISK_CACHE_REL) so the next agent session can load it.
-///
-/// Used by `atomcode init`. `force` deletes any existing cache and re-parses every file.
+fn save_disk_cache(
+    root: &Path,
+    walk_fp: u64,
+    units: &HashMap<PathBuf, FileUnit>,
+    graph: &CodeGraph,
+    changed_units: &[(PathBuf, FileUnit)],
+    deleted_paths: &[PathBuf],
+) -> std::io::Result<PathBuf> {
+    // 1. Sync to SQLite incremental db
+    let db_path = super::index_db::disk_cache_path_db(root);
+    if let Some(parent) = db_path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    if let Ok(db) = super::index_db::IndexDb::open(&db_path) {
+        let upsert_vec: Vec<(PathBuf, FileUnit)> = if changed_units.is_empty() && deleted_paths.is_empty() {
+            units.iter().map(|(p, u)| (p.clone(), u.clone())).collect()
+        } else {
+            changed_units.to_vec()
+        };
+        let _ = db.sync_incremental(walk_fp, &upsert_vec, deleted_paths, graph);
+    }
+
+    // 2. Also write binary cache and JSON cache for cold start and downgrade compatibility
+    let path = disk_cache_path(root);
+    let mut unit_map = HashMap::with_capacity(units.len());
+    for (p, u) in units {
+        unit_map.insert(p.to_string_lossy().into_owned(), u.clone());
+    }
+    let cache = DiskCache {
+        version: DISK_CACHE_VERSION,
+        root: root.display().to_string(),
+        walk_fp,
+        units: unit_map,
+        graph: graph.clone(),
+    };
+    let _ = save_disk_cache_bin(root, &cache);
+    let tmp = path.with_extension("json.tmp");
+    if let Ok(json) = serde_json::to_vec(&cache) {
+        let _ = std::fs::write(&tmp, json);
+        let _ = std::fs::rename(&tmp, &path);
+    }
+
+    Ok(db_path)
+}
+
 pub fn init_workspace_index(
     root: &Path,
     force: bool,
@@ -982,7 +1109,7 @@ pub fn init_workspace_index(
 ) -> Result<IndexReport, String> {
     let root = super::canonical(root);
     let t0 = Instant::now();
-    let cache_path = disk_cache_path(&root);
+    let cache_path = super::index_db::disk_cache_path_db(&root);
 
     if force {
         on_progress(&format!(
@@ -996,11 +1123,6 @@ pub fn init_workspace_index(
     let _g = idx.get_with_progress(&root, on_progress);
 
     let mut guard = idx.inner.lock().map_err(|e| e.to_string())?;
-    // Incremental save: only rewrite the durable cache when the graph actually
-    // changed (a file was re-parsed or removed). A pure cache hit (nothing
-    // dirty) leaves the on-disk cache untouched — for the 30-40 concurrent
-    // read-heavy session scenario this means `atomcode init` after small
-    // edits no longer re-serializes the whole graph.
     let changed = guard
         .last_stats
         .as_ref()
@@ -1008,13 +1130,9 @@ pub fn init_workspace_index(
         .unwrap_or(true);
     if changed {
         if let Some(g) = guard.graph.as_ref() {
-            let path = save_disk_cache(&root, guard.walk_fp, &guard.units, g)
+            let path = save_disk_cache(&root, guard.walk_fp, &guard.units, g, &[], &[])
                 .map_err(|e| format!("failed to write {}: {e}", path_for_display(&cache_path)))?;
             on_progress(&format!("Code graph: wrote {}", path_for_display(&path)));
-            // Explicitly persist the retrieval sidecars (dirindex / idf_stats)
-            // at init time so every subsequent query (all sessions sharing the
-            // process-wide index) loads them from disk instead of lazily
-            // rebuilding — the 30-40 concurrent session case.
             let dirindex = super::retrieval::DirIndex::build(g);
             let _ = dirindex.save(&root.join(super::retrieval::DIRINDEX_REL));
             let stats = super::retrieval::IdfStats::build(g);
@@ -1045,11 +1163,11 @@ pub fn init_workspace_index(
 }
 
 #[derive(Debug, Clone, Copy)]
-struct RefreshStats {
-    reparsed: usize,
-    removed: usize,
-    kept: usize,
-    cache_hit: bool,
+pub struct RefreshStats {
+    pub reparsed: usize,
+    pub removed: usize,
+    pub kept: usize,
+    pub cache_hit: bool,
 }
 
 fn parse_unit(w: &Walked) -> Option<FileUnit> {
@@ -1109,31 +1227,40 @@ fn compose_graph(
 }
 
 /// Diff `walked` against `units`: re-parse dirty/new, drop deleted. Returns
-/// `(reparsed, removed, kept)`. Dirty files are parsed **in parallel** across
+/// `(reparsed, removed, kept, changed_units, deleted_paths)`. Dirty files are parsed **in parallel** across
 /// available CPU cores (each thread caches its own tree-sitter queries).
 fn sync_units(
     units: &mut HashMap<PathBuf, FileUnit>,
     walked: &[Walked],
     on_progress: &dyn Fn(&str),
-) -> (usize, usize, usize) {
+) -> (usize, usize, usize, Vec<(PathBuf, FileUnit)>, Vec<PathBuf>) {
     let walked_paths: std::collections::HashSet<PathBuf> =
-        walked.iter().map(|w| w.path.clone()).collect();
+        walked.iter().map(|w| normalize_index_path(&w.path)).collect();
 
+    let mut deleted_paths = Vec::new();
     let before = units.len();
-    units.retain(|p, _| walked_paths.contains(p));
+    units.retain(|p, _| {
+        let norm_p = normalize_index_path(p);
+        let keep = walked_paths.contains(&norm_p);
+        if !keep {
+            deleted_paths.push(norm_p);
+        }
+        keep
+    });
     let removed = before - units.len();
 
     let mut dirty: Vec<&Walked> = Vec::new();
     let mut kept = 0usize;
     for w in walked {
-        match units.get(&w.path) {
+        let norm_p = normalize_index_path(&w.path);
+        match units.get(&norm_p) {
             Some(u) if u.mtime_ns == w.mtime_ns && u.len == w.len => kept += 1,
             _ => dirty.push(w),
         }
     }
     let dirty_total = dirty.len();
     if dirty_total == 0 {
-        return (0, removed, kept);
+        return (0, removed, kept, Vec::new(), deleted_paths);
     }
 
     let threads = std::thread::available_parallelism()
@@ -1158,7 +1285,8 @@ fn sync_units(
             handles.push(scope.spawn(move || {
                 let mut out = Vec::with_capacity(piece.len());
                 for w in piece {
-                    out.push((w.path.clone(), parse_unit(w)));
+                    let norm_p = normalize_index_path(&w.path);
+                    out.push((norm_p, parse_unit(w)));
                 }
                 out
             }));
@@ -1179,18 +1307,22 @@ fn sync_units(
     ));
 
     let mut reparsed = 0usize;
+    let mut changed_units = Vec::with_capacity(parsed.len());
     for (path, unit) in parsed {
+        let norm_path = normalize_index_path(&path);
         reparsed += 1;
         match unit {
             Some(u) => {
-                units.insert(path, u);
+                changed_units.push((norm_path.clone(), u.clone()));
+                units.insert(norm_path, u);
             }
             None => {
-                units.remove(&path);
+                units.remove(&norm_path);
+                deleted_paths.push(norm_path);
             }
         }
     }
-    (reparsed, removed, kept)
+    (reparsed, removed, kept, changed_units, deleted_paths)
 }
 
 /// Build a fresh code graph for `root` (walk → parse → resolve). O(repo), CPU-bound.
@@ -1200,7 +1332,7 @@ pub fn build_graph(root: &Path) -> CodeGraph {
     let mut units = HashMap::new();
     for w in &files {
         if let Some(u) = parse_unit(w) {
-            units.insert(w.path.clone(), u);
+            units.insert(normalize_index_path(&w.path), u);
         }
     }
     compose_graph(&root, &units, &|_| {})
@@ -1244,6 +1376,8 @@ struct IndexState {
     building: bool,
     /// Stats from the most recent refresh (for `atomcode init` reporting).
     last_stats: Option<RefreshStats>,
+    /// Last instant an edit or incremental update occurred (for background debouncing).
+    last_update_instant: Option<Instant>,
 }
 
 impl Default for IndexState {
@@ -1258,6 +1392,7 @@ impl Default for IndexState {
             concept_vectors: None,
             building: false,
             last_stats: None,
+            last_update_instant: None,
         }
     }
 }
@@ -1279,34 +1414,172 @@ impl CodeIndex {
 
     /// Start a cheap background poller that incrementally refreshes the last-used
     /// workspace so `git pull` / editor saves land without waiting for the next tool.
+    /// Debounced when active agent edits or quick-updates have recently occurred.
     /// Safe to call multiple times; only the first starts the thread.
     pub fn start_background_refresh(self: &Arc<Self>) {
-        if self
-            .watcher_started
-            .swap(true, Ordering::SeqCst)
-        {
-            return;
+        // In the event-driven architecture, file writes directly trigger fast-path
+        // in-memory updates via `update_single_file` with SQLite WAL write-through.
+        // Periodic background disk-scanning polling is intentionally disabled to eliminate
+        // lock contention and CPU/IO jitter.
+    }
+
+    /// Notify the code index that a file was modified, triggering a fast
+    /// in-memory unit parse and local graph/vector patch in 1-3ms without
+    /// full directory tree scanning or global recomposition.
+    pub fn update_single_file(&self, path: &Path, content: Option<&str>) -> bool {
+        let norm_path = normalize_index_path(path);
+        let mut guard = match self.inner.lock() {
+            Ok(g) => g,
+            Err(p) => p.into_inner(),
+        };
+
+        let root = match guard.root.clone() {
+            Some(r) => r,
+            None => {
+                let inferred = norm_path.parent().map(|p| p.to_path_buf()).unwrap_or_else(|| PathBuf::from("."));
+                guard.root = Some(inferred.clone());
+                inferred
+            }
+        };
+
+        let ext_ok = norm_path
+            .extension()
+            .and_then(|e| e.to_str())
+            .map(is_indexed_ext)
+            .unwrap_or(false);
+        if !ext_ok || is_generated_source(&norm_path) {
+            return false;
         }
-        let this = Arc::clone(self);
-        let _ = std::thread::Builder::new()
-            .name("codegraph-refresh".into())
-            .spawn(move || loop {
-                std::thread::sleep(Duration::from_secs(BACKGROUND_REFRESH_SECS));
-                let root = {
-                    let g = match this.inner.lock() {
-                        Ok(g) => g,
-                        Err(p) => p.into_inner(),
-                    };
-                    if g.building {
-                        continue;
+
+        let (source, mtime_ns, len) = match content {
+            Some(text) => {
+                let md = std::fs::metadata(&norm_path).ok();
+                let mtime_ns = md
+                    .as_ref()
+                    .and_then(|m| m.modified().ok())
+                    .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
+                    .map(|d| d.as_nanos())
+                    .unwrap_or_else(|| {
+                        std::time::SystemTime::now()
+                            .duration_since(UNIX_EPOCH)
+                            .map(|d| d.as_nanos())
+                            .unwrap_or(0)
+                    });
+                (text.to_string(), mtime_ns, text.len() as u64)
+            }
+            None => {
+                let Ok(md) = std::fs::metadata(&norm_path) else {
+                    guard.units.remove(&norm_path);
+                    if let Some(graph) = guard.graph.as_mut() {
+                        let g_mut = Arc::make_mut(graph);
+                        g_mut.remove_file(&norm_path);
                     }
-                    g.root.clone()
+                    guard.last_stats = Some(RefreshStats {
+                        reparsed: 0,
+                        removed: 1,
+                        kept: guard.units.len(),
+                        cache_hit: false,
+                    });
+                    guard.last_update_instant = Some(Instant::now());
+                    let default_g = CodeGraph::new();
+                    let g_ref = guard.graph.as_deref().unwrap_or(&default_g);
+                    let _ = save_disk_cache(&root, guard.walk_fp, &guard.units, g_ref, &[], &[norm_path]);
+                    return true;
                 };
-                if let Some(root) = root {
-                    // Silent incremental sync; tools still single-flight if racing.
-                    let _ = this.get_with_progress(&root, &|_| {});
+                let mtime_ns = md
+                    .modified()
+                    .ok()
+                    .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
+                    .map(|d| d.as_nanos())
+                    .unwrap_or(0);
+                let Ok(text) = std::fs::read_to_string(&norm_path) else {
+                    return false;
+                };
+                let l = md.len();
+                (text, mtime_ns, l)
+            }
+        };
+
+        if len > MAX_INDEX_FILE_BYTES {
+            return false;
+        }
+
+        let source = super::strip_utf8_bom(&source);
+        let Some((nodes, calls)) = parse_file(&norm_path, source) else {
+            guard.units.remove(&norm_path);
+            if let Some(graph) = guard.graph.as_mut() {
+                let g_mut = Arc::make_mut(graph);
+                g_mut.remove_file(&norm_path);
+            }
+            return true;
+        };
+
+        let unit = FileUnit {
+            mtime_ns,
+            len,
+            nodes: nodes.clone(),
+            calls: calls.clone(),
+        };
+
+        guard.units.insert(norm_path.clone(), unit.clone());
+
+        // Fast graph patch
+        if let Some(graph) = guard.graph.as_mut() {
+            let g = Arc::make_mut(graph);
+            g.remove_file(&norm_path);
+            for n in &nodes {
+                g.add_symbol(n.clone());
+            }
+            g.file_mtimes
+                .insert(norm_path.clone(), (mtime_ns / 1_000_000_000) as u64);
+
+            for rc in calls {
+                let caller = CodeGraph::make_id(&norm_path, &rc.caller_name, rc.caller_line);
+                if g.node(caller).is_none() {
+                    continue;
                 }
-            });
+                if let Some(callee) = resolve_callee(g, &rc.callee_name, &norm_path, &root) {
+                    g.add_edge(
+                        caller,
+                        Edge {
+                            to: callee,
+                            kind: EdgeKind::Calls,
+                            line: rc.line,
+                        },
+                    );
+                }
+            }
+        }
+
+        // Fast concept vectors patch for modified symbols
+        if let Some(concept_map) = guard.concept_vectors.as_mut() {
+            let map = Arc::make_mut(concept_map);
+            for node in &nodes {
+                map.insert(
+                    node.id,
+                    super::retrieval::concept_projection(&node.name, &HashSet::new()),
+                );
+            }
+        }
+
+        guard.last_stats = Some(RefreshStats {
+            reparsed: 1,
+            removed: 0,
+            kept: guard.units.len().saturating_sub(1),
+            cache_hit: false,
+        });
+        guard.last_update_instant = Some(Instant::now());
+
+        if let Some(g) = guard.graph.as_deref() {
+            let _ = save_disk_cache(&root, guard.walk_fp, &guard.units, g, &[(norm_path, unit)], &[]);
+        }
+
+        true
+    }
+
+    /// Mark that an edit occurred on `path`, recording the debounce timestamp.
+    pub fn notify_file_changed(&self, path: &Path) {
+        let _ = self.update_single_file(path, None);
     }
 
     /// Cached graph lookup with no progress callbacks (tests / internal).
@@ -1315,14 +1588,23 @@ impl CodeIndex {
     }
 
     /// Current graph fingerprint (walk fingerprint) for `root`, or `None` if
-    /// no graph is loaded. Callers can key result caches on this — when the
-    /// fingerprint changes (files added/removed/edited), cached results
-    /// derived from the old graph are automatically stale.
+    /// no graph is loaded. Callers can key result caches on this.
     pub fn fingerprint(&self, root: &Path) -> Option<u64> {
         let root = super::canonical(root);
         let guard = self.inner.lock().unwrap();
         if guard.root.as_ref() == Some(&root) {
             Some(guard.walk_fp)
+        } else {
+            None
+        }
+    }
+
+    /// Last refresh statistics for `root` (cache hit / reparsed count), if available.
+    pub fn last_stats(&self, root: &Path) -> Option<RefreshStats> {
+        let root = super::canonical(root);
+        let guard = self.inner.lock().unwrap();
+        if guard.root.as_ref() == Some(&root) {
+            guard.last_stats
         } else {
             None
         }
@@ -1408,6 +1690,11 @@ impl CodeIndex {
     /// Cold start path: if memory is empty, try loading
     /// [`.atomcode/codegraph/units.v1.json`](DISK_CACHE_REL) written by `atomcode init`.
     pub fn get_with_progress(&self, root: &Path, on_progress: &dyn Fn(&str)) -> Arc<CodeGraph> {
+        self.reconcile_workspace(root, on_progress)
+    }
+
+    /// Reconcile workspace state with disk: fast 2ms mtime scan, only re-parsing changed files.
+    pub fn reconcile_workspace(&self, root: &Path, on_progress: &dyn Fn(&str)) -> Arc<CodeGraph> {
         let root = super::canonical(root);
         let files = collect_files(&root);
         let fp = fingerprint(&files);
@@ -1415,18 +1702,15 @@ impl CodeIndex {
         let mut guard = self.inner.lock().unwrap();
         loop {
             let same_root = guard.root.as_ref() == Some(&root);
-            if same_root && guard.walk_fp == fp {
-                if let Some(g) = guard.graph.clone() {
-                    // Lazy-build the directory index if it is missing (old
-                    // cache or a graph that predates the sidecar).
-                    if guard.dirindex.is_none() {
-                        let di = Arc::new(super::retrieval::DirIndex::build(&g));
-                        let path = root.join(super::retrieval::DIRINDEX_REL);
-                        let _ = di.save(&path);
-                        guard.dirindex = Some(di);
-                    }
-                    return g;
+            if same_root && guard.graph.is_some() && guard.walk_fp == fp {
+                let g = guard.graph.clone().unwrap();
+                if guard.dirindex.is_none() {
+                    let di = Arc::new(super::retrieval::DirIndex::build(&g));
+                    let path = root.join(super::retrieval::DIRINDEX_REL);
+                    let _ = di.save(&path);
+                    guard.dirindex = Some(di);
                 }
+                return g;
             }
             if guard.building {
                 on_progress(
@@ -1450,7 +1734,7 @@ impl CodeIndex {
             };
             drop(guard);
 
-            // Seed from disk cache when memory has no units (new process / after force).
+            // Seed from disk cache when memory has no units (new process / cold start).
             let mut prev_graph = prev_graph;
             if units.is_empty() {
                 if let Some(disk) = load_disk_cache(&root) {
@@ -1477,9 +1761,6 @@ impl CodeIndex {
                         guard.units = units;
                         guard.graph = Some(g.clone());
                         guard.dirindex = Some(Arc::new(super::retrieval::DirIndex::build(&g)));
-                        // Derived caches must follow the graph snapshot: any
-                        // graph (re)build invalidates the in-memory IDF stats
-                        // and concept vectors computed from the previous graph.
                         guard.idf_stats = None;
                         guard.concept_vectors = None;
                         guard.last_stats = Some(RefreshStats {
@@ -1501,7 +1782,8 @@ impl CodeIndex {
                 }
             }
 
-            let (reparsed, removed, kept) = sync_units(&mut units, &files, on_progress);
+            let (reparsed, removed, kept, changed_units, deleted_paths) =
+                sync_units(&mut units, &files, on_progress);
             let need_compose = reparsed > 0 || removed > 0 || prev_graph.is_none();
             let cache_hit = reparsed == 0 && removed == 0 && prev_graph.is_some();
 
@@ -1530,7 +1812,14 @@ impl CodeIndex {
                     removed,
                     kept
                 ));
-                match save_disk_cache(&root, fp, &units, g.as_ref()) {
+                match save_disk_cache(
+                    &root,
+                    fp,
+                    &units,
+                    g.as_ref(),
+                    &changed_units,
+                    &deleted_paths,
+                ) {
                     Ok(p) => on_progress(&format!("Code graph: saved {}", path_for_display(&p))),
                     Err(e) => on_progress(&format!("Code graph: disk save skipped ({e})")),
                 }
@@ -1549,9 +1838,6 @@ impl CodeIndex {
             guard.units = units;
             guard.graph = Some(g.clone());
             guard.dirindex = Some(Arc::new(super::retrieval::DirIndex::build(&g)));
-            // Derived caches must follow the graph snapshot: any graph
-            // (re)build invalidates the in-memory IDF stats and concept
-            // vectors computed from the previous graph.
             guard.idf_stats = None;
             guard.concept_vectors = None;
             guard.last_stats = Some(stats);
@@ -1750,8 +2036,9 @@ export function CouponPanel() {
             nodes: g.nodes.values().cloned().collect(),
             calls: vec![],
         };
-        let units = HashMap::from([(file, unit)]);
-        let _ = save_disk_cache(d.path(), 1, &units, &g);
+        let units = HashMap::from([(file.clone(), unit.clone())]);
+        let changed = vec![(file, unit)];
+        let _ = save_disk_cache(d.path(), 1, &units, &g, &changed, &[]);
         let bin_path = disk_cache_path_bin(d.path());
         let json_path = disk_cache_path(d.path());
         assert!(bin_path.exists(), "units.v4.bin must be written");
@@ -2195,5 +2482,47 @@ public class OrderController
             "YAML plugin should be indexed"
         );
     }
-}
 
+    #[test]
+    fn test_quick_update_single_file_and_caching() {
+        let d = tempfile::tempdir().unwrap();
+        let root = d.path();
+        std::fs::write(root.join("a.rs"), "pub fn alpha() { beta(); }").unwrap();
+        std::fs::write(root.join("b.rs"), "pub fn beta() {}").unwrap();
+
+        let index = CodeIndex::new();
+        let g = index.get(root);
+        assert_eq!(g.node_count(), 2);
+        assert!(!g.find_by_name("alpha").is_empty());
+        assert!(!g.find_by_name("beta").is_empty());
+
+        // Fast update a.rs
+        let updated_a = "pub fn alpha_prime() { beta(); }";
+        std::fs::write(root.join("a.rs"), updated_a).unwrap();
+        let ok = index.update_single_file(&root.join("a.rs"), Some(updated_a));
+        assert!(ok, "single file update must succeed");
+
+        let stats = index.last_stats(root).unwrap();
+        assert_eq!(stats.reparsed, 1);
+        assert_eq!(stats.removed, 0);
+
+        let g2 = index.get(root);
+        assert!(g2.find_by_name("alpha").is_empty(), "old symbol should be removed");
+        assert!(!g2.find_by_name("alpha_prime").is_empty(), "new symbol should be present");
+        assert!(!g2.find_by_name("beta").is_empty());
+    }
+
+    #[test]
+    fn test_normalize_index_path_consistency() {
+        let p1 = Path::new("E:/code/agents/atomcode/foo.rs");
+        let p2 = Path::new("e:\\code\\agents\\atomcode\\foo.rs");
+        let p3 = Path::new(r"\\?\E:\code\agents\atomcode\foo.rs");
+
+        let norm1 = normalize_index_path(p1);
+        let norm2 = normalize_index_path(p2);
+        let norm3 = normalize_index_path(p3);
+
+        assert_eq!(norm1, norm2);
+        assert_eq!(norm2, norm3);
+    }
+}

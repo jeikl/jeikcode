@@ -761,6 +761,11 @@ fn command_output_should_mirror(
 ///
 /// 已绑定时经 live hub 投递到同一个 Coding Runtime，否则直接投递本地 runtime。
 pub(crate) fn submit_agent_turn(ctx: &LoopCtx, state: &mut UiState, text: String) {
+    if ctx.config.default_model.as_deref().unwrap_or("").trim().is_empty() {
+        let msg = "未配置模型：请先使用 /model 或 /provider 添加提供商和模型后再开始对话。";
+        state.deferred_background_notices.push(msg.to_string());
+        return;
+    }
     let submitted = submit_agent_text(ctx, text);
     if submitted {
         state.on_submit();
@@ -1863,6 +1868,11 @@ fn execute_slash_command_impl(
         }
         "provider" => {
             *active_modal = Some(Box::new(crate::modals::ProviderPanel::open()));
+        }
+        "modelsadd" => {
+            let mut panel = crate::modals::ProviderPanel::open();
+            panel.open_add_model(&ctx.config);
+            *active_modal = Some(Box::new(panel));
         }
         "proxy" => {
             *active_modal = Some(Box::new(ProxyPicker::open(&ctx.config)));

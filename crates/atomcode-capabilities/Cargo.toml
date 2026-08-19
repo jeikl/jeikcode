@@ -140,6 +140,8 @@ zstd = { version = "0.13", optional = true }
 bincode = { version = "1", optional = true }
 rayon = { version = "1", optional = true }
 tar = { version = "0.4", optional = true }
+rusqlite = { version = "0.31", features = ["bundled"], optional = true }
+strsim = "0.11"
 
 [features]
 default = ["provider", "tools"]
@@ -169,6 +171,8 @@ codeintel = [
     # binary index cache (units.v4.bin): bincode for fast (de)serialization,
     # zstd for ~10× smaller on-disk size (crate is already a build dependency).
     "dep:bincode", "dep:zstd",
+    # sqlite-backed index storage for fast incremental disk cache updates.
+    "dep:rusqlite",
     # fs2 file lock serializes concurrent cache writes across processes.
     "dep:fs2",
     # rayon parallelizes workspace-wide symbol scoring (read-only graph).

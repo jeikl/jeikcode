@@ -273,6 +273,10 @@ struct ModelForm {
     focus: ModelField,
     /// When set, this is an edit of an existing model id (account locked).
     edit_id: Option<String>,
+    /// Candidate models fetched from remote endpoint or curated presets
+    candidates: Vec<String>,
+    candidate_idx: usize,
+    fetch_status: Option<String>,
 }
 
 impl ModelForm {
@@ -303,6 +307,9 @@ impl ModelForm {
             make_default: true,
             focus: ModelField::Account,
             edit_id: None,
+            candidates: Vec::new(),
+            candidate_idx: 0,
+            fetch_status: None,
         })
     }
 
@@ -325,7 +332,23 @@ impl ModelForm {
             make_default: config.effective_model_selection().as_deref() == Some(id),
             focus: ModelField::Model,
             edit_id: Some(id.to_string()),
+            candidates: Vec::new(),
+            candidate_idx: 0,
+            fetch_status: None,
         })
+    }
+
+    fn filtered_candidates(&self) -> Vec<&str> {
+        let query = self.model.trim().to_lowercase();
+        if query.is_empty() {
+            self.candidates.iter().map(|s| s.as_str()).collect()
+        } else {
+            self.candidates
+                .iter()
+                .filter(|s| s.to_lowercase().contains(&query))
+                .map(|s| s.as_str())
+                .collect()
+        }
     }
 
     fn account_id(&self) -> &str {
@@ -469,6 +492,14 @@ impl ProviderPanel {
             query: String::new(),
             account_filter: None,
             pending_delete: None,
+        }
+    }
+
+    /// Open directly into adding a model under an existing account.
+    pub fn open_add_model(&mut self, config: &atomcode_config::Config) {
+        self.tab = Tab::Models;
+        if let Some(form) = ModelForm::new_add(config, None) {
+            self.mode = Mode::Model(form);
         }
     }
 
@@ -635,17 +666,20 @@ impl ProviderPanel {
 
     fn selected_id(&self, config: &Config) -> Option<String> {
         let ids = self.filtered_ids(config);
-        // The virtual add row sits just past the real rows on either tab.
-        if self.selected == ids.len() {
-            return Some(
-                match self.tab {
-                    Tab::Accounts => ADD_PROVIDER_ROW,
-                    Tab::Models => ADD_MODEL_ROW,
+        match self.tab {
+            Tab::Accounts => {
+                if self.selected == 0 {
+                    return Some(ADD_PROVIDER_ROW.to_string());
                 }
-                .to_string(),
-            );
+                ids.get(self.selected - 1).cloned()
+            }
+            Tab::Models => {
+                if self.selected == ids.len() {
+                    return Some(ADD_MODEL_ROW.to_string());
+                }
+                ids.get(self.selected).cloned()
+            }
         }
-        ids.get(self.selected).cloned()
     }
 
     fn begin_add_for_current_tab(&mut self, config: &Config) {
@@ -1190,6 +1224,35 @@ impl Modal for ProviderPanel {
         if let Mode::Model(form) = &mut self.mode {
             match code {
                 KeyCode::Esc => self.mode = Mode::List,
+                KeyCode::Up if form.focus == ModelField::Model => {
+                    let candidates = form.filtered_candidates();
+                    if !candidates.is_empty() {
+                        form.candidate_idx = form.candidate_idx.saturating_sub(1);
+                    } else {
+                        form.advance_focus(false);
+                    }
+                }
+                KeyCode::Down if form.focus == ModelField::Model => {
+                    let candidates = form.filtered_candidates();
+                    if !candidates.is_empty() {
+                        if form.candidate_idx + 1 < candidates.len() {
+                            form.candidate_idx += 1;
+                        }
+                    } else {
+                        form.advance_focus(true);
+                    }
+                }
+                KeyCode::Tab => {
+                    if form.focus == ModelField::Model {
+                        let candidates = form.filtered_candidates();
+                        if !candidates.is_empty() {
+                            let chosen = candidates[form.candidate_idx.min(candidates.len() - 1)];
+                            form.model = chosen.to_string();
+                        }
+                    }
+                    form.advance_focus(true);
+                }
+                KeyCode::BackTab => form.advance_focus(false),
                 KeyCode::Tab | KeyCode::Down => form.advance_focus(true),
                 KeyCode::BackTab | KeyCode::Up => form.advance_focus(false),
                 KeyCode::Left if form.focus == ModelField::Account => form.cycle_account(false),
@@ -1390,6 +1453,8 @@ impl Modal for ProviderPanel {
                 match self.tab {
                     Tab::Accounts => {
                         let ids = self.filtered_ids(&ctx.config);
+                        // Leading "+ 添加自定义 provider" affordance placed at TOP (also Ctrl+A).
+                        items.push(("＋ 添加自定义 provider".to_string(), String::new()));
                         for id in &ids {
                             let a = accounts.get(id);
                             let count = models.values().filter(|m| m.account == *id).count();
@@ -1415,8 +1480,6 @@ impl Modal for ProviderPanel {
                             };
                             items.push((Self::account_label(&ctx.config, id), desc));
                         }
-                        // Trailing "+ 添加自定义 provider" affordance (also Ctrl+A).
-                        items.push(("＋ 添加自定义 provider".to_string(), String::new()));
                         hint = crate::i18n::t(crate::i18n::Msg::ProviderPanelAccountsHint)
                             .into_owned();
                     }
@@ -1626,6 +1689,33 @@ impl Modal for ProviderPanel {
                     form.model.clone(),
                     form.focus == ModelField::Model,
                 ));
+                if form.focus == ModelField::Model {
+                    let candidates = form.filtered_candidates();
+                    if !candidates.is_empty() {
+                        let preview: Vec<String> = candidates
+                            .iter()
+                            .take(6)
+                            .enumerate()
+                            .map(|(idx, s)| {
+                                let marker = if idx == form.candidate_idx.min(candidates.len().saturating_sub(1)) {
+                                    "▸ "
+                                } else {
+                                    "  "
+                                };
+                                format!("{marker}{s}")
+                            })
+                            .collect();
+                        let count_hint = if candidates.len() > 6 {
+                            format!("   (共 {} 个匹配, 按 ↓ 选择, ↵ 填入)", candidates.len())
+                        } else {
+                            "   (按 ↓ 选择, ↵ 填入)".to_string()
+                        };
+                        items.push((format!("    [可选模型]{count_hint}"), String::new()));
+                        for line in preview {
+                            items.push((format!("      {line}"), String::new()));
+                        }
+                    }
+                }
                 let win = if form.window.is_empty() {
                     format!(
                         "({})",

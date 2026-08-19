@@ -22,15 +22,17 @@ use tokio::process::Command;
 #[cfg(target_os = "windows")]
 use std::os::windows::process::CommandExt;
 
-const DEFAULT_TIMEOUT_SECS: u64 = 60;
-const MAX_TIMEOUT_SECS: u64 = 300;
-
-/// How long a process can be silent (no new stdout/stderr) AFTER having emitted
-/// something, before we kill it. Bumped from 30→90 to tolerate legitimate silent
-/// phases (file lock waits, dependency downloads, linker blocking, large file
-/// reads). This is NOT tool- or language-specific — any process with these
-/// patterns benefits. Tradeoff: genuine deadlocks wait 60s longer than before.
-const SILENT_KILL_SECS: u64 = 90;
+/// Resolves the effective bash timeouts from `~/.atomcode/config.toml` (or workspace config),
+/// falling back to defaults if config cannot be loaded.
+fn resolve_bash_timeout_config() -> atomcode_config::config::BashToolConfig {
+    let default_path = atomcode_config::config::Config::default_path();
+    if default_path.is_file() {
+        if let Ok(cfg) = atomcode_config::config::Config::load(&default_path) {
+            return cfg.tools.bash;
+        }
+    }
+    atomcode_config::config::BashToolConfig::default()
+}
 
 #[derive(Default)]
 pub struct BashTool;
@@ -66,7 +68,7 @@ impl Tool for BashTool {
             "type": "object",
             "properties": {
                 "command": { "type": "string", "description": "The shell command to run" },
-                "timeout": { "type": "integer", "description": "Max seconds to wait (default 60, max 300)" }
+                "timeout": { "type": "integer", "description": "Max seconds to wait (default 60, configurable in [tools.bash])" }
             },
             "required": ["command"]
         })
@@ -113,10 +115,13 @@ impl Tool for BashTool {
                 ))
             }
         };
+        let bash_cfg = resolve_bash_timeout_config();
+        let default_timeout = bash_cfg.default_timeout_secs.max(1);
+        let max_timeout = bash_cfg.max_timeout_secs.max(default_timeout);
         let secs = a
             .timeout
-            .unwrap_or(DEFAULT_TIMEOUT_SECS)
-            .clamp(1, MAX_TIMEOUT_SECS);
+            .unwrap_or(default_timeout)
+            .clamp(1, max_timeout);
         let dur = Duration::from_secs(secs);
 
         // macOS sudo (and some Linux configs) needs explicit `-A` to use SUDO_ASKPASS —
@@ -2477,7 +2482,8 @@ pub async fn run_shell(
     let mut stdout_buf = Vec::new();
     let mut stderr_buf = Vec::new();
 
-    let idle_timeout = Duration::from_secs(SILENT_KILL_SECS);
+    let bash_cfg = resolve_bash_timeout_config();
+    let idle_timeout = Duration::from_secs(bash_cfg.silent_kill_secs.max(1));
     let has_any_output = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
     let has_out_1 = has_any_output.clone();
     let has_out_2 = has_any_output.clone();

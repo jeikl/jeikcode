@@ -387,43 +387,9 @@ impl OnboardingWizard {
         }
     }
 
-    /// First-launch fast path. Skips the old 3-step Intro / Language /
-    /// Setup flow and goes straight to a single QR screen for the
-    /// AtomGit OAuth short link — scan, log in, the background poll
-    /// thread auto-closes the modal and hands off to `/codingplan`
-    /// for the claim. Language defaults to auto-detect from `$LC_ALL`
-    /// / `$LANG` (i18n step gone); user can switch later via
-    /// `/language`.
-    ///
-    /// Synchronously calls [`atomcode_auth::oauth::start_login`]
-    /// up front so the QR is paintable the moment the modal opens.
-    /// On network failure the error is stashed on the wizard and
-    /// rendered in place of the QR — Esc bails, Enter retries via
-    /// `handle_key_pure`'s `RetryQrLogin` outcome.
-    ///
-    /// The successful `LoginSession` is held on `pending_session` so
-    /// the event loop can pull it out (see `take_pending_session`)
-    /// and hand it to a background poll thread. The wizard itself
-    /// doesn't know about polling — that plumbing stays in the event
-    /// loop.
-    /// **Official builds only.** Source/self-built binaries cannot sign
-    /// AtomGit gateway requests; use [`Self::new_source_build`] instead.
+    /// First-launch path. Directly opens the standard welcome flow (no CodingPlan QR).
     pub fn new_qr_fast_path() -> Self {
-        let (qr_login_url, qr_login_error, pending_session) =
-            match atomcode_auth::oauth::start_login() {
-                Ok(session) => (Some(session.url().to_string()), None, Some(session)),
-                Err(e) => (None, Some(format!("{e:#}")), None),
-            };
-        Self {
-            step: Step::QrLogin,
-            language_idx: 0,
-            setup_idx: 0,
-            needs_confirm: false,
-            qr_login_url,
-            qr_login_error,
-            pending_session,
-            qr_url_copied: false,
-        }
+        Self::new()
     }
 
     /// First-launch path for source/self-built binaries (no
@@ -645,29 +611,22 @@ impl OnboardingWizard {
         content.push(String::new()); // top padding
 
         if !compact {
-            // 5-line pure block-glyph logo. Uses only `█` and spaces
-            // so it renders uniformly in every monospaced font —
-            // mixing solid blocks with thin box-drawing chars (the
-            // ANSI Shadow style) broke in fonts that draw `█` at
-            // 100% cell coverage while keeping `╔═` at line weight,
-            // leaving the shadow outline floating disjointly from
-            // the letter bodies. Each row is 49 cells; logo_pad
-            // centres the 49-wide logo inside draw_panel's content area.
-            let logo_pad = " ".repeat(cell_w.saturating_sub(49) / 2);
+            // 5-line pure block-glyph logo for JEIKCODE (50 cells wide)
+            let logo_pad = " ".repeat(cell_w.saturating_sub(50) / 2);
             content.push(format!(
-                "{logo_pad}███  █████  ███  █     █  ████  ███  ████  █████"
+                "{logo_pad}  ███ █████ █████ █   █  ████  ███  ████  █████"
             ));
             content.push(format!(
-                "{logo_pad}█   █   █   █   █ ██   ██ █     █   █ █   █ █    "
+                "{logo_pad}   █  █       █   █  █  █     █   █ █   █ █    "
             ));
             content.push(format!(
-                "{logo_pad}█████   █   █   █ █ █ █ █ █     █   █ █   █ ████ "
+                "{logo_pad}   █  ████    █   ███   █     █   █ █   █ ████ "
             ));
             content.push(format!(
-                "{logo_pad}█   █   █   █   █ █  █  █ █     █   █ █   █ █    "
+                "{logo_pad}█  █  █       █   █  █  █     █   █ █   █ █    "
             ));
             content.push(format!(
-                "{logo_pad}█   █   █    ███  █     █  ████  ███  ████  █████"
+                "{logo_pad} ███  █████ █████ █   █  ████  ███  ████  █████"
             ));
             content.push(String::new());
             content.push(
@@ -686,7 +645,7 @@ impl OnboardingWizard {
         } else {
             // Compact: no logo + no Ctrl+C hint. Just product line +
             // tagline + bullets + press-enter.
-            content.push(format!("AtomCode v{}", env!("CARGO_PKG_VERSION")));
+            content.push(format!("JeikCode v{}", env!("CARGO_PKG_VERSION")));
             content.push(t(Msg::OnboardingIntroCompactTagline).into_owned());
             content.push(String::new());
             content.push(t(Msg::OnboardingIntroBullet1).into_owned());

@@ -6778,12 +6778,17 @@ pub async fn run_server(opts: ServerOpts) -> anyhow::Result<()> {
         )
         // Skills API
         .route("/skills", get(get_skills))
+        .route("/api/skills", get(get_skills))
         // Filesystem API
         .route("/fs/list", get(fs_list))
         .route("/fs/mkdir", post(fs_mkdir))
         // MCP API
+        .route("/mcp", get(mcp_status))
         .route("/mcp/status", get(mcp_status))
         .route("/mcp/reload", post(mcp_reload))
+        .route("/api/mcp", get(mcp_status))
+        .route("/api/mcp/status", get(mcp_status))
+        .route("/api/mcp/reload", post(mcp_reload))
         // Config API (P0)
         .route("/config", get(api_config::get_config))
         .route("/config/reload", post(api_config::reload_config))

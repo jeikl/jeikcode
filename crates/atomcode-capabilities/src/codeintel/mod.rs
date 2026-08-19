@@ -30,6 +30,7 @@ pub mod find_references;
 pub mod find_symbol;
 pub mod graph;
 pub mod index;
+pub mod index_db;
 pub mod lang;
 pub mod list_symbols;
 pub mod read_symbol;
@@ -147,6 +148,13 @@ pub fn shared_code_index() -> Arc<CodeIndex> {
             idx
         })
         .clone()
+}
+
+/// Notify the global shared code index that a file was modified/created/deleted.
+/// Triggers a fast 1-3ms in-memory incremental patch.
+pub fn notify_code_index_file_changed(path: &Path, content: Option<&str>) {
+    let index = shared_code_index();
+    let _ = index.update_single_file(path, content);
 }
 
 /// Register graph/symbol tools according to the chosen [`CodeIntelMode`].

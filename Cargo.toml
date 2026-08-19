@@ -18,17 +18,16 @@ default-members = [
 ]
 
 [profile.release]
-opt-level = "z"        # Optimize for size
-lto = true             # Link-time optimization — eliminates dead code across crates
-codegen-units = 1      # Single codegen unit — better optimization, slower build
-strip = true           # Strip symbols automatically
-panic = "abort"        # Remove panic unwinding code — saves ~200-500KB
+opt-level = 2
+lto = false
+codegen-units = 4
+strip = true
 
 [profile.test]
 debug = "line-tables-only" # Smaller binaries, faster linker
 
 [workspace.package]
-version = "6.0.1"
+version = "6.0.3"
 edition = "2021"
 license = "MIT"
 repository = "https://atomgit.com/atomgit_atomcode/atomcode"

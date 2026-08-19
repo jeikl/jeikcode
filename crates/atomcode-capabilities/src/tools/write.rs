@@ -47,6 +47,7 @@ impl Tool for WriteFileTool {
         String::new()
     }
     async fn execute(&self, args: &str, ctx: &ToolContext) -> ToolResult {
+        let t0 = std::time::Instant::now();
         let a: Args = match parse_tool_args(
             "write_file",
             args,
@@ -73,18 +74,13 @@ impl Tool for WriteFileTool {
         }
         let new_lines = a.content.lines().count();
         let bytes = a.content.len();
-        // Model-facing paths use forward slashes on Windows so the model can paste
-        // them into a subsequent bash (Git Bash) command without `\` being eaten.
         let disp = crate::pathnorm::to_display(&path);
-        // write_file always writes UTF-8, intentionally: it does a WHOLE-file overwrite
-        // (usually a create), so there is no original encoding to preserve. Unlike
-        // `edit_file` — which decodes a GBK/GB18030 file, edits in place, and re-encodes
-        // back to the original encoding (see tools::encoding) — overwriting an existing
-        // GBK file here converts it to UTF-8. That asymmetry is deliberate; steer legacy-
-        // encoding-preserving changes through `edit_file`.
         if let Err(e) = tokio::fs::write(&path, &a.content).await {
             return err(format!("write_file: failed to write {disp}: {e}"));
         }
+
+        #[cfg(feature = "codeintel")]
+        crate::codeintel::notify_code_index_file_changed(&path, Some(&a.content));
 
         let msg = match old_lines {
             Some(old) => {
@@ -104,7 +100,8 @@ impl Tool for WriteFileTool {
             }
             None => format!("Created {disp} ({bytes} bytes, {new_lines} lines)"),
         };
-        ok(msg)
+        let cost_time = t0.elapsed();
+        ok(format!("> ⏱️ **Cost Time**: {:.2?}ms\n\n{msg}", cost_time.as_millis()))
     }
 }
 
@@ -133,7 +130,7 @@ mod tests {
             )
             .await;
         assert!(!r.is_error, "{}", r.content);
-        assert!(r.content.starts_with("Created"), "{}", r.content);
+        assert!(r.content.contains("Created"), "{}", r.content);
         let on_disk = std::fs::read_to_string(d.path().join("nested/dir/a.txt")).unwrap();
         assert_eq!(on_disk, "hello\nworld\n");
     }

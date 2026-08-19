@@ -207,6 +207,8 @@ pub struct CodingAgentConfig {
     /// Disable TLS certificate verification (self-signed / internal gateways).
     /// Sourced from `ProviderConfig::skip_tls_verify`; default false.
     pub skip_tls_verify: bool,
+    /// Explicit reasoning model boolean; `Some(true)` ⇒ Include, `Some(false)` ⇒ Exclude.
+    pub reasoning_model: Option<bool>,
     /// Whether the active model should receive image bytes on the wire
     /// (OpenAI `image_url` / Anthropic base64). Resolved from config
     /// `supports_vision` + protocol defaults (see
@@ -259,6 +261,7 @@ pub struct CodingRuntimeConfig {
     pub thinking_enabled: Option<bool>,
     pub thinking_type: Option<String>,
     pub thinking_keep: Option<String>,
+    pub reasoning_model: Option<bool>,
     pub dangerously_skip_permissions: bool,
     pub interactive: bool,
     pub keep_interrupted_context: bool,
@@ -377,6 +380,7 @@ impl CodingRuntimeConfig {
             thinking_enabled: r.and_then(|r| r.thinking_enabled),
             thinking_type: r.and_then(|r| r.thinking_type.clone()),
             thinking_keep: r.and_then(|r| r.thinking_keep.clone()),
+            reasoning_model: r.and_then(|r| r.reasoning_model),
             dangerously_skip_permissions,
             interactive,
             keep_interrupted_context: config.keep_interrupted_context,
@@ -446,6 +450,7 @@ impl CodingRuntimeConfig {
         config.thinking_enabled = self.thinking_enabled;
         config.thinking_type = self.thinking_type.clone();
         config.thinking_keep = self.thinking_keep.clone();
+        config.reasoning_model = self.reasoning_model;
         config.user_agent = self.user_agent.clone();
         config.skip_tls_verify = self.skip_tls_verify;
         config.supports_vision = self.supports_vision;
@@ -493,6 +498,7 @@ pub fn apply_provider_config(
     config.thinking_enabled = provider.thinking_enabled;
     config.thinking_type = provider.thinking_type.clone();
     config.thinking_keep = provider.thinking_keep.clone();
+    config.reasoning_model = provider.reasoning_model;
     config.user_agent = provider.user_agent.clone();
     config.skip_tls_verify = provider.skip_tls_verify;
     config.supports_vision = provider.accepts_images();
@@ -785,6 +791,7 @@ impl CodingAgentConfig {
             keep_interrupted_context: false,
             user_agent: None,
             skip_tls_verify: false,
+            reasoning_model: None,
             // Opt-in multimodal (matches resolve_supports_vision protocol default).
             // Callers that load from config overwrite this via `accepts_images()`.
             supports_vision: false,

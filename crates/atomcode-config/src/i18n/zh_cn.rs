@@ -358,6 +358,9 @@ pub(super) fn zh_cn(msg: Msg<'_>) -> Cow<'static, str> {
         Msg::ProviderPanelFieldSupportsVision => "支持图片输入？".into(),
         Msg::ProviderPanelVisionYes => "是 [✓]  （将发送 base64 图片）".into(),
         Msg::ProviderPanelVisionNo => "否 [ ]  （仅文本）".into(),
+        Msg::ProviderPanelFieldReasoningModel => "是否为思考模型？".into(),
+        Msg::ProviderPanelReasoningYes => "是 [✓]  （多轮将回传思考过程）".into(),
+        Msg::ProviderPanelReasoningNo => "否 [ ]  （普通模型/不回传思考）".into(),
         Msg::ProviderPanelFieldMakeDefault => "设为默认".into(),
         Msg::ProviderPanelSwitchHint => "←→ 切换".into(),
         Msg::ProviderPanelEnvHint { env } => format!("留空使用 ${env}").into(),
@@ -367,7 +370,7 @@ pub(super) fn zh_cn(msg: Msg<'_>) -> Cow<'static, str> {
             "Tab 下一项  ←→ 切厂商  空格 勾选  ↵ 保存  Esc 返回".into(),
         Msg::ProviderPanelAccountFormHint => "Tab 切换  ↵ 保存  Esc 返回".into(),
         Msg::ProviderPanelModelFormHint =>
-            "Tab 下一项  ←→ 切账号  空格 切换图片/默认  ↵ 保存  Esc 返回".into(),
+            "Tab 下一项  ←→ 切账号  空格 切换图片/思考/默认  ↵ 保存  Esc 返回".into(),
         // ── Model 选择器 ──
         Msg::ModelSwitched { provider, model } =>
             format!("  当前会话已切换到 {provider} · {model}\n").into(),
@@ -953,6 +956,7 @@ Msg::CmdDescSetup =>
         Msg::CmdDescLogout => "退出 AtomGit 登录".into(),
         Msg::CmdDescWhoami => "显示当前登录用户".into(),
         Msg::CmdDescModel => "设置默认 Provider / 模型，并切换当前会话".into(),
+        Msg::CmdDescModelAdd => "向现有 Provider 账户快速添加新模型".into(),
         Msg::CmdDescProvider => "管理 Provider（添加、编辑、删除、设为全局默认）".into(),
         Msg::CmdDescStatus => "显示会话状态".into(),
         Msg::CmdDescConfig => "显示配置文件路径".into(),

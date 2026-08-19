@@ -118,6 +118,18 @@ pub struct ProviderConfig {
         skip_serializing_if = "Option::is_none"
     )]
     pub supports_vision: Option<bool>,
+    /// Whether this model is a reasoning / thinking model that requires echoing
+    /// reasoning content or thinking blocks on subsequent turns.
+    /// `None` = unset (auto-detected from model name and base URL).
+    /// Defaults to false in UI model creation.
+    #[serde(
+        default,
+        rename = "reasoning_model",
+        alias = "is_reasoning_model",
+        alias = "thinking_model",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub reasoning_model: Option<bool>,
 }
 
 /// Resolve whether image bytes should be encoded for a model selection.
@@ -142,6 +154,32 @@ pub fn resolve_supports_vision(
         "openai" | "claude" | "anthropic" => false,
         _ => crate::util::model_name_suggests_vision(model),
     }
+}
+
+/// Resolve whether this model is treated as a reasoning / thinking model.
+///
+/// Priority:
+/// 1. Explicit `reasoning_model` in config (`Some(true|false)`)
+/// 2. If unset (`None`), auto-detect based on model name & base_url (e.g. grok, deepseek-v4, kimi, etc.)
+pub fn resolve_is_reasoning_model(
+    explicit: Option<bool>,
+    model: &str,
+    base_url: &str,
+) -> bool {
+    if let Some(v) = explicit {
+        return v;
+    }
+    let m = model.to_ascii_lowercase();
+    let u = base_url.to_ascii_lowercase();
+    m.contains("grok")
+        || m.contains("deepseek-v4")
+        || m.starts_with("kimi-")
+        || m.starts_with("moonshot")
+        || m.starts_with("mimo-")
+        || u.contains("moonshot")
+        || u.contains("kimi")
+        || u.contains("xiaomimimo")
+        || u.contains("mimo")
 }
 
 /// A provider *account*: a reusable connection + credential identity (new schema,
@@ -222,6 +260,15 @@ pub struct ModelProfileConfig {
         skip_serializing_if = "Option::is_none"
     )]
     pub supports_vision: Option<bool>,
+    /// Whether this model is a reasoning / thinking model.
+    #[serde(
+        default,
+        rename = "reasoning_model",
+        alias = "is_reasoning_model",
+        alias = "thinking_model",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub reasoning_model: Option<bool>,
 }
 
 /// One flattened, immutable resolution of a model selection (design §3.4). This
@@ -256,6 +303,8 @@ pub struct ResolvedModelConfig {
     pub pricing: Option<ProviderPricing>,
     /// Explicit config value (may be `None` when unset).
     pub supports_vision: Option<bool>,
+    /// Explicit config value (may be `None` when unset).
+    pub reasoning_model: Option<bool>,
 }
 
 impl std::fmt::Debug for ResolvedModelConfig {
@@ -301,12 +350,22 @@ impl ResolvedModelConfig {
             capable_model: self.capable_model,
             pricing: self.pricing,
             supports_vision: self.supports_vision,
+            reasoning_model: self.reasoning_model,
         }
     }
 
     /// Whether image bytes should be sent for this resolved selection.
     pub fn accepts_images(&self) -> bool {
         resolve_supports_vision(self.supports_vision, &self.provider_type, &self.model)
+    }
+
+    /// Whether this resolved model selection is a reasoning model.
+    pub fn is_reasoning_model(&self) -> bool {
+        resolve_is_reasoning_model(
+            self.reasoning_model,
+            &self.model,
+            self.base_url.as_deref().unwrap_or(""),
+        )
     }
 }
 
@@ -316,6 +375,15 @@ impl ProviderConfig {
     /// protocol defaults to false (opt-in), other types use the model-name heuristic.
     pub fn accepts_images(&self) -> bool {
         resolve_supports_vision(self.supports_vision, &self.provider_type, &self.model)
+    }
+
+    /// True if this provider's active model is a reasoning model.
+    pub fn is_reasoning_model(&self) -> bool {
+        resolve_is_reasoning_model(
+            self.reasoning_model,
+            &self.model,
+            self.base_url.as_deref().unwrap_or(""),
+        )
     }
 
     /// Resolve the API key for this provider, taking environment variables into account.
@@ -670,6 +738,7 @@ output_per_million = 0
             capable_model: None,
             pricing: None,
             supports_vision: None,
+            reasoning_model: None,
         };
         let serialized = toml::to_string(&cfg).expect("serialize");
         assert!(
@@ -700,6 +769,7 @@ output_per_million = 0
             capable_model: None,
             pricing: None,
             supports_vision: None,
+            reasoning_model: None,
         };
         let serialized = toml::to_string(&cfg).expect("serialize");
         assert!(
@@ -730,6 +800,49 @@ output_per_million = 0
         };
         let s2 = toml::to_string(&none_cfg).expect("serialize");
         assert!(!s2.contains("capable_model"), "None must not be serialized");
+    }
+
+    #[test]
+    fn reasoning_model_round_trips_and_detects() {
+        let toml_str = r#"
+            type = "openai"
+            model = "grok-4.6"
+            reasoning_model = true
+        "#;
+        let cfg: ProviderConfig = toml::from_str(toml_str).expect("parse");
+        assert_eq!(cfg.reasoning_model, Some(true));
+        assert!(cfg.is_reasoning_model());
+
+        // Test alias is_reasoning_model
+        let toml_alias = r#"
+            type = "openai"
+            model = "some-custom-model"
+            is_reasoning_model = true
+        "#;
+        let cfg_alias: ProviderConfig = toml::from_str(toml_alias).expect("parse alias");
+        assert_eq!(cfg_alias.reasoning_model, Some(true));
+        assert!(cfg_alias.is_reasoning_model());
+
+        // Test alias thinking_model
+        let toml_alias2 = r#"
+            account = "acc"
+            model = "some-custom-model"
+            thinking_model = false
+        "#;
+        let m_alias: ModelProfileConfig = toml::from_str(toml_alias2).expect("parse model profile");
+        assert_eq!(m_alias.reasoning_model, Some(false));
+
+        // Auto-detection for grok and deepseek-v4 without explicit flag
+        assert!(resolve_is_reasoning_model(None, "grok-4.6", "https://api.x.ai/v1"));
+        assert!(resolve_is_reasoning_model(None, "grok-4.5", "https://api.x.ai/v1"));
+        assert!(resolve_is_reasoning_model(None, "deepseek-v4-flash", "https://api.deepseek.com/v1"));
+        assert!(resolve_is_reasoning_model(None, "kimi-k2.5", "https://api.moonshot.cn/v1"));
+        assert!(!resolve_is_reasoning_model(None, "gpt-4o", "https://api.openai.com/v1"));
+        assert!(!resolve_is_reasoning_model(None, "glm-5.1", "https://open.bigmodel.cn/v1"));
+
+        // Explicit override wins over name heuristic
+        assert!(!resolve_is_reasoning_model(Some(false), "grok-4.6", ""));
+        assert!(resolve_is_reasoning_model(Some(true), "gpt-4o", ""));
     }
 
     #[test]
@@ -778,6 +891,7 @@ output_per_million = 0
             capable_model: None,
             pricing: None,
             supports_vision: None,
+            reasoning_model: None,
         };
 
         assert_eq!(cfg.resolved_api_key(), Some("sk-from-env-var".to_string()));
@@ -807,6 +921,7 @@ output_per_million = 0
             capable_model: None,
             pricing: None,
             supports_vision: None,
+            reasoning_model: None,
         };
 
         assert_eq!(cfg.resolved_api_key(), Some("sk-custom-123".to_string()));
@@ -836,6 +951,7 @@ output_per_million = 0
             capable_model: None,
             pricing: None,
             supports_vision: None,
+            reasoning_model: None,
         };
 
         assert_eq!(cfg.resolved_api_key(), Some("sk-openai-std".to_string()));

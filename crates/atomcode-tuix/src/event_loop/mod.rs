@@ -9370,6 +9370,7 @@ mod external_config_tests {
                 capable_model: None,
                 pricing: None,
                 supports_vision: None,
+                reasoning_model: None,
             },
         );
         config

@@ -645,7 +645,7 @@ impl OnboardingWizard {
         } else {
             // Compact: no logo + no Ctrl+C hint. Just product line +
             // tagline + bullets + press-enter.
-            content.push(format!("JeikCode v{}", env!("CARGO_PKG_VERSION")));
+            content.push(format!("AtomCode v{}", env!("CARGO_PKG_VERSION")));
             content.push(t(Msg::OnboardingIntroCompactTagline).into_owned());
             content.push(String::new());
             content.push(t(Msg::OnboardingIntroBullet1).into_owned());
@@ -1505,9 +1505,8 @@ mod tests {
             .map(|s| strip_sgr(s))
             .collect::<Vec<_>>()
             .join("\n");
-        // ASCII logo signature: M's row 3 collapses to alternating
-        // `█ █ █ █`, unique to the new pure-block design.
-        assert!(joined.contains("█ █ █ █"), "logo missing: {joined}");
+        // ASCII logo signature
+        assert!(joined.contains("███ █████"), "logo missing: {joined}");
         assert!(joined.contains("Version "));
         assert!(joined.contains("Multi-step agent loop"));
         assert!(joined.contains("Connects to any OpenAI"));

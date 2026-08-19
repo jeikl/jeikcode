@@ -8159,7 +8159,8 @@ mod tests {
             ephemeral: false,
             capable_model: None,
             pricing: None,
-            supports_vision: None,
+            supports_vision: Some(atomcode_config::util::model_name_suggests_vision(model)),
+            reasoning_model: None,
         }
     }
 

@@ -61,6 +61,26 @@ impl ReasoningPolicy {
         }
     }
 
+    /// Resolve policy given optional explicit `reasoning_model` bool, optional `reasoning_history` string, model and base_url.
+    pub fn resolve(
+        reasoning_model: Option<bool>,
+        reasoning_history: Option<&str>,
+        model: &str,
+        base_url: &str,
+    ) -> Result<Self, String> {
+        if let Some(explicit) = reasoning_model {
+            return Ok(if explicit {
+                ReasoningPolicy::Include
+            } else {
+                ReasoningPolicy::Exclude
+            });
+        }
+        if let Some(parsed) = Self::from_config(reasoning_history)? {
+            return Ok(parsed);
+        }
+        Ok(Self::derive(model, base_url))
+    }
+
     /// Derive the default policy from the model name + base URL (some vendors are only
     /// identifiable by host, e.g. Moonshot/MiMo gateways). An explicit
     /// [`OpenAiCompatConfig::reasoning_policy`](super::OpenAiCompatConfig) override takes
@@ -71,8 +91,8 @@ impl ReasoningPolicy {
         if m.contains("deepseek-reasoner") || m.contains("deepseek-r1") {
             // DeepSeek V3 family: rejects echoed reasoning_content (400).
             ReasoningPolicy::Exclude
-        } else if m.contains("deepseek-v4") {
-            // DeepSeek V4 thinking mode: REQUIRES reasoning_content on tool-call turns.
+        } else if m.contains("deepseek-v4") || m.contains("grok") {
+            // DeepSeek V4 thinking mode / Grok 4.5/4.6: REQUIRES/expects reasoning_content on tool-call turns.
             ReasoningPolicy::Include
         } else if m.starts_with("kimi-")
             || m.starts_with("moonshot")
@@ -85,9 +105,7 @@ impl ReasoningPolicy {
             // Moonshot/Kimi/MiMo: require reasoning_content on every assistant tool_call.
             ReasoningPolicy::Include
         } else {
-            // Grok / GLM / vanilla OpenAI-compat: OpenCode also omits
-            // `reasoning_content` (no `interleaved.field` on Grok). Echoing
-            // plaintext thinking is a DeepSeek-V4 / Kimi requirement, not Grok's.
+            // GLM / vanilla OpenAI-compat: safe default: do not echo.
             ReasoningPolicy::Exclude
         }
     }
@@ -98,13 +116,21 @@ mod tests {
     use super::*;
 
     #[test]
-    fn deepseek_v4_includes() {
+    fn deepseek_v4_and_grok_include() {
         assert_eq!(
             ReasoningPolicy::derive("deepseek-v4-flash", ""),
             ReasoningPolicy::Include
         );
         assert_eq!(
             ReasoningPolicy::derive("DeepSeek-V4", ""),
+            ReasoningPolicy::Include
+        );
+        assert_eq!(
+            ReasoningPolicy::derive("grok-4.6", "https://api.x.ai/v1"),
+            ReasoningPolicy::Include
+        );
+        assert_eq!(
+            ReasoningPolicy::derive("grok-4.5", "https://gateway.example/v1"),
             ReasoningPolicy::Include
         );
     }
@@ -170,6 +196,38 @@ mod tests {
     }
 
     #[test]
+    fn resolve_prioritizes_reasoning_model_then_config_then_derive() {
+        // Explicit reasoning_model = Some(true) forces Include even on deepseek-r1
+        assert_eq!(
+            ReasoningPolicy::resolve(Some(true), None, "deepseek-r1", ""),
+            Ok(ReasoningPolicy::Include)
+        );
+        // Explicit reasoning_model = Some(false) forces Exclude even on grok
+        assert_eq!(
+            ReasoningPolicy::resolve(Some(false), None, "grok-4.6", ""),
+            Ok(ReasoningPolicy::Exclude)
+        );
+        // reasoning_history override wins if reasoning_model is None
+        assert_eq!(
+            ReasoningPolicy::resolve(None, Some("include"), "gpt-4o", ""),
+            Ok(ReasoningPolicy::Include)
+        );
+        assert_eq!(
+            ReasoningPolicy::resolve(None, Some("exclude"), "grok-4.6", ""),
+            Ok(ReasoningPolicy::Exclude)
+        );
+        // Fallback to derive
+        assert_eq!(
+            ReasoningPolicy::resolve(None, None, "grok-4.6", ""),
+            Ok(ReasoningPolicy::Include)
+        );
+        assert_eq!(
+            ReasoningPolicy::resolve(None, None, "gpt-4o", ""),
+            Ok(ReasoningPolicy::Exclude)
+        );
+    }
+
+    #[test]
     fn glm_and_default_exclude() {
         assert_eq!(
             ReasoningPolicy::derive("glm-5.1", "https://open.bigmodel.cn/api/paas/v4"),
@@ -180,15 +238,5 @@ mod tests {
             ReasoningPolicy::Exclude
         );
         assert_eq!(ReasoningPolicy::derive("", ""), ReasoningPolicy::Exclude);
-        // OpenCode does not set interleaved.field on Grok — plaintext thinking
-        // is displayed but not echoed on the next request.
-        assert_eq!(
-            ReasoningPolicy::derive("grok-4.6", "https://api.x.ai/v1"),
-            ReasoningPolicy::Exclude
-        );
-        assert_eq!(
-            ReasoningPolicy::derive("grok-4.5", "https://gateway.example/v1"),
-            ReasoningPolicy::Exclude
-        );
     }
 }

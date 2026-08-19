@@ -89,6 +89,10 @@ const COMMAND_ALIASES: &[(&str, &str)] = &[
     ("new", "session"),
     // Keep `/exit` working while presenting one canonical quit command.
     ("exit", "quit"),
+    // `/modelsadd`, `/model-add`, `/models-add` alias to `/modeladd`.
+    ("modelsadd", "modeladd"),
+    ("model-add", "modeladd"),
+    ("models-add", "modeladd"),
 ];
 
 /// Resolve an alias to its canonical command name (ASCII case-insensitive).
@@ -143,7 +147,7 @@ const BUILTIN_COMMANDS: &[Command] = &[
     Command { name: "logout",  desc: "Sign out of AtomGit", needs_args: false, hidden: false },
     Command { name: "whoami",  desc: "Show current logged-in user", needs_args: false, hidden: false },
     Command { name: "model",   desc: "Switch provider / model", needs_args: false, hidden: false },
-    Command { name: "modelsadd", desc: "Quickly add a model to an existing provider account", needs_args: false, hidden: false },
+    Command { name: "modeladd", desc: "Quickly add a model to an existing provider account", needs_args: false, hidden: false },
     Command { name: "provider", desc: "Manage providers (add / edit / delete)", needs_args: false, hidden: false },
     Command { name: "proxy",   desc: "Switch outbound proxy mode", needs_args: false, hidden: false },
     Command { name: "status",  desc: "Show session status", needs_args: false, hidden: false },
@@ -238,6 +242,7 @@ pub fn cmd_desc_i18n(name: &str) -> Option<std::borrow::Cow<'static, str>> {
         "logout" => Msg::CmdDescLogout,
         "whoami" => Msg::CmdDescWhoami,
         "model" => Msg::CmdDescModel,
+        "modeladd" => Msg::CmdDescModelAdd,
         "provider" => Msg::CmdDescProvider,
         "status" => Msg::CmdDescStatus,
         "config" => Msg::CmdDescConfig,

@@ -1536,10 +1536,18 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
       activeTodosRef.current = null;
       return;
     }
-    // Clear sticky first so the next paint never shows both sticky + frozen.
-    activeTodosRef.current = null;
-    setActiveTodos(null);
-    setMessages((prev) => freezeTodosIntoLastAssistant(prev, items));
+    // If all tasks are completed, archive them onto the last assistant reply and clear sticky.
+    // If some tasks remain unfinished/in_progress (e.g. aborted turn or multi-turn workflow),
+    // keep the sticky panel alive so the user and next turn can continue editing them!
+    const isAllDone = items.every((t) => t.status === 'completed');
+    if (isAllDone) {
+      activeTodosRef.current = null;
+      setActiveTodos(null);
+      setMessages((prev) => freezeTodosIntoLastAssistant(prev, items));
+    } else {
+      // Also snapshot into assistant history for safety, but retain active sticky list.
+      setMessages((prev) => freezeTodosIntoLastAssistant(prev, items));
+    }
   }
 
   function sessionMessagesToDisplay(msgs: SessionMessage[]): Message[] {

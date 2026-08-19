@@ -22,6 +22,59 @@ test('parseTodoPlan accepts full list shape', () => {
   assert.equal(items?.[1]?.status, 'in_progress');
 });
 
+test('applyTodoAction handles batch actions[] payload', () => {
+  let list = applyTodoAction([], JSON.stringify({
+    actions: [
+      { action: 'add', content: 'task 1' },
+      { action: 'add', content: 'task 2' },
+      { action: 'update', id: 1, status: 'in_progress' },
+    ],
+  }));
+  assert.equal(list.length, 2);
+  assert.equal(list[0]?.content, 'task 1');
+  assert.equal(list[0]?.status, 'in_progress');
+  assert.equal(list[1]?.content, 'task 2');
+  assert.equal(list[1]?.status, 'pending');
+
+  list = applyTodoAction(list, JSON.stringify({
+    actions: [
+      { action: 'update', id: 1, status: 'completed' },
+      { action: 'update', id: 2, status: 'in_progress' },
+    ],
+  }));
+  assert.equal(list[0]?.status, 'completed');
+  assert.equal(list[1]?.status, 'in_progress');
+});
+
+test('foldTodoToolCall handles actions batch updates in live stream', () => {
+  let cur = foldTodoToolCall(
+    null,
+    'todowrite',
+    JSON.stringify({
+      actions: [
+        { action: 'add', content: 'Step 1' },
+        { action: 'add', content: 'Step 2' },
+        { action: 'update', id: 1, status: 'in_progress' },
+      ],
+    }),
+  );
+  assert.equal(cur?.length, 2);
+  assert.equal(cur?.[0]?.status, 'in_progress');
+
+  cur = foldTodoToolCall(
+    cur,
+    'todowrite',
+    JSON.stringify({
+      actions: [
+        { action: 'update', id: 1, status: 'completed' },
+        { action: 'update', id: 2, status: 'in_progress' },
+      ],
+    }),
+  );
+  assert.equal(cur?.length, 2);
+  assert.equal(cur?.[0]?.status, 'completed');
+  assert.equal(cur?.[1]?.status, 'in_progress');
+});
 test('reduceTodosFromCalls uses last plan then actions', () => {
   const list = reduceTodosFromCalls([
     {

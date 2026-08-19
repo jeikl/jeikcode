@@ -2,7 +2,8 @@
  * Session todo list — TUI `active_todos` panel parity for WebUI.
  *
  * The `todowrite` / `todo` tools are stateless: the model either sends a full
- * plan (`{"todos":[…]}`) or an incremental action (`{"action":"add|update",…}`).
+ * plan (`{"todos":[…]}`), an incremental batch (`{"actions":[…]}`), or a single
+ * incremental action (`{"action":"add|update|...",…}`).
  * Current list is folded over the transcript the same way as
  * `atomcode_capabilities::tools::todo::reduce_todos`.
  */
@@ -14,6 +15,8 @@ export interface TodoItem {
   status: TodoStatus;
 }
 
+type ActionKind = 'add' | 'insert' | 'update' | 'delete' | 'clear';
+
 export function isTodoTool(name: string): boolean {
   return name === 'todowrite' || name === 'todo';
 }
@@ -21,6 +24,55 @@ export function isTodoTool(name: string): boolean {
 function parseStatus(s: string): TodoStatus | null {
   if (s === 'pending' || s === 'in_progress' || s === 'completed') return s;
   return null;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+function actionKind(value: Record<string, unknown>): ActionKind | null {
+  const action = typeof value.action === 'string' ? value.action : null;
+  if (action === 'add' || action === 'insert' || action === 'update' || action === 'clear') {
+    return action;
+  }
+  if (action === 'delete' || action === 'remove') return 'delete';
+  return null;
+}
+
+function parseNonNegInt(raw: unknown): number | null {
+  if (typeof raw === 'number' && Number.isSafeInteger(raw) && raw >= 0) return raw;
+  if (typeof raw === 'string') {
+    const parsed = Number.parseInt(raw.trim(), 10);
+    if (Number.isSafeInteger(parsed) && parsed >= 0) return parsed;
+  }
+  return null;
+}
+
+function jsonId(value: Record<string, unknown>): number | null {
+  const id = parseNonNegInt(value.id);
+  return id !== null && id >= 1 ? id : null;
+}
+
+function insertPosition(value: Record<string, unknown>): number | null {
+  const direct = parseNonNegInt(value.position !== undefined ? value.position : value.id);
+  if (direct !== null) return direct;
+  const after = parseNonNegInt(value.after !== undefined ? value.after : value.after_id);
+  return after === null ? null : after + 1;
+}
+
+function validateActionsMix(actions: Record<string, unknown>[]): boolean {
+  const kinds = new Set<ActionKind>();
+  for (const item of actions) {
+    const kind = actionKind(item);
+    if (!kind) return false;
+    kinds.add(kind);
+  }
+  if (kinds.has('clear') && kinds.size > 1) return false;
+  if (kinds.has('delete') && [...kinds].some((kind) => kind !== 'delete')) return false;
+  if (kinds.has('insert') && [...kinds].some((kind) => kind !== 'insert' && kind !== 'update')) {
+    return false;
+  }
+  return true;
 }
 
 /** Full-list plan shape. Returns null when args are not a valid plan. */
@@ -31,8 +83,12 @@ export function parseTodoPlan(args: string): TodoItem[] | null {
   } catch {
     return null;
   }
-  if (!value || typeof value !== 'object') return null;
-  let todos = (value as { todos?: unknown }).todos;
+  if (!isRecord(value)) return null;
+
+  // `actions` takes precedence over leftover `todos` field (same as Rust backend).
+  if (Array.isArray(value.actions)) return null;
+
+  let todos = value.todos;
   // Tolerate a single-layer stringified array (same as Rust parse_todos).
   if (typeof todos === 'string') {
     try {
@@ -46,13 +102,9 @@ export function parseTodoPlan(args: string): TodoItem[] | null {
   const out: TodoItem[] = [];
   let inProgress = 0;
   for (const raw of todos) {
-    if (!raw || typeof raw !== 'object') return null;
-    const content = typeof (raw as { content?: unknown }).content === 'string'
-      ? (raw as { content: string }).content.trim()
-      : '';
-    const status = typeof (raw as { status?: unknown }).status === 'string'
-      ? parseStatus((raw as { status: string }).status)
-      : null;
+    if (!isRecord(raw)) return null;
+    const content = typeof raw.content === 'string' ? raw.content.trim() : '';
+    const status = typeof raw.status === 'string' ? parseStatus(raw.status) : null;
     if (!content || !status) return null;
     if (status === 'in_progress') inProgress += 1;
     out.push({ content, status });
@@ -61,23 +113,14 @@ export function parseTodoPlan(args: string): TodoItem[] | null {
   return out;
 }
 
-/** Apply one incremental action; returns a new array (or same ref if no-op). */
-export function applyTodoAction(list: TodoItem[], args: string): TodoItem[] {
-  let v: Record<string, unknown>;
-  try {
-    const parsed = JSON.parse(args);
-    if (!parsed || typeof parsed !== 'object') return list;
-    v = parsed as Record<string, unknown>;
-  } catch {
-    return list;
-  }
-  const action = typeof v.action === 'string' ? v.action : null;
-  if (action === 'add') {
+function applyOne(list: TodoItem[], v: Record<string, unknown>): TodoItem[] {
+  const kind = actionKind(v);
+  if (kind === 'add') {
     const content = typeof v.content === 'string' ? v.content.trim() : '';
     if (!content) return list;
     return [...list, { content, status: 'pending' as const }];
   }
-  if (action === 'insert') {
+  if (kind === 'insert') {
     const content = typeof v.content === 'string' ? v.content.trim() : '';
     if (!content) return list;
     const status = typeof v.status === 'string' ? (parseStatus(v.status) ?? 'pending') : 'pending';
@@ -87,21 +130,20 @@ export function applyTodoAction(list: TodoItem[], args: string): TodoItem[] {
         if (item.status === 'in_progress') item.status = 'pending';
       }
     }
-    const rawPos = v.position !== undefined ? v.position : v.id;
-    const pos = typeof rawPos === 'number' ? rawPos : typeof rawPos === 'string' ? Number(rawPos) : NaN;
+    const pos = insertPosition(v);
     let idx = next.length;
-    if (Number.isFinite(pos)) {
+    if (pos !== null) {
       if (pos <= 1) idx = 0;
       else if (pos - 1 <= next.length) idx = pos - 1;
     }
     next.splice(idx, 0, { content, status });
     return next;
   }
-  if (action === 'update') {
-    const id = typeof v.id === 'number' ? v.id : Number(v.id);
+  if (kind === 'update') {
+    const id = jsonId(v);
     const status = typeof v.status === 'string' ? parseStatus(v.status) : null;
     const content = typeof v.content === 'string' ? v.content.trim() : null;
-    if (!Number.isFinite(id) || id < 1 || id > list.length || (!status && !content)) return list;
+    if (id === null || id < 1 || id > list.length || (!status && !content)) return list;
     const next = list.map((item) => ({ ...item }));
     if (status === 'in_progress') {
       for (const item of next) {
@@ -115,17 +157,76 @@ export function applyTodoAction(list: TodoItem[], args: string): TodoItem[] {
     };
     return next;
   }
-  if (action === 'delete' || action === 'remove') {
-    const id = typeof v.id === 'number' ? v.id : Number(v.id);
-    if (!Number.isFinite(id) || id < 1 || id > list.length) return list;
+  if (kind === 'delete') {
+    const id = jsonId(v);
+    if (id === null || id < 1 || id > list.length) return list;
     const next = list.map((item) => ({ ...item }));
     next.splice(id - 1, 1);
     return next;
   }
-  if (action === 'clear') {
+  if (kind === 'clear') {
     return [];
   }
   return list;
+}
+
+function applyBatch(list: TodoItem[], actions: Record<string, unknown>[]): TodoItem[] {
+  if (!validateActionsMix(actions)) return list;
+  const kinds = new Set(actions.map(actionKind));
+  if (kinds.has('clear')) return [];
+
+  if (kinds.has('delete')) {
+    const ids: number[] = [];
+    for (const action of actions) {
+      const id = jsonId(action);
+      if (id !== null && id <= list.length && !ids.includes(id)) {
+        ids.push(id);
+      }
+    }
+    ids.sort((a, b) => b - a);
+    const next = list.slice();
+    for (const id of ids) next.splice(id - 1, 1);
+    return next;
+  }
+
+  let next = list;
+  for (const action of actions) {
+    if (actionKind(action) !== 'add') continue;
+    next = applyOne(next, action);
+  }
+
+  const inserts = actions
+    .filter((action) => actionKind(action) === 'insert')
+    .sort((a, b) => (insertPosition(b) ?? Number.POSITIVE_INFINITY) - (insertPosition(a) ?? Number.POSITIVE_INFINITY));
+  for (const action of inserts) {
+    next = applyOne(next, action);
+  }
+
+  for (const action of actions) {
+    if (actionKind(action) !== 'update') continue;
+    next = applyOne(next, action);
+  }
+  return next;
+}
+
+/** Apply one incremental action or actions batch; returns a new array (or same ref if no-op). */
+export function applyTodoAction(list: TodoItem[], args: string): TodoItem[] {
+  let v: Record<string, unknown>;
+  try {
+    const parsed = JSON.parse(args);
+    if (!isRecord(parsed)) return list;
+    v = parsed;
+  } catch {
+    return list;
+  }
+
+  if (Array.isArray(v.actions)) {
+    const actions = v.actions.filter(isRecord);
+    if (actions.length !== v.actions.length || actions.length === 0) return list;
+    return applyBatch(list, actions);
+  }
+
+  return applyOne(list, v);
 }
 
 /**

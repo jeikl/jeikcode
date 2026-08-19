@@ -44,6 +44,51 @@ test('todo projection follows full-list and incremental tool semantics', () => {
   assert.deepEqual(items.at(-1), { content: '补充文档', status: 'pending' });
 });
 
+test('actions batch is id-addressed, transactional, and wins over leftover todos', () => {
+  let items = applyTodoCall([], 'todowrite', JSON.stringify({
+    actions: [
+      { action: 'add', content: 'a' },
+      { action: 'add', content: 'b' },
+      { action: 'add', content: 'c' },
+    ],
+  }));
+  assert.deepEqual(items.map((item) => item.content), ['a', 'b', 'c']);
+
+  items = applyTodoCall(items, 'todowrite', JSON.stringify({
+    actions: [
+      { action: 'update', id: 3, status: 'completed' },
+      { action: 'update', id: 1, status: 'completed' },
+      { action: 'update', id: 2, status: 'in_progress' },
+    ],
+  }));
+  assert.equal(items[0].status, 'completed');
+  assert.equal(items[1].status, 'in_progress');
+  assert.equal(items[2].status, 'completed');
+
+  const beforeBad = items.slice();
+  items = applyTodoCall(items, 'todowrite', JSON.stringify({
+    actions: [
+      { action: 'update', id: 1, status: 'pending' },
+      { action: 'update', id: 99, status: 'in_progress' },
+    ],
+  }));
+  assert.deepEqual(items, beforeBad, 'failed batch must not apply');
+
+  items = applyTodoCall(items, 'todowrite', JSON.stringify({
+    actions: [
+      { action: 'delete', id: 3 },
+      { action: 'delete', id: 1 },
+    ],
+  }));
+  assert.deepEqual(items, [{ content: 'b', status: 'in_progress' }]);
+
+  const mixed = applyTodoCall(items, 'todowrite', JSON.stringify({
+    actions: [{ action: 'add', content: 'from-actions' }],
+    todos: [{ content: 'from-todos', status: 'pending' }],
+  }));
+  assert.deepEqual(mixed.map((item) => item.content), ['b', 'from-actions']);
+});
+
 test('valid re-plan replaces earlier state and an empty plan clears it', () => {
   let items = applyTodoCall([], 'todo', '{"action":"add","content":"旧任务"}');
   items = applyTodoCall(items, 'todowrite', '{"todos":[{"content":"新任务","status":"pending"}]}');
@@ -62,7 +107,7 @@ test('malformed and unsupported todo calls do not corrupt prior state', () => {
     '{"action":"update","id":9,"status":"completed"}',
     '{"action":"update","id":1,"status":"unknown"}',
     '{"action":"add","content":"   "}',
-    '{"action":"remove","id":1}',
+    '{"action":"frobnicate"}',
     'not-json',
   ];
 

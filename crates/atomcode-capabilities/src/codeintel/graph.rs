@@ -133,7 +133,23 @@ impl CodeGraph {
         self.nodes.get(&id)
     }
     pub fn symbols_in_file(&self, file: &Path) -> Option<&Vec<SymbolId>> {
-        self.file_symbols.get(file)
+        if let Some(ids) = self.file_symbols.get(file) {
+            return Some(ids);
+        }
+        let key = self.resolve_file_key(file)?;
+        self.file_symbols.get(&key)
+    }
+
+    /// Locate the `file_symbols` key that refers to the same on-disk file,
+    /// tolerating slash / drive-letter drift between the walker and editors.
+    fn resolve_file_key(&self, file: &Path) -> Option<PathBuf> {
+        if self.file_symbols.contains_key(file) {
+            return Some(file.to_path_buf());
+        }
+        self.file_symbols
+            .keys()
+            .find(|k| paths_equivalent(k, file))
+            .cloned()
     }
     pub fn callees(&self, id: SymbolId) -> Option<&Vec<Edge>> {
         self.edges_out.get(&id)
@@ -185,13 +201,20 @@ impl CodeGraph {
     }
 
     pub fn remove_file(&mut self, file: &Path) {
-        if let Some(ids) = self.file_symbols.get(file).cloned() {
+        let key = self
+            .resolve_file_key(file)
+            .unwrap_or_else(|| file.to_path_buf());
+        if let Some(ids) = self.file_symbols.get(&key).cloned() {
             for id in ids {
                 self.remove_symbol(id);
             }
         }
-        self.file_symbols.remove(file);
-        self.file_mtimes.remove(file);
+        self.file_symbols.remove(&key);
+        self.file_mtimes.remove(&key);
+        if key != file {
+            self.file_symbols.remove(file);
+            self.file_mtimes.remove(file);
+        }
     }
 
     pub fn node_count(&self) -> usize {
@@ -343,6 +366,32 @@ impl CodeGraph {
             ));
         }
         out
+    }
+}
+
+/// Slash- and (on Windows) drive-letter-insensitive path equality so a graph
+/// keyed by the walker (`E:\foo.rs`) still matches an editor path (`E:/foo.rs`).
+fn paths_equivalent(a: &Path, b: &Path) -> bool {
+    if a == b {
+        return true;
+    }
+    normalize_path_cmp(a) == normalize_path_cmp(b)
+}
+
+fn normalize_path_cmp(p: &Path) -> String {
+    let s = p.to_string_lossy();
+    let stripped = s
+        .strip_prefix(r"\\?\")
+        .or_else(|| s.strip_prefix("//?/"))
+        .unwrap_or(&s);
+    let unified = stripped.replace('/', "\\");
+    #[cfg(windows)]
+    {
+        unified.to_ascii_lowercase()
+    }
+    #[cfg(not(windows))]
+    {
+        unified
     }
 }
 

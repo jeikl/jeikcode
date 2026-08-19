@@ -7102,6 +7102,20 @@ mod tool_format_tests {
     }
 
     #[test]
+    fn format_tool_detail_todowrite_actions_batch() {
+        let one = r#"{"actions":[{"action":"update","id":2,"status":"completed"}]}"#;
+        assert_eq!(format_tool_detail("todowrite", one), "#2 → completed");
+        let many = r#"{"actions":[{"action":"add","content":"a"},{"action":"add","content":"b"}]}"#;
+        assert_eq!(format_tool_detail("todowrite", many), "2 actions");
+        let mixed_legacy = r#"{"actions":[{"action":"add","content":"from-actions"}],"todos":[{"content":"from-todos","status":"pending"}]}"#;
+        assert_eq!(
+            format_tool_detail("todowrite", mixed_legacy),
+            "from-actions",
+            "actions wins over leftover todos"
+        );
+    }
+
+    #[test]
     fn format_tool_detail_search_replace_shows_arrow() {
         let args = r#"{"search":"bg-blue-600","replace":"bg-violet-600","glob":"*.vue"}"#;
         let out = format_tool_detail("search_replace", args);
@@ -19997,19 +20011,18 @@ fn handle_agent_event(
             let display = display_tool_name(&name);
 
             // The merged `todowrite` carries EITHER the full-list PLAN shape (`{todos:[…]}`) or
-            // the incremental `{action}` shape; a resumed session may also carry legacy `todo`
-            // calls. Distinguish by ARG SHAPE, not tool name.
+            // the incremental `{action}` / `{actions:[…]}` shape; a resumed session may also
+            // carry legacy `todo` calls. Distinguish by ARG SHAPE, not tool name.
             let is_todo_call = name == "todowrite" || name == "todo";
-            let todo_plan = if is_todo_call {
+            let todo_plan = if is_todo_call
+                && atomcode_capabilities::tools::todo::is_todo_plan(&arguments)
+            {
                 todo_progress_from_args(&arguments)
             } else {
                 None
             };
             let is_todo_action = is_todo_call
-                && todo_plan.is_none()
-                && serde_json::from_str::<serde_json::Value>(&arguments)
-                    .ok()
-                    .is_some_and(|v| v.get("action").and_then(|a| a.as_str()).is_some());
+                && atomcode_capabilities::tools::todo::is_todo_action_args(&arguments);
 
             // Incremental action (add / update id=N status): fold it into the live footer panel
             // + title cache HERE — ABOVE the batch / approval early-returns below — so batched
@@ -23011,10 +23024,17 @@ pub(crate) fn enrich_todo_detail(
     let Ok(v) = serde_json::from_str::<serde_json::Value>(&repaired) else {
         return base.to_string();
     };
-    if v.get("action").and_then(|a| a.as_str()) != Some("update") {
-        return base.to_string();
-    }
-    let Some(id) = v.get("id").and_then(|x| x.as_u64()) else {
+    let id = if v.get("action").and_then(|a| a.as_str()) == Some("update") {
+        v.get("id").and_then(|x| x.as_u64())
+    } else {
+        // Single-item `actions` update: same `#N → status` row as the shorthand.
+        v.get("actions").and_then(|a| a.as_array()).and_then(|arr| {
+            (arr.len() == 1 && arr[0].get("action").and_then(|a| a.as_str()) == Some("update"))
+                .then(|| arr[0].get("id").and_then(|x| x.as_u64()))
+                .flatten()
+        })
+    };
+    let Some(id) = id else {
         return base.to_string();
     };
     let Some(title) = titles.get(&id) else {
@@ -23026,6 +23046,43 @@ pub(crate) fn enrich_todo_detail(
     match base.split_once(" \u{2192} ") {
         Some((head, tail)) => format!("{} {} \u{2192} {}", head, title, tail),
         None => format!("{} {}", base, title),
+    }
+}
+
+fn format_todo_action_detail(v: &serde_json::Value) -> String {
+    let action = v.get("action").and_then(|a| a.as_str()).unwrap_or("");
+    let content = v
+        .get("content")
+        .and_then(|c| c.as_str())
+        .map(|c| crate::width::truncate_with_ellipsis(c, 100));
+    let id = v
+        .get("id")
+        .and_then(|x| x.as_u64().or_else(|| x.as_str().and_then(|s| s.parse().ok())));
+    let status = v.get("status").and_then(|s| s.as_str()).unwrap_or("");
+    match action {
+        "add" => content.unwrap_or_default(),
+        "insert" => content
+            .map(|c| {
+                let pos = v
+                    .get("position")
+                    .or_else(|| v.get("id"))
+                    .and_then(|x| x.as_u64())
+                    .unwrap_or(1);
+                format!("#{pos} insert {c}")
+            })
+            .unwrap_or_default(),
+        "update" => match (id, status) {
+            (Some(i), s) if !s.is_empty() => format!("#{} → {}", i, s),
+            (Some(i), _) => format!("#{i}"),
+            (None, s) if !s.is_empty() => s.to_string(),
+            _ => String::new(),
+        },
+        "delete" | "remove" => id
+            .map(|i| format!("#{i} removed"))
+            .unwrap_or_default(),
+        "clear" => "clear all".to_string(),
+        "list" => "list all".to_string(),
+        _ => String::new(),
     }
 }
 
@@ -23183,32 +23240,23 @@ pub(crate) fn format_tool_detail(name: &str, args_json: &str) -> String {
         // Merged `todowrite` (legacy `todo` still recognized for resumed sessions): the shape
         // decides the detail — a full-list plan shows the count, an `{action}` shows what changed.
         "todowrite" | "todo" => {
-            if let Some(arr) = v.get("todos").and_then(|t| t.as_array()) {
+            if v.get("actions").and_then(|t| t.as_array()).is_some()
+                && atomcode_capabilities::tools::todo::is_todo_action_args(&repaired_args)
+            {
+                let arr = v.get("actions").and_then(|t| t.as_array()).unwrap();
+                match arr.len() {
+                    0 => String::new(),
+                    1 => format_todo_action_detail(&arr[0]),
+                    n => format!("{n} actions"),
+                }
+            } else if let Some(arr) = v.get("todos").and_then(|t| t.as_array()) {
                 match arr.len() {
                     0 => "0 tasks".to_string(),
                     1 => "1 task".to_string(),
                     n => format!("{} tasks", n),
                 }
             } else {
-                // Incremental action: show the description (add) or id+status (update).
-                let action = get_str("action").unwrap_or_default();
-                match action.as_str() {
-                    "add" => get_str("content")
-                        .map(|c| crate::width::truncate_with_ellipsis(&c, 100))
-                        .unwrap_or_default(),
-                    "update" => {
-                        let id = v.get("id").and_then(|x| x.as_u64());
-                        let status = get_str("status").unwrap_or_default();
-                        match (id, status.as_str()) {
-                            (Some(i), s) if !s.is_empty() => format!("#{} → {}", i, s),
-                            (Some(i), _) => format!("#{}", i),
-                            (None, s) if !s.is_empty() => s.to_string(),
-                            _ => String::new(),
-                        }
-                    }
-                    "list" => "list all".to_string(),
-                    _ => String::new(),
-                }
+                format_todo_action_detail(&v)
             }
         }
         "use_skill" => get_str("name").unwrap_or_default(),
@@ -24218,6 +24266,29 @@ mod todo_block_tests {
             "the in_progress item is #3 'c'"
         );
         assert_eq!(p.items[0], (TodoStatus::Completed, "a".to_string()));
+    }
+
+    #[test]
+    fn todo_progress_from_messages_folds_actions_array() {
+        use atomcode_kernel::message::Message;
+        use atomcode_kernel::tool::ToolCall;
+        let mk = |args: &str| {
+            Message::assistant(
+                "",
+                vec![ToolCall {
+                    id: "1".into(),
+                    name: "todowrite".into(),
+                    arguments: args.into(),
+                }],
+            )
+        };
+        let msgs = vec![
+            mk(r#"{"actions":[{"action":"add","content":"a"},{"action":"add","content":"b"}]}"#),
+            mk(r#"{"actions":[{"action":"update","id":1,"status":"completed"},{"action":"update","id":2,"status":"in_progress"}]}"#),
+        ];
+        let p = todo_progress_from_messages(&msgs).expect("actions fold");
+        assert_eq!((p.completed, p.total), (1, 2));
+        assert_eq!(p.current.as_deref(), Some("b"));
     }
 }
 

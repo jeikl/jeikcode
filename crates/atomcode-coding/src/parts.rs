@@ -288,6 +288,12 @@ async fn prepare_with_plugin_hooks_reusing_lease(
     // PREPARE-time flag; `assemble` re-registers read_file on every model swap (see there)
     // so a `/model` change to/from a VL model can't leave it stale.
     register_coding_tools_with_vision(&mut registry, cfg.supports_vision);
+    let todo_enabled = crate::persona::todo_switch_enabled_for(cfg.todo.enabled);
+    let todo_live = if todo_enabled {
+        Some(atomcode_capabilities::tools::bind_todowrite(&mut registry))
+    } else {
+        None
+    };
     names.extend(
         atomcode_capabilities::tools::coding_tool_names()
             .iter()
@@ -295,7 +301,6 @@ async fn prepare_with_plugin_hooks_reusing_lease(
     );
     let request_user_input_enabled =
         opts.request_user_input && crate::persona::request_user_input_switch_enabled();
-    let todo_enabled = crate::persona::todo_switch_enabled_for(cfg.todo.enabled);
     if !todo_enabled {
         names.retain(|name| name != "todowrite");
     }
@@ -696,7 +701,10 @@ async fn prepare_with_plugin_hooks_reusing_lease(
     // through prepare()/assemble() here; `assemble.rs::build_coding_agent` (which also registers
     // it) is reachable only from tests + examples, so there is no double-registration.
     if crate::persona::todo_switch_enabled_for(cfg.todo.enabled) {
-        hooks.push(Arc::new(crate::todo::TodoHook));
+        hooks.push(Arc::new(match todo_live {
+            Some(live) => crate::todo::TodoHook::with_live(live),
+            None => crate::todo::TodoHook::new(),
+        }));
     }
     // DeepSeek-only opening-turn skill-first reminder. A weak model (deepseek) skips
     // use_skill and dives straight into exploring/solutioning; a static persona line did

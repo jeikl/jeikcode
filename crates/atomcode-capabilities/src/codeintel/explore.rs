@@ -1505,6 +1505,11 @@ fn render_explore_output(
                 "> ⚡ **Index Status**: [Cache HIT] 内存索引已就绪（复用 {} 个文件单元，0 重建）\n",
                 stats.kept
             ));
+        } else if stats.reparsed <= 8 && stats.removed <= 8 {
+            out.push(format!(
+                "> ⚡ **Index Status**: [Incremental] 增量补丁（重解析 {} 个文件，保留 {} 个，移除 {} 个）\n",
+                stats.reparsed, stats.kept, stats.removed
+            ));
         } else {
             out.push(format!(
                 "> 🔄 **Index Status**: [Cache MISS] 索引已更新（重新解析 {} 个文件，保留 {} 个，移除 {} 个）\n",

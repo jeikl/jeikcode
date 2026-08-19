@@ -6,7 +6,7 @@
 use async_trait::async_trait;
 use atomcode_capabilities::reminder::system_reminder;
 use atomcode_capabilities::tools::todo::{
-    derive_current_todos, render_todos_numbered, TodoItem, TodoStatus,
+    derive_current_todos, render_todos_numbered, TodoItem, TodoLive, TodoStatus,
 };
 use atomcode_kernel::hook::{LifecycleHooks, TurnCtx};
 use atomcode_kernel::message::{Conversation, Message, Role};
@@ -25,7 +25,31 @@ If you have actually completed them, mark each one done now with `todowrite` \
 through them. Only stop with open items if you genuinely need approval/input, are stuck, or the \
 request is ambiguous — in that case say so briefly.";
 
-pub struct TodoHook;
+pub struct TodoHook {
+    live: Option<TodoLive>,
+}
+
+impl Default for TodoHook {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl TodoHook {
+    pub fn new() -> Self {
+        Self { live: None }
+    }
+
+    pub fn with_live(live: TodoLive) -> Self {
+        Self { live: Some(live) }
+    }
+
+    fn sync_live(&self, todos: &[TodoItem]) {
+        if let Some(live) = &self.live {
+            *live.lock().unwrap_or_else(|e| e.into_inner()) = todos.to_vec();
+        }
+    }
+}
 
 /// High-recency todo activation policy. Unlike `TodoHook`, this only acts on
 /// round one of a real user turn and only while no structured list exists.
@@ -166,6 +190,7 @@ actually working on as in_progress (`{\"action\":\"update\",\"id\":<id>,\"status
 impl LifecycleHooks for TodoHook {
     async fn pre_request(&self, messages: &mut Vec<Message>, _ctx: &TurnCtx) {
         let todos = derive_current_todos(messages);
+        self.sync_live(&todos);
         if todos.is_empty() {
             return;
         }
@@ -178,9 +203,9 @@ impl LifecycleHooks for TodoHook {
             .unwrap_or_default();
         let body = format!(
             "{anchor}Current task list (each line is `#<id> <task>`) — keep it accurate and finish it:\n\
-- The MOMENT you START an item: `todowrite` with `{{\"action\":\"update\",\"id\":<id>,\"status\":\"in_progress\"}}`.\n\
-- The MOMENT you FINISH an item: `todowrite` with `{{\"action\":\"update\",\"id\":<id>,\"status\":\"completed\"}}` (do not leave a done item showing incomplete).\n\
-- Manage items incrementally (`action`: `add`, `insert`, `update`, `delete`, `clear`) — do NOT resend the whole `todos` list for single changes.\n\
+- The MOMENT you START or FINISH items: one `todowrite` with `actions` covering every status change you already know (e.g. complete #1 and set #2 `in_progress` in the SAME array).\n\
+- Skip `todowrite` this turn if the list already matches reality. Never re-mark an item already in that status.\n\
+- First plan / replace a plan: `actions` of `add`s (plus `clear` first if replacing). Do NOT resend a full `todos` list.\n\
 - Do NOT stop, summarize, or hand back while ANY item is still pending or in_progress — keep working through them, unless you truly need approval, are genuinely stuck, or the request is ambiguous.\n\
 {}",
             render_todos_numbered(&todos, false)
@@ -274,7 +299,7 @@ mod tests {
             Message::user("do it"),
             todowrite_msg(r#"{"todos":[{"content":"step one","status":"in_progress"}]}"#),
         ];
-        TodoHook.pre_request(&mut msgs, &TurnCtx::default()).await;
+        TodoHook::new().pre_request(&mut msgs, &TurnCtx::default()).await;
         let last = &msgs[msgs.len() - 1];
         assert!(
             last.text.contains("currently ON task #1"),
@@ -287,6 +312,11 @@ mod tests {
             last.text
         );
         // The anchor precedes the list body.
+        assert!(
+            last.text.contains("Skip `todowrite` this turn if the list already matches"),
+            "must discourage no-op updates: {}",
+            last.text
+        );
         let anchor_at = last.text.find("currently ON task").unwrap();
         let list_at = last.text.find("Current task list").unwrap();
         assert!(
@@ -303,7 +333,7 @@ mod tests {
             todowrite_msg(r#"{"todos":[{"content":"step one","status":"in_progress"}]}"#),
         ];
         let before = msgs.len();
-        TodoHook.pre_request(&mut msgs, &TurnCtx::default()).await;
+        TodoHook::new().pre_request(&mut msgs, &TurnCtx::default()).await;
         assert_eq!(msgs.len(), before + 1, "one reminder appended");
         let last = &msgs[msgs.len() - 1];
         assert_eq!(last.role, Role::User);
@@ -312,10 +342,38 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn hook_syncs_live_so_execute_rejects_unknown_ids() {
+        use atomcode_capabilities::tools::TodoTool;
+        use atomcode_kernel::tool::{Tool, ToolContext};
+        use tokio_util::sync::CancellationToken;
+
+        let tool = TodoTool::new();
+        let hook = TodoHook::with_live(tool.live());
+        let mut msgs = vec![
+            Message::user("do it"),
+            todowrite_msg(r#"{"todos":[{"content":"only","status":"pending"}]}"#),
+        ];
+        hook.pre_request(&mut msgs, &TurnCtx::default()).await;
+
+        let ctx = ToolContext {
+            working_dir: std::path::PathBuf::from("."),
+            cancel: CancellationToken::new(),
+            progress: atomcode_kernel::tool::ProgressSink::noop(),
+            requester: None,
+        };
+        let bad = tool
+            .execute(r#"{"action":"update","id":3,"status":"completed"}"#, &ctx)
+            .await;
+        assert!(bad.is_error, "{}", bad.content);
+        assert!(bad.content.contains("only"), "{}", bad.content);
+        assert!(bad.content.contains("Current list"), "{}", bad.content);
+    }
+
+    #[tokio::test]
     async fn no_injection_when_no_list() {
         let mut msgs = vec![Message::user("hi"), Message::assistant("hello", vec![])];
         let before = msgs.len();
-        TodoHook.pre_request(&mut msgs, &TurnCtx::default()).await;
+        TodoHook::new().pre_request(&mut msgs, &TurnCtx::default()).await;
         assert_eq!(msgs.len(), before, "empty list → no injection");
     }
 
@@ -424,7 +482,7 @@ mod tests {
             Message::assistant("here is the summary…", vec![]),
         ]);
         assert!(
-            TodoHook.offer_continuation(&convo).await.is_some(),
+            TodoHook::new().offer_continuation(&convo).await.is_some(),
             "open item on stop must nudge"
         );
     }
@@ -439,7 +497,7 @@ mod tests {
             Message::assistant("all done", vec![]),
         ]);
         assert!(
-            TodoHook.offer_continuation(&convo).await.is_none(),
+            TodoHook::new().offer_continuation(&convo).await.is_none(),
             "all completed → let it stop"
         );
     }
@@ -450,7 +508,7 @@ mod tests {
             Message::user("hi"),
             Message::assistant("hi there", vec![]),
         ]);
-        assert!(TodoHook.offer_continuation(&convo).await.is_none());
+        assert!(TodoHook::new().offer_continuation(&convo).await.is_none());
     }
 
     #[tokio::test]
@@ -465,7 +523,7 @@ mod tests {
             Message::assistant("foo does X.", vec![]),
         ]);
         assert!(
-            TodoHook.offer_continuation(&convo).await.is_none(),
+            TodoHook::new().offer_continuation(&convo).await.is_none(),
             "a stale open list not touched this turn must not force a continuation"
         );
     }
@@ -478,7 +536,7 @@ mod tests {
             Message::assistant("summary", vec![]),
         ]);
         assert!(
-            TodoHook.offer_continuation(&convo).await.is_some(),
+            TodoHook::new().offer_continuation(&convo).await.is_some(),
             "first stop nudges"
         );
         // Kernel injected the nudge as a synthetic user message; model stops again without closing.
@@ -489,7 +547,7 @@ mod tests {
             .messages
             .push(Message::assistant("still open", vec![]));
         assert!(
-            TodoHook.offer_continuation(&convo).await.is_none(),
+            TodoHook::new().offer_continuation(&convo).await.is_none(),
             "already nudged this turn → let it stop (no spin)"
         );
     }

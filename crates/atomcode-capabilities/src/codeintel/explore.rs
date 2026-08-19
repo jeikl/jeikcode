@@ -361,9 +361,6 @@ impl Tool for CodeExploreTool {
         drop(thesaurus_guard);
 
         let t0 = std::time::Instant::now();
-        let t_index_start = std::time::Instant::now();
-        let graph = self.index.get(&root);
-        let t_index = t_index_start.elapsed();
 
         let scope_path = if !parsed_query.path_filters.is_empty() {
             let p = &parsed_query.path_filters[0];
@@ -381,6 +378,10 @@ impl Tool for CodeExploreTool {
                 }
             })
         };
+
+        let t_index_start = std::time::Instant::now();
+        let graph = self.index.get_scoped(&root, scope_path.as_deref());
+        let t_index = t_index_start.elapsed();
 
         // Step 1: Score all symbols in the workspace.
         let t_retrieval_start = std::time::Instant::now();

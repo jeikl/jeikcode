@@ -317,6 +317,98 @@ pub(crate) fn canonical(p: &Path) -> PathBuf {
     PathBuf::from(stripped)
 }
 
+/// Lowercase, unify slashes, strip `\\?\` / trailing separators — matching key only.
+pub(crate) fn normalize_path_for_match(p: &Path) -> String {
+    let s = p.to_string_lossy();
+    let stripped = s
+        .strip_prefix(r"\\?\")
+        .or_else(|| s.strip_prefix("//?/"))
+        .unwrap_or(&s);
+
+    let mut unified = stripped.replace('/', "\\").to_ascii_lowercase();
+    while unified.len() > 1 && unified.ends_with('\\') {
+        unified.pop();
+    }
+    unified
+}
+
+fn path_components(norm: &str) -> Vec<&str> {
+    norm.split('\\')
+        .filter(|c| !c.is_empty() && *c != "." && *c != "..")
+        .collect()
+}
+
+fn is_windows_drive(c: &str) -> bool {
+    let b = c.as_bytes();
+    b.len() == 2 && b[1] == b':' && b[0].is_ascii_alphabetic()
+}
+
+/// True when `needle` appears as consecutive path components inside `haystack`.
+fn components_contains(haystack: &[&str], needle: &[&str]) -> bool {
+    if needle.is_empty() || haystack.len() < needle.len() {
+        return false;
+    }
+    haystack.windows(needle.len()).any(|w| w == needle)
+}
+
+/// Relative indexed file vs canonical absolute scope (or the reverse): a suffix
+/// of one side lines up with a prefix of the other, covering the entire remaining
+/// shorter slice. Overlap of 1 is allowed only when that *is* the shorter path.
+fn components_align(a: &[&str], b: &[&str]) -> bool {
+    if a.is_empty() || b.is_empty() {
+        return false;
+    }
+    let shorter = a.len().min(b.len());
+    for i in 0..a.len() {
+        for j in 0..b.len() {
+            let n = (a.len() - i).min(b.len() - j);
+            if n == 0 {
+                continue;
+            }
+            if a[i..i + n] != b[j..j + n] {
+                continue;
+            }
+            // Entire remaining of at least one side must be consumed.
+            if a.len() - i != n && b.len() - j != n {
+                continue;
+            }
+            if n >= 2 || n == shorter {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+/// Multi-format scope match: relative vs absolute, `/` vs `\`, UNC prefix,
+/// and segment-boundary alignment (so `coupon-mall-demo/backend/...` matches
+/// `E:\code\agents\coupon-mall-demo\backend\...`). Does **not** expand to
+/// the whole workspace when the scope is simply empty.
+pub(crate) fn path_matches_scope(file_path: &Path, scope: &Path) -> bool {
+    let f_norm = normalize_path_for_match(file_path);
+    let sc_norm = normalize_path_for_match(scope);
+    if f_norm.is_empty() || sc_norm.is_empty() {
+        return false;
+    }
+    if f_norm == sc_norm {
+        return true;
+    }
+
+    let fc = path_components(&f_norm);
+    let sc = path_components(&sc_norm);
+    if fc.is_empty() || sc.is_empty() {
+        return false;
+    }
+
+    let fc: &[&str] = if is_windows_drive(fc[0]) { &fc[1..] } else { &fc };
+    let sc: &[&str] = if is_windows_drive(sc[0]) { &sc[1..] } else { &sc };
+    if fc.is_empty() || sc.is_empty() {
+        return false;
+    }
+
+    components_contains(fc, sc) || components_contains(sc, fc) || components_align(fc, sc)
+}
+
 /// Human-readable path for CLI/logs. Windows `canonicalize` yields `\\?\E:\...`, which
 /// looks like mojibake/noise on GBK consoles — strip the extended-length prefix.
 pub(crate) fn path_for_display(p: &Path) -> String {
@@ -425,5 +517,27 @@ mod tests {
         let p = Path::new("E:/code/agents/atomcode");
         let c = canonical(p);
         assert_eq!(c, PathBuf::from("E:/code/agents/atomcode"));
+    }
+
+    #[test]
+    fn path_matches_scope_aligns_absolute_scope_with_relative_index() {
+        let rel = Path::new(
+            "coupon-mall-demo/backend/src/main/java/com/demo/coupon/service/CouponBatchIssueService.java",
+        );
+        let abs_scope = Path::new(
+            r"E:\code\agents\coupon-mall-demo\backend\src\main\java\com\demo\coupon\service",
+        );
+        assert!(
+            path_matches_scope(rel, abs_scope),
+            "canonicalized absolute scope must match a relative indexed file"
+        );
+        assert!(path_matches_scope(
+            Path::new(r"E:\code\agents\coupon-mall-demo\backend\src\main\java\com\demo\coupon\service\CouponService.java"),
+            Path::new("coupon-mall-demo/backend/src/main/java/com/demo/coupon/service")
+        ));
+        assert!(!path_matches_scope(
+            Path::new("atomcode/crates/atomcode-tuix/src/lib.rs"),
+            abs_scope
+        ));
     }
 }

@@ -16,7 +16,7 @@ use super::bilingual_nlp::{
 };
 use super::graph::{CodeGraph, EdgeKind, SymbolId, SymbolKind, SymbolNode};
 use super::index::CodeIndex;
-use super::{canonical, err, ok};
+use super::{canonical, err, normalize_path_for_match, ok, path_matches_scope};
 use async_trait::async_trait;
 use atomcode_kernel::tool::{Tool, ToolContext, ToolResult};
 use serde::Deserialize;
@@ -218,25 +218,6 @@ struct FileCandidate {
     symbols: Vec<ScoredSymbol>,
 }
 
-fn normalize_path_for_match(p: &Path) -> String {
-    let s = p.to_string_lossy();
-    let stripped = if let Some(rest) = s.strip_prefix(r"\\?\") {
-        rest
-    } else {
-        &s
-    };
-    stripped.replace('/', "\\").to_ascii_lowercase()
-}
-
-pub(crate) fn path_matches_scope(file_path: &Path, scope: &Path) -> bool {
-    let f_norm = normalize_path_for_match(file_path);
-    let sc_norm = normalize_path_for_match(scope);
-    f_norm.starts_with(&sc_norm)
-        || f_norm.ends_with(&sc_norm)
-        || f_norm.contains(&sc_norm)
-        || sc_norm.contains(&f_norm)
-}
-
 /// Discovers independent subproject roots in a workspace (directories containing
 /// Cargo.toml, package.json, go.mod, pom.xml, pyproject.toml, build.gradle, or .git).
 pub fn detect_subproject_roots(root: &Path) -> Vec<PathBuf> {
@@ -364,17 +345,19 @@ impl Tool for CodeExploreTool {
 
         let scope_path = if !parsed_query.path_filters.is_empty() {
             let p = &parsed_query.path_filters[0];
-            if Path::new(p).is_absolute() {
-                Some(PathBuf::from(p))
+            let pb = Path::new(p);
+            if pb.is_absolute() {
+                Some(canonical(pb))
             } else {
-                Some(root.join(p))
+                Some(canonical(&root.join(pb)))
             }
         } else {
             a.path.as_deref().map(|p| {
-                if Path::new(p).is_absolute() {
-                    PathBuf::from(p)
+                let pb = Path::new(p);
+                if pb.is_absolute() {
+                    canonical(pb)
                 } else {
-                    root.join(p)
+                    canonical(&root.join(pb))
                 }
             })
         };
@@ -2444,6 +2427,53 @@ mod tests {
             out.contains("1 symbol(s) OUTSIDE this scope were NOT ranked"),
             "outside-scope warning missing:\n{out}"
         );
+    }
+
+    #[test]
+    fn path_matches_scope_multiformat_and_boundary_resilience() {
+        // 1. Cross-format slash & prefix match
+        assert!(path_matches_scope(
+            Path::new("atomcode/crates/atomcode-tuix/src/event_loop.rs"),
+            Path::new("atomcode/crates/atomcode-tuix")
+        ));
+        assert!(path_matches_scope(
+            Path::new("atomcode\\crates\\atomcode-tuix\\src\\event_loop.rs"),
+            Path::new("atomcode/crates/atomcode-tuix")
+        ));
+        assert!(path_matches_scope(
+            Path::new("atomcode/crates/atomcode-tuix/src/event_loop.rs"),
+            Path::new("crates/atomcode-tuix")
+        ));
+        assert!(path_matches_scope(
+            Path::new(r"\\?\E:\code\agents\atomcode\crates\atomcode-tuix\src\event_loop.rs"),
+            Path::new("atomcode/crates/atomcode-tuix")
+        ));
+
+        // 2. Exact file match
+        assert!(path_matches_scope(
+            Path::new("coupon-mall-demo/backend/src/main/java/com/demo/coupon/service/CouponService.java"),
+            Path::new("coupon-mall-demo/backend/src/main/java/com/demo/coupon/service/CouponService.java")
+        ));
+
+        // 3. Segment boundary mismatch (prevent substring false positives)
+        assert!(!path_matches_scope(
+            Path::new("atomcode/crates/atomcode-tuix-demo/src/main.rs"),
+            Path::new("atomcode/crates/atomcode-tuix")
+        ));
+        assert!(!path_matches_scope(
+            Path::new("atomcode/crates/atomcode-tuix/src/event_loop.rs"),
+            Path::new("atomcode/crates/atomcode-tui")
+        ));
+
+        // 4. Absolute canonicalized scope vs relative indexed file (the live Zero-Hit case)
+        assert!(path_matches_scope(
+            Path::new("coupon-mall-demo/backend/src/main/java/com/demo/coupon/service/CouponBatchIssueService.java"),
+            Path::new(r"E:\code\agents\coupon-mall-demo\backend\src\main\java\com\demo\coupon\service")
+        ));
+        assert!(path_matches_scope(
+            Path::new(r"E:\code\agents\coupon-mall-demo\backend\src\main\java\com\demo\coupon\service\CouponService.java"),
+            Path::new("coupon-mall-demo/backend/src/main/java/com/demo/coupon/service")
+        ));
     }
 }
 

@@ -167,7 +167,16 @@ impl Tool for RepoMapTool {
             .unwrap_or_else(|| "tree".to_string())
             .to_ascii_lowercase();
         let working_dir = ctx.working_dir.clone();
+        let _log_guard = super::index_log::ToolCallGuard::enter(
+            "repo_map",
+            json!({
+                "path": a.path,
+                "max_files": max_files,
+                "mode": mode,
+            }),
+        );
         let index = self.index.clone();
+        let log_root = working_dir.clone();
 
         let result = tokio::task::spawn_blocking(move || {
             build_repo_map(&index, &target_dir, &working_dir, max_files, &mode)
@@ -177,6 +186,20 @@ impl Tool for RepoMapTool {
         match result {
             Ok(content) => {
                 let cost_time = t0.elapsed();
+                let stats = self.index.last_stats(&log_root);
+                super::index_log::log_tool_call(
+                    &log_root,
+                    json!({
+                        "outcome": "ok",
+                        "total_ms": cost_time.as_millis() as u64,
+                        "result_chars": content.len(),
+                        "cache_hit": stats.as_ref().map(|s| s.cache_hit),
+                        "reparsed": stats.as_ref().map(|s| s.reparsed),
+                        "miss_files": stats.as_ref().map(|s| {
+                            s.reparsed_files.iter().take(200).map(|p| p.display().to_string()).collect::<Vec<_>>()
+                        }),
+                    }),
+                );
                 ok(format!("> ⏱️ **Cost Time**: {}ms\n\n{content}", cost_time.as_millis()))
             }
             Err(e) => err(format!("repo_map execution failed: {e}")),

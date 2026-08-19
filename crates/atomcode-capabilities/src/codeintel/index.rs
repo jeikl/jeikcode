@@ -1195,6 +1195,10 @@ pub fn init_workspace_index(
     }
 
     let idx = CodeIndex::new();
+    let _log_guard = super::index_log::ToolCallGuard::enter(
+        "atomcode_init",
+        serde_json::json!({ "force": force, "root": path_for_display(&root) }),
+    );
     // Explicit init must parse every dirty file. The query-time 128 cap is
     // what turned `atomcode init --force` into a 127-file stub index.
     let _g = idx.reconcile_workspace(&root, None, on_progress, ReparseBudget::Unlimited);
@@ -1220,11 +1224,12 @@ pub fn init_workspace_index(
     } else {
         on_progress("Code graph: unchanged, cache kept");
     }
-    let stats = guard.last_stats.unwrap_or(RefreshStats {
+    let stats = guard.last_stats.clone().unwrap_or(RefreshStats {
         reparsed: 0,
         removed: 0,
         kept: guard.units.len(),
         cache_hit: false,
+        ..Default::default()
     });
     Ok(IndexReport {
         root: root.clone(),
@@ -1239,18 +1244,29 @@ pub fn init_workspace_index(
     })
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Default)]
 pub struct RefreshStats {
     pub reparsed: usize,
     pub removed: usize,
     pub kept: usize,
     pub cache_hit: bool,
+    pub reparsed_files: Vec<PathBuf>,
+    pub removed_files: Vec<PathBuf>,
 }
 
 fn parse_unit(w: &Walked) -> Option<FileUnit> {
-    let source = std::fs::read_to_string(&w.path).ok()?;
-    let source = super::strip_utf8_bom(&source);
-    let (nodes, calls) = parse_file(&w.path, source)?;
+    // Always produce a unit, even when the file has no extractable symbols
+    // (empty, header-only, generic json/xml, …). Returning None used to drop
+    // the path from `units`, so the next query rediscovered the same 64 files
+    // forever (MAX_DISCOVER_NEW_ON_QUERY). An empty unit is a tombstone:
+    // mtime/len stay, discover treats it as known.
+    let (nodes, calls) = match std::fs::read_to_string(&w.path) {
+        Ok(source) => {
+            let source = super::strip_utf8_bom(&source);
+            parse_file(&w.path, source).unwrap_or((Vec::new(), Vec::new()))
+        }
+        Err(_) => (Vec::new(), Vec::new()),
+    };
     Some(FileUnit {
         mtime_ns: w.mtime_ns,
         len: w.len,
@@ -1586,10 +1602,13 @@ fn discover_new_files(
     }
 
     // A scoped query (`path: coupon-mall-demo`) may point at a dir we have
-    // not fully indexed — walk just that subtree.
+    // not fully indexed — walk just that subtree. Skip the WalkBuilder when
+    // the focus already has indexed files: that path is what turned every
+    // `code_explore(path: atomcode)` into an 8s Index miss.
     if let Some(focus) = focus {
         let f = normalize_index_path(focus);
-        if f.is_dir() {
+        let already_indexed = known.iter().any(|k| path_in_focus(k, Some(&f)));
+        if !already_indexed && f.is_dir() {
             for w in collect_files(&f) {
                 push_new(w.path);
             }
@@ -1936,6 +1955,8 @@ impl CodeIndex {
                         removed: 1,
                         kept: guard.units.len(),
                         cache_hit: false,
+                        removed_files: vec![norm_path.clone()],
+                        ..Default::default()
                     });
                     guard.last_update_instant = Some(Instant::now());
                     guard.fast_patch_pending = true;
@@ -2004,6 +2025,8 @@ impl CodeIndex {
             removed: 0,
             kept: guard.units.len().saturating_sub(1),
             cache_hit: false,
+            reparsed_files: vec![norm_path.clone()],
+            ..Default::default()
         });
         guard.last_update_instant = Some(Instant::now());
         guard.fast_patch_pending = true;
@@ -2046,7 +2069,7 @@ impl CodeIndex {
         let root = super::canonical(root);
         let guard = self.inner.lock().unwrap();
         if guard.root.as_ref() == Some(&root) {
-            guard.last_stats
+            guard.last_stats.clone()
         } else {
             None
         }
@@ -2083,8 +2106,15 @@ impl CodeIndex {
         let stats = Arc::new(match load_idf_stats_sqlite(&root) {
             Some(loaded) if loaded.total_symbols as usize == g.node_count() => loaded,
             _ => {
+                let t_idf = Instant::now();
                 let built = super::retrieval::IdfStats::build(&g);
                 persist_derived_sidecars(&root, None, Some(&built));
+                super::index_log::log_derived_rebuild(
+                    &root,
+                    "idf_stats",
+                    t_idf.elapsed(),
+                    serde_json::json!({ "symbols": g.node_count() }),
+                );
                 built
             }
         });
@@ -2111,12 +2141,20 @@ impl CodeIndex {
         let Some(g) = guard.graph.clone() else {
             return None;
         };
+        let t_cv = Instant::now();
         let mut map = std::collections::HashMap::with_capacity(g.nodes.len());
         for node in g.nodes.values() {
             map.insert(node.id, super::retrieval::concept_projection(&node.name, &HashSet::new()));
         }
+        let n = map.len();
         let vectors = Arc::new(map);
         guard.concept_vectors = Some(vectors.clone());
+        super::index_log::log_derived_rebuild(
+            &root,
+            "concept_vectors",
+            t_cv.elapsed(),
+            serde_json::json!({ "symbols": n }),
+        );
         Some(vectors)
     }
 
@@ -2146,6 +2184,7 @@ impl CodeIndex {
         budget: ReparseBudget,
     ) -> Arc<CodeGraph> {
         let root = super::canonical(root);
+        let started = Instant::now();
 
         let mut guard = match self.inner.lock() {
             Ok(g) => g,
@@ -2163,6 +2202,7 @@ impl CodeIndex {
                         removed: 0,
                         kept: guard.units.len().saturating_sub(1),
                         cache_hit: false,
+                        ..Default::default()
                     });
                 }
                 return guard.graph.clone().unwrap();
@@ -2241,6 +2281,7 @@ impl CodeIndex {
                                 removed: 0,
                                 kept: kept_hint,
                                 cache_hit: true,
+                                ..Default::default()
                             });
                             if guard.dirindex.is_none() {
                                 let di = Arc::new(super::retrieval::DirIndex::build(&warm_graph));
@@ -2344,6 +2385,7 @@ impl CodeIndex {
                                 removed: 0,
                                 kept: n_files,
                                 cache_hit: true,
+                                ..Default::default()
                             });
                             guard.building = false;
                             self.cv.notify_all();
@@ -2373,6 +2415,7 @@ impl CodeIndex {
                             deleted,
                             walked_known.len(),
                             on_progress,
+                            started,
                         );
                     }
                     prev_graph = if disk_graph_ok {
@@ -2403,6 +2446,7 @@ impl CodeIndex {
                 deleted_paths,
                 files.len(),
                 on_progress,
+                started,
             );
             return g;
         }
@@ -2416,6 +2460,7 @@ impl CodeIndex {
         on_progress: &dyn Fn(&str),
         budget: ReparseBudget,
     ) -> Arc<CodeGraph> {
+        let started = Instant::now();
         let mut guard = match self.inner.lock() {
             Ok(g) => g,
             Err(p) => p.into_inner(),
@@ -2472,6 +2517,7 @@ impl CodeIndex {
             deleted_paths,
             walked.len(),
             on_progress,
+            started,
         )
     }
 
@@ -2488,6 +2534,7 @@ impl CodeIndex {
         deleted_paths: Vec<PathBuf>,
         walked_len: usize,
         on_progress: &dyn Fn(&str),
+        started: Instant,
     ) -> Arc<CodeGraph> {
         // If we already have a live graph, NEVER recompose all call edges.
         // Reparsing 2223 files used to still rebuild 38万 symbols — that is why
@@ -2558,12 +2605,41 @@ impl CodeIndex {
             }
         }
 
+        let reparsed_files: Vec<PathBuf> = changed_units.iter().map(|(p, _)| p.clone()).collect();
         let stats = RefreshStats {
             reparsed,
             removed,
             kept,
             cache_hit,
+            reparsed_files: reparsed_files.clone(),
+            removed_files: deleted_paths.clone(),
         };
+        let kind = if cache_hit {
+            "hit"
+        } else if kept == 0 {
+            "full"
+        } else if can_patch {
+            "incremental"
+        } else {
+            "compose"
+        };
+        super::index_log::log_index_refresh(
+            root,
+            cache_hit,
+            kind,
+            started.elapsed(),
+            reparsed,
+            removed,
+            kept,
+            &reparsed_files,
+            &deleted_paths,
+            serde_json::json!({
+                "symbols": g.node_count(),
+                "files": units.len(),
+                "walked": walked_len,
+                "derived_invalidated": need_compose && !can_patch,
+            }),
+        );
 
         let mut guard = match self.inner.lock() {
             Ok(g) => g,
@@ -2575,7 +2651,14 @@ impl CodeIndex {
         guard.graph = Some(g.clone());
         guard.fast_patch_pending = false;
         if need_compose && !can_patch {
+            let t_di = Instant::now();
             guard.dirindex = Some(Arc::new(super::retrieval::DirIndex::build(&g)));
+            super::index_log::log_derived_rebuild(
+                root,
+                "dirindex",
+                t_di.elapsed(),
+                serde_json::json!({ "symbols": g.node_count() }),
+            );
             guard.idf_stats = None;
             guard.concept_vectors = None;
         }
@@ -3191,7 +3274,7 @@ public class OrderController
         );
         let guard = idx.inner.lock().unwrap();
         assert!(
-            guard.last_stats.map(|s| s.cache_hit).unwrap_or(false),
+            guard.last_stats.as_ref().map(|s| s.cache_hit).unwrap_or(false),
             "second process should report disk cache hit"
         );
     }
@@ -3573,6 +3656,54 @@ public class OrderController
         assert!(
             g.find_by_name("focused_sym").into_iter().next().is_some(),
             "focus files must be parsed even when dirty count exceeds the query cap"
+        );
+    }
+
+    #[test]
+    fn unparseable_sibling_is_tombstoned_not_rediscovered() {
+        let d = tempfile::tempdir().unwrap();
+        std::fs::write(d.path().join("keep.rs"), "pub fn keep() {}\n").unwrap();
+        std::fs::write(d.path().join("empty.json"), "").unwrap();
+
+        let idx = CodeIndex::new();
+        let _ = idx.get(d.path());
+        assert!(
+            idx.inner.lock().unwrap().units.len() >= 2,
+            "empty.json must stay in units as a tombstone"
+        );
+
+        let _ = idx.get(d.path());
+        let stats = idx.last_stats(d.path()).unwrap();
+        assert!(
+            stats.cache_hit || stats.reparsed == 0,
+            "tombstoned empty file must not be rediscovered: {stats:?}"
+        );
+    }
+
+    #[test]
+    fn scoped_query_skips_full_walk_when_focus_already_indexed() {
+        let d = tempfile::tempdir().unwrap();
+        let src = d.path().join("src");
+        std::fs::create_dir_all(&src).unwrap();
+        std::fs::write(src.join("keep.rs"), "pub fn keep() {}\n").unwrap();
+        init_workspace_index(d.path(), false, &|_| {}).expect("init");
+
+        let vendor = src.join("vendor");
+        std::fs::create_dir_all(&vendor).unwrap();
+        for i in 0..20 {
+            std::fs::write(vendor.join(format!("e{i}.h")), "").unwrap();
+        }
+
+        let idx = CodeIndex::new();
+        let _ = idx.get_scoped(d.path(), Some(&src));
+        let stats = idx.last_stats(d.path()).unwrap();
+        assert_eq!(
+            stats.reparsed, 0,
+            "already-indexed focus must not WalkBuilder vendor/: {stats:?}"
+        );
+        assert!(
+            idx.inner.lock().unwrap().units.len() < 5,
+            "must not ingest the 20-file unindexed vendor tree"
         );
     }
 }

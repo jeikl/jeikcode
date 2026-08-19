@@ -85,7 +85,9 @@ impl ReasoningPolicy {
             // Moonshot/Kimi/MiMo: require reasoning_content on every assistant tool_call.
             ReasoningPolicy::Include
         } else {
-            // GLM and normal OpenAI models: safe default — nothing to echo.
+            // Grok / GLM / vanilla OpenAI-compat: OpenCode also omits
+            // `reasoning_content` (no `interleaved.field` on Grok). Echoing
+            // plaintext thinking is a DeepSeek-V4 / Kimi requirement, not Grok's.
             ReasoningPolicy::Exclude
         }
     }
@@ -178,5 +180,15 @@ mod tests {
             ReasoningPolicy::Exclude
         );
         assert_eq!(ReasoningPolicy::derive("", ""), ReasoningPolicy::Exclude);
+        // OpenCode does not set interleaved.field on Grok — plaintext thinking
+        // is displayed but not echoed on the next request.
+        assert_eq!(
+            ReasoningPolicy::derive("grok-4.6", "https://api.x.ai/v1"),
+            ReasoningPolicy::Exclude
+        );
+        assert_eq!(
+            ReasoningPolicy::derive("grok-4.5", "https://gateway.example/v1"),
+            ReasoningPolicy::Exclude
+        );
     }
 }

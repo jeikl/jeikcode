@@ -11,11 +11,13 @@ use async_trait::async_trait;
 use atomcode_kernel::tool::{Tool, ToolContext, ToolResult};
 use grep::regex::{RegexMatcher, RegexMatcherBuilder};
 use grep::searcher::{BinaryDetection, Searcher, SearcherBuilder, Sink, SinkContext, SinkMatch};
+use globset::{GlobBuilder, GlobMatcher};
 use ignore::WalkBuilder;
 use serde::Deserialize;
 use serde_json::json;
+use std::path::Path;
 
-const DEFAULT_MAX_RESULTS: usize = 50;
+const DEFAULT_MAX_RESULTS: usize = 200;
 const DEFAULT_CONTEXT: usize = 3;
 const MAX_CONTEXT: usize = 10;
 const MAX_DISPLAY_LINE: usize = 1000;
@@ -40,6 +42,10 @@ struct Args {
     max_results: Option<usize>,
     #[serde(default, deserialize_with = "lenient_usize")]
     context: Option<usize>,
+    /// File-name glob (`*.rs`, `*.{ts,tsx}`, `src/**/*.go`). Ripgrep-style:
+    /// a pattern with no `/` matches at any depth.
+    #[serde(default)]
+    glob: Option<String>,
 }
 
 #[async_trait]
@@ -51,7 +57,9 @@ impl Tool for GrepTool {
         "Search file contents by regular expression under a directory (gitignore-aware; \
          build/cache dirs and .log files are skipped). Smart-case: case-insensitive \
          unless the pattern contains an uppercase letter. Escape regex metachars, e.g. \
-         `console\\.log\\(`. Relative paths resolve against the working directory."
+         `console\\.log\\(`. Use `glob` (e.g. `*.rs`) to restrict file types in one call \
+         instead of a separate glob+grep round. Relative paths resolve against the working \
+         directory. Default 200 matches; raise `max_results` if a page is capped."
     }
     fn parameters_schema(&self) -> serde_json::Value {
         json!({
@@ -59,7 +67,8 @@ impl Tool for GrepTool {
             "properties": {
                 "pattern": { "type": "string", "description": "Regex to search for" },
                 "path": { "type": "string", "description": "Directory or file to search (default: the working directory)" },
-                "max_results": { "type": "integer", "description": "Max matching lines to return (default 50)" },
+                "glob": { "type": "string", "description": "File-name glob to restrict which files are searched, e.g. `*.rs`, `*.{ts,tsx}` (ripgrep-style: no `/` matches at any depth)" },
+                "max_results": { "type": "integer", "description": "Max matching lines to return (default 200). Raise this instead of re-running a narrower crawl." },
                 "context": { "type": "integer", "description": "Lines of context around each match (default 3, max 10)" }
             },
             "required": ["pattern"]
@@ -75,7 +84,7 @@ impl Tool for GrepTool {
         let a: Args = match parse_tool_args(
             "grep",
             args,
-            r#"{"pattern":"<regex>","path":"<dir>","max_results":50}"#,
+            r#"{"pattern":"<regex>","path":"<dir>"}"#,
         ) {
             Ok(a) => a,
             Err(e) => return e.into_tool_result(),
@@ -94,6 +103,13 @@ impl Tool for GrepTool {
             .unwrap_or(DEFAULT_MAX_RESULTS)
             .clamp(1, MAX_RESULTS_CAP);
         let context = a.context.unwrap_or(DEFAULT_CONTEXT).min(MAX_CONTEXT);
+        let glob_filter = match a.glob.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+            None => None,
+            Some(g) => match GlobBuilder::new(g).literal_separator(true).build() {
+                Ok(glob) => Some((glob.compile_matcher(), g.to_string())),
+                Err(e) => return err(format!("grep: invalid glob '{g}': {e}")),
+            },
+        };
 
         // Smart-case + literal fallback, as a streaming ripgrep matcher.
         let has_upper = a.pattern.chars().any(|c| c.is_uppercase());
@@ -114,8 +130,10 @@ impl Tool for GrepTool {
         let base = ctx.working_dir.clone();
         let pattern = a.pattern.clone();
         let display_path = raw.clone();
-        let res =
-            tokio::task::spawn_blocking(move || search(&root, &matcher, max, context, &base)).await;
+        let res = tokio::task::spawn_blocking(move || {
+            search(&root, &matcher, max, context, &base, glob_filter.as_ref())
+        })
+        .await;
         match res {
             Ok((lines, _, files)) if lines.is_empty() => ok(format!(
                 "No matches found for '{pattern}' in {display_path} ({files} files searched)"
@@ -127,7 +145,7 @@ impl Tool for GrepTool {
                 let mut out = lines.join("\n");
                 if capped {
                     out.push_str(&format!(
-                        "\n\n[Results capped at {max} matches; narrow the `pattern` or add a more specific `path` to see the rest]"
+                        "\n\n[Results capped at {max} matches; raise `max_results` or add `glob` / a more specific `path` to see the rest]"
                     ));
                 }
                 ok(out)
@@ -141,12 +159,26 @@ impl Tool for GrepTool {
 /// `max` matches are collected. Each file is searched by a STREAMING searcher (never
 /// loads the whole file into memory; `heap_limit` caps the per-line buffer), so a huge
 /// file — or a huge single line — can't OOM the process.
+/// Ripgrep-style glob: `*.rs` matches at any depth; `src/**/*.rs` is path-relative.
+fn grep_glob_matches(rel: &Path, matcher: &GlobMatcher, pattern: &str) -> bool {
+    if matcher.is_match(rel) {
+        return true;
+    }
+    if !pattern.contains('/') && !pattern.contains('\\') {
+        if let Some(name) = rel.file_name() {
+            return matcher.is_match(Path::new(name));
+        }
+    }
+    false
+}
+
 fn search(
     root: &std::path::Path,
     matcher: &RegexMatcher,
     max: usize,
     context: usize,
     base: &std::path::Path,
+    glob_filter: Option<&(GlobMatcher, String)>,
 ) -> (Vec<String>, usize, usize) {
     let mut out: Vec<String> = Vec::new();
     let mut match_count = 0usize;
@@ -203,6 +235,12 @@ fn search(
         let path = entry.path();
         if !path.is_file() {
             continue;
+        }
+        if let Some((glob, pat)) = glob_filter {
+            let rel = path.strip_prefix(root).unwrap_or(path);
+            if !grep_glob_matches(rel, glob, pat) {
+                continue;
+            }
         }
         if path
             .extension()
@@ -530,6 +568,29 @@ mod tests {
         assert!(
             !r.content.contains("junk.rs"),
             "target/ should be skipped: {}",
+            r.content
+        );
+    }
+
+    #[tokio::test]
+    async fn glob_restricts_files_at_any_depth() {
+        let d = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(d.path().join("src")).unwrap();
+        std::fs::write(d.path().join("src/a.rs"), "NEEDLE rust\n").unwrap();
+        std::fs::write(d.path().join("src/a.txt"), "NEEDLE text\n").unwrap();
+        std::fs::write(d.path().join("top.rs"), "NEEDLE top\n").unwrap();
+        let r = GrepTool
+            .execute(
+                r#"{"pattern":"NEEDLE","glob":"*.rs"}"#,
+                &ctx(d.path()),
+            )
+            .await;
+        assert!(!r.is_error, "{}", r.content);
+        assert!(r.content.contains("a.rs"), "{}", r.content);
+        assert!(r.content.contains("top.rs"), "{}", r.content);
+        assert!(
+            !r.content.contains("a.txt"),
+            "*.rs must not match .txt: {}",
             r.content
         );
     }

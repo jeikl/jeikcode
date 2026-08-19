@@ -29,6 +29,7 @@ Call multiple tools in ONE turn whenever they have NO data dependency on each ot
 MANDATORY parallel scenarios (must be ONE turn):\n\
 - Reading multiple files for context: read_file × N in one response.\n\
 - Searching for multiple patterns or paths: grep × N / glob × N in one response.\n\
+- Editing multiple independent files: edit_file × N in one response.\n\
 - Creating multiple new files: write_file × N in one response.\n\
 \n\
 Sequential is OK ONLY when step N+1's command DEPENDS on step N's output (edit then verify; check error then fix; test then commit).\n\
@@ -42,10 +43,10 @@ RIGHT (1 turn): read_file A.rs + read_file B.rs + read_file C.rs + read_file D.r
 \n\
 Inside one `bash` call, chain dependent shell steps with `&&` / `;` / `||` instead of splitting them across turns. A multi-step deploy or restart (build → stop old → upload → start → verify) is ONE bash call. Exception: when the next step's command genuinely depends on observing the previous step's output — then split.\n\
 The fewer turns you use, the better.\n\
-To read a file, always use `read_file` — not `bash cat`. `read_file` gives you skeletons for large files, \"Did you mean\" suggestions when the path is off by a directory, recovery hints for binary / non-UTF-8 formats, and per-session caching. `bash cat` has none of these and makes weak models cycle through wrong paths for turns.\n\
-Mutate files only with `write_file` / `edit_file` / `search_replace` — never with `bash` (`sed -i`, `echo >>`, heredoc redirects, `python -c '...write...'`): bash edits bypass diff review, encoding handling, and undo. Use `edit_file` for a targeted hunk, `search_replace` for the same literal change across many places.\n\
-Tool results may be truncated or condensed. If you need more detail, re-read the specific section with offset/limit.\n\
-If search results are truncated, narrow the query (add path filters, more specific pattern) rather than re-running the same search.\n\n\
+To read a file, always use `read_file` — not `bash cat`. Omit `offset` and `limit` unless the file is too large to read at once (default page is 2000 lines). Do not request 20–70 line slices; if a footer reports remaining lines, omit `limit` and continue from the given offset. `read_file` also gives \"Did you mean\" suggestions when the path is off, recovery hints for binary / non-UTF-8 formats, and per-session caching.\n\
+Mutate files only with `write_file` / `edit_file` / `search_replace` — never with `bash` (`sed -i`, `echo >>`, heredoc redirects, `python -c '...write...'`): bash edits bypass diff review, encoding handling, and undo. Use `edit_file` for a targeted hunk (same-file multi-hunk: one call with `edits:[{old_string,new_string},…]`), `search_replace` for the same literal change across many places.\n\
+If a tool result is truncated, follow the footer: omit `limit` and continue from the given offset, or raise `max_results` / add `glob` for search. Do not crawl a file in tiny windows.\n\
+If search results are truncated, raise `max_results` or add `glob` / a path filter — do not re-run the identical query.\n\n\
 ## DOING TASKS:
 - Do not propose changes to code you haven't read. Read first, then modify.
 - Prefer editing existing files over creating new ones.
@@ -137,6 +138,10 @@ mod tests {
         assert!(
             p.contains("write_file × N"),
             "must enumerate the create-many scenario"
+        );
+        assert!(
+            p.contains("edit_file × N"),
+            "must enumerate the edit-many scenario"
         );
         assert!(
             p.contains("WRONG") && p.contains("RIGHT"),
@@ -243,6 +248,28 @@ mod tests {
                 forbidden
             );
         }
+    }
+
+    #[test]
+    fn unified_prompt_omits_offset_limit_by_default() {
+        let p = build_rules();
+        assert!(
+            p.contains("Omit `offset` and `limit`"),
+            "TOOLS must tell the model not to paginate ordinary files"
+        );
+        assert!(
+            p.contains("Do not request 20–70 line slices")
+                || p.contains("Do not request 20-70 line slices"),
+            "must forbid tiny read windows"
+        );
+        assert!(
+            !p.contains("re-read the specific section with offset/limit"),
+            "old pagination-first guidance must be gone"
+        );
+        assert!(
+            p.contains("edits:[{old_string,new_string}"),
+            "must advertise same-file multi-hunk batching"
+        );
     }
 
     /// Lock the behavior-shaping clauses added for the deferential CN model

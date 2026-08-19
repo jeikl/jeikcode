@@ -17,6 +17,8 @@ pub fn disk_cache_path_db(root: &Path) -> PathBuf {
     super::canonical(root).join(DISK_CACHE_REL_DB)
 }
 
+static SHARED_DBS: OnceLock<Mutex<HashMap<PathBuf, Arc<IndexDb>>>> = OnceLock::new();
+
 /// Thread-safe SQLite connection wrapper for index operations.
 pub struct IndexDb {
     conn: Mutex<Connection>,
@@ -77,9 +79,8 @@ impl IndexDb {
     /// Process-wide connection cache: opening SQLite + applying PRAGMAs on every
     /// edit/query is a real cost, and a fresh handle also fights the WAL lock.
     pub fn open_shared(root: &Path) -> Result<Arc<Self>, rusqlite::Error> {
-        static CACHE: OnceLock<Mutex<HashMap<PathBuf, Arc<IndexDb>>>> = OnceLock::new();
         let key = disk_cache_path_db(root);
-        let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+        let cache = SHARED_DBS.get_or_init(|| Mutex::new(HashMap::new()));
         let mut map = cache.lock().unwrap_or_else(|p| p.into_inner());
         if let Some(existing) = map.get(&key) {
             return Ok(existing.clone());
@@ -87,6 +88,16 @@ impl IndexDb {
         let db = Arc::new(Self::open(&key)?);
         map.insert(key, db.clone());
         Ok(db)
+    }
+
+    /// Drop the process-wide handle for `root` so `--force` can delete the db
+    /// file (Windows refuses `remove_file` while this connection is open).
+    pub fn drop_shared(root: &Path) {
+        let key = disk_cache_path_db(root);
+        if let Some(cache) = SHARED_DBS.get() {
+            let mut map = cache.lock().unwrap_or_else(|p| p.into_inner());
+            map.remove(&key);
+        }
     }
 
     /// Loads the stored walk fingerprint, if present.

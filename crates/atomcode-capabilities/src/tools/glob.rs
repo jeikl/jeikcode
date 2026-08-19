@@ -1,7 +1,7 @@
 //! `glob` — find files by glob pattern under a base directory, gitignore-aware.
 //! Read-only ⇒ always `Safe`. Standard glob semantics (`**` crosses directories, `*`
 //! does not) via `globset` with `literal_separator(true)`. Build/VCS/cache dirs are
-//! skipped; results sorted, capped at 100.
+//! skipped; results sorted, capped at 300 by default (raise `limit`).
 
 use super::{err, is_absolute_path, is_skip_dir, not_found_hint, ok, resolve_path};
 use crate::tool_feedback::{format_path_not_found, parse_tool_args};
@@ -13,7 +13,8 @@ use serde::Deserialize;
 use serde_json::json;
 use std::path::PathBuf;
 
-const MAX_RESULTS: usize = 100;
+const DEFAULT_MAX_RESULTS: usize = 300;
+const MAX_RESULTS_CAP: usize = 2000;
 
 pub struct GlobTool;
 
@@ -22,6 +23,8 @@ struct Args {
     pattern: String,
     #[serde(default)]
     path: Option<String>,
+    #[serde(default, deserialize_with = "super::read::lenient_usize")]
+    limit: Option<usize>,
 }
 
 #[async_trait]
@@ -32,7 +35,8 @@ impl Tool for GlobTool {
     fn description(&self) -> &str {
         "Find files by glob pattern (e.g. `**/*.rs`, `src/**/*.ts`) under a base \
          directory, gitignore-aware. `**` crosses directories, `*` does not. Build/VCS/ \
-         cache directories are skipped. Relative base paths resolve against the working \
+         cache directories are skipped. Defaults to 300 matches; raise `limit` or narrow \
+         the pattern/path if truncated. Relative base paths resolve against the working \
          directory."
     }
     fn parameters_schema(&self) -> serde_json::Value {
@@ -40,7 +44,8 @@ impl Tool for GlobTool {
             "type": "object",
             "properties": {
                 "pattern": { "type": "string", "description": "Glob pattern, e.g. **/*.rs" },
-                "path": { "type": "string", "description": "Base directory to search (default: the working directory)" }
+                "path": { "type": "string", "description": "Base directory to search (default: the working directory)" },
+                "limit": { "type": "integer", "description": "Max paths to return (default 300, max 2000). Raise this instead of splitting into many globs." }
             },
             "required": ["pattern"]
         })
@@ -147,14 +152,20 @@ impl Tool for GlobTool {
         match res {
             Ok(hits) if hits.is_empty() => ok(format!("No files matching \"{pattern}\"")),
             Ok(mut hits) => {
+                let cap = a
+                    .limit
+                    .unwrap_or(DEFAULT_MAX_RESULTS)
+                    .clamp(1, MAX_RESULTS_CAP);
                 let total = hits.len();
-                let extra = total.saturating_sub(MAX_RESULTS);
-                if total > MAX_RESULTS {
-                    hits.truncate(MAX_RESULTS);
+                let extra = total.saturating_sub(cap);
+                if total > cap {
+                    hits.truncate(cap);
                 }
                 let mut out = format!("{total} files found:\n{}", hits.join("\n"));
                 if extra > 0 {
-                    out.push_str(&format!("\n[{extra} more files not shown]"));
+                    out.push_str(&format!(
+                        "\n[{extra} more files not shown; raise `limit` or narrow the pattern/path]"
+                    ));
                 }
                 ok(out)
             }

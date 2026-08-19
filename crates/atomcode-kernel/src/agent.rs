@@ -22,15 +22,13 @@ use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
 
 /// Default kernel cap on a single tool result's `content` byte length.
 ///
-/// 64 KiB (~16K tokens). A single tool output rarely needs more, and an
-/// uncapped-or-generously-capped output is the dominant cause of context bloat in
-/// long sessions: several 256 KiB outputs (~64K tokens each) alone can fill a 200K
-/// window and survive compaction (which keeps recent turns verbatim). Bounding each
-/// output tightly at INGESTION keeps the retained window small. A mounted
-/// third-party tool may not self-cap, so the kernel applies this CENTRAL backstop
-/// regardless of any per-tool limit. `0` disables the cap (UNBOUNDED) — see
+/// 256 KiB (~64K tokens). Sized so a 2000-line numbered source file from
+/// `read_file` survives the backstop instead of being chopped into a crawl.
+/// Runaway tools (a `grep -r /`, an infinite generator) are still bounded well
+/// below a megabyte. Tools that declare `never_truncate_result()` skip this cap
+/// (and the artifact fold). `0` disables the cap (UNBOUNDED) — see
 /// `AgentBuilder::max_tool_result_bytes` — but the default is bounded.
-pub const DEFAULT_MAX_TOOL_RESULT_BYTES: usize = 64 * 1024;
+pub const DEFAULT_MAX_TOOL_RESULT_BYTES: usize = 256 * 1024;
 
 /// Opt-in policy for exact, no-progress tool-loop detection.
 ///
@@ -2770,7 +2768,7 @@ impl RunningAgent {
             // response, never empty. The two retry tiers in the `match opened` above
             // never catch this: an empty 200 OPENS successfully (`Ok`), so it is
             // neither a retryable `Err` nor a context overflow.
-            let mut cleaned_reasoning = strip_reasoning_filler(&reasoning);
+            let cleaned_reasoning = strip_reasoning_filler(&reasoning);
             let filler_only_reasoning = saw_stream_content
                 && assistant_text.trim().is_empty()
                 && pending_calls.is_empty()
@@ -2885,44 +2883,6 @@ impl RunningAgent {
                 session_id: self.session_id.as_deref().map(str::to_string),
                 finish_reason,
             };
-            // RECOVER a MISROUTED answer. Some gateways/serving layers put the model's
-            // ACTUAL answer into the reasoning channel and leave `content` empty — observed
-            // with Qwen3-VL via a gateway whose reasoning-parser never sees a closing
-            // `</think>`, so the whole answer lands in `reasoning_content`. The turn would
-            // otherwise render BLANK (the driver hides reasoning by default). When a turn
-            // ends with NO content, NO tool calls, and a real (stop) finish but NON-empty
-            // reasoning, PROMOTE the reasoning to be the body: emit it live (so the driver
-            // shows the answer, not a blank) and let it ride the stored message as `content`
-            // so it persists for the next turn's context. GATED TIGHTLY so a normal model is
-            // never affected: a turn with ANY content, or any tool-call turn, is excluded —
-            // a model that legitimately separates reasoning from its answer keeps both.
-            if assistant_text.trim().is_empty()
-                && !cleaned_reasoning.trim().is_empty()
-                && pending_calls.is_empty()
-                && !truncated
-                // Only the PLAIN-text reasoning path (OpenAI-compatible / Qwen). A turn that
-                // carries SIGNED reasoning blocks (Anthropic-style) is left untouched —
-                // promoting the flat reasoning to content while signed blocks still hold the
-                // same text would desync the message (content == thinking) and make a
-                // thinking-block adapter echo BOTH a thinking and a text block (double-send).
-                && reasoning_blocks.is_empty()
-            {
-                // Route the recovered answer through the SAME content-scrub seam a normal
-                // text delta passes (`on_text_delta`), so a hook that redacts/suppresses
-                // content treats the promoted answer identically — the live emit must not
-                // bypass the seam (its invariant: live stream AND storage are consistently
-                // transformed). Clone first so a hook that CLEARS the chunk leaves the
-                // reasoning intact to be STORED as reasoning (matching the no-promotion path).
-                let mut promoted = cleaned_reasoning.clone();
-                self.hooks.on_text_delta(&mut promoted).await;
-                if !promoted.is_empty() {
-                    assistant_text = promoted;
-                    cleaned_reasoning.clear(); // now the body; do not also store it as reasoning
-                    if !suppress_internal_stream {
-                        self.rt.emit(AgentEvent::TextDelta(assistant_text.clone()));
-                    }
-                }
-            }
             let current_internal_continuation = active_internal_continuation.take();
             let mut assistant_msg =
                 Message::assistant(assistant_text.clone(), pending_calls.clone());
@@ -3923,7 +3883,7 @@ impl AgentBuilder {
     /// trust-model contract on `crate::tool`). A result whose content exceeds `n`
     /// bytes is truncated on a UTF-8 char boundary with a marker before it reaches
     /// the model, the stored history, or the driver — bounding context growth.
-    /// Defaults to [`DEFAULT_MAX_TOOL_RESULT_BYTES`] (64 KiB). `0` DISABLES the
+    /// Defaults to [`DEFAULT_MAX_TOOL_RESULT_BYTES`] (256 KiB). `0` DISABLES the
     /// cap (UNBOUNDED) — only do this if every mounted tool self-caps.
     pub fn max_tool_result_bytes(mut self, n: usize) -> Self {
         self.max_tool_result_bytes = n;

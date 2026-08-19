@@ -599,7 +599,7 @@ MANDATORY parallel scenarios (MUST emit all in ONE response):
 
 Sequential is OK ONLY when step N+1's command strictly DEPENDS on step N's output (check error then fix; test then commit).
 Inside one `bash` call, chain dependent shell steps with `&&` / `;` / `||` instead of splitting them across turns.
-To read a file, always use `read_file` — not `bash cat`. `read_file` returns up to 1500 lines with line numbers and per-session caching.
+To read a file, always use `read_file` — not `bash cat`. Omit `offset`/`limit` unless the file is too large to read at once (default page is 2000 lines). Do not request 20–70 line slices; if a footer reports remaining lines, omit `limit` and continue from the given offset.
 To list directories, default to `list_directory` instead of `bash ls` / `bash find` — it is gitignore-aware and skips build/cache directories. Fall back to `bash ls -la` ONLY when you specifically need file sizes, permissions, or timestamps.
 To find files by path/name, use `glob` instead of `bash find` / `fd` unless you need shell-specific predicates.
 To search file contents, use `grep` instead of `bash grep` / `rg` unless you need shell-specific flags or streaming output.
@@ -964,6 +964,10 @@ mod tests {
         assert!(
             p.contains("UPGRADE") && p.contains("code_explore"),
             "persona must require grep→code_explore upgrade for known names"
+        );
+        assert!(
+            p.contains("Omit `offset`/`limit`"),
+            "persona must tell the model not to paginate ordinary files"
         );
     }
 

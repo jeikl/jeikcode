@@ -624,9 +624,9 @@ async fn prepare_with_plugin_hooks_reusing_lease(
     //    prefix, so they compose (the insert position is computed live each time).
     // 2b. SkillCatalogHook — session_start: inject the AVAILABLE SKILLS catalog after
     //    memory (persona → context → memory → skills). Same header-prefix reconcile.
-    // 2c. McpInstructionsHook — pre_request append-only projection of live,
-    //     server-scoped instructions for currently mounted MCP tools. Ephemeral:
-    //     never persists external server guidance into the session snapshot.
+    // 2c. McpInstructionsHook — session_start / turn_start: inject the MCP server
+    //     instructions after skills (persona → context → memory → skills → mcp).
+    //     Keeps prompt prefix cache stable and preserves the user query at the tail.
     // 3. SnapshotHook  — turn_complete: persist .snapshot + .meta.
     // 4. TranscriptHook— turn_complete: append the .jsonl record. (No coupling with
     //    3 — the order is fixed purely for determinism.)

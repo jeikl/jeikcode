@@ -4,12 +4,12 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex, OnceLock};
 
 use rusqlite::{params, Connection, OpenFlags};
 
-use super::index::FileUnit;
 use super::graph::CodeGraph;
+use super::index::FileUnit;
 
 pub const DISK_CACHE_REL_DB: &str = ".atomcode/codegraph/index.v1.db";
 
@@ -36,12 +36,17 @@ impl IndexDb {
                 | OpenFlags::SQLITE_OPEN_NO_MUTEX,
         )?;
 
-        // Performance & concurrency tunings
+        // Performance & concurrency tunings. Incremental agent edits must not
+        // stall on fsync or a cold page cache — WAL + a large mmap keeps a
+        // single-row upsert in the millisecond range.
         conn.execute_batch(
             "PRAGMA journal_mode = WAL;
              PRAGMA synchronous = NORMAL;
              PRAGMA temp_store = MEMORY;
              PRAGMA busy_timeout = 5000;
+             PRAGMA cache_size = -65536;
+             PRAGMA mmap_size = 268435456;
+             PRAGMA wal_autocheckpoint = 1000;
              CREATE TABLE IF NOT EXISTS meta (
                  key TEXT PRIMARY KEY,
                  value TEXT NOT NULL
@@ -56,6 +61,10 @@ impl IndexDb {
                  id INTEGER PRIMARY KEY CHECK (id = 1),
                  walk_fp INTEGER NOT NULL,
                  data BLOB NOT NULL
+             );
+             CREATE TABLE IF NOT EXISTS meta_blobs (
+                 key TEXT PRIMARY KEY,
+                 data BLOB NOT NULL
              );",
         )?;
 
@@ -65,9 +74,33 @@ impl IndexDb {
         })
     }
 
+    /// Process-wide connection cache: opening SQLite + applying PRAGMAs on every
+    /// edit/query is a real cost, and a fresh handle also fights the WAL lock.
+    pub fn open_shared(root: &Path) -> Result<Arc<Self>, rusqlite::Error> {
+        static CACHE: OnceLock<Mutex<HashMap<PathBuf, Arc<IndexDb>>>> = OnceLock::new();
+        let key = disk_cache_path_db(root);
+        let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+        let mut map = cache.lock().unwrap_or_else(|p| p.into_inner());
+        if let Some(existing) = map.get(&key) {
+            return Ok(existing.clone());
+        }
+        let db = Arc::new(Self::open(&key)?);
+        map.insert(key, db.clone());
+        Ok(db)
+    }
+
     /// Loads the stored walk fingerprint, if present.
     pub fn get_walk_fp(&self) -> Option<u64> {
         let conn = self.conn.lock().ok()?;
+        if let Ok(s) = conn.query_row(
+            "SELECT value FROM meta WHERE key = 'walk_fp'",
+            [],
+            |row| row.get::<_, String>(0),
+        ) {
+            if let Ok(fp) = s.parse::<u64>() {
+                return Some(fp);
+            }
+        }
         let mut stmt = conn
             .prepare("SELECT walk_fp FROM graph_meta WHERE id = 1")
             .ok()?;
@@ -130,6 +163,29 @@ impl IndexDb {
         }
     }
 
+    /// Row-level unit upsert/delete. Does **not** rewrite the graph blob — that
+    /// serialize+zstd of the whole `CodeGraph` is what turned a 1-file edit into
+    /// a multi-second stall. Cold start recomposes the graph from units.
+    pub fn upsert_units(
+        &self,
+        upsert_units: &[(PathBuf, FileUnit)],
+        deleted_paths: &[PathBuf],
+    ) -> Result<(), rusqlite::Error> {
+        let mut conn = self.conn.lock().map_err(|_| {
+            rusqlite::Error::SqliteFailure(
+                rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_BUSY),
+                Some("lock poisoned".into()),
+            )
+        })?;
+
+        let tx = conn.transaction()?;
+        apply_unit_writes(&tx, upsert_units, deleted_paths)?;
+        tx.commit()?;
+        drop(conn);
+        self.checkpoint();
+        Ok(())
+    }
+
     /// Incrementally persists changed/new/deleted file units and updates the graph snapshot.
     pub fn sync_incremental(
         &self,
@@ -146,43 +202,9 @@ impl IndexDb {
         })?;
 
         let tx = conn.transaction()?;
+        apply_unit_writes(&tx, upsert_units, deleted_paths)?;
 
-        // 1. Delete removed files
-        {
-            let mut del_stmt = tx.prepare("DELETE FROM file_units WHERE path = ?")?;
-            for p in deleted_paths {
-                let norm_str = super::index::normalize_index_path(p).to_string_lossy().into_owned();
-                del_stmt.execute(params![norm_str])?;
-            }
-        }
-
-        // 2. Upsert changed/new units
-        {
-            let mut ins_stmt = tx.prepare(
-                "INSERT INTO file_units (path, mtime_ns, len, data)
-                 VALUES (?1, ?2, ?3, ?4)
-                 ON CONFLICT(path) DO UPDATE SET
-                     mtime_ns = excluded.mtime_ns,
-                     len = excluded.len,
-                     data = excluded.data;",
-            )?;
-
-            for (p, u) in upsert_units {
-                let norm_str = super::index::normalize_index_path(p).to_string_lossy().into_owned();
-                if let Ok(serialized) = bincode::serialize(u) {
-                    if let Ok(compressed) = zstd::stream::encode_all(&serialized[..], 3) {
-                        ins_stmt.execute(params![
-                            norm_str,
-                            u.mtime_ns as i64,
-                            u.len as i64,
-                            compressed
-                        ])?;
-                    }
-                }
-            }
-        }
-
-        // 3. Update global graph snapshot
+        // Full graph snapshot — only for cold-start / first-build callers.
         if let Ok(graph_bytes) = bincode::serialize(graph) {
             if let Ok(compressed_graph) = zstd::stream::encode_all(&graph_bytes[..], 1) {
                 tx.execute(
@@ -197,8 +219,136 @@ impl IndexDb {
         }
 
         tx.commit()?;
+        drop(conn);
+        self.checkpoint();
         Ok(())
     }
+
+    /// Persist only the composed graph snapshot (no unit rewrite). Used after a
+    /// one-time compose from existing SQLite units so the next process start
+    /// can skip both the tree walk and call-graph recomposition.
+    pub fn save_graph_only(&self, walk_fp: u64, graph: &CodeGraph) -> Result<(), rusqlite::Error> {
+        let conn = self.conn.lock().map_err(|_| {
+            rusqlite::Error::SqliteFailure(
+                rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_BUSY),
+                Some("lock poisoned".into()),
+            )
+        })?;
+        if let Ok(graph_bytes) = bincode::serialize(graph) {
+            if let Ok(compressed_graph) = zstd::stream::encode_all(&graph_bytes[..], 1) {
+                conn.execute(
+                    "INSERT INTO graph_meta (id, walk_fp, data)
+                     VALUES (1, ?, ?)
+                     ON CONFLICT(id) DO UPDATE SET
+                         walk_fp = excluded.walk_fp,
+                         data = excluded.data",
+                    params![walk_fp as i64, compressed_graph],
+                )?;
+            }
+        }
+        drop(conn);
+        let _ = self.set_walk_fp(walk_fp);
+        self.checkpoint();
+        Ok(())
+    }
+
+    /// Persist walk fingerprint without rewriting a graph blob.
+    pub fn set_walk_fp(&self, walk_fp: u64) -> Result<(), rusqlite::Error> {
+        let conn = self.conn.lock().map_err(|_| {
+            rusqlite::Error::SqliteFailure(
+                rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_BUSY),
+                Some("lock poisoned".into()),
+            )
+        })?;
+        conn.execute(
+            "INSERT INTO meta (key, value) VALUES ('walk_fp', ?1)
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            params![walk_fp.to_string()],
+        )?;
+        Ok(())
+    }
+
+    /// Store a small sidecar blob (dirindex / idf stats) inside SQLite so we
+    /// do not emit sibling `.json` files next to the database.
+    pub fn put_meta_blob(&self, key: &str, blob: &[u8]) -> Result<(), rusqlite::Error> {
+        let conn = self.conn.lock().map_err(|_| {
+            rusqlite::Error::SqliteFailure(
+                rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_BUSY),
+                Some("lock poisoned".into()),
+            )
+        })?;
+        let encoded = zstd::stream::encode_all(blob, 1).unwrap_or_else(|_| blob.to_vec());
+        conn.execute(
+            "INSERT INTO meta_blobs (key, data) VALUES (?1, ?2)
+             ON CONFLICT(key) DO UPDATE SET data = excluded.data",
+            params![key, encoded],
+        )?;
+        Ok(())
+    }
+
+    pub fn get_meta_blob(&self, key: &str) -> Option<Vec<u8>> {
+        let conn = self.conn.lock().ok()?;
+        let raw: Vec<u8> = conn
+            .query_row(
+                "SELECT data FROM meta_blobs WHERE key = ?",
+                params![key],
+                |row| row.get(0),
+            )
+            .ok()?;
+        zstd::stream::decode_all(&raw[..]).ok().or(Some(raw))
+    }
+
+    /// Fold the WAL back into the main db so `index.v1.db-wal` does not sit
+    /// on disk at the same size as the database itself.
+    pub fn checkpoint(&self) {
+        if let Ok(conn) = self.conn.lock() {
+            let _ = conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);");
+        }
+    }
+}
+
+fn apply_unit_writes(
+    tx: &rusqlite::Transaction<'_>,
+    upsert_units: &[(PathBuf, FileUnit)],
+    deleted_paths: &[PathBuf],
+) -> Result<(), rusqlite::Error> {
+    {
+        let mut del_stmt = tx.prepare("DELETE FROM file_units WHERE path = ?")?;
+        for p in deleted_paths {
+            let norm_str = super::index::normalize_index_path(p)
+                .to_string_lossy()
+                .into_owned();
+            del_stmt.execute(params![norm_str])?;
+        }
+    }
+
+    {
+        let mut ins_stmt = tx.prepare(
+            "INSERT INTO file_units (path, mtime_ns, len, data)
+             VALUES (?1, ?2, ?3, ?4)
+             ON CONFLICT(path) DO UPDATE SET
+                 mtime_ns = excluded.mtime_ns,
+                 len = excluded.len,
+                 data = excluded.data;",
+        )?;
+
+        for (p, u) in upsert_units {
+            let norm_str = super::index::normalize_index_path(p)
+                .to_string_lossy()
+                .into_owned();
+            if let Ok(serialized) = bincode::serialize(u) {
+                if let Ok(compressed) = zstd::stream::encode_all(&serialized[..], 3) {
+                    ins_stmt.execute(params![
+                        norm_str,
+                        u.mtime_ns as i64,
+                        u.len as i64,
+                        compressed
+                    ])?;
+                }
+            }
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -247,6 +397,19 @@ mod tests {
         let cached_graph = db.load_graph().expect("cached graph");
         assert_eq!(cached_graph.node_count(), 1);
         assert_eq!(db.get_walk_fp(), Some(999));
+
+        let updated = FileUnit {
+            mtime_ns: 222,
+            len: 50,
+            nodes: unit.nodes.clone(),
+            calls: Vec::new(),
+        };
+        db.upsert_units(&[(test_file.clone(), updated)], &[])
+            .expect("upsert_units");
+        let after = db.load_units();
+        assert_eq!(after.get(&test_file).unwrap().mtime_ns, 222);
+        // Incremental upsert must not require rewriting the graph blob.
+        assert_eq!(db.load_graph().unwrap().node_count(), 1);
 
         let _ = std::fs::remove_dir_all(&temp_dir);
     }

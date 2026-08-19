@@ -425,28 +425,30 @@ tools live under `Scripts\\` (not `bin/`).";
 /// (see the `todo_enabled` gate in `coding_persona`).
 const TODO_USAGE: &str = "\n\n## TASK TRACKING:\n\
 When a task has multiple requests, phases, files, dependencies, ambiguity, or requires \
-investigation followed by changes, call `todowrite` FIRST with the full list to \
-lay out the steps. Then keep it current by calling `todowrite` ONE action at a time — NOT by \
-resending the whole list:\n\
-- Update status: `todowrite {\"action\":\"update\",\"id\":N,\"status\":\"in_progress|completed|pending\"}` \
-(the moment you start item #N set `in_progress`, and the moment it is verified set `completed`).\n\
-- Insert new tasks: `todowrite {\"action\":\"insert\",\"position\":N,\"content\":\"...\"}` \
-to insert an intermediate task at 1-based position N between existing tasks (e.g. position=2 inserts between #1 and #2).\n\
-- Append new tasks: `todowrite {\"action\":\"add\",\"content\":\"...\"}`.\n\
-- Delete obsolete tasks: `todowrite {\"action\":\"delete\",\"id\":N}`.\n\
-- Clear tasks: `todowrite {\"action\":\"clear\"}`.\n\
-Keep exactly one item in_progress at a time (this is enforced for you) and \
-mark an item done only after that step is actually verified (never on intent) — in the same \
-turn you finish it, before moving on, and never \
-batch-complete several items at the end. Unless you genuinely need approval, hit the STOP \
+investigation followed by changes, call `todowrite` FIRST with an `actions` array that \
+creates the whole list (several `add`, then `update` #1 to `in_progress`). Then keep it \
+current with ONE `todowrite` per turn that includes EVERY status change you already know \
+— do not send one call per item:\n\
+- Batch (preferred): `todowrite {\"actions\":[{\"action\":\"update\",\"id\":2,\"status\":\"completed\"},{\"action\":\"update\",\"id\":1,\"status\":\"in_progress\"}]}` \
+(ids are the current list numbers; order of update/delete items does not matter).\n\
+- First plan: `todowrite {\"actions\":[{\"action\":\"add\",\"content\":\"…\"},{\"action\":\"add\",\"content\":\"…\"},{\"action\":\"update\",\"id\":1,\"status\":\"in_progress\"}]}`.\n\
+- Insert: `{\"action\":\"insert\",\"position\":N,\"content\":\"...\"}` inside `actions`.\n\
+- Delete: `{\"action\":\"delete\",\"id\":N}` inside `actions`.\n\
+- User pivots to genuinely different multi-step work: REPLACE the plan with one \
+`todowrite {\"actions\":[{\"action\":\"clear\"}]}` then a second call of `add`s — \
+`clear` cannot share a batch with other actions. Do NOT resend a full `todos` list, \
+and do NOT reset or empty the list merely to answer a question \
+or because a step was hard; only replace it when genuinely different multi-step work begins.\n\
+Keep exactly one item in_progress after each batch (this is enforced for you) and \
+mark an item done only after that step is actually verified (never on intent). Do not \
+pre-complete items you have not done. Do not call `todowrite` unless the list must \
+change, and never re-mark an item already in that status. A failed call reprints the \
+current numbered list — use those ids; do not retry the same bad id. Unless you genuinely need approval, hit the STOP \
 WHEN STUCK limit, or the request is ambiguous, do NOT declare done, summarize as if \
 finished, or hand back to the user while any item is still pending or in_progress — keep \
 working through them. Keep each \
 item specific and verifiable (`add retry to fetch_user`, not `fix networking`). It keeps you \
-and the user aligned and avoids losing the thread across turns. If the user pivots to clearly \
-unrelated multi-step work, call `todowrite` with the new full list to REPLACE the old one rather \
-than carrying stale items forward — but do NOT reset or empty the list merely to answer a question \
-or because a step was hard; only replace it when genuinely different multi-step work begins. Do NOT \
+and the user aligned and avoids losing the thread across turns. Do NOT \
 use it for a single quick edit, a one-off command, or a purely informational / conversational reply.";
 
 /// Skill-trigger guidance. Surfaced in the system prompt because weak models under-weight
@@ -590,8 +592,9 @@ MANDATORY parallel scenarios (MUST emit all in ONE response):
 - Exploratory research, ROUND 1: 1x list_directory + 1x repo_map in ONE response — both are structure tools, no dependency between them. For functional/investigation questions you MAY add code_explore in the same batch — `path:` already scopes it, it does not depend on the structure round. (Omit code_explore only for a pure structural census.)
 - Reading multiple files for context: read_file × N in one response.
 - Searching for multiple patterns, symbols, or paths: code_explore / grep × N / glob × N in one response.
-- Modifying multiple files or functions: emit all edits across all files in ONE round.
-- Creating multiple new files: write_file × N in one response.
+- Modifying multiple files: emit all independent `edit_file` calls in ONE round (do not edit one file then re-read before the next independent file).
+- Same file, several independent hunks: ONE `edit_file` with `edits:[{old_string,new_string},…]` applied top-to-bottom on one buffer — do not edit-one-then-read-one.
+- Creating multiple new files: write_file × N in one response. Only use `write_file` for brand-new files or full-file rewrites; never to replace a batch of in-file hunks.
 - Verification: Run build/check (`cargo check`, `tsc --noEmit`, etc.) ONCE after all related edits in the batch are complete, NOT after every individual file.
 
 Sequential is OK ONLY when step N+1's command strictly DEPENDS on step N's output (check error then fix; test then commit).
@@ -853,7 +856,7 @@ mod tests {
         // clarifying question (no new steps) leaves the current list untouched.
         let on = coding_persona("deepseek-v4-flash", true, false);
         assert!(
-            on.contains("REPLACE the old one"),
+            on.contains("REPLACE the plan"),
             "must direct replacing the list on redirect: {on}"
         );
         assert!(
@@ -868,7 +871,7 @@ mod tests {
         // Gating parity: absent when the todo tool/hook aren't mounted.
         let off = coding_persona("deepseek-v4-flash", false, false);
         assert!(
-            !off.contains("REPLACE the old one"),
+            !off.contains("REPLACE the plan"),
             "disabled → no redirect guidance: {off}"
         );
     }

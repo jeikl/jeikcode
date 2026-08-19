@@ -111,7 +111,7 @@ pub use report_finding::{Finding, ReportFindingTool};
 pub use search_replace::SearchReplaceTool;
 pub use sensitive_path::{path_is_sensitive, references_sensitive_path, SensitivePathGate};
 pub use task::TaskTool;
-pub use todo::TodoTool;
+pub use todo::{bind_todowrite, TodoLive, TodoTool};
 #[cfg(feature = "web")]
 pub use web_fetch::WebFetchTool;
 #[cfg(feature = "web")]

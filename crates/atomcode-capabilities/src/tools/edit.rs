@@ -16,6 +16,18 @@ pub struct EditFileTool;
 #[derive(Deserialize)]
 struct Args {
     file_path: String,
+    #[serde(default)]
+    old_string: String,
+    #[serde(default)]
+    new_string: String,
+    #[serde(default)]
+    replace_all: bool,
+    #[serde(default)]
+    edits: Vec<EditHunk>,
+}
+
+#[derive(Deserialize, Clone)]
+struct EditHunk {
     old_string: String,
     new_string: String,
     #[serde(default)]
@@ -28,22 +40,36 @@ impl Tool for EditFileTool {
         "edit_file"
     }
     fn description(&self) -> &str {
-        "Replace an exact text fragment in a file. `old_string` must match EXACTLY \
-         (including whitespace and indentation) and, unless `replace_all` is true, must \
-         be UNIQUE in the file — include enough surrounding context to make it unique. \
-         On no-match or an ambiguous match the file is left UNCHANGED. Relative paths \
-         resolve against the working directory."
+        "Replace exact text in a file. For several independent hunks in the SAME file, \
+         send `edits:[{old_string,new_string},…]` in ONE call (applied top-to-bottom on \
+         one buffer; later hunks see earlier replacements). For one hunk, use top-level \
+         `old_string`/`new_string`. Each `old_string` must match EXACTLY (whitespace \
+         included) and be UNIQUE unless `replace_all` is true. Any failed hunk leaves \
+         the file UNCHANGED. Relative paths resolve against the working directory."
     }
     fn parameters_schema(&self) -> serde_json::Value {
         json!({
             "type": "object",
             "properties": {
                 "file_path": { "type": "string", "description": "Path to edit (absolute, or relative to the working directory)" },
-                "old_string": { "type": "string", "description": "Exact text to find. Must be unique unless replace_all is true." },
-                "new_string": { "type": "string", "description": "Replacement text." },
-                "replace_all": { "type": "boolean", "description": "Replace ALL occurrences (default false = require a unique match)." }
+                "old_string": { "type": "string", "description": "Single-hunk: exact text to find. Omit when using `edits`." },
+                "new_string": { "type": "string", "description": "Single-hunk: replacement text. Omit when using `edits`." },
+                "replace_all": { "type": "boolean", "description": "Single-hunk: replace ALL occurrences (default false)." },
+                "edits": {
+                    "type": "array",
+                    "description": "Same-file multi-hunk batch. Applied in order on one in-memory buffer; one write. Prefer this over N edit_file calls on the same file.",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "old_string": { "type": "string" },
+                            "new_string": { "type": "string" },
+                            "replace_all": { "type": "boolean" }
+                        },
+                        "required": ["old_string", "new_string"]
+                    }
+                }
             },
-            "required": ["file_path", "old_string", "new_string"]
+            "required": ["file_path"]
         })
     }
     fn risk(&self, _args: &str) -> RiskLevel {
@@ -64,15 +90,18 @@ impl Tool for EditFileTool {
             Ok(a) => a,
             Err(e) => return e.into_tool_result(),
         };
-        if a.old_string == a.new_string {
+        let hunks: Vec<EditHunk> = if !a.edits.is_empty() {
+            a.edits
+        } else {
+            vec![EditHunk {
+                old_string: a.old_string,
+                new_string: a.new_string,
+                replace_all: a.replace_all,
+            }]
+        };
+        if hunks.is_empty() {
             return err(
-                "edit_file: old_string and new_string are identical — nothing to change."
-                    .to_string(),
-            );
-        }
-        if a.old_string.is_empty() {
-            return err(
-                "edit_file: old_string is empty — provide the exact text fragment to replace."
+                "edit_file: provide `old_string`/`new_string` or a non-empty `edits` array."
                     .to_string(),
             );
         }
@@ -110,169 +139,138 @@ impl Tool for EditFileTool {
         let content = decoded.text;
         let file_encoding = decoded.encoding;
 
-        // Line-ending tolerance: read_file shows the model LF-normalized text (it does
-        // `str::lines()`, which strips the `\r` from every `\r\n`), but the file on disk
-        // may be CRLF. Match literally first; on a literal hit the model's strings already
-        // agree with the file's bytes, so old/new are used VERBATIM. Only if the literal
-        // match fails do we coerce BOTH old_string and new_string to the file's EOL — that
-        // rescues an LF-copied edit of a CRLF file without injecting mixed endings, and
-        // (unlike coercing unconditionally) leaves verbatim edits of LF files untouched.
-        let literal = content.matches(&a.old_string).count();
-        let (old_match, new_match, count) = if literal > 0 {
-            (a.old_string.clone(), a.new_string.clone(), literal)
-        } else {
-            let file_eol = if content.contains("\r\n") {
-                "\r\n"
-            } else {
-                "\n"
-            };
-            let old_c = coerce_eol(&a.old_string, file_eol);
-            let c = content.matches(&old_c).count();
-            (old_c, coerce_eol(&a.new_string, file_eol), c)
-        };
-        if count == 0 {
-            // Tier 2: whitespace-normalized fuzzy fallback
-            if let Some((fuzzy_result, fuzzy_count)) =
-                try_fuzzy_replace(&content, &a.old_string, &a.new_string, a.replace_all)
-            {
-                if fuzzy_result == content {
-                    return err(
-                        "edit_file: the fuzzy (whitespace-normalized) match produced no \
-                         change — old_string and new_string differ only in whitespace."
-                            .to_string(),
-                    );
+        let mut buf = content.clone();
+        let mut total = 0usize;
+        let mut kinds: Vec<&str> = Vec::new();
+        for (i, h) in hunks.iter().enumerate() {
+            match apply_hunk(&buf, &h.old_string, &h.new_string, h.replace_all) {
+                Ok((next, n, kind)) => {
+                    buf = next;
+                    total += n;
+                    kinds.push(kind);
                 }
-                if let Err(msg) = write_encoded(&path, &fuzzy_result, file_encoding).await {
-                    return err(msg);
-                }
-                #[cfg(feature = "codeintel")]
-                crate::codeintel::notify_code_index_file_changed(&path, Some(&fuzzy_result));
-                let diff = build_compact_diff(&content, &fuzzy_result);
-                let cost_time = t0.elapsed();
-                return ok(format!(
-                    "> ⏱️ **Cost Time**: {:.2?}ms\n\nEdited {} (fuzzy whitespace match, {fuzzy_count} replacement{})\n{}",
-                    cost_time.as_millis(),
-                    crate::pathnorm::to_display(&path),
-                    if fuzzy_count == 1 { "" } else { "s" },
-                    diff,
-                ));
-            }
-
-            // Tier 3: token & inline whitespace normalized fallback
-            if let Some((token_result, token_count)) =
-                try_token_normalized_replace(&content, &a.old_string, &a.new_string, a.replace_all)
-            {
-                if token_result != content {
-                    if let Err(msg) = write_encoded(&path, &token_result, file_encoding).await {
-                        return err(msg);
-                    }
-                    #[cfg(feature = "codeintel")]
-                    crate::codeintel::notify_code_index_file_changed(&path, Some(&token_result));
-                    let diff = build_compact_diff(&content, &token_result);
-                    let cost_time = t0.elapsed();
-                    return ok(format!(
-                        "> ⏱️ **Cost Time**: {:.2?}ms\n\nEdited {} (token-normalized match, {token_count} replacement{})\n{}",
-                        cost_time.as_millis(),
-                        crate::pathnorm::to_display(&path),
-                        if token_count == 1 { "" } else { "s" },
-                        diff,
+                Err(e) => {
+                    return err(format!(
+                        "edit_file: hunk {}/{} failed. The file was NOT modified. {e}",
+                        i + 1,
+                        hunks.len()
                     ));
                 }
             }
-
-            // Tier 4: block-anchor match (first+last line anchors with interior drift tolerance)
-            if let Some((anchor_result, _)) =
-                try_block_anchor_replace(&content, &a.old_string, &a.new_string)
-            {
-                if anchor_result != content {
-                    if let Err(msg) = write_encoded(&path, &anchor_result, file_encoding).await {
-                        return err(msg);
-                    }
-                    #[cfg(feature = "codeintel")]
-                    crate::codeintel::notify_code_index_file_changed(&path, Some(&anchor_result));
-                    let diff = build_compact_diff(&content, &anchor_result);
-                    let cost_time = t0.elapsed();
-                    return ok(format!(
-                        "> ⏱️ **Cost Time**: {:.2?}ms\n\nEdited {} (anchored block match, 1 replacement)\n{}",
-                        cost_time.as_millis(),
-                        crate::pathnorm::to_display(&path),
-                        diff,
-                    ));
-                }
-            }
-
-            // Tier 5: boundary trimmed context match (handles extraneous leading/trailing context line emitted by LLM)
-            if let Some((bound_result, _)) =
-                try_trimmed_boundary_replace(&content, &a.old_string, &a.new_string)
-            {
-                if bound_result != content {
-                    if let Err(msg) = write_encoded(&path, &bound_result, file_encoding).await {
-                        return err(msg);
-                    }
-                    #[cfg(feature = "codeintel")]
-                    crate::codeintel::notify_code_index_file_changed(&path, Some(&bound_result));
-                    let diff = build_compact_diff(&content, &bound_result);
-                    let cost_time = t0.elapsed();
-                    return ok(format!(
-                        "> ⏱️ **Cost Time**: {:.2?}ms\n\nEdited {} (trimmed boundary match, 1 replacement)\n{}",
-                        cost_time.as_millis(),
-                        crate::pathnorm::to_display(&path),
-                        diff,
-                    ));
-                }
-            }
-
-            // Diagnostics: find closest matching snippet in the file to aid recovery
-            let hint = find_closest_match_snippet(&content, &a.old_string)
-                .map(|h| format!("\n\n{}", h))
-                .unwrap_or_default();
-
-            return err(format!(
-                "edit_file: old_string not found in {}. The file was NOT modified. Re-read \
-                 the file and copy the exact text (including whitespace).{}",
-                crate::pathnorm::to_display(&path),
-                hint
-            ));
         }
-        if count > 1 && !a.replace_all {
-            return err(format!(
-                "edit_file: old_string appears {count} times in {} — it must be unique. Add \
-                 surrounding context to disambiguate, or set replace_all=true. The file was \
-                 NOT modified.",
-                crate::pathnorm::to_display(&path)
-            ));
-        }
-        if old_match == new_match {
-            // Originals differed (the early guard passed) but EOL-coercion collapsed them
-            // to the same bytes → the replacement would be a silent no-op.
-            return err(
-                "edit_file: old_string and new_string are identical after line-ending \
-                 normalization — nothing to change."
-                    .to_string(),
-            );
-        }
-
-        let updated = if a.replace_all {
-            content.replace(&old_match, &new_match)
-        } else {
-            content.replacen(&old_match, &new_match, 1)
-        };
-        if let Err(msg) = write_encoded(&path, &updated, file_encoding).await {
+        if let Err(msg) = write_encoded(&path, &buf, file_encoding).await {
             return err(msg);
         }
         #[cfg(feature = "codeintel")]
-        crate::codeintel::notify_code_index_file_changed(&path, Some(&updated));
-        let replaced = if a.replace_all { count } else { 1 };
-        let diff = build_compact_diff(&content, &updated);
+        crate::codeintel::notify_code_index_file_changed(&path, Some(&buf));
+        let diff = build_compact_diff(&content, &buf);
         let cost_time = t0.elapsed();
-        ok(format!(
-            "> ⏱️ **Cost Time**: {:.2?}ms\n\nEdited {} ({replaced} replacement{})\n{}",
+        let kind_note = if kinds.len() == 1 {
+            if kinds[0] == "exact" {
+                String::new()
+            } else {
+                format!(" ({})", kinds[0])
+            }
+        } else {
+            format!(" ({} hunks: {})", kinds.len(), kinds.join(", "))
+        };
+        return ok(format!(
+            "> ⏱️ **Cost Time**: {:.2?}ms\n\nEdited {} ({total} replacement{}{kind_note})\n{}",
             cost_time.as_millis(),
             crate::pathnorm::to_display(&path),
-            if replaced == 1 { "" } else { "s" },
+            if total == 1 { "" } else { "s" },
             diff,
-        ))
+        ));
     }
+}
+
+fn apply_hunk(
+    content: &str,
+    old_string: &str,
+    new_string: &str,
+    replace_all: bool,
+) -> Result<(String, usize, &'static str), String> {
+    if old_string == new_string {
+        return Err("old_string and new_string are identical — nothing to change.".into());
+    }
+    if old_string.is_empty() {
+        return Err("old_string is empty — provide the exact text fragment to replace.".into());
+    }
+
+    let literal = content.matches(old_string).count();
+    let (old_match, new_match, count) = if literal > 0 {
+        (old_string.to_string(), new_string.to_string(), literal)
+    } else {
+        let file_eol = if content.contains("\r\n") {
+            "\r\n"
+        } else {
+            "\n"
+        };
+        let old_c = coerce_eol(old_string, file_eol);
+        let c = content.matches(&old_c).count();
+        (old_c, coerce_eol(new_string, file_eol), c)
+    };
+
+    if count == 0 {
+        if let Some((fuzzy_result, fuzzy_count)) =
+            try_fuzzy_replace(content, old_string, new_string, replace_all)
+        {
+            if fuzzy_result == content {
+                return Err(
+                    "the fuzzy (whitespace-normalized) match produced no change — old_string and new_string differ only in whitespace.".into(),
+                );
+            }
+            return Ok((fuzzy_result, fuzzy_count, "fuzzy whitespace match"));
+        }
+        if let Some((token_result, token_count)) =
+            try_token_normalized_replace(content, old_string, new_string, replace_all)
+        {
+            if token_result != content {
+                return Ok((token_result, token_count, "token-normalized match"));
+            }
+        }
+        if let Some((comment_result, comment_count)) =
+            try_comment_style_replace(content, old_string, new_string, replace_all)
+        {
+            if comment_result != content {
+                return Ok((comment_result, comment_count, "comment-style match"));
+            }
+        }
+        if let Some((anchor_result, _)) = try_block_anchor_replace(content, old_string, new_string)
+        {
+            if anchor_result != content {
+                return Ok((anchor_result, 1, "anchored block match"));
+            }
+        }
+        if let Some((bound_result, _)) =
+            try_trimmed_boundary_replace(content, old_string, new_string)
+        {
+            if bound_result != content {
+                return Ok((bound_result, 1, "trimmed boundary match"));
+            }
+        }
+        let hint = find_closest_match_snippet(content, old_string).unwrap_or_default();
+        return Err(format!(
+            "old_string not found. Re-read the file and copy the exact text (including whitespace).{hint}"
+        ));
+    }
+    if count > 1 && !replace_all {
+        return Err(format!(
+            "old_string appears {count} times — it must be unique. Add surrounding context, or set replace_all=true."
+        ));
+    }
+    if old_match == new_match {
+        return Err(
+            "old_string and new_string are identical after line-ending normalization.".into(),
+        );
+    }
+    let updated = if replace_all {
+        content.replace(&old_match, &new_match)
+    } else {
+        content.replacen(&old_match, &new_match, 1)
+    };
+    let replaced = if replace_all { count } else { 1 };
+    Ok((updated, replaced, "exact"))
 }
 
 /// Write edited text back to `path` in its original on-disk `encoding`. Refuses (Err
@@ -722,6 +720,184 @@ fn try_trimmed_boundary_replace(
     None
 }
 
+/// Collapse `/** foo */` and `/**\n * foo\n */` (and `// foo`) into one comparable token
+/// so a model that re-wrapped a javadoc still matches the on-disk form.
+fn collapse_comment_style_lines(lines: &[&str]) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut javadoc: Vec<String> = Vec::new();
+    let mut in_javadoc = false;
+    for raw in lines {
+        let t = raw.trim();
+        if t.starts_with("/**") && t.ends_with("*/") {
+            let inner = t
+                .trim_start_matches("/**")
+                .trim_end_matches("*/")
+                .trim();
+            out.push(clean_token_normalize(&format!("/** {inner} */")));
+            continue;
+        }
+        if t.starts_with("/**") {
+            in_javadoc = true;
+            javadoc.clear();
+            let inner = t.trim_start_matches("/**").trim();
+            if !inner.is_empty() {
+                javadoc.push(inner.to_string());
+            }
+            continue;
+        }
+        if in_javadoc {
+            if t.ends_with("*/") {
+                let inner = t.trim_end_matches("*/").trim().trim_start_matches('*').trim();
+                if !inner.is_empty() {
+                    javadoc.push(inner.to_string());
+                }
+                in_javadoc = false;
+                out.push(clean_token_normalize(&format!("/** {} */", javadoc.join(" "))));
+            } else {
+                let inner = t.trim_start_matches('*').trim();
+                if !inner.is_empty() {
+                    javadoc.push(inner.to_string());
+                }
+            }
+            continue;
+        }
+        if t.starts_with("//") {
+            out.push(clean_token_normalize(&format!("/** {} */", t.trim_start_matches('/').trim())));
+            continue;
+        }
+        let n = clean_token_normalize(raw);
+        if !n.is_empty() {
+            out.push(n);
+        }
+    }
+    out
+}
+
+/// Map each collapsed token back to a half-open line range in `lines`.
+fn collapse_comment_style_spans(lines: &[&str]) -> Vec<(String, usize, usize)> {
+    let mut out = Vec::new();
+    let mut javadoc: Vec<String> = Vec::new();
+    let mut in_javadoc = false;
+    let mut javadoc_start = 0usize;
+    for (i, raw) in lines.iter().enumerate() {
+        let t = raw.trim();
+        if t.starts_with("/**") && t.ends_with("*/") {
+            let inner = t
+                .trim_start_matches("/**")
+                .trim_end_matches("*/")
+                .trim();
+            out.push((clean_token_normalize(&format!("/** {inner} */")), i, i + 1));
+            continue;
+        }
+        if t.starts_with("/**") {
+            in_javadoc = true;
+            javadoc.clear();
+            javadoc_start = i;
+            let inner = t.trim_start_matches("/**").trim();
+            if !inner.is_empty() {
+                javadoc.push(inner.to_string());
+            }
+            continue;
+        }
+        if in_javadoc {
+            if t.ends_with("*/") {
+                let inner = t.trim_end_matches("*/").trim().trim_start_matches('*').trim();
+                if !inner.is_empty() {
+                    javadoc.push(inner.to_string());
+                }
+                in_javadoc = false;
+                out.push((
+                    clean_token_normalize(&format!("/** {} */", javadoc.join(" "))),
+                    javadoc_start,
+                    i + 1,
+                ));
+            } else {
+                let inner = t.trim_start_matches('*').trim();
+                if !inner.is_empty() {
+                    javadoc.push(inner.to_string());
+                }
+            }
+            continue;
+        }
+        if t.starts_with("//") {
+            out.push((
+                clean_token_normalize(&format!("/** {} */", t.trim_start_matches('/').trim())),
+                i,
+                i + 1,
+            ));
+            continue;
+        }
+        let n = clean_token_normalize(raw);
+        if !n.is_empty() {
+            out.push((n, i, i + 1));
+        }
+    }
+    out
+}
+
+/// Match `old_string` after collapsing javadoc wrapping. Does **not** drop
+/// annotations or unrelated identifiers — a model that tried to replace
+/// `createTime` with a different field must still fail.
+fn try_comment_style_replace(
+    content: &str,
+    old_string: &str,
+    new_string: &str,
+    replace_all: bool,
+) -> Option<(String, usize)> {
+    let old_lines: Vec<&str> = old_string.lines().collect();
+    let old_collapsed = collapse_comment_style_lines(&old_lines);
+    if old_collapsed.len() < 2 {
+        return None;
+    }
+    let total: usize = old_collapsed.iter().map(|s| s.len()).sum();
+    if total < 8 {
+        return None;
+    }
+
+    let content_lines: Vec<&str> = content.lines().collect();
+    let content_spans = collapse_comment_style_spans(&content_lines);
+    if content_spans.len() < old_collapsed.len() {
+        return None;
+    }
+
+    let n = old_collapsed.len();
+    let mut matches: Vec<(usize, usize)> = Vec::new();
+    let mut i = 0;
+    while i + n <= content_spans.len() {
+        let window: Vec<&String> = content_spans[i..i + n].iter().map(|(s, _, _)| s).collect();
+        if window.iter().copied().eq(old_collapsed.iter()) {
+            let start_line = content_spans[i].1;
+            let end_line = content_spans[i + n - 1].2;
+            matches.push((start_line, end_line));
+            i += n;
+        } else {
+            i += 1;
+        }
+    }
+    if matches.is_empty() || (!replace_all && matches.len() > 1) {
+        return None;
+    }
+
+    let has_trailing_newline = content.ends_with('\n');
+    let new_lines: Vec<&str> = new_string.lines().collect();
+    let mut result_lines: Vec<String> = content_lines.iter().map(|l| l.to_string()).collect();
+    let to_replace = if replace_all { &matches[..] } else { &matches[..1] };
+    for &(start, end) in to_replace.iter().rev() {
+        let replacement = reanchored_replacement(&new_lines, content_lines[start]);
+        result_lines.splice(start..end, replacement);
+    }
+
+    let mut result = result_lines.join("\n");
+    if has_trailing_newline && !result.ends_with('\n') {
+        result.push('\n');
+    }
+    if content.contains("\r\n") {
+        result = coerce_eol(&result, "\r\n");
+    }
+    let count = if replace_all { matches.len() } else { 1 };
+    Some((result, count))
+}
+
 /// Computes the closest snippet in `content` to `old_string` using normalized Levenshtein similarity.
 fn find_closest_match_snippet(content: &str, old_string: &str) -> Option<String> {
     let old_lines: Vec<&str> = old_string.lines().collect();
@@ -755,13 +931,16 @@ fn find_closest_match_snippet(content: &str, old_string: &str) -> Option<String>
         }
     }
 
-    if best_score >= 0.55 {
+    if best_score >= 0.30 {
         let (start, end) = best_range;
-        let snippet = content_lines[start..end].join("\n");
+        let ctx = 3usize;
+        let show_start = start.saturating_sub(ctx);
+        let show_end = (end + ctx).min(content_lines.len());
+        let snippet = content_lines[show_start..show_end].join("\n");
         Some(format!(
-            "Closest match found around lines {}-{} (similarity {:.0}%):\n```\n{}\n```",
-            start + 1,
-            end,
+            "Closest match found around lines {}-{} (similarity {:.0}%). Copy the EXACT text from the file (do not invent annotations or rewrite comments):\n```\n{}\n```",
+            show_start + 1,
+            show_end,
             best_score * 100.0,
             snippet
         ))
@@ -854,6 +1033,80 @@ mod tests {
         assert!(r.content.contains("+    let x = 2;"), "{}", r.content);
         let on_disk = std::fs::read_to_string(d.path().join("a.rs")).unwrap();
         assert!(on_disk.contains("let x = 2;"), "{on_disk}");
+    }
+
+    #[tokio::test]
+    async fn edits_array_applies_two_hunks_transactionally() {
+        let d = tempfile::tempdir().unwrap();
+        std::fs::write(
+            d.path().join("a.rs"),
+            "fn a() { 1 }\nfn b() { 2 }\nfn c() { 3 }\n",
+        )
+        .unwrap();
+        let ok = EditFileTool
+            .execute(
+                r#"{"file_path":"a.rs","edits":[{"old_string":"fn a() { 1 }","new_string":"fn a() { 10 }"},{"old_string":"fn c() { 3 }","new_string":"fn c() { 30 }"}]}"#,
+                &ctx(d.path()),
+            )
+            .await;
+        assert!(!ok.is_error, "{}", ok.content);
+        let on_disk = std::fs::read_to_string(d.path().join("a.rs")).unwrap();
+        assert_eq!(on_disk, "fn a() { 10 }\nfn b() { 2 }\nfn c() { 30 }\n");
+
+        let fail = EditFileTool
+            .execute(
+                r#"{"file_path":"a.rs","edits":[{"old_string":"fn a() { 10 }","new_string":"fn a() { 11 }"},{"old_string":"missing","new_string":"x"}]}"#,
+                &ctx(d.path()),
+            )
+            .await;
+        assert!(fail.is_error, "{}", fail.content);
+        assert!(fail.content.contains("hunk 2/2"), "{}", fail.content);
+        let still = std::fs::read_to_string(d.path().join("a.rs")).unwrap();
+        assert_eq!(still, "fn a() { 10 }\nfn b() { 2 }\nfn c() { 30 }\n");
+    }
+
+    #[tokio::test]
+    async fn javadoc_wrapping_matches_single_line_comment() {
+        let d = tempfile::tempdir().unwrap();
+        std::fs::write(
+            d.path().join("Coupon.java"),
+            "public class Coupon {\n    /** 创建时间 */\n    private LocalDateTime createTime;\n}\n",
+        )
+        .unwrap();
+        let args = serde_json::json!({
+            "file_path": "Coupon.java",
+            "old_string": "    /**\n     * 创建时间\n     */\n    private LocalDateTime createTime;",
+            "new_string": "    /**\n     * 创建时间\n     */\n    private LocalDateTime createTime;\n\n    /** 过期提前预警天数 */\n    private Integer expireWarningDays;"
+        });
+        let r = EditFileTool.execute(&args.to_string(), &ctx(d.path())).await;
+        assert!(!r.is_error, "javadoc wrap must match: {}", r.content);
+        let on_disk = std::fs::read_to_string(d.path().join("Coupon.java")).unwrap();
+        assert!(on_disk.contains("expireWarningDays"), "{on_disk}");
+        assert!(on_disk.contains("createTime"), "must keep existing field: {on_disk}");
+    }
+
+    #[tokio::test]
+    async fn hallucinated_annotation_does_not_clobber_other_field() {
+        let d = tempfile::tempdir().unwrap();
+        std::fs::write(
+            d.path().join("Coupon.java"),
+            "public class Coupon {\n    /** 创建时间 */\n    private LocalDateTime createTime;\n\n    /** 过期提前预警天数 (默认3天) */\n    private Integer expireWarningDays;\n}\n",
+        )
+        .unwrap();
+        let args = serde_json::json!({
+            "file_path": "Coupon.java",
+            "old_string": "    /**\n     * 创建时间\n     */\n    @TableField(\"create_time\")\n    private LocalDateTime createTime;\n}",
+            "new_string": "    /**\n     * 过期提前预警天数 (默认为3天)\n     */\n    @TableField(\"expire_warning_days\")\n    private Integer expireWarningDays;\n}"
+        });
+        let r = EditFileTool.execute(&args.to_string(), &ctx(d.path())).await;
+        assert!(r.is_error, "must refuse a structurally different old_string: {}", r.content);
+        assert!(r.content.contains("not found"), "{}", r.content);
+        let on_disk = std::fs::read_to_string(d.path().join("Coupon.java")).unwrap();
+        assert!(on_disk.contains("createTime"), "createTime must survive: {on_disk}");
+        assert!(
+            on_disk.matches("expireWarningDays").count() == 1,
+            "must not duplicate expireWarningDays: {on_disk}"
+        );
     }
 
     #[test]
@@ -1409,6 +1662,10 @@ mod tests {
             )
             .await;
         assert!(r.is_error);
-        assert!(r.content.contains("Closest match found around lines 2-3"));
+        assert!(
+            r.content.contains("Closest match found around lines"),
+            "{}",
+            r.content
+        );
     }
 }

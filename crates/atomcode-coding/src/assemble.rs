@@ -67,13 +67,17 @@ pub fn build_coding_agent(cfg: CodingAgentConfig) -> Result<Agent, String> {
 pub fn build_coding_agent_with(cfg: &CodingAgentConfig, provider: Arc<dyn LlmProvider>) -> Agent {
     let todo_enabled = crate::persona::todo_switch_enabled_for(cfg.todo.enabled);
     match mount_coding_tools(cfg.supports_vision, todo_enabled, &cfg.lsp) {
-        Ok(tools) => build_coding_agent_from_tools(cfg, provider, tools, None),
-        Err(_error) => build_coding_agent_from_tools(
-            cfg,
-            provider,
-            mount_base_coding_tools(cfg.supports_vision, todo_enabled, &cfg.lsp),
-            Some("AtomGit tools are unavailable because capability setup failed.".to_string()),
-        ),
+        Ok((tools, live)) => build_coding_agent_from_tools(cfg, provider, tools, live, None),
+        Err(_error) => {
+            let (tools, live) = mount_base_coding_tools(cfg.supports_vision, todo_enabled, &cfg.lsp);
+            build_coding_agent_from_tools(
+                cfg,
+                provider,
+                tools,
+                live,
+                Some("AtomGit tools are unavailable because capability setup failed.".to_string()),
+            )
+        }
     }
 }
 
@@ -84,14 +88,15 @@ pub fn try_build_coding_agent_with(
     provider: Arc<dyn LlmProvider>,
 ) -> Result<Agent, String> {
     let todo_enabled = crate::persona::todo_switch_enabled_for(cfg.todo.enabled);
-    let tools = mount_coding_tools(cfg.supports_vision, todo_enabled, &cfg.lsp)?;
-    Ok(build_coding_agent_from_tools(cfg, provider, tools, None))
+    let (tools, live) = mount_coding_tools(cfg.supports_vision, todo_enabled, &cfg.lsp)?;
+    Ok(build_coding_agent_from_tools(cfg, provider, tools, live, None))
 }
 
 fn build_coding_agent_from_tools(
     cfg: &CodingAgentConfig,
     provider: Arc<dyn LlmProvider>,
     tools: MountedTools,
+    todo_live: Option<atomcode_capabilities::tools::TodoLive>,
     startup_warning: Option<String>,
 ) -> Agent {
     let summary_provider = provider.clone(); // tier-2 overflow summary uses the same provider
@@ -185,7 +190,10 @@ fn build_coding_agent_from_tools(
     // CodingAgentConfig doesn't carry ui.todo, so we use the config default (true) here;
     // the env var ATOMCODE_TODO=0 / =false / =off can disable it without a config change.
     if todo_enabled {
-        builder = builder.hook(Arc::new(crate::todo::TodoHook));
+        builder = builder.hook(Arc::new(match todo_live {
+            Some(live) => crate::todo::TodoHook::with_live(live),
+            None => crate::todo::TodoHook::new(),
+        }));
         builder = builder.hook(Arc::new(crate::todo::TodoEagerHook::new(
             &cfg.model,
             &cfg.provider_type,
@@ -207,31 +215,44 @@ fn mount_coding_tools(
     vision: bool,
     todo_enabled: bool,
     lsp: &LspSettings,
-) -> Result<MountedTools, String> {
-    let (registry, names) = base_coding_tools(vision, todo_enabled, lsp);
+) -> Result<(MountedTools, Option<atomcode_capabilities::tools::TodoLive>), String> {
+    let (registry, names, live) = base_coding_tools(vision, todo_enabled, lsp);
     #[cfg(feature = "atomgit")]
-    let (registry, names) = {
-        let (mut registry, mut names) = (registry, names);
+    let (registry, names, live) = {
+        let (mut registry, mut names, live) = (registry, names, live);
         register_atomgit_capabilities(&mut registry, &mut names)?;
-        (registry, names)
+        (registry, names, live)
     };
     let refs: Vec<&str> = names.iter().map(String::as_str).collect();
-    Ok(registry.mount(&refs))
+    Ok((registry.mount(&refs), live))
 }
 
-fn mount_base_coding_tools(vision: bool, todo_enabled: bool, lsp: &LspSettings) -> MountedTools {
-    let (registry, names) = base_coding_tools(vision, todo_enabled, lsp);
+fn mount_base_coding_tools(
+    vision: bool,
+    todo_enabled: bool,
+    lsp: &LspSettings,
+) -> (MountedTools, Option<atomcode_capabilities::tools::TodoLive>) {
+    let (registry, names, live) = base_coding_tools(vision, todo_enabled, lsp);
     let refs: Vec<&str> = names.iter().map(String::as_str).collect();
-    registry.mount(&refs)
+    (registry.mount(&refs), live)
 }
 
 fn base_coding_tools(
     vision: bool,
     todo_enabled: bool,
     lsp: &LspSettings,
-) -> (ToolRegistry, Vec<String>) {
+) -> (
+    ToolRegistry,
+    Vec<String>,
+    Option<atomcode_capabilities::tools::TodoLive>,
+) {
     let mut registry = ToolRegistry::new();
     register_coding_tools_with_vision(&mut registry, vision);
+    let todo_live = if todo_enabled {
+        Some(atomcode_capabilities::tools::bind_todowrite(&mut registry))
+    } else {
+        None
+    };
     register_codeintel_tools(&mut registry);
     let mut names: Vec<String> = coding_tool_names()
         .iter()
@@ -242,7 +263,7 @@ fn base_coding_tools(
     if register_lsp_tool(&mut registry, lsp) {
         names.push("lsp".into());
     }
-    (registry, names)
+    (registry, names, todo_live)
 }
 
 /// Register the shipped AtomGit REST capabilities into a coding tool catalog.
@@ -277,6 +298,7 @@ mod tests {
     #[test]
     fn disabled_todo_is_not_exposed_to_the_model() {
         let names: Vec<String> = mount_base_coding_tools(false, false, &Default::default())
+            .0
             .defs()
             .into_iter()
             .map(|def| def.name)
@@ -299,6 +321,7 @@ mod tests {
         std::env::set_var("ATOMCODE_CODEINTEL_MODE", "full");
 
         let disabled: Vec<_> = mount_base_coding_tools(false, true, &LspSettings::default())
+            .0
             .defs()
             .into_iter()
             .map(|definition| definition.name)
@@ -320,6 +343,7 @@ mod tests {
             },
         );
         let mounted: Vec<_> = mount_base_coding_tools(false, true, &enabled)
+            .0
             .defs()
             .into_iter()
             .map(|definition| definition.name)

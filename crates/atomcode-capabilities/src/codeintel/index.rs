@@ -841,7 +841,7 @@ fn collect_files(root: &Path) -> Vec<Walked> {
         let ext_ok = p
             .extension()
             .and_then(|e| e.to_str())
-            .map(|e| INDEXED_EXTS.contains(&e))
+            .map(is_indexed_ext)
             .unwrap_or(false);
         if !ext_ok {
             continue;
@@ -997,8 +997,18 @@ fn units_from_disk(cache: DiskCache) -> HashMap<PathBuf, FileUnit> {
     cache
         .units
         .into_iter()
-        .map(|(p, u)| (PathBuf::from(p), u))
+        .map(|(p, u)| (normalize_index_path(&PathBuf::from(p)), u))
         .collect()
+}
+
+/// Re-key an in-memory unit map so lookups never miss due to slash / drive
+/// letter drift (the classic "every file looks dirty → reparse 1297 files").
+fn rekey_units(units: &mut HashMap<PathBuf, FileUnit>) {
+    let old = std::mem::take(units);
+    units.reserve(old.len());
+    for (p, u) in old {
+        units.insert(normalize_index_path(&p), u);
+    }
 }
 
 /// Write the binary cache (`units.v4.bin`): zstd-compress + bincode-encode.
@@ -1019,25 +1029,29 @@ fn save_disk_cache_bin(root: &Path, cache: &DiskCache) -> std::io::Result<PathBu
 
 fn load_disk_cache(root: &Path) -> Option<DiskCache> {
     // 1. Prefer SQLite-backed cache (`index.v1.db`) — fast incremental row-level upserts.
+    //    Units are sufficient to recompose a graph; the graph blob is optional.
     let db_path = super::index_db::disk_cache_path_db(root);
     if db_path.is_file() {
-        if let Ok(db) = super::index_db::IndexDb::open(&db_path) {
-            if let (Some(walk_fp), Some(graph)) = (db.get_walk_fp(), db.load_graph()) {
-                let units_map = db.load_units();
-                if !units_map.is_empty() {
-                    let mut unit_str_map = HashMap::with_capacity(units_map.len());
-                    for (p, u) in units_map {
-                        unit_str_map.insert(p.to_string_lossy().into_owned(), u);
-                    }
-                    return Some(DiskCache {
-                        version: DISK_CACHE_VERSION,
-                        root: root.display().to_string(),
-                        walk_fp,
-                        units: unit_str_map,
-                        graph,
-                    });
-                }
+        if let Ok(db) = super::index_db::IndexDb::open_shared(root) {
+        let units_map = db.load_units();
+        if !units_map.is_empty() {
+            let mut unit_str_map = HashMap::with_capacity(units_map.len());
+            for (p, u) in units_map {
+                unit_str_map.insert(
+                    normalize_index_path(&p).to_string_lossy().into_owned(),
+                    u,
+                );
             }
+            let graph = db.load_graph().unwrap_or_else(CodeGraph::new);
+            let walk_fp = db.get_walk_fp().unwrap_or(0);
+            return Some(DiskCache {
+                version: DISK_CACHE_VERSION,
+                root: root.display().to_string(),
+                walk_fp,
+                units: unit_str_map,
+                graph,
+            });
+        }
         }
     }
 
@@ -1057,48 +1071,92 @@ fn load_disk_cache(root: &Path) -> Option<DiskCache> {
     Some(cache)
 }
 
+/// Persist only the dirty file-unit rows. Never serializes the whole graph or
+/// rewrites the giant JSON/bin snapshots — those belong on first build / init.
+fn persist_units_incremental(
+    root: &Path,
+    upsert: &[(PathBuf, FileUnit)],
+    deleted: &[PathBuf],
+) {
+    if upsert.is_empty() && deleted.is_empty() {
+        return;
+    }
+    if let Ok(db) = super::index_db::IndexDb::open_shared(root) {
+        let _ = db.upsert_units(upsert, deleted);
+    }
+}
+
+/// Remove leftover JSON/bin sidecars from the pre-SQLite layout. Serializing
+/// the whole graph to `units.v3.json` (hundreds of MB) is what made a 1-file
+/// edit take tens of seconds.
+const META_DIRINDEX: &str = "dirindex.v1";
+const META_IDF_STATS: &str = "idf_stats.v1";
+
+fn persist_derived_sidecars(
+    root: &Path,
+    dirindex: Option<&super::retrieval::DirIndex>,
+    stats: Option<&super::retrieval::IdfStats>,
+) {
+    let Ok(db) = super::index_db::IndexDb::open_shared(root) else {
+        return;
+    };
+    if let Some(di) = dirindex {
+        if let Ok(bytes) = serde_json::to_vec(di) {
+            let _ = db.put_meta_blob(META_DIRINDEX, &bytes);
+        }
+    }
+    if let Some(st) = stats {
+        if let Ok(bytes) = serde_json::to_vec(st) {
+            let _ = db.put_meta_blob(META_IDF_STATS, &bytes);
+        }
+    }
+}
+
+fn load_idf_stats_sqlite(root: &Path) -> Option<super::retrieval::IdfStats> {
+    let db = super::index_db::IndexDb::open_shared(root).ok()?;
+    let bytes = db.get_meta_blob(META_IDF_STATS)?;
+    serde_json::from_slice(&bytes).ok()
+}
+
+fn cleanup_legacy_sidecars(root: &Path) {
+    let root = super::canonical(root);
+    for rel in [
+        DISK_CACHE_REL,
+        DISK_CACHE_REL_BIN,
+        super::retrieval::DIRINDEX_REL,
+        super::retrieval::stats::STATS_REL,
+        ".atomcode/codegraph/units.v3.json.tmp",
+        ".atomcode/codegraph/units.v4.bin.tmp",
+    ] {
+        let _ = std::fs::remove_file(root.join(rel));
+    }
+}
+
 fn save_disk_cache(
     root: &Path,
     walk_fp: u64,
     units: &HashMap<PathBuf, FileUnit>,
-    graph: &CodeGraph,
+    _graph: &CodeGraph,
     changed_units: &[(PathBuf, FileUnit)],
     deleted_paths: &[PathBuf],
 ) -> std::io::Result<PathBuf> {
-    // 1. Sync to SQLite incremental db
     let db_path = super::index_db::disk_cache_path_db(root);
     if let Some(parent) = db_path.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    if let Ok(db) = super::index_db::IndexDb::open(&db_path) {
-        let upsert_vec: Vec<(PathBuf, FileUnit)> = if changed_units.is_empty() && deleted_paths.is_empty() {
-            units.iter().map(|(p, u)| (p.clone(), u.clone())).collect()
-        } else {
-            changed_units.to_vec()
-        };
-        let _ = db.sync_incremental(walk_fp, &upsert_vec, deleted_paths, graph);
-    }
 
-    // 2. Also write binary cache and JSON cache for cold start and downgrade compatibility
-    let path = disk_cache_path(root);
-    let mut unit_map = HashMap::with_capacity(units.len());
-    for (p, u) in units {
-        unit_map.insert(p.to_string_lossy().into_owned(), u.clone());
+    // SQLite is the only on-disk store. Units are the source of truth; the
+    // graph is recomposed in memory on cold start. No JSON, no bin snapshot.
+    let incremental = !changed_units.is_empty() || !deleted_paths.is_empty();
+    if incremental {
+        persist_units_incremental(root, changed_units, deleted_paths);
+    } else if let Ok(db) = super::index_db::IndexDb::open_shared(root) {
+        let upsert_vec: Vec<(PathBuf, FileUnit)> =
+            units.iter().map(|(p, u)| (p.clone(), u.clone())).collect();
+        let _ = db.upsert_units(&upsert_vec, &[]);
+        let _ = db.save_graph_only(walk_fp, _graph);
     }
-    let cache = DiskCache {
-        version: DISK_CACHE_VERSION,
-        root: root.display().to_string(),
-        walk_fp,
-        units: unit_map,
-        graph: graph.clone(),
-    };
-    let _ = save_disk_cache_bin(root, &cache);
-    let tmp = path.with_extension("json.tmp");
-    if let Ok(json) = serde_json::to_vec(&cache) {
-        let _ = std::fs::write(&tmp, json);
-        let _ = std::fs::rename(&tmp, &path);
-    }
-
+    cleanup_legacy_sidecars(root);
     Ok(db_path)
 }
 
@@ -1117,6 +1175,9 @@ pub fn init_workspace_index(
             path_for_display(&cache_path)
         ));
         let _ = std::fs::remove_file(&cache_path);
+        let _ = std::fs::remove_file(cache_path.with_extension("db-wal"));
+        let _ = std::fs::remove_file(cache_path.with_extension("db-shm"));
+        cleanup_legacy_sidecars(&root);
     }
 
     let idx = CodeIndex::new();
@@ -1134,9 +1195,9 @@ pub fn init_workspace_index(
                 .map_err(|e| format!("failed to write {}: {e}", path_for_display(&cache_path)))?;
             on_progress(&format!("Code graph: wrote {}", path_for_display(&path)));
             let dirindex = super::retrieval::DirIndex::build(g);
-            let _ = dirindex.save(&root.join(super::retrieval::DIRINDEX_REL));
+            persist_derived_sidecars(&root, Some(&dirindex), None);
             let stats = super::retrieval::IdfStats::build(g);
-            let _ = stats.save(&root.join(super::retrieval::stats::STATS_REL));
+            persist_derived_sidecars(&root, None, Some(&stats));
             guard.dirindex = Some(Arc::new(dirindex));
             guard.idf_stats = Some(Arc::new(stats));
         }
@@ -1226,6 +1287,247 @@ fn compose_graph(
     g
 }
 
+/// Patch a live graph for one file unit: drop the old symbols/edges for that
+/// file, insert the new ones, resolve only this file's call sites. Avoids
+/// recomposing every call edge in the workspace ("branch index rebuild").
+fn patch_graph_with_unit(g: &mut CodeGraph, path: &Path, unit: &FileUnit, root: &Path) {
+    let path = normalize_index_path(path);
+    g.remove_file(&path);
+    for n in &unit.nodes {
+        g.add_symbol(n.clone());
+    }
+    g.file_mtimes
+        .insert(path.clone(), (unit.mtime_ns / 1_000_000_000) as u64);
+    for rc in &unit.calls {
+        let caller = CodeGraph::make_id(&path, &rc.caller_name, rc.caller_line);
+        if g.node(caller).is_none() {
+            continue;
+        }
+        if let Some(callee) = resolve_callee(g, &rc.callee_name, &path, root) {
+            g.add_edge(
+                caller,
+                Edge {
+                    to: callee,
+                    kind: EdgeKind::Calls,
+                    line: rc.line,
+                },
+            );
+        }
+    }
+}
+
+/// Re-stat already-known unit paths. Avoids `ignore::WalkBuilder` over the
+/// whole workspace (the 10s+ "Index" cost) when we only need to know which
+/// of the files we already indexed changed.
+fn restat_known_units(units: &HashMap<PathBuf, FileUnit>) -> (Vec<Walked>, Vec<PathBuf>) {
+    let mut walked = Vec::with_capacity(units.len());
+    let mut missing = Vec::new();
+    for path in units.keys() {
+        let norm = normalize_index_path(path);
+        match std::fs::metadata(&norm) {
+            Ok(md) => {
+                let len = md.len();
+                if len > MAX_INDEX_FILE_BYTES {
+                    missing.push(norm);
+                    continue;
+                }
+                let mtime_ns = md
+                    .modified()
+                    .ok()
+                    .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
+                    .map(|d| d.as_nanos())
+                    .unwrap_or(0);
+                walked.push(Walked {
+                    path: norm,
+                    mtime_ns,
+                    len,
+                });
+            }
+            Err(_) => missing.push(norm),
+        }
+    }
+    walked.sort_by(|a, b| a.path.cmp(&b.path));
+    (walked, missing)
+}
+
+fn walked_from_disk(path: &Path) -> Option<Walked> {
+    let norm = normalize_index_path(path);
+    if is_generated_source(&norm) {
+        return None;
+    }
+    let ext_ok = norm
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(is_indexed_ext)
+        .unwrap_or(false);
+    if !ext_ok {
+        return None;
+    }
+    let md = std::fs::metadata(&norm).ok()?;
+    if !md.is_file() {
+        return None;
+    }
+    let len = md.len();
+    if len > MAX_INDEX_FILE_BYTES || len == 0 {
+        return None;
+    }
+    let mtime_ns = md
+        .modified()
+        .ok()
+        .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    Some(Walked {
+        path: norm,
+        mtime_ns,
+        len,
+    })
+}
+
+fn path_under_skip_dir(p: &Path) -> bool {
+    p.components().any(|c| should_skip_dir(c.as_os_str()))
+}
+
+/// Git roots we already index: the workspace itself, its immediate children,
+/// and the nearest `.git` ancestor of known unit paths.
+fn discover_git_roots(workspace: &Path, known: &HashSet<PathBuf>) -> Vec<PathBuf> {
+    let mut roots = Vec::new();
+    if workspace.join(".git").exists() {
+        roots.push(workspace.to_path_buf());
+    }
+    if let Ok(rd) = std::fs::read_dir(workspace) {
+        for e in rd.flatten() {
+            let p = e.path();
+            if p.is_dir() && p.join(".git").exists() {
+                roots.push(normalize_index_path(&p));
+            }
+        }
+    }
+    for file in known.iter().take(256) {
+        let mut cur = file.parent();
+        while let Some(dir) = cur {
+            if dir.join(".git").exists() {
+                let n = normalize_index_path(dir);
+                if !roots.iter().any(|r| r == &n) {
+                    roots.push(n);
+                }
+                break;
+            }
+            if dir == workspace {
+                break;
+            }
+            cur = dir.parent();
+        }
+    }
+    roots.sort();
+    roots.dedup();
+    roots
+}
+
+fn git_ls_indexable(git_root: &Path) -> Vec<PathBuf> {
+    let mut cmd = std::process::Command::new("git");
+    cmd.args([
+        "-C",
+        &git_root.to_string_lossy(),
+        "ls-files",
+        "-z",
+        "--cached",
+        "--others",
+        "--exclude-standard",
+    ]);
+    crate::process_utils::suppress_console_window_sync(&mut cmd);
+    let Ok(out) = cmd.output() else {
+        return Vec::new();
+    };
+    if !out.status.success() {
+        return Vec::new();
+    }
+    let mut files = Vec::new();
+    for rel in out.stdout.split(|b| *b == 0).filter(|s| !s.is_empty()) {
+        let rel = match std::str::from_utf8(rel) {
+            Ok(s) => s,
+            Err(_) => continue,
+        };
+        let abs = normalize_index_path(&git_root.join(rel));
+        if path_under_skip_dir(&abs) {
+            continue;
+        }
+        files.push(abs);
+    }
+    files
+}
+
+/// Discover **new** source files (create). Delete/modify of already-indexed
+/// files are handled by [`restat_known_units`]. This is filesystem-first —
+/// git / editor / copy / pull are all just ways the tree can change.
+/// Never WalkBuilder-s the whole workspace.
+fn discover_new_files(root: &Path, units: &HashMap<PathBuf, FileUnit>) -> Vec<Walked> {
+    let known: HashSet<PathBuf> = units.keys().map(|p| normalize_index_path(p)).collect();
+    let mut new_files = Vec::new();
+    let mut seen: HashSet<PathBuf> = HashSet::new();
+
+    let mut push_new = |p: PathBuf| {
+        let n = normalize_index_path(&p);
+        if known.contains(&n) || !seen.insert(n.clone()) {
+            return;
+        }
+        if let Some(w) = walked_from_disk(&n) {
+            new_files.push(w);
+        }
+    };
+
+    // 1. Directories we already index: list them. A new sibling file or a new
+    //    subdirectory next to known sources is the common create path.
+    let mut indexed_dirs: HashSet<PathBuf> = HashSet::new();
+    for p in &known {
+        if let Some(dir) = p.parent() {
+            indexed_dirs.insert(dir.to_path_buf());
+        }
+    }
+    indexed_dirs.insert(normalize_index_path(root));
+
+    let mut new_dirs: Vec<PathBuf> = Vec::new();
+    for dir in &indexed_dirs {
+        let Ok(rd) = std::fs::read_dir(dir) else {
+            continue;
+        };
+        for e in rd.flatten() {
+            let p = e.path();
+            if p.is_file() {
+                push_new(p);
+                continue;
+            }
+            if !p.is_dir() {
+                continue;
+            }
+            if should_skip_dir(p.file_name().unwrap_or_default()) {
+                continue;
+            }
+            let pn = normalize_index_path(&p);
+            if !known.iter().any(|k| k.starts_with(&pn)) {
+                new_dirs.push(pn);
+            }
+        }
+    }
+
+    // 2. New folders that appeared under indexed dirs (or a new project at root).
+    for dir in new_dirs {
+        for w in collect_files(&dir) {
+            push_new(w.path);
+        }
+    }
+
+    // 3. Optional extra net: git ls-files sees tracked files in a brand-new
+    //    subtree that we have not listed as an indexed parent yet.
+    for git_root in discover_git_roots(root, &known) {
+        for p in git_ls_indexable(&git_root) {
+            push_new(p);
+        }
+    }
+
+    new_files
+}
+
 /// Diff `walked` against `units`: re-parse dirty/new, drop deleted. Returns
 /// `(reparsed, removed, kept, changed_units, deleted_paths)`. Dirty files are parsed **in parallel** across
 /// available CPU cores (each thread caches its own tree-sitter queries).
@@ -1234,16 +1536,17 @@ fn sync_units(
     walked: &[Walked],
     on_progress: &dyn Fn(&str),
 ) -> (usize, usize, usize, Vec<(PathBuf, FileUnit)>, Vec<PathBuf>) {
+    rekey_units(units);
+
     let walked_paths: std::collections::HashSet<PathBuf> =
         walked.iter().map(|w| normalize_index_path(&w.path)).collect();
 
     let mut deleted_paths = Vec::new();
     let before = units.len();
     units.retain(|p, _| {
-        let norm_p = normalize_index_path(p);
-        let keep = walked_paths.contains(&norm_p);
+        let keep = walked_paths.contains(p);
         if !keep {
-            deleted_paths.push(norm_p);
+            deleted_paths.push(p.clone());
         }
         keep
     });
@@ -1378,6 +1681,10 @@ struct IndexState {
     last_stats: Option<RefreshStats>,
     /// Last instant an edit or incremental update occurred (for background debouncing).
     last_update_instant: Option<Instant>,
+    /// True after `update_single_file` patched memory. The next `get()` must
+    /// return that graph without walking the workspace — otherwise every agent
+    /// edit is followed by a 10s+ "incremental" reindex of every file.
+    fast_patch_pending: bool,
 }
 
 impl Default for IndexState {
@@ -1393,6 +1700,7 @@ impl Default for IndexState {
             building: false,
             last_stats: None,
             last_update_instant: None,
+            fast_patch_pending: false,
         }
     }
 }
@@ -1433,13 +1741,11 @@ impl CodeIndex {
             Err(p) => p.into_inner(),
         };
 
-        let root = match guard.root.clone() {
-            Some(r) => r,
-            None => {
-                let inferred = norm_path.parent().map(|p| p.to_path_buf()).unwrap_or_else(|| PathBuf::from("."));
-                guard.root = Some(inferred.clone());
-                inferred
-            }
+        // Never invent a workspace root from the file's parent — that made the
+        // next `code_explore` (which uses the real workspace root) look like a
+        // different project and throw away the whole in-memory index.
+        let Some(root) = guard.root.clone() else {
+            return false;
         };
 
         let ext_ok = norm_path
@@ -1465,7 +1771,10 @@ impl CodeIndex {
                             .map(|d| d.as_nanos())
                             .unwrap_or(0)
                     });
-                (text.to_string(), mtime_ns, text.len() as u64)
+                // Use on-disk byte length (not UTF-8 char len) so the next
+                // restat/`collect_files` comparison does not mark this file dirty.
+                let disk_len = md.as_ref().map(|m| m.len()).unwrap_or(text.len() as u64);
+                (text.to_string(), mtime_ns, disk_len)
             }
             None => {
                 let Ok(md) = std::fs::metadata(&norm_path) else {
@@ -1481,9 +1790,9 @@ impl CodeIndex {
                         cache_hit: false,
                     });
                     guard.last_update_instant = Some(Instant::now());
-                    let default_g = CodeGraph::new();
-                    let g_ref = guard.graph.as_deref().unwrap_or(&default_g);
-                    let _ = save_disk_cache(&root, guard.walk_fp, &guard.units, g_ref, &[], &[norm_path]);
+                    guard.fast_patch_pending = true;
+                    drop(guard);
+                    persist_units_incremental(&root, &[], &[norm_path]);
                     return true;
                 };
                 let mtime_ns = md
@@ -1511,50 +1820,29 @@ impl CodeIndex {
                 let g_mut = Arc::make_mut(graph);
                 g_mut.remove_file(&norm_path);
             }
+            guard.fast_patch_pending = true;
+            drop(guard);
+            persist_units_incremental(&root, &[], &[norm_path]);
             return true;
         };
 
         let unit = FileUnit {
             mtime_ns,
             len,
-            nodes: nodes.clone(),
-            calls: calls.clone(),
+            nodes,
+            calls,
         };
 
-        guard.units.insert(norm_path.clone(), unit.clone());
-
-        // Fast graph patch
         if let Some(graph) = guard.graph.as_mut() {
             let g = Arc::make_mut(graph);
-            g.remove_file(&norm_path);
-            for n in &nodes {
-                g.add_symbol(n.clone());
-            }
-            g.file_mtimes
-                .insert(norm_path.clone(), (mtime_ns / 1_000_000_000) as u64);
-
-            for rc in calls {
-                let caller = CodeGraph::make_id(&norm_path, &rc.caller_name, rc.caller_line);
-                if g.node(caller).is_none() {
-                    continue;
-                }
-                if let Some(callee) = resolve_callee(g, &rc.callee_name, &norm_path, &root) {
-                    g.add_edge(
-                        caller,
-                        Edge {
-                            to: callee,
-                            kind: EdgeKind::Calls,
-                            line: rc.line,
-                        },
-                    );
-                }
-            }
+            patch_graph_with_unit(g, &norm_path, &unit, &root);
         }
 
-        // Fast concept vectors patch for modified symbols
+        // Fast concept vectors patch for modified symbols — do NOT drop the
+        // whole map (rebuilding it is the 50s retrieval stall).
         if let Some(concept_map) = guard.concept_vectors.as_mut() {
             let map = Arc::make_mut(concept_map);
-            for node in &nodes {
+            for node in &unit.nodes {
                 map.insert(
                     node.id,
                     super::retrieval::concept_projection(&node.name, &HashSet::new()),
@@ -1562,6 +1850,7 @@ impl CodeIndex {
             }
         }
 
+        guard.units.insert(norm_path.clone(), unit.clone());
         guard.last_stats = Some(RefreshStats {
             reparsed: 1,
             removed: 0,
@@ -1569,11 +1858,10 @@ impl CodeIndex {
             cache_hit: false,
         });
         guard.last_update_instant = Some(Instant::now());
+        guard.fast_patch_pending = true;
+        drop(guard);
 
-        if let Some(g) = guard.graph.as_deref() {
-            let _ = save_disk_cache(&root, guard.walk_fp, &guard.units, g, &[(norm_path, unit)], &[]);
-        }
-
+        persist_units_incremental(&root, &[(norm_path, unit)], &[]);
         true
     }
 
@@ -1638,17 +1926,11 @@ impl CodeIndex {
         let Some(g) = guard.graph.clone() else {
             return None;
         };
-        let path = root.join(super::retrieval::stats::STATS_REL);
-        // Disk cache freshness check: the sidecar is only trusted when its
-        // symbol count matches the CURRENT graph snapshot. If a graph rebuild
-        // didn't persist new stats (crash between graph save and stats save,
-        // or another process overwrote units without stats), the stale sidecar
-        // would silently produce wrong IDF weights — rebuild instead.
-        let stats = Arc::new(match super::retrieval::IdfStats::load(&path) {
+        let stats = Arc::new(match load_idf_stats_sqlite(&root) {
             Some(loaded) if loaded.total_symbols as usize == g.node_count() => loaded,
             _ => {
                 let built = super::retrieval::IdfStats::build(&g);
-                let _ = built.save(&path);
+                persist_derived_sidecars(&root, None, Some(&built));
                 built
             }
         });
@@ -1693,25 +1975,129 @@ impl CodeIndex {
         self.reconcile_workspace(root, on_progress)
     }
 
-    /// Reconcile workspace state with disk: fast 2ms mtime scan, only re-parsing changed files.
+    /// Reconcile workspace state with disk.
+    ///
+    /// Hot path after an agent edit: trust the in-memory patch (`fast_patch_pending`)
+    /// and return immediately — no `WalkBuilder`, no graph recompose, no sidecar
+    /// rebuild. Warm path: re-stat only already-known files. Cold path: full walk.
     pub fn reconcile_workspace(&self, root: &Path, on_progress: &dyn Fn(&str)) -> Arc<CodeGraph> {
         let root = super::canonical(root);
-        let files = collect_files(&root);
-        let fp = fingerprint(&files);
 
-        let mut guard = self.inner.lock().unwrap();
+        let mut guard = match self.inner.lock() {
+            Ok(g) => g,
+            Err(p) => p.into_inner(),
+        };
         loop {
             let same_root = guard.root.as_ref() == Some(&root);
-            if same_root && guard.graph.is_some() && guard.walk_fp == fp {
-                let g = guard.graph.clone().unwrap();
-                if guard.dirindex.is_none() {
-                    let di = Arc::new(super::retrieval::DirIndex::build(&g));
-                    let path = root.join(super::retrieval::DIRINDEX_REL);
-                    let _ = di.save(&path);
-                    guard.dirindex = Some(di);
+
+            // 1. Agent just patched this file — serve memory, do not walk.
+            if same_root && guard.graph.is_some() && guard.fast_patch_pending {
+                guard.fast_patch_pending = false;
+                if guard.last_stats.is_none() {
+                    guard.last_stats = Some(RefreshStats {
+                        reparsed: 1,
+                        removed: 0,
+                        kept: guard.units.len().saturating_sub(1),
+                        cache_hit: false,
+                    });
                 }
-                return g;
+                return guard.graph.clone().unwrap();
             }
+
+            // 2. Warm memory: re-stat known files only (no ignore-walk of the tree).
+            if same_root && guard.graph.is_some() && !guard.units.is_empty() {
+                if guard.building {
+                    on_progress(
+                        "Code graph: waiting for in-flight workspace index (shared with other tools)...",
+                    );
+                    guard = self.cv.wait(guard).unwrap();
+                    continue;
+                }
+                let snapshot: Vec<(PathBuf, u128, u64)> = guard
+                    .units
+                    .iter()
+                    .map(|(p, u)| (p.clone(), u.mtime_ns, u.len))
+                    .collect();
+                let warm_graph = guard.graph.clone().unwrap();
+                let kept_hint = guard.units.len();
+                drop(guard);
+
+                let mut dirty = 0usize;
+                let mut missing = 0usize;
+                for (path, mtime_ns, len) in &snapshot {
+                    match std::fs::metadata(path) {
+                        Ok(md) => {
+                            let disk_mtime = md
+                                .modified()
+                                .ok()
+                                .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
+                                .map(|d| d.as_nanos())
+                                .unwrap_or(0);
+                            if disk_mtime != *mtime_ns || md.len() != *len {
+                                dirty += 1;
+                            }
+                        }
+                        Err(_) => missing += 1,
+                    }
+                }
+
+                if dirty == 0 && missing == 0 {
+                    // Known files are clean. Still look for *created* files
+                    // (any source: editor, copy, pull, …) without a full tree walk.
+                    let known_only: HashMap<PathBuf, FileUnit> = snapshot
+                        .iter()
+                        .map(|(p, m, l)| {
+                            (
+                                p.clone(),
+                                FileUnit {
+                                    mtime_ns: *m,
+                                    len: *l,
+                                    nodes: Vec::new(),
+                                    calls: Vec::new(),
+                                },
+                            )
+                        })
+                        .collect();
+                    let newcomers = discover_new_files(&root, &known_only);
+                    if newcomers.is_empty() {
+                        let mut guard = match self.inner.lock() {
+                            Ok(g) => g,
+                            Err(p) => p.into_inner(),
+                        };
+                        if guard.root.as_ref() == Some(&root) && guard.graph.is_some() {
+                            if guard.fast_patch_pending {
+                                guard.fast_patch_pending = false;
+                                return guard.graph.clone().unwrap();
+                            }
+                            guard.last_stats = Some(RefreshStats {
+                                reparsed: 0,
+                                removed: 0,
+                                kept: kept_hint,
+                                cache_hit: true,
+                            });
+                            if guard.dirindex.is_none() {
+                                let di = Arc::new(super::retrieval::DirIndex::build(&warm_graph));
+                                persist_derived_sidecars(&root, Some(di.as_ref()), None);
+                                guard.dirindex = Some(di);
+                            }
+                            return guard.graph.clone().unwrap_or(warm_graph);
+                        }
+                        drop(guard);
+                    } else {
+                        return self.reconcile_known_files(&root, on_progress);
+                    }
+                } else {
+                    return self.reconcile_known_files(&root, on_progress);
+                }
+
+                // Re-lock and continue into the cold path if the warm graph vanished.
+                guard = match self.inner.lock() {
+                    Ok(g) => g,
+                    Err(p) => p.into_inner(),
+                };
+                continue;
+            }
+
             if guard.building {
                 on_progress(
                     "Code graph: waiting for in-flight workspace index (shared with other tools)...",
@@ -1720,131 +2106,293 @@ impl CodeIndex {
                 continue;
             }
             guard.building = true;
-            // Move units out so we can work without holding the lock.
             let mut units = if same_root {
                 std::mem::take(&mut guard.units)
             } else {
                 guard.units.clear();
                 HashMap::new()
             };
-            let prev_graph = if same_root {
-                guard.graph.clone()
-            } else {
-                None
-            };
+            let prev_graph = if same_root { guard.graph.clone() } else { None };
             drop(guard);
 
-            // Seed from disk cache when memory has no units (new process / cold start).
+            // Cold start: load SQLite FIRST. A full WalkBuilder over a 1万+ file
+            // workspace is 80s+ on Windows and is what made every process restart
+            // look like a guaranteed rebuild even when the db already existed.
             let mut prev_graph = prev_graph;
             if units.is_empty() {
                 if let Some(disk) = load_disk_cache(&root) {
-                    if disk.walk_fp == fp {
-                        let DiskCache {
-                            units: disk_units,
-                            graph,
-                            ..
-                        } = disk;
-                        let n_files = disk_units.len();
-                        let g = Arc::new(graph);
+                    let disk_fp = disk.walk_fp;
+                    let disk_graph_ok = disk.graph.node_count() > 0;
+                    let disk_graph = disk.graph;
+                    let loaded = disk
+                        .units
+                        .into_iter()
+                        .map(|(p, u)| (normalize_index_path(&PathBuf::from(p)), u))
+                        .collect::<HashMap<PathBuf, FileUnit>>();
+                    if !loaded.is_empty() {
+                        let n_files = loaded.len();
+                        let newcomers = discover_new_files(&root, &loaded);
+                        let g = if disk_graph_ok {
+                            on_progress(&format!(
+                                "Code graph: loaded SQLite snapshot ({n_files} files, {} symbols) — skipped tree walk.",
+                                disk_graph.node_count()
+                            ));
+                            Arc::new(disk_graph)
+                        } else {
+                            on_progress(&format!(
+                                "Code graph: composing {n_files} units from SQLite (one-time, no tree walk)...",
+                            ));
+                            let composed = Arc::new(compose_graph(&root, &loaded, on_progress));
+                            if let Ok(db) = super::index_db::IndexDb::open_shared(&root) {
+                                let _ = db.save_graph_only(disk_fp, composed.as_ref());
+                            }
+                            composed
+                        };
+                        if newcomers.is_empty() {
+                            let mut guard = match self.inner.lock() {
+                                Ok(g) => g,
+                                Err(p) => p.into_inner(),
+                            };
+                            guard.root = Some(root.clone());
+                            guard.walk_fp = disk_fp;
+                            guard.units = loaded;
+                            guard.graph = Some(g.clone());
+                            guard.fast_patch_pending = false;
+                            guard.last_stats = Some(RefreshStats {
+                                reparsed: 0,
+                                removed: 0,
+                                kept: n_files,
+                                cache_hit: true,
+                            });
+                            guard.building = false;
+                            self.cv.notify_all();
+                            return g;
+                        }
                         on_progress(&format!(
-                            "Code graph: loaded {} from disk ({n_files} files, {} symbols) - up to date.",
-                            path_for_display(&disk_cache_path(&root)),
-                            g.node_count()
+                            "Code graph: {} new file(s) since last index — incremental ingest.",
+                            newcomers.len()
                         ));
-                        let units: HashMap<PathBuf, FileUnit> = disk_units
-                            .into_iter()
-                            .map(|(p, u)| (PathBuf::from(p), u))
+                        let mut walked: Vec<Walked> = loaded
+                            .iter()
+                            .map(|(p, u)| Walked {
+                                path: p.clone(),
+                                mtime_ns: u.mtime_ns,
+                                len: u.len,
+                            })
                             .collect();
-                        let mut guard = self.inner.lock().unwrap();
-                        guard.root = Some(root.clone());
-                        guard.walk_fp = fp;
-                        guard.units = units;
-                        guard.graph = Some(g.clone());
-                        guard.dirindex = Some(Arc::new(super::retrieval::DirIndex::build(&g)));
-                        guard.idf_stats = None;
-                        guard.concept_vectors = None;
-                        guard.last_stats = Some(RefreshStats {
-                            reparsed: 0,
-                            removed: 0,
-                            kept: n_files,
-                            cache_hit: true,
-                        });
-                        guard.building = false;
-                        self.cv.notify_all();
-                        return g;
+                        walked.extend(newcomers);
+                        let mut units = loaded;
+                        let (reparsed, removed, kept, changed, deleted) =
+                            sync_units(&mut units, &walked, on_progress);
+                        return self.finish_reconcile(
+                            &root,
+                            disk_fp,
+                            units,
+                            Some(g),
+                            reparsed,
+                            removed,
+                            kept,
+                            changed,
+                            deleted,
+                            walked.len(),
+                            on_progress,
+                        );
                     }
-                    on_progress(&format!(
-                        "Code graph: disk cache stale - incremental sync from {}...",
-                        path_for_display(&disk_cache_path(&root))
-                    ));
-                    units = units_from_disk(disk);
-                    prev_graph = None; // force recompose after unit sync
+                    prev_graph = if disk_graph_ok {
+                        Some(Arc::new(disk_graph))
+                    } else {
+                        None
+                    };
+                    units = loaded;
                 }
             }
+
+            // No on-disk index at all — first-ever build for this workspace.
+            on_progress("Code graph: no SQLite index, walking workspace...");
+            let files = collect_files(&root);
+            let fp = fingerprint(&files);
 
             let (reparsed, removed, kept, changed_units, deleted_paths) =
                 sync_units(&mut units, &files, on_progress);
-            let need_compose = reparsed > 0 || removed > 0 || prev_graph.is_none();
-            let cache_hit = reparsed == 0 && removed == 0 && prev_graph.is_some();
-
-            let g = if need_compose {
-                if kept == 0 && reparsed > 0 {
-                    on_progress(&format!(
-                        "Code graph: full index of {} files (first build or workspace switch)...",
-                        files.len()
-                    ));
-                } else if reparsed > 0 || removed > 0 {
-                    on_progress(&format!(
-                        "Code graph: unit update - reparsed {reparsed}, removed {removed}, kept {kept}."
-                    ));
-                }
-                Arc::new(compose_graph(&root, &units, on_progress))
-            } else {
-                prev_graph.expect("need_compose false => graph present")
-            };
-
-            if need_compose {
-                on_progress(&format!(
-                    "Code graph: ready ({} symbols, {} files; reparsed {}, removed {}, kept {}).",
-                    g.node_count(),
-                    units.len(),
-                    reparsed,
-                    removed,
-                    kept
-                ));
-                match save_disk_cache(
-                    &root,
-                    fp,
-                    &units,
-                    g.as_ref(),
-                    &changed_units,
-                    &deleted_paths,
-                ) {
-                    Ok(p) => on_progress(&format!("Code graph: saved {}", path_for_display(&p))),
-                    Err(e) => on_progress(&format!("Code graph: disk save skipped ({e})")),
-                }
-            }
-
-            let stats = RefreshStats {
+            let g = self.finish_reconcile(
+                &root,
+                fp,
+                units,
+                prev_graph,
                 reparsed,
                 removed,
                 kept,
-                cache_hit,
-            };
+                changed_units,
+                deleted_paths,
+                files.len(),
+                on_progress,
+            );
+            return g;
+        }
+    }
 
-            let mut guard = self.inner.lock().unwrap();
-            guard.root = Some(root.clone());
-            guard.walk_fp = fp;
-            guard.units = units;
-            guard.graph = Some(g.clone());
+    /// Incremental reconcile against already-known unit paths (no tree walk).
+    fn reconcile_known_files(&self, root: &Path, on_progress: &dyn Fn(&str)) -> Arc<CodeGraph> {
+        let mut guard = match self.inner.lock() {
+            Ok(g) => g,
+            Err(p) => p.into_inner(),
+        };
+        if guard.building {
+            guard = self.cv.wait(guard).unwrap();
+            if guard.root.as_deref() == Some(root) {
+                if let Some(g) = guard.graph.clone() {
+                    return g;
+                }
+            }
+        }
+        if guard.root.as_deref() != Some(root) {
+            guard.building = false;
+            self.cv.notify_all();
+            drop(guard);
+            return self.reconcile_workspace(root, on_progress);
+        }
+        guard.building = true;
+        let mut units = std::mem::take(&mut guard.units);
+        let prev_graph = guard.graph.clone();
+        drop(guard);
+
+        rekey_units(&mut units);
+        let (mut walked, missing) = restat_known_units(&units);
+        for p in &missing {
+            units.remove(p);
+        }
+        let newcomers = discover_new_files(root, &units);
+        if !newcomers.is_empty() {
+            on_progress(&format!(
+                "Code graph: discovered {} new file(s) (git/dir incremental).",
+                newcomers.len()
+            ));
+            walked.extend(newcomers);
+        }
+        let (reparsed, removed_sync, kept, mut changed_units, mut deleted_paths) =
+            sync_units(&mut units, &walked, on_progress);
+        let removed = removed_sync + missing.len();
+        deleted_paths.extend(missing);
+        if reparsed == 0 && removed == 0 {
+            changed_units.clear();
+        }
+        let fp = fingerprint(&walked);
+        self.finish_reconcile(
+            root,
+            fp,
+            units,
+            prev_graph,
+            reparsed,
+            removed,
+            kept,
+            changed_units,
+            deleted_paths,
+            walked.len(),
+            on_progress,
+        )
+    }
+
+    fn finish_reconcile(
+        &self,
+        root: &Path,
+        fp: u64,
+        units: HashMap<PathBuf, FileUnit>,
+        prev_graph: Option<Arc<CodeGraph>>,
+        reparsed: usize,
+        removed: usize,
+        kept: usize,
+        changed_units: Vec<(PathBuf, FileUnit)>,
+        deleted_paths: Vec<PathBuf>,
+        walked_len: usize,
+        on_progress: &dyn Fn(&str),
+    ) -> Arc<CodeGraph> {
+        // If we already have a live graph, NEVER recompose all call edges.
+        // Reparsing 2223 files used to still rebuild 38万 symbols — that is why
+        // a "partial" increment cost the same as a full index.
+        let can_patch = prev_graph.is_some() && (reparsed > 0 || removed > 0);
+        let need_compose = prev_graph.is_none();
+        let cache_hit = reparsed == 0 && removed == 0 && prev_graph.is_some();
+
+        let g = if can_patch {
+            on_progress(&format!(
+                "Code graph: incremental patch - reparsed {reparsed}, removed {removed}, kept {kept}."
+            ));
+            let mut g = prev_graph.expect("can_patch => graph").as_ref().clone();
+            for p in &deleted_paths {
+                g.remove_file(p);
+            }
+            for (path, unit) in &changed_units {
+                patch_graph_with_unit(&mut g, path, unit, root);
+            }
+            Arc::new(g)
+        } else if need_compose {
+            if kept == 0 && reparsed > 0 {
+                on_progress(&format!(
+                    "Code graph: full index of {walked_len} files (first build or workspace switch)..."
+                ));
+            } else if reparsed > 0 || removed > 0 {
+                on_progress(&format!(
+                    "Code graph: unit update - reparsed {reparsed}, removed {removed}, kept {kept}."
+                ));
+            }
+            Arc::new(compose_graph(root, &units, on_progress))
+        } else {
+            prev_graph.expect("need_compose false => graph present")
+        };
+
+        // Only rewrite SQLite when file units actually changed. Composing the
+        // in-memory graph from an existing db must NOT touch the files on disk
+        // (that was the "restart = rebuild three index files" bug).
+        if reparsed > 0 || removed > 0 {
+            on_progress(&format!(
+                "Code graph: ready ({} symbols, {} files; reparsed {}, removed {}, kept {}).",
+                g.node_count(),
+                units.len(),
+                reparsed,
+                removed,
+                kept
+            ));
+            let first_or_large = kept == 0;
+            let (ch, del): (&[(PathBuf, FileUnit)], &[PathBuf]) = if first_or_large {
+                (&[], &[])
+            } else {
+                (&changed_units, &deleted_paths)
+            };
+            match save_disk_cache(root, fp, &units, g.as_ref(), ch, del) {
+                Ok(p) => on_progress(&format!("Code graph: saved {}", path_for_display(&p))),
+                Err(e) => on_progress(&format!("Code graph: disk save skipped ({e})")),
+            }
+        } else if need_compose {
+            if let Ok(db) = super::index_db::IndexDb::open_shared(root) {
+                let _ = db.save_graph_only(fp, g.as_ref());
+            }
+        }
+
+        let stats = RefreshStats {
+            reparsed,
+            removed,
+            kept,
+            cache_hit,
+        };
+
+        let mut guard = match self.inner.lock() {
+            Ok(g) => g,
+            Err(p) => p.into_inner(),
+        };
+        guard.root = Some(root.to_path_buf());
+        guard.walk_fp = fp;
+        guard.units = units;
+        guard.graph = Some(g.clone());
+        guard.fast_patch_pending = false;
+        if need_compose && !can_patch {
             guard.dirindex = Some(Arc::new(super::retrieval::DirIndex::build(&g)));
             guard.idf_stats = None;
             guard.concept_vectors = None;
-            guard.last_stats = Some(stats);
-            guard.building = false;
-            self.cv.notify_all();
-            return g;
         }
+        guard.last_stats = Some(stats);
+        guard.building = false;
+        self.cv.notify_all();
+        g
     }
 }
 
@@ -2014,14 +2562,113 @@ export function CouponPanel() {
     }
 
     #[test]
-    fn binary_cache_roundtrip_and_json_fallback() {
+    fn restart_loads_sqlite_without_rewalk_or_rewrite() {
         let d = tempfile::tempdir().unwrap();
-        // Build a tiny graph.
+        std::fs::write(d.path().join("a.rs"), "pub fn hello() {}\n").unwrap();
+        let report = init_workspace_index(d.path(), false, &|_| {}).expect("init");
+        assert!(report.cache_path.exists());
+        let db_path = crate::codeintel::index_db::disk_cache_path_db(d.path());
+        let before = std::fs::metadata(&db_path).unwrap();
+        let before_mtime = before.modified().unwrap();
+        let before_len = before.len();
+
+        // New process: must load the existing SQLite index, not rebuild it.
+        let idx = CodeIndex::new();
+        let g = idx.get(d.path());
+        assert!(g.find_by_name("hello").into_iter().next().is_some());
+        let stats = idx.last_stats(d.path()).unwrap();
+        assert!(
+            stats.cache_hit && stats.reparsed == 0,
+            "restart must be a SQLite cache hit, not a rebuild: {stats:?}"
+        );
+
+        let after = std::fs::metadata(&db_path).unwrap();
+        assert_eq!(
+            after.len(),
+            before_len,
+            "restart must not rewrite the SQLite db"
+        );
+        assert_eq!(
+            after.modified().unwrap(),
+            before_mtime,
+            "restart must not touch the SQLite db mtime"
+        );
+    }
+
+    #[test]
+    fn new_file_create_is_ingested_without_git() {
+        // Create (not just modify/delete) must be incremental even with no VCS.
+        let d = tempfile::tempdir().unwrap();
+        std::fs::write(d.path().join("old.rs"), "pub fn old_sym() {}\n").unwrap();
+        let idx = CodeIndex::new();
+        let g1 = idx.get(d.path());
+        assert!(!g1.find_by_name("old_sym").is_empty());
+        assert!(g1.find_by_name("brand_new").is_empty());
+
+        std::fs::create_dir_all(d.path().join("pkg")).unwrap();
+        std::fs::write(d.path().join("pkg/new.rs"), "pub fn brand_new() {}\n").unwrap();
+        std::fs::write(d.path().join("sibling.rs"), "pub fn sibling() {}\n").unwrap();
+
+        let g2 = idx.get(d.path());
+        assert!(!g2.find_by_name("brand_new").is_empty(), "new file in new subdir");
+        assert!(!g2.find_by_name("sibling").is_empty(), "new sibling file");
+        assert!(!g2.find_by_name("old_sym").is_empty());
+        let stats = idx.last_stats(d.path()).unwrap();
+        assert!(
+            stats.reparsed <= 3,
+            "create must be incremental, not a full rebuild: {stats:?}"
+        );
+    }
+
+    #[test]
+    fn git_new_file_is_ingested_incrementally() {
+        let d = tempfile::tempdir().unwrap();
+        let root = d.path();
+        assert!(std::process::Command::new("git")
+            .args(["-C", &root.to_string_lossy(), "init"])
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false));
+        let _ = std::process::Command::new("git")
+            .args(["-C", &root.to_string_lossy(), "config", "user.email", "t@t.t"])
+            .status();
+        let _ = std::process::Command::new("git")
+            .args(["-C", &root.to_string_lossy(), "config", "user.name", "t"])
+            .status();
+        std::fs::write(root.join("old.rs"), "pub fn old_sym() {}\n").unwrap();
+        let _ = std::process::Command::new("git")
+            .args(["-C", &root.to_string_lossy(), "add", "old.rs"])
+            .status();
+        let _ = std::process::Command::new("git")
+            .args(["-C", &root.to_string_lossy(), "commit", "-m", "init", "--no-gpg-sign"])
+            .status();
+
+        let idx = CodeIndex::new();
+        let g1 = idx.get(root);
+        assert!(!g1.find_by_name("old_sym").is_empty());
+        assert!(g1.find_by_name("new_sym").is_empty());
+
+        std::fs::write(root.join("new.rs"), "pub fn new_sym() {}\n").unwrap();
+        let g2 = idx.get(root);
+        assert!(
+            !g2.find_by_name("new_sym").is_empty(),
+            "git-visible new file must be incrementally indexed"
+        );
+        assert!(!g2.find_by_name("old_sym").is_empty());
+        let stats = idx.last_stats(root).unwrap();
+        assert!(
+            stats.reparsed <= 2,
+            "must not rebuild the whole index for one new file: {stats:?}"
+        );
+    }
+
+    #[test]
+    fn sqlite_is_the_only_on_disk_store() {
+        let d = tempfile::tempdir().unwrap();
         std::fs::write(d.path().join("a.rs"), "pub fn alpha() {}\n").unwrap();
         let g = build_graph(d.path());
         assert!(!g.nodes.is_empty());
 
-        // Save both formats; verify the binary file exists and is much smaller.
         let file = d.path().join("a.rs");
         let meta = std::fs::metadata(&file).unwrap();
         let mtime = meta
@@ -2037,24 +2684,23 @@ export function CouponPanel() {
             calls: vec![],
         };
         let units = HashMap::from([(file.clone(), unit.clone())]);
-        let changed = vec![(file, unit)];
-        let _ = save_disk_cache(d.path(), 1, &units, &g, &changed, &[]);
-        let bin_path = disk_cache_path_bin(d.path());
+        // Plant leftover sidecar junk — save must delete them.
         let json_path = disk_cache_path(d.path());
-        assert!(bin_path.exists(), "units.v4.bin must be written");
-        assert!(json_path.exists(), "units.v3.json must still be written for fallback");
-        let bin_size = std::fs::metadata(&bin_path).unwrap().len();
-        let json_size = std::fs::metadata(&json_path).unwrap().len();
-        assert!(bin_size < json_size, "binary cache should be smaller: {bin_size} vs {json_size}");
+        let bin_path = disk_cache_path_bin(d.path());
+        std::fs::create_dir_all(json_path.parent().unwrap()).unwrap();
+        std::fs::write(&json_path, b"stale").unwrap();
+        std::fs::write(&bin_path, b"stale").unwrap();
 
-        // Binary load path round-trips the graph.
-        let loaded_bin = load_disk_cache_bin(d.path()).expect("binary cache must load");
-        assert_eq!(loaded_bin.graph.nodes.len(), g.nodes.len());
+        let _ = save_disk_cache(d.path(), 1, &units, &g, &[], &[]);
+        assert!(
+            crate::codeintel::index_db::disk_cache_path_db(d.path()).is_file(),
+            "SQLite db must be written"
+        );
+        assert!(!json_path.exists(), "units.v3.json must not be written");
+        assert!(!bin_path.exists(), "units.v4.bin must not be written");
 
-        // Delete the binary cache → JSON fallback still serves.
-        std::fs::remove_file(&bin_path).unwrap();
-        let loaded_json = load_disk_cache(d.path()).expect("JSON fallback must load");
-        assert_eq!(loaded_json.graph.nodes.len(), g.nodes.len());
+        let loaded = load_disk_cache(d.path()).expect("sqlite cache must load");
+        assert_eq!(loaded.units.len(), 1);
     }
 
     #[test]
@@ -2213,8 +2859,10 @@ public class OrderController
             "unchanged repo → cached graph reused"
         );
         assert!(g1.find_by_name("two").is_empty());
-        // change the repo (new mtime via a new file) → rebuild
-        std::fs::write(d.path().join("b.rs"), "fn two() {}\n").unwrap();
+        // New files arrive via the edit/write notify path (no full tree walk).
+        let new_src = "fn two() {}\n";
+        std::fs::write(d.path().join("b.rs"), new_src).unwrap();
+        assert!(idx.update_single_file(&d.path().join("b.rs"), Some(new_src)));
         let g3 = idx.get(d.path());
         assert!(!Arc::ptr_eq(&g1, &g3), "changed repo → rebuilt");
         assert!(
@@ -2510,6 +3158,50 @@ public class OrderController
         assert!(g2.find_by_name("alpha").is_empty(), "old symbol should be removed");
         assert!(!g2.find_by_name("alpha_prime").is_empty(), "new symbol should be present");
         assert!(!g2.find_by_name("beta").is_empty());
+
+        // A second get with no disk change must be a cache hit — not "reparse N files".
+        let g3 = index.get(root);
+        assert!(Arc::ptr_eq(&g2, &g3), "warm get after patch must reuse graph");
+        let stats2 = index.last_stats(root).unwrap();
+        assert!(
+            stats2.cache_hit || stats2.reparsed <= 1,
+            "must not reparse the whole workspace: {stats2:?}"
+        );
+    }
+
+    #[test]
+    fn slash_mismatched_unit_keys_do_not_mark_every_file_dirty() {
+        let d = tempfile::tempdir().unwrap();
+        for i in 0..12 {
+            std::fs::write(
+                d.path().join(format!("f{i}.rs")),
+                format!("pub fn f{i}() {{}}\n"),
+            )
+            .unwrap();
+        }
+        let idx = CodeIndex::new();
+        let _ = idx.get(d.path());
+
+        // Poison in-memory keys with forward slashes (the SQLite/JSON round-trip
+        // bug that made every file look new).
+        {
+            let mut guard = idx.inner.lock().unwrap();
+            let old = std::mem::take(&mut guard.units);
+            for (p, u) in old {
+                let slashed = PathBuf::from(p.to_string_lossy().replace('\\', "/"));
+                guard.units.insert(slashed, u);
+            }
+            guard.fast_patch_pending = false;
+        }
+
+        let g2 = idx.get(d.path());
+        let stats = idx.last_stats(d.path()).unwrap();
+        assert!(
+            stats.reparsed <= 1,
+            "slash-mismatched keys must be rekeyed, not fully reparsed: {stats:?}"
+        );
+        assert!(!g2.find_by_name("f0").is_empty());
+        assert!(!g2.find_by_name("f11").is_empty());
     }
 
     #[test]

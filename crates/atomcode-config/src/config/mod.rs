@@ -102,9 +102,34 @@ impl Default for TodoToolConfig {
 #[serde(default)]
 pub struct ToolsConfig {
     pub todo: TodoToolConfig,
+    /// Bash tool timeout and execution policy. Persisted as `[tools.bash]`.
+    #[serde(default)]
+    pub bash: BashToolConfig,
     /// Tool-result fold threshold. Persisted as `[tools.tool_output]`.
     #[serde(default)]
     pub tool_output: ToolOutputConfig,
+}
+
+/// `[tools.bash]` — configuration for the bash tool execution timeouts.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct BashToolConfig {
+    /// Default timeout in seconds if not specified in the tool call arguments.
+    pub default_timeout_secs: u64,
+    /// Maximum allowed timeout ceiling in seconds that can be passed by the model or user.
+    pub max_timeout_secs: u64,
+    /// Silent timeout in seconds (killed if no output is produced for this duration).
+    pub silent_kill_secs: u64,
+}
+
+impl Default for BashToolConfig {
+    fn default() -> Self {
+        Self {
+            default_timeout_secs: 180,
+            max_timeout_secs: 1800,
+            silent_kill_secs: 300,
+        }
+    }
 }
 
 /// `[tools.tool_output]` — where oversized tool results are folded into a
@@ -1374,6 +1399,26 @@ impl Default for NotificationConfig {
 /// `enabled` and `dir` are always emitted as real values — the default `dir`
 /// (`~/.atomcode/datalog`) is shown explicitly so users see exactly where
 /// logs go without having to discover that "unset == default".
+fn render_tools_section(tools: &ToolsConfig) -> String {
+    let mut out = String::new();
+    out.push_str("\n[tools.todo]\n");
+    out.push_str(&format!("enabled = {}\n", tools.todo.enabled));
+    let eager_str = match tools.todo.eager {
+        TodoEagerness::Auto => "auto",
+        TodoEagerness::Preferred => "preferred",
+        TodoEagerness::Always => "always",
+    };
+    out.push_str(&format!("eager = \"{}\"\n", eager_str));
+    out.push_str("\n[tools.bash]\n");
+    out.push_str("# 默认超时时间（秒）：当未指定 timeout 参数时使用的默认超时（默认 60）\n");
+    out.push_str(&format!("default_timeout_secs = {}\n", tools.bash.default_timeout_secs));
+    out.push_str("# 最大允许超时时间（秒）：限制 timeout 参数的最大上限（默认 1800，即 30 分钟）\n");
+    out.push_str(&format!("max_timeout_secs = {}\n", tools.bash.max_timeout_secs));
+    out.push_str("# 静默输出超时时间（秒）：进程已产生部分输出后，若连续无任何新输出的最大等待时间（默认 90）\n");
+    out.push_str(&format!("silent_kill_secs = {}\n", tools.bash.silent_kill_secs));
+    out
+}
+
 fn render_datalog_section(cfg: &DatalogConfig) -> String {
     let mut out = String::new();
     out.push_str("\n# Per-turn datalog. Each turn writes a markdown summary; each LLM\n");
@@ -1713,6 +1758,7 @@ impl Config {
             }
         }
         let mut content = toml::to_string_pretty(&persistent)?;
+        content.push_str(&render_tools_section(&self.tools));
         content.push_str(&render_datalog_section(&self.datalog));
         content.push_str(&render_notifications_section(&self.notifications));
         content.push_str(&render_network_section(&self.network));
@@ -2486,6 +2532,7 @@ model = "missing-type"
                     eager: TodoEagerness::Always,
                 },
                 tool_output: ToolOutputConfig::default(),
+                bash: BashToolConfig::default(),
             },
             vision_preprocessor_provider: None,
             language: None,
@@ -3583,5 +3630,21 @@ context_window = 131072
         // 0 explicitly disables folding (distinct from absent).
         let zero: Config = toml::from_str("[tools.tool_output]\nmax_bytes = 0\n").unwrap();
         assert_eq!(zero.tools.tool_output.max_bytes, Some(0));
+    }
+
+    #[test]
+    fn bash_tool_config_defaults_and_parses() {
+        let defaulted: Config = toml::from_str("").unwrap();
+        assert_eq!(defaulted.tools.bash.default_timeout_secs, 180);
+        assert_eq!(defaulted.tools.bash.max_timeout_secs, 1800);
+        assert_eq!(defaulted.tools.bash.silent_kill_secs, 300);
+
+        let configured: Config = toml::from_str(
+            "[tools.bash]\ndefault_timeout_secs = 300\nmax_timeout_secs = 3600\nsilent_kill_secs = 600\n",
+        )
+        .unwrap();
+        assert_eq!(configured.tools.bash.default_timeout_secs, 300);
+        assert_eq!(configured.tools.bash.max_timeout_secs, 3600);
+        assert_eq!(configured.tools.bash.silent_kill_secs, 600);
     }
 }

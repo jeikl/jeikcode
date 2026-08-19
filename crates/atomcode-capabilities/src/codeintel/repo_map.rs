@@ -132,6 +132,7 @@ impl Tool for RepoMapTool {
     }
 
     async fn execute(&self, args: &str, ctx: &ToolContext) -> ToolResult {
+        let t0 = std::time::Instant::now();
         let a: Args = match serde_json::from_str(args) {
             Ok(a) => a,
             Err(_) => Args {
@@ -148,9 +149,9 @@ impl Tool for RepoMapTool {
                 } else {
                     ctx.working_dir.join(p)
                 };
-                resolved
+                crate::pathnorm::canonicalize(&resolved).unwrap_or(resolved)
             }
-            _ => ctx.working_dir.clone(),
+            _ => crate::pathnorm::canonicalize(&ctx.working_dir).unwrap_or_else(|_| ctx.working_dir.clone()),
         };
 
         if !target_dir.exists() {
@@ -160,7 +161,7 @@ impl Tool for RepoMapTool {
             ));
         }
 
-        let max_files = a.max_files.unwrap_or(DEFAULT_MAX_FILES).min(MAX_ALLOWED_FILES);
+        let max_files = a.max_files.unwrap_or(DEFAULT_MAX_FILES).clamp(1, MAX_ALLOWED_FILES);
         let mode = a
             .mode
             .unwrap_or_else(|| "tree".to_string())
@@ -174,7 +175,10 @@ impl Tool for RepoMapTool {
         .await;
 
         match result {
-            Ok(content) => ok(content),
+            Ok(content) => {
+                let cost_time = t0.elapsed();
+                ok(format!("> ⏱️ **Cost Time**: {}ms\n\n{content}", cost_time.as_millis()))
+            }
             Err(e) => err(format!("repo_map execution failed: {e}")),
         }
     }

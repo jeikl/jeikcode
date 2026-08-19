@@ -143,6 +143,7 @@ const BUILTIN_COMMANDS: &[Command] = &[
     Command { name: "logout",  desc: "Sign out of AtomGit", needs_args: false, hidden: false },
     Command { name: "whoami",  desc: "Show current logged-in user", needs_args: false, hidden: false },
     Command { name: "model",   desc: "Switch provider / model", needs_args: false, hidden: false },
+    Command { name: "modelsadd", desc: "Quickly add a model to an existing provider account", needs_args: false, hidden: false },
     Command { name: "provider", desc: "Manage providers (add / edit / delete)", needs_args: false, hidden: false },
     Command { name: "proxy",   desc: "Switch outbound proxy mode", needs_args: false, hidden: false },
     Command { name: "status",  desc: "Show session status", needs_args: false, hidden: false },

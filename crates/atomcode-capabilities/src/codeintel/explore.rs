@@ -25,6 +25,7 @@ use rayon::prelude::*;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock};
+use std::time::Duration;
 
 const DEFAULT_MAX_FILES: usize = 12;
 const MAX_ALLOWED_FILES: usize = 30;
@@ -236,6 +237,35 @@ pub(crate) fn path_matches_scope(file_path: &Path, scope: &Path) -> bool {
         || sc_norm.contains(&f_norm)
 }
 
+/// Discovers independent subproject roots in a workspace (directories containing
+/// Cargo.toml, package.json, go.mod, pom.xml, pyproject.toml, build.gradle, or .git).
+pub fn detect_subproject_roots(root: &Path) -> Vec<PathBuf> {
+    let mut projects = Vec::new();
+    let Ok(entries) = std::fs::read_dir(root) else {
+        return projects;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+            if name.starts_with('.') || name == "target" || name == "node_modules" || name == "dist" {
+                continue;
+            }
+            if path.join("Cargo.toml").exists()
+                || path.join("package.json").exists()
+                || path.join("go.mod").exists()
+                || path.join("pom.xml").exists()
+                || path.join("pyproject.toml").exists()
+                || path.join("build.gradle").exists()
+                || path.join(".git").exists()
+            {
+                projects.push(path);
+            }
+        }
+    }
+    projects
+}
+
 #[async_trait]
 impl Tool for CodeExploreTool {
     fn name(&self) -> &str {
@@ -276,7 +306,7 @@ impl Tool for CodeExploreTool {
                 },
                 "path": {
                     "type": "string",
-                    "description": "Optional subdirectory or file scope to narrow search"
+                    "description": "Optional subdirectory or file scope to narrow search (e.g. 'src/tools', 'packages/backend'). In a multi-project workspace with independent subprojects, MUST provide a relative path to prevent context explosion."
                 }
             },
             "required": ["query"]
@@ -330,7 +360,10 @@ impl Tool for CodeExploreTool {
         let query_tokens = parse_bilingual_query_with_thesaurus(search_text, &thesaurus_guard);
         drop(thesaurus_guard);
 
+        let t0 = std::time::Instant::now();
+        let t_index_start = std::time::Instant::now();
         let graph = self.index.get(&root);
+        let t_index = t_index_start.elapsed();
 
         let scope_path = if !parsed_query.path_filters.is_empty() {
             let p = &parsed_query.path_filters[0];
@@ -350,6 +383,7 @@ impl Tool for CodeExploreTool {
         };
 
         // Step 1: Score all symbols in the workspace.
+        let t_retrieval_start = std::time::Instant::now();
         // Opt-in BM25 lexical recall (ATOMCODE_EXPLORE_BM25=1): surface naming-plain
         // core files (run_loop.rs / turn.rs / tool_calls.rs) that the semantic-anchor
         // gate would otherwise drop before scoring.
@@ -488,6 +522,7 @@ impl Tool for CodeExploreTool {
 
         // Step 2: Attempt Flow Spine extraction from top seeds
         let (flow_spine, connected) = extract_flow_spine(&graph, &scored_files);
+        let t_retrieval = t_retrieval_start.elapsed();
 
         // Step 3: Render output (Mode A: Connected Flow vs Mode B: Ranked Fallback)
         // Query-result cache: identical (fingerprint, query, scope) hits reuse
@@ -504,7 +539,11 @@ impl Tool for CodeExploreTool {
         if let Some(cached) = query_cache_get(fp, &a.query, &scope_key, max_files, bm25_enabled, concept_enabled) {
             return ok(cached);
         }
+        let t_render_start = std::time::Instant::now();
         let dirindex = self.index.get_dirindex(&root);
+        let cache_status = self.index.last_stats(&root);
+        let t_render = t_render_start.elapsed();
+        let total_cost = t0.elapsed();
         let output = render_explore_output(
             &graph,
             &root,
@@ -516,6 +555,8 @@ impl Tool for CodeExploreTool {
             scope_path.as_deref(),
             &query_tokens,
             dirindex.as_deref(),
+            cache_status,
+            Some((total_cost, t_index, t_retrieval, t_render)),
         );
         query_cache_insert(fp, &a.query, &scope_key, max_files, bm25_enabled, concept_enabled, output.clone());
 
@@ -1440,9 +1481,87 @@ fn render_explore_output(
     scope: Option<&Path>,
     tokens: &SearchTokens,
     dirindex: Option<&super::retrieval::DirIndex>,
+    cache_status: Option<super::index::RefreshStats>,
+    cost_breakdown: Option<(Duration, Duration, Duration, Duration)>,
 ) -> String {
     let mut out = Vec::new();
     let top_files = &candidates[..candidates.len().min(max_files)];
+
+    // Performance timing breakdown header
+    if let Some((total, index_t, ret_t, ren_t)) = cost_breakdown {
+        out.push(format!(
+            "> ⚡ **Performance**: ⏱️ **Cost Time**: {}ms (Index: {}ms | Retrieval: {}ms | Render: {}ms)\n",
+            total.as_millis(),
+            index_t.as_millis(),
+            ret_t.as_millis(),
+            ren_t.as_millis()
+        ));
+    }
+
+    // Index cache hit / miss header
+    if let Some(stats) = cache_status {
+        if stats.cache_hit {
+            out.push(format!(
+                "> ⚡ **Index Status**: [Cache HIT] 内存索引已就绪（复用 {} 个文件单元，0 重建）\n",
+                stats.kept
+            ));
+        } else {
+            out.push(format!(
+                "> 🔄 **Index Status**: [Cache MISS] 索引已更新（重新解析 {} 个文件，保留 {} 个，移除 {} 个）\n",
+                stats.reparsed, stats.kept, stats.removed
+            ));
+        }
+    } else {
+        out.push("> ⚡ **Index Status**: [Cache HIT] 内存索引已就绪\n".to_string());
+    }
+
+    // Path unassigned reference & subprojects discovery:
+    // If it's a monorepo (frontend/backend/terminal), tell the model that empty or "~" is fully supported for cross-end search.
+    // If they are completely independent non-crossing projects, suggest providing a relative path.
+    if scope.is_none() {
+        let subprojects = detect_subproject_roots(root);
+        if subprojects.len() > 1 {
+            let mut proj_list = Vec::new();
+            let mut looks_like_monorepo = false;
+            for p in &subprojects {
+                if let Ok(rel) = p.strip_prefix(root) {
+                    let rel_str = rel.to_string_lossy().to_lowercase();
+                    if rel_str.contains("frontend")
+                        || rel_str.contains("backend")
+                        || rel_str.contains("web")
+                        || rel_str.contains("server")
+                        || rel_str.contains("client")
+                        || rel_str.contains("ui")
+                        || rel_str.contains("api")
+                        || rel_str.contains("terminal")
+                        || rel_str.contains("crates")
+                        || rel_str.contains("packages")
+                    {
+                        looks_like_monorepo = true;
+                    }
+                    proj_list.push(format!("`{}`", rel.display()));
+                }
+            }
+            if looks_like_monorepo {
+                out.push(format!(
+                    "> 💡 **工作区结构感知（同项目/前后端/终端大仓）**：检测到工作区包含多个子模块（{}）。如果是同一套系统（如前端+后端+终端一体仓），支持传空参数或 `~` 执行全仓跨端检索；如果本次仅需定位某一端（如仅查前端或仅查后端），可传入子目录相对路径（例如 `path: \"{}\"`）获得更聚焦的代码与调用流。\n",
+                    proj_list.join(", "),
+                    subprojects.first().and_then(|p| p.strip_prefix(root).ok()).map(|p| p.display().to_string()).unwrap_or_else(|| "frontend".to_string())
+                ));
+            } else {
+                out.push(format!(
+                    "> ⚠️ **工作区结构感知（多独立不交叉项目）**：检测到当前工作区包含 {} 个独立子项目（{}）。如果是独立没有交叉的项目，不传 `path` 进行全仓检索可能导致上下文体积激增；建议在 `path:` 中明确指定具体项目相对路径（例如 `path: \"{}\"`）。若本来就是同一个大项目或需要全仓搜，可继续传空或 `~`。\n",
+                    subprojects.len(),
+                    proj_list.join(", "),
+                    subprojects.first().and_then(|p| p.strip_prefix(root).ok()).map(|p| p.display().to_string()).unwrap_or_else(|| "subproject".to_string())
+                ));
+            }
+        } else {
+            out.push(
+                "> 💡 **未限定检索路径**：当前为全仓检索模式。若是同一个大项目（包含前端、后端等各个组成部分），传空或 `~` 即可；如果当前目录包含多个完全独立的项目，建议在 `path:` 中指定具体的子项目相对路径以避免上下文膨胀。\n".to_string()
+            );
+        }
+    }
 
     out.push("> 💡 **Surgical Flow & Capsule Notice**: Primary execution flow, candidate spans, and file capability capsules are rendered below. To ensure complete coverage of edge cases or declarative configs, examine the **File Capability Capsule** or adjacent files in the same directory.\n".to_string());
 
@@ -1932,7 +2051,7 @@ mod tests {
             symbols,
         }];
         let root = PathBuf::from(".");
-        let out = render_explore_output(&graph, &root, "coverage probe", &candidates, &[], false, 8, None, &SearchTokens::default(), None);
+        let out = render_explore_output(&graph, &root, "coverage probe", &candidates, &[], false, 8, None, &SearchTokens::default(), None, None, None);
         assert!(out.contains("📊 **Coverage**"), "coverage summary missing:\n{out}");
         assert!(out.contains("showing 1/1 candidate file(s)"), "shown/total missing:\n{out}");
         assert!(out.contains("2 high-scoring symbol(s) omitted"), "omitted count missing:\n{out}");
@@ -1978,7 +2097,7 @@ mod tests {
         let flow_spine: Vec<(u64, Option<u64>, super::super::graph::EdgeKind)> = (0..40u64)
             .map(|i| (i, Some(i + 1), super::super::graph::EdgeKind::Calls))
             .collect();
-        let out = render_explore_output(&graph, &root, "q", &candidates, &flow_spine, true, 8, None, &SearchTokens::default(), None);
+        let out = render_explore_output(&graph, &root, "q", &candidates, &flow_spine, true, 8, None, &SearchTokens::default(), None, None, None);
         assert!(out.contains("showing 8/15 candidate file(s)"), "shown/total:\n{out}");
         assert!(
             out.contains("7 remaining candidate file(s) — ALL listed with full paths below"),
@@ -2131,6 +2250,8 @@ mod tests {
             Some(&scope),
             &SearchTokens::default(),
             None,
+            None,
+            None,
         );
         assert!(out.contains("🔭 **Search scope**"), "scope hint missing:\n{out}");
         assert!(out.contains("SIBLING layers"), "sibling-layers hint missing:\n{out}");
@@ -2163,7 +2284,7 @@ mod tests {
                 graph_mass: 10.0,
             }],
         }];
-        let no_contract = render_explore_output(&graph, &root, "q", &func_candidates, &[], false, 8, None, &SearchTokens::default(), None);
+        let no_contract = render_explore_output(&graph, &root, "q", &func_candidates, &[], false, 8, None, &SearchTokens::default(), None, None, None);
         assert!(!no_contract.contains("🧩 **Contract hit**"), "contract hint should not fire for a function:\n{no_contract}");
         assert!(no_contract.contains("🎯 **Low hit count**"), "low-hit should still fire:\n{no_contract}");
     }
@@ -2231,7 +2352,7 @@ mod tests {
             }],
         }];
         let root = PathBuf::from(".");
-        let out = render_explore_output(&graph, &root, "repair_tool_args", &candidates, &[], false, 8, None, &SearchTokens::default(), None);
+        let out = render_explore_output(&graph, &root, "repair_tool_args", &candidates, &[], false, 8, None, &SearchTokens::default(), None, None, None);
         // 📁 now lists the hit's DIRECTORY (not sibling filenames): the tools/
         // dir must appear; the far kernel/src dir must not.
         assert!(
@@ -2304,6 +2425,8 @@ mod tests {
             8,
             Some(&scope),
             &SearchTokens::default(),
+            None,
+            None,
             None,
         );
         // The Coverage line must surface the workspace contrast: only 1 of 2 files /

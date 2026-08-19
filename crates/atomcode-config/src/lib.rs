@@ -5,6 +5,7 @@
 //! `docs/superpowers/plans/2026-07-11-extract-atomcode-config.md`.
 
 /// UI language selection (`Config.language`).
+
 pub mod locale;
 
 /// Localization message tables + `t()`/`Msg`.

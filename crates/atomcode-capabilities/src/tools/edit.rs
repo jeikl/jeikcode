@@ -55,6 +55,7 @@ impl Tool for EditFileTool {
         String::new()
     }
     async fn execute(&self, args: &str, ctx: &ToolContext) -> ToolResult {
+        let t0 = std::time::Instant::now();
         let a: Args = match parse_tool_args(
             "edit_file",
             args,
@@ -130,15 +131,7 @@ impl Tool for EditFileTool {
             (old_c, coerce_eol(&a.new_string, file_eol), c)
         };
         if count == 0 {
-            // Last-resort whitespace-normalized fuzzy fallback (ported from the v1
-            // editor). The common failure it rescues: the model reproduced the snippet
-            // with the wrong INDENTATION whitespace (e.g. spaces where the file uses
-            // tabs — read_file passes the real tabs, but the model emits spaces), so the
-            // exact / EOL-coerced match can't find it and the model resorts to a shell
-            // script. `try_fuzzy_replace` matches line-by-line ignoring leading/trailing
-            // whitespace, then re-anchors the replacement to the file's REAL indent. It
-            // is guarded (≥10 chars of trimmed content, and unique unless replace_all)
-            // so it can't fire on short/ambiguous fragments.
+            // Tier 2: whitespace-normalized fuzzy fallback
             if let Some((fuzzy_result, fuzzy_count)) =
                 try_fuzzy_replace(&content, &a.old_string, &a.new_string, a.replace_all)
             {
@@ -152,17 +145,42 @@ impl Tool for EditFileTool {
                 if let Err(msg) = write_encoded(&path, &fuzzy_result, file_encoding).await {
                     return err(msg);
                 }
+                #[cfg(feature = "codeintel")]
+                crate::codeintel::notify_code_index_file_changed(&path, Some(&fuzzy_result));
                 let diff = build_compact_diff(&content, &fuzzy_result);
+                let cost_time = t0.elapsed();
                 return ok(format!(
-                    "Edited {} (fuzzy whitespace match, {fuzzy_count} replacement{})\n{}",
+                    "> ⏱️ **Cost Time**: {:.2?}ms\n\nEdited {} (fuzzy whitespace match, {fuzzy_count} replacement{})\n{}",
+                    cost_time.as_millis(),
                     crate::pathnorm::to_display(&path),
                     if fuzzy_count == 1 { "" } else { "s" },
                     diff,
                 ));
             }
-            // Tier 2: block-anchor match (first+last line anchors, ONE interior line's drift
-            // tolerated). Absorbs the "model got one interior line slightly wrong" case that
-            // otherwise sends a weak model reaching for `sed`. Unique + at-most-one-drift guarded.
+
+            // Tier 3: token & inline whitespace normalized fallback
+            if let Some((token_result, token_count)) =
+                try_token_normalized_replace(&content, &a.old_string, &a.new_string, a.replace_all)
+            {
+                if token_result != content {
+                    if let Err(msg) = write_encoded(&path, &token_result, file_encoding).await {
+                        return err(msg);
+                    }
+                    #[cfg(feature = "codeintel")]
+                    crate::codeintel::notify_code_index_file_changed(&path, Some(&token_result));
+                    let diff = build_compact_diff(&content, &token_result);
+                    let cost_time = t0.elapsed();
+                    return ok(format!(
+                        "> ⏱️ **Cost Time**: {:.2?}ms\n\nEdited {} (token-normalized match, {token_count} replacement{})\n{}",
+                        cost_time.as_millis(),
+                        crate::pathnorm::to_display(&path),
+                        if token_count == 1 { "" } else { "s" },
+                        diff,
+                    ));
+                }
+            }
+
+            // Tier 4: block-anchor match (first+last line anchors with interior drift tolerance)
             if let Some((anchor_result, _)) =
                 try_block_anchor_replace(&content, &a.old_string, &a.new_string)
             {
@@ -170,18 +188,50 @@ impl Tool for EditFileTool {
                     if let Err(msg) = write_encoded(&path, &anchor_result, file_encoding).await {
                         return err(msg);
                     }
+                    #[cfg(feature = "codeintel")]
+                    crate::codeintel::notify_code_index_file_changed(&path, Some(&anchor_result));
                     let diff = build_compact_diff(&content, &anchor_result);
+                    let cost_time = t0.elapsed();
                     return ok(format!(
-                        "Edited {} (anchored block match, 1 replacement)\n{}",
+                        "> ⏱️ **Cost Time**: {:.2?}ms\n\nEdited {} (anchored block match, 1 replacement)\n{}",
+                        cost_time.as_millis(),
                         crate::pathnorm::to_display(&path),
                         diff,
                     ));
                 }
             }
+
+            // Tier 5: boundary trimmed context match (handles extraneous leading/trailing context line emitted by LLM)
+            if let Some((bound_result, _)) =
+                try_trimmed_boundary_replace(&content, &a.old_string, &a.new_string)
+            {
+                if bound_result != content {
+                    if let Err(msg) = write_encoded(&path, &bound_result, file_encoding).await {
+                        return err(msg);
+                    }
+                    #[cfg(feature = "codeintel")]
+                    crate::codeintel::notify_code_index_file_changed(&path, Some(&bound_result));
+                    let diff = build_compact_diff(&content, &bound_result);
+                    let cost_time = t0.elapsed();
+                    return ok(format!(
+                        "> ⏱️ **Cost Time**: {:.2?}ms\n\nEdited {} (trimmed boundary match, 1 replacement)\n{}",
+                        cost_time.as_millis(),
+                        crate::pathnorm::to_display(&path),
+                        diff,
+                    ));
+                }
+            }
+
+            // Diagnostics: find closest matching snippet in the file to aid recovery
+            let hint = find_closest_match_snippet(&content, &a.old_string)
+                .map(|h| format!("\n\n{}", h))
+                .unwrap_or_default();
+
             return err(format!(
                 "edit_file: old_string not found in {}. The file was NOT modified. Re-read \
-                 the file and copy the exact text (including whitespace).",
-                crate::pathnorm::to_display(&path)
+                 the file and copy the exact text (including whitespace).{}",
+                crate::pathnorm::to_display(&path),
+                hint
             ));
         }
         if count > 1 && !a.replace_all {
@@ -210,10 +260,14 @@ impl Tool for EditFileTool {
         if let Err(msg) = write_encoded(&path, &updated, file_encoding).await {
             return err(msg);
         }
+        #[cfg(feature = "codeintel")]
+        crate::codeintel::notify_code_index_file_changed(&path, Some(&updated));
         let replaced = if a.replace_all { count } else { 1 };
         let diff = build_compact_diff(&content, &updated);
+        let cost_time = t0.elapsed();
         ok(format!(
-            "Edited {} ({replaced} replacement{})\n{}",
+            "> ⏱️ **Cost Time**: {:.2?}ms\n\nEdited {} ({replaced} replacement{})\n{}",
+            cost_time.as_millis(),
             crate::pathnorm::to_display(&path),
             if replaced == 1 { "" } else { "s" },
             diff,
@@ -343,8 +397,19 @@ fn try_fuzzy_replace(
     new_string: &str,
     replace_all: bool,
 ) -> Option<(String, usize)> {
+    // 1. Exact match (with optional leading/trailing blank line trimming)
     let old_normalized: Vec<&str> = old_string.lines().map(|l| l.trim()).collect();
-    if old_normalized.is_empty() || old_normalized.iter().all(|l| l.is_empty()) {
+    // Strip leading/trailing empty lines from the old_string pattern if they don't match the file boundary
+    let old_trimmed_core: Vec<&str> = {
+        let start = old_normalized.iter().position(|l| !l.is_empty()).unwrap_or(0);
+        let end = old_normalized.iter().rposition(|l| !l.is_empty()).map(|p| p + 1).unwrap_or(0);
+        if start < end {
+            old_normalized[start..end].to_vec()
+        } else {
+            old_normalized.clone()
+        }
+    };
+    if old_trimmed_core.is_empty() || old_trimmed_core.iter().all(|l| l.is_empty()) {
         return None;
     }
 
@@ -354,12 +419,12 @@ fn try_fuzzy_replace(
 
     // Only attempt a fuzzy match if old_string has substantial content (guards against
     // a short fragment matching the wrong place after trimming).
-    let total_non_ws: usize = old_normalized.iter().map(|l| l.len()).sum();
-    if total_non_ws < 10 {
+    let total_non_ws: usize = old_trimmed_core.iter().map(|l| l.len()).sum();
+    if total_non_ws < 4 {
         return None;
     }
 
-    // Slide a window over content lines (trimmed), skipping past each match.
+    // Pass 1: match exact old_normalized
     let mut i = 0;
     while i + old_normalized.len() <= content_lines.len() {
         let window: Vec<&str> = content_lines[i..i + old_normalized.len()]
@@ -371,6 +436,23 @@ fn try_fuzzy_replace(
             i += old_normalized.len();
         } else {
             i += 1;
+        }
+    }
+
+    // Pass 2: If no matches, try matching with trimmed core (handles accidental leading/trailing blank lines emitted by LLM)
+    if matches.is_empty() && old_trimmed_core.len() != old_normalized.len() {
+        let mut i = 0;
+        while i + old_trimmed_core.len() <= content_lines.len() {
+            let window: Vec<&str> = content_lines[i..i + old_trimmed_core.len()]
+                .iter()
+                .map(|l| l.trim())
+                .collect();
+            if window == old_trimmed_core {
+                matches.push((i, i + old_trimmed_core.len()));
+                i += old_trimmed_core.len();
+            } else {
+                i += 1;
+            }
         }
     }
 
@@ -430,15 +512,23 @@ fn try_block_anchor_replace(
     old_string: &str,
     new_string: &str,
 ) -> Option<(String, usize)> {
-    let old_lines: Vec<&str> = old_string.lines().collect();
+    let raw_old_lines: Vec<&str> = old_string.lines().collect();
+    let start_pos = raw_old_lines.iter().position(|l| !l.trim().is_empty()).unwrap_or(0);
+    let end_pos = raw_old_lines.iter().rposition(|l| !l.trim().is_empty()).map(|p| p + 1).unwrap_or(0);
+    let old_lines: Vec<&str> = if start_pos < end_pos {
+        raw_old_lines[start_pos..end_pos].to_vec()
+    } else {
+        raw_old_lines.clone()
+    };
+
     let n = old_lines.len();
     if n < 3 {
-        return None; // need first + last anchors AND ≥ 1 interior line
+        return None;
     }
-    let first = old_lines[0].trim();
-    let last = old_lines[n - 1].trim();
-    if first.chars().count() < 3 || last.chars().count() < 3 {
-        return None; // anchors too short to identify a block safely
+    let first_norm = clean_token_normalize(old_lines[0]);
+    let last_norm = clean_token_normalize(old_lines[n - 1]);
+    if first_norm.chars().count() < 2 || last_norm.chars().count() < 2 {
+        return None;
     }
 
     let content_lines: Vec<&str> = content.lines().collect();
@@ -446,23 +536,25 @@ fn try_block_anchor_replace(
     let mut matches: Vec<usize> = Vec::new();
     let mut i = 0;
     while i + n <= content_lines.len() {
-        if content_lines[i].trim() == first && content_lines[i + n - 1].trim() == last {
-            // Require ALL BUT AT MOST ONE line to still match (trimmed) at its position.
-            // This matches the intent — the model got a SINGLE interior line slightly wrong —
-            // and (unlike a "≥ half" rule, which for n≤4 degenerates to "anchors only" and
-            // would ignore the interior) rejects a window that merely shares its first/last
-            // line with an unrelated region.
+        let f_c = clean_token_normalize(content_lines[i]);
+        let l_c = clean_token_normalize(content_lines[i + n - 1]);
+        if f_c == first_norm && l_c == last_norm {
             let matched = (0..n)
-                .filter(|&k| content_lines[i + k].trim() == old_lines[k].trim())
+                .filter(|&k| {
+                    let a = clean_token_normalize(content_lines[i + k]);
+                    let b = clean_token_normalize(old_lines[k]);
+                    a == b || strsim::normalized_levenshtein(&a, &b) >= 0.75
+                })
                 .count();
-            if matched + 1 >= n {
+            let threshold = if n <= 4 { n.saturating_sub(1) } else { (n as f32 * 0.65).ceil() as usize };
+            if matched >= threshold {
                 matches.push(i);
             }
         }
         i += 1;
     }
     if matches.len() != 1 {
-        return None; // no match, or ambiguous → let the caller error out
+        return None;
     }
 
     let start = matches[0];
@@ -479,6 +571,203 @@ fn try_block_anchor_replace(
         result = coerce_eol(&result, "\r\n");
     }
     Some((result, 1))
+}
+
+/// Filter invisible Unicode characters, normalize smart quotes/punctuation, and collapse whitespace.
+fn clean_token_normalize(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut last_was_ws = false;
+    for c in s.chars() {
+        if matches!(
+            c,
+            '\u{feff}'
+                | '\u{200b}'
+                | '\u{200c}'
+                | '\u{200d}'
+                | '\u{2060}'
+                | '\u{fe0f}'
+        ) {
+            continue;
+        }
+        let norm_char = match c {
+            '\u{00a0}' | '\u{2002}' | '\u{2003}' | '\u{2009}' | '\t' => ' ',
+            '“' | '”' | '″' => '"',
+            '‘' | '’' | '′' => '\'',
+            '（' => '(',
+            '）' => ')',
+            '【' => '[',
+            '】' => ']',
+            '：' => ':',
+            '；' => ';',
+            '，' => ',',
+            other => other,
+        };
+        if norm_char.is_whitespace() {
+            if !last_was_ws {
+                out.push(' ');
+                last_was_ws = true;
+            }
+        } else {
+            out.push(norm_char);
+            last_was_ws = false;
+        }
+    }
+    out.trim().to_string()
+}
+
+/// Token & inline-whitespace normalized fallback: matches line-by-line after collapsing internal spaces,
+/// stripping zero-width characters, and normalizing unicode quotes/punctuation.
+fn try_token_normalized_replace(
+    content: &str,
+    old_string: &str,
+    new_string: &str,
+    replace_all: bool,
+) -> Option<(String, usize)> {
+    let old_normalized: Vec<String> = old_string
+        .lines()
+        .map(clean_token_normalize)
+        .filter(|l| !l.is_empty())
+        .collect();
+    if old_normalized.is_empty() {
+        return None;
+    }
+
+    let total_chars: usize = old_normalized.iter().map(|l| l.len()).sum();
+    if total_chars < 4 {
+        return None;
+    }
+
+    let content_lines: Vec<&str> = content.lines().collect();
+    let content_normalized: Vec<String> = content_lines
+        .iter()
+        .map(|l| clean_token_normalize(l))
+        .collect();
+
+    let n = old_normalized.len();
+    if n == 0 || n > content_normalized.len() {
+        return None;
+    }
+
+    let mut matches: Vec<(usize, usize)> = Vec::new();
+    let mut i = 0;
+    while i + n <= content_normalized.len() {
+        let window = &content_normalized[i..i + n];
+        if window == old_normalized.as_slice() {
+            matches.push((i, i + n));
+            i += n;
+        } else {
+            i += 1;
+        }
+    }
+
+    if matches.is_empty() || (!replace_all && matches.len() > 1) {
+        return None;
+    }
+
+    let has_trailing_newline = content.ends_with('\n');
+    let new_lines: Vec<&str> = new_string.lines().collect();
+    let mut result_lines: Vec<String> = content_lines.iter().map(|l| l.to_string()).collect();
+    let to_replace = if replace_all { &matches[..] } else { &matches[..1] };
+    for &(start, end) in to_replace.iter().rev() {
+        let replacement = reanchored_replacement(&new_lines, content_lines[start]);
+        result_lines.splice(start..end, replacement);
+    }
+
+    let mut result = result_lines.join("\n");
+    if has_trailing_newline && !result.ends_with('\n') {
+        result.push('\n');
+    }
+    if content.contains("\r\n") {
+        result = coerce_eol(&result, "\r\n");
+    }
+    let count = if replace_all { matches.len() } else { 1 };
+    Some((result, count))
+}
+
+/// Boundary trimmed context match: when LLM emitted extra leading or trailing context lines.
+fn try_trimmed_boundary_replace(
+    content: &str,
+    old_string: &str,
+    new_string: &str,
+) -> Option<(String, usize)> {
+    let old_lines: Vec<&str> = old_string.lines().collect();
+    let new_lines: Vec<&str> = new_string.lines().collect();
+    if old_lines.len() < 3 || new_lines.len() < 3 {
+        return None;
+    }
+    // Case 1: Drop first line from old_string and new_string if they match
+    if clean_token_normalize(old_lines[0]) == clean_token_normalize(new_lines[0]) {
+        let sub_old = old_lines[1..].join("\n");
+        let sub_new = new_lines[1..].join("\n");
+        if let Some(res) = try_fuzzy_replace(content, &sub_old, &sub_new, false) {
+            return Some(res);
+        }
+        if let Some(res) = try_token_normalized_replace(content, &sub_old, &sub_new, false) {
+            return Some(res);
+        }
+    }
+    // Case 2: Drop last line from old_string and new_string if they match
+    if let (Some(last_o), Some(last_n)) = (old_lines.last(), new_lines.last()) {
+        if clean_token_normalize(last_o) == clean_token_normalize(last_n) {
+            let sub_old = old_lines[..old_lines.len() - 1].join("\n");
+            let sub_new = new_lines[..new_lines.len() - 1].join("\n");
+            if let Some(res) = try_fuzzy_replace(content, &sub_old, &sub_new, false) {
+                return Some(res);
+            }
+            if let Some(res) = try_token_normalized_replace(content, &sub_old, &sub_new, false) {
+                return Some(res);
+            }
+        }
+    }
+    None
+}
+
+/// Computes the closest snippet in `content` to `old_string` using normalized Levenshtein similarity.
+fn find_closest_match_snippet(content: &str, old_string: &str) -> Option<String> {
+    let old_lines: Vec<&str> = old_string.lines().collect();
+    let old_core: String = old_lines
+        .iter()
+        .map(|l| clean_token_normalize(l))
+        .filter(|l| !l.is_empty())
+        .collect::<Vec<_>>()
+        .join(" ");
+    if old_core.is_empty() {
+        return None;
+    }
+    let content_lines: Vec<&str> = content.lines().collect();
+    let n = old_lines.len().max(1);
+
+    let mut best_score = 0.0f32;
+    let mut best_range = (0, 0);
+
+    for i in 0..content_lines.len() {
+        let end = (i + n).min(content_lines.len());
+        let window: String = content_lines[i..end]
+            .iter()
+            .map(|l| clean_token_normalize(l))
+            .filter(|l| !l.is_empty())
+            .collect::<Vec<_>>()
+            .join(" ");
+        let sim = strsim::normalized_levenshtein(&old_core, &window) as f32;
+        if sim > best_score {
+            best_score = sim;
+            best_range = (i, end);
+        }
+    }
+
+    if best_score >= 0.55 {
+        let (start, end) = best_range;
+        let snippet = content_lines[start..end].join("\n");
+        Some(format!(
+            "Closest match found around lines {}-{} (similarity {:.0}%):\n```\n{}\n```",
+            start + 1,
+            end,
+            best_score * 100.0,
+            snippet
+        ))
+    } else {
+        None
+    }
 }
 
 #[cfg(test)]
@@ -1054,5 +1343,72 @@ mod tests {
             "def f():\n\u{3000}x = 99\n\u{3000}y = 2\n",
             "the file's multi-byte whitespace indent must be preserved with no content leaking into it"
         );
+    }
+
+    #[tokio::test]
+    async fn token_normalized_matches_invisible_unicode_and_inline_whitespace() {
+        let d = tempfile::tempdir().unwrap();
+        let content = "fn calculate_total(price: f64, tax_rate: f64) -> f64 {\n    let subtotal = price * (1.0 + tax_rate);\n    subtotal.round()\n}\n";
+        std::fs::write(d.path().join("calc.rs"), content).unwrap();
+
+        // Model emits with double spaces, NBSP, zero-width space, and smart quotes
+        let old_str = "let  subtotal\u{200b} =\u{00a0}price * (1.0 + tax_rate);";
+        let new_str = "let subtotal = price * (1.0 + tax_rate) + 5.0;";
+
+        let r = EditFileTool
+            .execute(
+                &format!(
+                    r#"{{"file_path":"calc.rs","old_string":{},"new_string":{}}}"#,
+                    serde_json::to_string(old_str).unwrap(),
+                    serde_json::to_string(new_str).unwrap()
+                ),
+                &ctx(d.path()),
+            )
+            .await;
+        assert!(!r.is_error, "token normalized match must succeed: {}", r.content);
+        assert!(r.content.contains("token-normalized match"));
+        let updated = std::fs::read_to_string(d.path().join("calc.rs")).unwrap();
+        assert!(updated.contains("let subtotal = price * (1.0 + tax_rate) + 5.0;"));
+    }
+
+    #[tokio::test]
+    async fn boundary_trimmed_matches_when_llm_emits_extra_context_line() {
+        let d = tempfile::tempdir().unwrap();
+        let content = "fn main() {\n    let a = 10;\n    let b = 20;\n    let sum = a + b;\n    println!(\"{}\", sum);\n}\n";
+        std::fs::write(d.path().join("main.rs"), content).unwrap();
+
+        // Model copied leading context line "fn main() {" and modified sum line
+        let old_str = "fn main() {\n    let a = 10;\n    let b = 20;\n    let sum = a + b;";
+        let new_str = "fn main() {\n    let a = 10;\n    let b = 20;\n    let sum = a * b;";
+
+        let r = EditFileTool
+            .execute(
+                &format!(
+                    r#"{{"file_path":"main.rs","old_string":{},"new_string":{}}}"#,
+                    serde_json::to_string(old_str).unwrap(),
+                    serde_json::to_string(new_str).unwrap()
+                ),
+                &ctx(d.path()),
+            )
+            .await;
+        assert!(!r.is_error, "boundary trimmed match must succeed: {}", r.content);
+        let updated = std::fs::read_to_string(d.path().join("main.rs")).unwrap();
+        assert!(updated.contains("let sum = a * b;"));
+    }
+
+    #[tokio::test]
+    async fn not_found_returns_closest_match_snippet() {
+        let d = tempfile::tempdir().unwrap();
+        let content = "pub fn perform_action() {\n    let mut state = get_state();\n    state.validate_and_commit();\n}\n";
+        std::fs::write(d.path().join("act.rs"), content).unwrap();
+
+        let r = EditFileTool
+            .execute(
+                r#"{"file_path":"act.rs","old_string":"let state = get_state();\nstate.validate_and_rollback();","new_string":"let state = get_state();"}"#,
+                &ctx(d.path()),
+            )
+            .await;
+        assert!(r.is_error);
+        assert!(r.content.contains("Closest match found around lines 2-3"));
     }
 }

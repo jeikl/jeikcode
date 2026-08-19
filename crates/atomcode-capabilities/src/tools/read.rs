@@ -16,18 +16,15 @@ use serde_json::json;
 /// UTF-8/GB18030 detection and codeintel. Refuse pathological inputs uniformly,
 /// including callers that supplied an offset/limit.
 const MAX_IN_MEMORY_BYTES: u64 = 64 * 1024 * 1024;
-/// Default page size when the caller omits `limit`. Aligned with mainstream
-/// standards (DeepSeek Harness, OpenCode, Grok).
-const DEFAULT_READ_LIMIT: usize = 1500;
-/// Keep the complete read result (body plus continuation) below 64 KiB
-/// aligned with Kernel's `DEFAULT_MAX_TOOL_RESULT_BYTES`.
-const MAX_READ_OUTPUT_BYTES: usize = 64 * 1024;
+/// Default page size when the caller omits `limit`. Matches OpenCode / DeepSeek
+/// Harness; Grok defaults to 1000 but tells the model not to fill a window.
+const DEFAULT_READ_LIMIT: usize = 2000;
+/// Keep one page (body plus continuation) under this budget. 256 KiB is enough
+/// for a typical 1500–2000 line source file with per-line numbers; the old 64 KiB
+/// cap silently chopped that page around ~700 lines and taught the model to crawl.
+const MAX_READ_OUTPUT_BYTES: usize = 256 * 1024;
 /// Per-line display cap (very long minified lines are truncated with a marker).
 const MAX_LINE_LEN: usize = 2000;
-/// Above this line count, an un-sliced read of a CODE file returns a symbol skeleton
-/// (when the `codeintel` capability is enabled) instead of the full dump.
-#[cfg(feature = "codeintel")]
-const SKELETON_THRESHOLD: usize = 1500;
 
 /// `vision` = the active model can SEE images. When true, reading an image file
 /// returns the picture itself (base64) for the model instead of the "binary,
@@ -50,18 +47,26 @@ fn continuation_footer(
     start: usize,
     end: usize,
     total: usize,
-    page_limit: usize,
 ) -> String {
+    // Never echo a previous small `limit` — that is what trapped models in 25-line
+    // crawls. The next call should omit `limit` and pick up at `offset`.
     let continuation = json!({
         "file_path": file_path,
-        "limit": page_limit,
         "offset": end + 1,
     });
     let remaining = total.saturating_sub(end);
-    let detailed = format!(
-        "\n[Showing lines {start}-{end} of {total}. {remaining} lines remaining. Use offset={} if needed: read_file({continuation})]",
-        end + 1
-    );
+    let next = end + 1;
+    let detailed = if remaining <= DEFAULT_READ_LIMIT {
+        format!(
+            "\n[Showing lines {start}-{end} of {total}. {remaining} lines remaining. \
+             Omit `limit` and use offset={next} to read the rest: read_file({continuation})]"
+        )
+    } else {
+        format!(
+            "\n[Showing lines {start}-{end} of {total}. {remaining} lines remaining. \
+             Continue with offset={next} and omit `limit` (do not repeat a small page): read_file({continuation})]"
+        )
+    };
     // Reserve enough room for the one line we always return, even when it is a
     // maximum-length four-byte UTF-8 line. This keeps the total budget real,
     // rather than only bounding the body in ordinary short-path cases.
@@ -72,8 +77,7 @@ fn continuation_footer(
         detailed
     } else {
         format!(
-            "\n[Showing lines {start}-{end} of {total}. {remaining} lines remaining. Use offset={} if needed.]",
-            end + 1
+            "\n[Showing lines {start}-{end} of {total}. {remaining} lines remaining. Use offset={next} and omit `limit`.]"
         )
     }
 }
@@ -175,11 +179,12 @@ impl Tool for ReadFileTool {
     }
     fn description(&self) -> &str {
         "Read a file from the filesystem. Returns the contents prefixed with 1-based \
-         line numbers (`<n>\\t<content>`). By default returns up to 1500 lines; an output \
-         budget may return fewer. When a partial result is returned, use the remaining offset \
-         if further lines are needed. Use `offset` (1-based start line) and `limit` (max lines) \
-         when a specific window is needed. If the path is a directory its entries are listed instead. \
-         Relative paths resolve against the working directory."
+         line numbers (`<n>\\t<content>`). Omit `offset` and `limit` unless the file is too \
+         large to read at once — the default page is 2000 lines (a byte budget may return \
+         fewer). Do not request tiny windows (20–70 lines). If a footer reports remaining \
+         lines, omit `limit` (or use a large remaining window) rather than repeating a small \
+         page. If the path is a directory its entries are listed instead. Relative paths \
+         resolve against the working directory."
     }
     fn parameters_schema(&self) -> serde_json::Value {
         json!({
@@ -189,13 +194,13 @@ impl Tool for ReadFileTool {
                 "offset": {
                     "type": "integer",
                     "minimum": 1,
-                    "description": "Start line, 1-based. Omit to start at line 1; after a partial result, use the next offset shown."
+                    "description": "Start line, 1-based. Only provide if the file is too large to read at once. After a partial result, use the next offset shown and omit `limit`."
                 },
                 "limit": {
                     "type": "integer",
                     "minimum": 1,
                     "default": DEFAULT_READ_LIMIT,
-                    "description": "Maximum lines to read. Defaults to 1500; the output byte budget may return fewer."
+                    "description": "Maximum lines to read. Omit unless you need a specific window. Defaults to 2000; the output byte budget may return fewer. Do not use 20–70 line slices."
                 }
             },
             "required": ["file_path"]
@@ -206,12 +211,18 @@ impl Tool for ReadFileTool {
     fn read_only_hint(&self) -> bool {
         true
     }
+    /// Self-capped to `MAX_READ_OUTPUT_BYTES`. Skipping the generic 64 KiB artifact
+    /// fold / kernel cap is what makes the 2000-line default page actually reach
+    /// the model instead of being chopped into a fetch_output crawl.
+    fn never_truncate_result(&self) -> bool {
+        true
+    }
     // read is non-destructive → risk() defaults to Safe.
     async fn execute(&self, args: &str, ctx: &ToolContext) -> ToolResult {
         let a: Args = match parse_tool_args(
             "read_file",
             args,
-            r#"{"file_path":"<path>","offset":1,"limit":300}"#,
+            r#"{"file_path":"<path>"}"#,
         ) {
             Ok(a) => a,
             Err(e) => return e.into_tool_result(),
@@ -320,16 +331,6 @@ impl Tool for ReadFileTool {
         // on line pointers than on the bounded source bytes themselves.
         let total = text.lines().count();
 
-        // codeintel enrichment: outline a large CODE file as a symbol skeleton instead of
-        // dumping it (cross-capability composition; only when codeintel is compiled in).
-        // A given offset/limit means the model wants a specific range, so skip it.
-        #[cfg(feature = "codeintel")]
-        if a.offset.is_none() && a.limit.is_none() && total > SKELETON_THRESHOLD {
-            if let Some(skel) = crate::codeintel::skeleton(&path, text.as_ref()) {
-                return ok(skel);
-            }
-        }
-
         let start = a.offset.unwrap_or(1).max(1); // 1-based
         let start_idx = start - 1;
         if start_idx >= total {
@@ -357,7 +358,7 @@ impl Tool for ReadFileTool {
             };
             let candidate_end = start_idx + i + 1;
             let footer_len = if candidate_end < total {
-                continuation_footer(&a.file_path, start, candidate_end, total, page_limit).len()
+                continuation_footer(&a.file_path, start, candidate_end, total).len()
             } else if start > 1 {
                 format!("[Showing lines {start}-{candidate_end} of {total} (end)]").len()
             } else {
@@ -381,7 +382,6 @@ impl Tool for ReadFileTool {
                 start,
                 end_idx,
                 total,
-                page_limit,
             ));
         } else if start > 1 {
             out.push_str(&format!(
@@ -631,12 +631,17 @@ mod tests {
             "{}",
             r.content
         );
+        assert!(
+            r.content.contains("Omit `limit`") && !r.content.contains("\"limit\":"),
+            "continuation must not echo the small requested limit: {}",
+            r.content
+        );
     }
 
     #[tokio::test]
     async fn omitted_limit_uses_a_bounded_page_with_an_actionable_continuation() {
         let d = tempfile::tempdir().unwrap();
-        let text = (1..=1505)
+        let text = (1..=2505)
             .map(|n| format!("line {n}"))
             .collect::<Vec<_>>()
             .join("\n");
@@ -647,11 +652,13 @@ mod tests {
             .await;
 
         assert!(!r.is_error, "{}", r.content);
-        assert!(r.content.contains("1500\tline 1500"), "{}", r.content);
-        assert!(!r.content.contains("1501\tline 1501"), "{}", r.content);
+        assert!(r.content.contains("2000\tline 2000"), "{}", r.content);
+        assert!(!r.content.contains("2001\tline 2001"), "{}", r.content);
         assert!(
-            r.content.contains("Showing lines 1-1500 of 1505")
-                && r.content.contains("offset=1501"),
+            r.content.contains("Showing lines 1-2000 of 2505")
+                && r.content.contains("offset=2001")
+                && r.content.to_ascii_lowercase().contains("omit `limit`")
+                && !r.content.contains("\"limit\":"),
             "{}",
             r.content
         );
@@ -660,8 +667,8 @@ mod tests {
     #[tokio::test]
     async fn read_page_stays_below_the_generic_artifact_threshold() {
         let d = tempfile::tempdir().unwrap();
-        let text = (1..=200)
-            .map(|n| format!("line {n} {}", "x".repeat(500)))
+        let text = (1..=400)
+            .map(|n| format!("line {n} {}", "x".repeat(800)))
             .collect::<Vec<_>>()
             .join("\n");
         std::fs::write(d.path().join("wide.txt"), text).unwrap();
@@ -708,7 +715,7 @@ mod tests {
 
     #[test]
     fn oversized_continuation_path_uses_a_compact_footer() {
-        let footer = continuation_footer(&"x".repeat(60_000), 1, 10, 100, 300);
+        let footer = continuation_footer(&"x".repeat(300_000), 1, 10, 100);
         assert!(!footer.contains("file_path"), "{footer}");
         assert!(footer.contains("offset=11"), "{footer}");
         assert!(footer.len() < MAX_READ_OUTPUT_BYTES, "{}", footer.len());
@@ -891,7 +898,9 @@ mod tests {
 
     #[cfg(feature = "codeintel")]
     #[tokio::test]
-    async fn large_code_file_returns_skeleton() {
+    async fn large_code_file_returns_the_body_not_a_skeleton() {
+        // Plan A: an unsliced read of a ~1600-line source file must dump the body
+        // in one page, not replace it with a symbol outline that forces offset/limit.
         let d = tempfile::tempdir().unwrap();
         let mut src = String::from("fn alpha() {\n");
         for _ in 0..1600 {
@@ -903,22 +912,25 @@ mod tests {
             .execute(r#"{"file_path":"big.rs"}"#, &ctx(d.path()))
             .await;
         assert!(!r.is_error, "{}", r.content);
-        assert!(r.content.contains("File skeleton"), "{}", r.content);
+        assert!(
+            !r.content.contains("File skeleton"),
+            "unsliced read must not hijack into a skeleton: {}",
+            r.content
+        );
         assert!(
             r.content.contains("alpha") && r.content.contains("beta"),
             "{}",
             r.content
         );
         assert!(
-            !r.content.contains("let _ = 1;"),
-            "skeleton must not dump bodies: {}",
+            r.content.contains("let _ = 1;"),
+            "body must be present: {}",
             r.content
         );
     }
 
-    #[cfg(feature = "codeintel")]
     #[tokio::test]
-    async fn offset_bypasses_skeleton() {
+    async fn offset_limit_still_selects_a_window() {
         let d = tempfile::tempdir().unwrap();
         let mut src = String::from("fn f() {}\n");
         for i in 0..1600 {
@@ -931,76 +943,12 @@ mod tests {
                 &ctx(d.path()),
             )
             .await;
-        assert!(
-            !r.content.contains("File skeleton"),
-            "offset/limit must bypass skeleton: {}",
-            r.content
-        );
         assert!(r.content.contains("1\tfn f"), "{}", r.content);
+        assert!(!r.content.contains("line 5"), "{}", r.content);
     }
 
-    #[cfg(feature = "codeintel")]
     #[tokio::test]
-    async fn skeleton_threshold_boundary() {
-        let d = tempfile::tempdir().unwrap();
-        // exactly 1500 lines (fn + 1499 fillers) → total > 1500 is false → full read
-        let mut at = String::from("fn f() {}\n");
-        for _ in 0..1499 {
-            at.push_str("// x\n");
-        }
-        std::fs::write(d.path().join("at.rs"), &at).unwrap();
-        let r = ReadFileTool::default()
-            .execute(r#"{"file_path":"at.rs"}"#, &ctx(d.path()))
-            .await;
-        assert!(
-            !r.content.contains("File skeleton"),
-            "1500 lines must NOT skeleton: {}",
-            r.content
-        );
-        // 1501 lines → skeleton
-        let mut over = String::from("fn f() {}\n");
-        for _ in 0..1500 {
-            over.push_str("// x\n");
-        }
-        std::fs::write(d.path().join("over.rs"), &over).unwrap();
-        let r2 = ReadFileTool::default()
-            .execute(r#"{"file_path":"over.rs"}"#, &ctx(d.path()))
-            .await;
-        assert!(
-            r2.content.contains("File skeleton"),
-            "1501 lines must skeleton: {}",
-            r2.content
-        );
-    }
-
-    #[cfg(feature = "codeintel")]
-    #[tokio::test]
-    async fn large_symbolless_code_file_falls_back_to_a_bounded_page() {
-        // A >1500-line .rs with NO symbols (only comments) has no skeleton, so it
-        // falls back to the same bounded page as other text files.
-        let d = tempfile::tempdir().unwrap();
-        let mut src = String::new();
-        for i in 0..1600 {
-            src.push_str(&format!("// comment {i}\n"));
-        }
-        std::fs::write(d.path().join("c.rs"), &src).unwrap();
-        let r = ReadFileTool::default()
-            .execute(r#"{"file_path":"c.rs"}"#, &ctx(d.path()))
-            .await;
-        assert!(!r.content.contains("File skeleton"), "{}", r.content);
-        assert!(r.content.contains("comment 0"), "{}", r.content);
-        assert!(!r.content.contains("comment 1500"), "{}", r.content);
-        assert!(
-            r.content.contains("read_file("),
-            "{}",
-            r.content
-        );
-    }
-
-    #[cfg(feature = "codeintel")]
-    #[tokio::test]
-    async fn large_non_code_file_uses_a_bounded_page() {
-        // .txt has no tree-sitter language, so it uses normal bounded pagination.
+    async fn file_under_the_default_page_returns_in_full() {
         let d = tempfile::tempdir().unwrap();
         let mut src = String::new();
         for i in 0..1600 {
@@ -1010,12 +958,11 @@ mod tests {
         let r = ReadFileTool::default()
             .execute(r#"{"file_path":"big.txt"}"#, &ctx(d.path()))
             .await;
-        assert!(!r.content.contains("File skeleton"), "{}", r.content);
         assert!(r.content.contains("line 0"), "{}", r.content);
-        assert!(!r.content.contains("line 1500"), "{}", r.content);
+        assert!(r.content.contains("line 1599"), "{}", r.content);
         assert!(
-            r.content.contains("read_file("),
-            "{}",
+            !r.content.contains("read_file("),
+            "a 1600-line file must not paginate under a 2000-line default: {}",
             r.content
         );
     }
@@ -1039,5 +986,9 @@ mod tests {
         let t = ReadFileTool::new(false); // vision flag irrelevant here
         assert!(t.read_only_hint(), "read_file has no side effects");
         assert!(t.parallel_safe("{}"), "read_file may run concurrently");
+        assert!(
+            t.never_truncate_result(),
+            "read_file pages must not be folded by the 64 KiB artifact cap"
+        );
     }
 }

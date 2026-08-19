@@ -35,7 +35,7 @@ impl Tool for ListDirTool {
     }
     fn description(&self) -> &str {
         "List a directory tree (indented; directories end with '/'). `depth` controls \
-         recursion (default 2, max 5). Build/VCS/cache directories (node_modules, .git, \
+         recursion (default 3, max 6). Build/VCS/cache directories (node_modules, .git, \
          target, …) are skipped. Relative paths resolve against the working directory."
     }
     fn parameters_schema(&self) -> serde_json::Value {
@@ -43,7 +43,7 @@ impl Tool for ListDirTool {
             "type": "object",
             "properties": {
                 "path": { "type": "string", "description": "Directory to list (default: the working directory)" },
-                "depth": { "type": "integer", "description": "Max recursion depth (default 2, max 5)" }
+                "depth": { "type": "integer", "description": "Max recursion depth (default 3, max 6)" }
             }
         })
     }
@@ -57,14 +57,14 @@ impl Tool for ListDirTool {
         let a: Args = match parse_tool_args(
             "list_directory",
             args,
-            r#"{"path":"<dir>","depth":2}"#,
+            r#"{"path":"<dir>"}"#,
         ) {
             Ok(a) => a,
             Err(e) => return e.into_tool_result(),
         };
         let raw = a.path.unwrap_or_else(|| ".".to_string());
         let root = resolve_path(&raw, &ctx.working_dir);
-        let depth = a.depth.unwrap_or(2).min(MAX_DEPTH_CAP);
+        let depth = a.depth.unwrap_or(3).min(MAX_DEPTH_CAP);
 
         match tokio::fs::metadata(&root).await {
             Ok(m) if m.is_dir() => {}

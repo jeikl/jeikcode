@@ -30,6 +30,19 @@ use std::time::{Duration, Instant, UNIX_EPOCH};
 /// only dirty files are re-parsed). Debounced when recent edits occurred.
 const BACKGROUND_REFRESH_SECS: u64 = 5;
 
+/// Query-time safety valve: never re-tree-sitter thousands of files on a single
+/// `code_explore`. Explicit `atomcode init` / `--force` pass [`ReparseBudget::Unlimited`].
+const MAX_REPARSE_PER_QUERY: usize = 128;
+
+/// How many dirty files [`sync_units`] may re-parse in one pass.
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum ReparseBudget {
+    /// `code_explore` / warm refresh: cap + prefer files under `path:`.
+    Query,
+    /// `atomcode init` (with or without `--force`): parse every dirty file.
+    Unlimited,
+}
+
 /// Unified internal path normalization for the code index.
 /// Strips verbatim prefixes (`\\?\`), unifies slashes, and on Windows uppercases the drive letter.
 pub fn normalize_index_path(p: &Path) -> PathBuf {
@@ -1174,6 +1187,7 @@ pub fn init_workspace_index(
             "Code graph: --force, removing {}",
             path_for_display(&cache_path)
         ));
+        super::index_db::IndexDb::drop_shared(&root);
         let _ = std::fs::remove_file(&cache_path);
         let _ = std::fs::remove_file(cache_path.with_extension("db-wal"));
         let _ = std::fs::remove_file(cache_path.with_extension("db-shm"));
@@ -1181,7 +1195,9 @@ pub fn init_workspace_index(
     }
 
     let idx = CodeIndex::new();
-    let _g = idx.get_with_progress(&root, on_progress);
+    // Explicit init must parse every dirty file. The query-time 128 cap is
+    // what turned `atomcode init --force` into a 127-file stub index.
+    let _g = idx.reconcile_workspace(&root, None, on_progress, ReparseBudget::Unlimited);
 
     let mut guard = idx.inner.lock().map_err(|e| e.to_string())?;
     let changed = guard
@@ -1583,6 +1599,73 @@ fn discover_new_files(
     new_files
 }
 
+/// Rank dirty files so a scoped `code_explore(path: …)` still ingests that
+/// subtree when the query-time cap fires. New-in-focus first, then dirty-in-focus,
+/// then everything else (original walk order as the tie-break).
+fn take_reparse_budget<'a>(
+    dirty: Vec<&'a Walked>,
+    units: &HashMap<PathBuf, FileUnit>,
+    budget: ReparseBudget,
+    focus: Option<&Path>,
+    on_progress: &dyn Fn(&str),
+) -> Vec<&'a Walked> {
+    let ReparseBudget::Query = budget else {
+        return dirty;
+    };
+    if dirty.len() <= MAX_REPARSE_PER_QUERY {
+        return dirty;
+    }
+    let dirty_found = dirty.len();
+
+    let mut ranked: Vec<(u8, usize)> = dirty
+        .iter()
+        .enumerate()
+        .map(|(i, w)| {
+            let norm = normalize_index_path(&w.path);
+            let focused = path_in_focus(&norm, focus);
+            let cached = units.contains_key(&norm);
+            let rank: u8 = match (focused, cached) {
+                (true, false) => 0,
+                (true, true) => 1,
+                (false, false) => 2,
+                (false, true) => 3,
+            };
+            (rank, i)
+        })
+        .collect();
+    ranked.sort_by_key(|(rank, i)| (*rank, *i));
+
+    let mut selected = Vec::with_capacity(MAX_REPARSE_PER_QUERY);
+    let mut kept_idx = vec![false; dirty.len()];
+    for (_, i) in ranked.into_iter().take(MAX_REPARSE_PER_QUERY) {
+        kept_idx[i] = true;
+        selected.push(dirty[i]);
+    }
+
+    let mut deferred_new = 0usize;
+    let mut deferred_cached = 0usize;
+    for (i, w) in dirty.iter().enumerate() {
+        if kept_idx[i] {
+            continue;
+        }
+        if units.contains_key(&normalize_index_path(&w.path)) {
+            deferred_cached += 1;
+        } else {
+            deferred_new += 1;
+        }
+    }
+    let detail = match (deferred_new, deferred_cached) {
+        (0, c) => format!("{c} stay on cached units"),
+        (n, 0) => format!("{n} new files not indexed this pass"),
+        (n, c) => format!("{n} new files not indexed this pass, {c} stay on cached units"),
+    };
+    on_progress(&format!(
+        "Code graph: {dirty_found} dirty files; reparsing {MAX_REPARSE_PER_QUERY} this query \
+         ({detail}; run `atomcode init` to finish)."
+    ));
+    selected
+}
+
 /// Diff `walked` against `units`: re-parse dirty/new, drop deleted. Returns
 /// `(reparsed, removed, kept, changed_units, deleted_paths)`. Dirty files are parsed **in parallel** across
 /// available CPU cores (each thread caches its own tree-sitter queries).
@@ -1590,6 +1673,8 @@ fn sync_units(
     units: &mut HashMap<PathBuf, FileUnit>,
     walked: &[Walked],
     on_progress: &dyn Fn(&str),
+    budget: ReparseBudget,
+    focus: Option<&Path>,
 ) -> (usize, usize, usize, Vec<(PathBuf, FileUnit)>, Vec<PathBuf>) {
     rekey_units(units);
 
@@ -1620,26 +1705,22 @@ fn sync_units(
         return (0, removed, kept, Vec::new(), deleted_paths);
     }
 
-    // Query-time safety valve: never re-tree-sitter thousands of files on
-    // a single code_explore. Remaining dirty files stay on the cached unit
-    // and will be picked up on later queries / explicit init.
-    const MAX_REPARSE_PER_QUERY: usize = 128;
     let dirty_found = dirty.len();
-    if dirty.len() > MAX_REPARSE_PER_QUERY {
-        on_progress(&format!(
-            "Code graph: {dirty_found} dirty files; reparsing {MAX_REPARSE_PER_QUERY} this query (rest stay cached)."
-        ));
-        dirty.truncate(MAX_REPARSE_PER_QUERY);
-    }
+    let dirty = take_reparse_budget(dirty, units, budget, focus, on_progress);
     let dirty_total = dirty.len();
+    let deferred = dirty_found.saturating_sub(dirty_total);
 
     let threads = std::thread::available_parallelism()
         .map(|n| n.get())
         .unwrap_or(4)
         .clamp(1, 16);
     on_progress(&format!(
-        "Code graph: re-parsing {dirty_total} changed/new file(s) ({} unchanged) with {threads} threads...",
-        walked.len().saturating_sub(dirty_total)
+        "Code graph: re-parsing {dirty_total} changed/new file(s) ({kept} unchanged{}) with {threads} threads...",
+        if deferred > 0 {
+            format!(", {deferred} deferred")
+        } else {
+            String::new()
+        }
     ));
 
     // Chunk dirty list across worker threads. Progress is reported after each
@@ -1939,13 +2020,13 @@ impl CodeIndex {
 
     /// Cached graph lookup with no progress callbacks (tests / internal).
     pub fn get(&self, root: &Path) -> Arc<CodeGraph> {
-        self.reconcile_workspace(root, None, &|_| {})
+        self.reconcile_workspace(root, None, &|_| {}, ReparseBudget::Query)
     }
 
     /// Like [`get`], but restat/discover only under `focus` (a `code_explore`
     /// `path:` scope). SQLite + the rest of the workspace stay untouched.
     pub fn get_scoped(&self, root: &Path, focus: Option<&Path>) -> Arc<CodeGraph> {
-        self.reconcile_workspace(root, focus, &|_| {})
+        self.reconcile_workspace(root, focus, &|_| {}, ReparseBudget::Query)
     }
 
     /// Current graph fingerprint (walk fingerprint) for `root`, or `None` if
@@ -2045,7 +2126,7 @@ impl CodeIndex {
     /// Cold start path: if memory is empty, try loading
     /// [`.atomcode/codegraph/units.v1.json`](DISK_CACHE_REL) written by `atomcode init`.
     pub fn get_with_progress(&self, root: &Path, on_progress: &dyn Fn(&str)) -> Arc<CodeGraph> {
-        self.reconcile_workspace(root, None, on_progress)
+        self.reconcile_workspace(root, None, on_progress, ReparseBudget::Query)
     }
 
     /// Reconcile workspace state with disk.
@@ -2054,11 +2135,15 @@ impl CodeIndex {
     /// and return immediately — no `WalkBuilder`, no graph recompose, no sidecar
     /// rebuild. Warm path: re-stat only already-known files (optionally only
     /// under `focus`). Cold path: load SQLite; full walk only when no db exists.
-    pub fn reconcile_workspace(
+    ///
+    /// `budget` is [`ReparseBudget::Query`] for tool calls (128-file cap) and
+    /// [`ReparseBudget::Unlimited`] for explicit `atomcode init` / `--force`.
+    pub(crate) fn reconcile_workspace(
         &self,
         root: &Path,
         focus: Option<&Path>,
         on_progress: &dyn Fn(&str),
+        budget: ReparseBudget,
     ) -> Arc<CodeGraph> {
         let root = super::canonical(root);
 
@@ -2166,10 +2251,10 @@ impl CodeIndex {
                         }
                         drop(guard);
                     } else {
-                        return self.reconcile_known_files(&root, focus, on_progress);
+                        return self.reconcile_known_files(&root, focus, on_progress, budget);
                     }
                 } else {
-                    return self.reconcile_known_files(&root, focus, on_progress);
+                    return self.reconcile_known_files(&root, focus, on_progress, budget);
                 }
 
                 // Re-lock and continue into the cold path if the warm graph vanished.
@@ -2275,7 +2360,7 @@ impl CodeIndex {
                             units.remove(p);
                         }
                         let (reparsed, removed, kept, changed, deleted) =
-                            sync_units(&mut units, &walked_known, on_progress);
+                            sync_units(&mut units, &walked_known, on_progress, budget, focus);
                         return self.finish_reconcile(
                             &root,
                             disk_fp,
@@ -2305,7 +2390,7 @@ impl CodeIndex {
             let fp = fingerprint(&files);
 
             let (reparsed, removed, kept, changed_units, deleted_paths) =
-                sync_units(&mut units, &files, on_progress);
+                sync_units(&mut units, &files, on_progress, budget, focus);
             let g = self.finish_reconcile(
                 &root,
                 fp,
@@ -2329,6 +2414,7 @@ impl CodeIndex {
         root: &Path,
         focus: Option<&Path>,
         on_progress: &dyn Fn(&str),
+        budget: ReparseBudget,
     ) -> Arc<CodeGraph> {
         let mut guard = match self.inner.lock() {
             Ok(g) => g,
@@ -2346,7 +2432,7 @@ impl CodeIndex {
             guard.building = false;
             self.cv.notify_all();
             drop(guard);
-            return self.reconcile_workspace(root, focus, on_progress);
+            return self.reconcile_workspace(root, focus, on_progress, budget);
         }
         guard.building = true;
         let mut units = std::mem::take(&mut guard.units);
@@ -2367,7 +2453,7 @@ impl CodeIndex {
             walked.extend(newcomers);
         }
         let (reparsed, removed_sync, kept, mut changed_units, mut deleted_paths) =
-            sync_units(&mut units, &walked, on_progress);
+            sync_units(&mut units, &walked, on_progress, budget, focus);
         let removed = removed_sync + missing.len();
         deleted_paths.extend(missing);
         if reparsed == 0 && removed == 0 {
@@ -2424,9 +2510,16 @@ impl CodeIndex {
             Arc::new(g)
         } else if need_compose {
             if kept == 0 && reparsed > 0 {
-                on_progress(&format!(
-                    "Code graph: full index of {walked_len} files (first build or workspace switch)..."
-                ));
+                if reparsed >= walked_len {
+                    on_progress(&format!(
+                        "Code graph: full index of {walked_len} files (first build or workspace switch)..."
+                    ));
+                } else {
+                    on_progress(&format!(
+                        "Code graph: partial first build — parsed {reparsed} of {walked_len} files \
+                         (run `atomcode init` to finish)."
+                    ));
+                }
             } else if reparsed > 0 || removed > 0 {
                 on_progress(&format!(
                     "Code graph: unit update - reparsed {reparsed}, removed {removed}, kept {kept}."
@@ -3380,5 +3473,106 @@ public class OrderController
             "scoped get of proj_a must pick up the edit"
         );
         assert!(g_a.find_by_name("alpha").is_empty());
+    }
+
+    #[test]
+    fn query_time_first_build_caps_reparse() {
+        let d = tempfile::tempdir().unwrap();
+        let n = MAX_REPARSE_PER_QUERY + 12;
+        for i in 0..n {
+            std::fs::write(
+                d.path().join(format!("f{i:03}.rs")),
+                format!("pub fn f{i}() {{}}\n"),
+            )
+            .unwrap();
+        }
+        let idx = CodeIndex::new();
+        let _ = idx.get(d.path());
+        let stats = idx.last_stats(d.path()).unwrap();
+        let units = idx.inner.lock().unwrap().units.len();
+        assert!(
+            stats.reparsed <= MAX_REPARSE_PER_QUERY,
+            "query-time must not re-tree-sitter the whole workspace: {stats:?}"
+        );
+        assert!(
+            units <= MAX_REPARSE_PER_QUERY,
+            "capped first build must not persist the deferred files as indexed: {units}"
+        );
+    }
+
+    #[test]
+    fn init_force_parses_every_file_past_query_cap() {
+        let d = tempfile::tempdir().unwrap();
+        let n = MAX_REPARSE_PER_QUERY + 12;
+        for i in 0..n {
+            std::fs::write(
+                d.path().join(format!("f{i:03}.rs")),
+                format!("pub fn f{i}() {{}}\n"),
+            )
+            .unwrap();
+        }
+        let report = init_workspace_index(d.path(), true, &|_| {}).expect("init --force");
+        assert!(
+            report.files >= n,
+            "init --force must parse all {n} files, not cap at {}: {report:?}",
+            MAX_REPARSE_PER_QUERY
+        );
+        assert!(
+            report.reparsed >= n,
+            "init --force must reparse every dirty file: {report:?}"
+        );
+    }
+
+    #[test]
+    fn init_force_rebuilds_after_query_time_truncated_index() {
+        let d = tempfile::tempdir().unwrap();
+        let n = MAX_REPARSE_PER_QUERY + 12;
+        for i in 0..n {
+            std::fs::write(
+                d.path().join(format!("f{i:03}.rs")),
+                format!("pub fn f{i}() {{}}\n"),
+            )
+            .unwrap();
+        }
+        let idx = CodeIndex::new();
+        let _ = idx.get(d.path());
+        assert!(
+            idx.inner.lock().unwrap().units.len() <= MAX_REPARSE_PER_QUERY,
+            "precondition: query-time index is truncated"
+        );
+
+        let report = init_workspace_index(d.path(), true, &|_| {}).expect("init --force");
+        assert!(
+            report.files >= n,
+            "init --force must recover a truncated index: {report:?}"
+        );
+        assert!(
+            report.reparsed >= n,
+            "init --force must reparse the whole workspace, not 128: {report:?}"
+        );
+    }
+
+    #[test]
+    fn scoped_query_prioritizes_focus_when_reparse_capped() {
+        let d = tempfile::tempdir().unwrap();
+        let other = d.path().join("aaa_other");
+        let focus = d.path().join("zzz_focus");
+        std::fs::create_dir_all(&other).unwrap();
+        std::fs::create_dir_all(&focus).unwrap();
+        for i in 0..(MAX_REPARSE_PER_QUERY + 12) {
+            std::fs::write(
+                other.join(format!("o{i:03}.rs")),
+                format!("pub fn other_{i}() {{}}\n"),
+            )
+            .unwrap();
+        }
+        std::fs::write(focus.join("hot.rs"), "pub fn focused_sym() {}\n").unwrap();
+
+        let idx = CodeIndex::new();
+        let g = idx.get_scoped(d.path(), Some(&focus));
+        assert!(
+            g.find_by_name("focused_sym").into_iter().next().is_some(),
+            "focus files must be parsed even when dirty count exceeds the query cap"
+        );
     }
 }

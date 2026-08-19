@@ -264,7 +264,8 @@ eager = "auto"
 
 # 工具输出折叠阈值（字节）。超过该大小的工具输出会被折叠为「头部+尾部预览」并存成 artifact，
 # 模型可用 fetch_output 工具按片段取回全文（全量不丢失）。
-# 默认 65536（64 KiB，与内核 64 KiB 工具结果上限对齐——超过 64 KiB 的结果本就会被内核截断）。
+# 默认 65536（64 KiB）。bash/grep 等大输出在此折叠；read_file 自带 256 KiB 页并跳过折叠。
+# 内核工具结果上限默认 256 KiB。
 # 设为 0 完全禁用折叠（所有工具输出原样进入上下文，超大输出会占用上下文窗口）。
 # 环境变量 ATOMCODE_TOOL_OUTPUT_THRESHOLD_BYTES 可覆盖本项（env 优先）。
 [tools.tool_output]

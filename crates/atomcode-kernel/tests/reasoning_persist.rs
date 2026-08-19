@@ -88,16 +88,13 @@ async fn final_answer_reasoning_is_persisted_on_the_stored_message() {
     );
 }
 
-/// A model/gateway that MISROUTES the answer into the reasoning channel (observed with
-/// Qwen3-VL via a gateway whose reasoning-parser never sees a closing `</think>`, so the
-/// whole answer lands in `reasoning_content` and `content` is empty). The turn would
-/// otherwise render BLANK. The kernel must PROMOTE the reasoning to the body: surface it
-/// live (a TextDelta) AND store it as `content` so it persists for context — gated tightly
-/// to empty-content + no-tool-calls + a real stop, so a normal model is never affected.
+/// A turn that emits ONLY reasoning, NO content body, NO tool calls.
+/// In standard Message Parts architecture (aligning with opencode / grok-build),
+/// reasoning is stored as a distinct reasoning channel and NOT promoted to content.
 #[tokio::test]
-async fn reasoning_only_turn_is_promoted_to_the_answer() {
+async fn reasoning_only_turn_is_persisted_in_reasoning_channel() {
     let provider = Arc::new(RecordingProvider::new(vec![
-        // Turn 1: ONLY reasoning, NO content body, NO tool calls — the misrouted answer.
+        // Turn 1: ONLY reasoning, NO content body, NO tool calls.
         vec![
             StreamEvent::Reasoning("目录下有 2 个文件：a.png 和 b.png。".into()),
             StreamEvent::Done { truncated: false },
@@ -115,7 +112,6 @@ async fn reasoning_only_turn_is_promoted_to_the_answer() {
         .build()
         .spawn();
 
-    // Drive turn 1, collecting the live text the driver (TUI) would render as the body.
     h.commands
         .send(AgentCommand::SendMessage {
             text: "目录里有啥".into(),
@@ -123,9 +119,11 @@ async fn reasoning_only_turn_is_promoted_to_the_answer() {
         })
         .unwrap();
     let mut live_text = String::new();
+    let mut live_reasoning = String::new();
     while let Some(ev) = h.events.recv().await {
         match ev {
             AgentEvent::TextDelta(t) => live_text.push_str(&t),
+            AgentEvent::Reasoning(r) => live_reasoning.push_str(&r),
             AgentEvent::TurnComplete { .. } => break,
             _ => {}
         }
@@ -134,25 +132,29 @@ async fn reasoning_only_turn_is_promoted_to_the_answer() {
     h.commands.send(AgentCommand::Shutdown).unwrap();
     let _ = h.task.await;
 
-    // (1) LIVE: the answer must reach the driver as body text (TextDelta), not stay hidden
-    // in the reasoning channel — otherwise the user sees a blank turn.
+    // (1) LIVE: Reasoning stays in the reasoning channel, not promoted to TextDelta.
     assert!(
-        live_text.contains("目录下有 2 个文件"),
-        "misrouted reasoning must be surfaced as live body text; got {live_text:?}"
+        live_reasoning.contains("目录下有 2 个文件"),
+        "reasoning must be surfaced in reasoning channel; got {live_reasoning:?}"
+    );
+    assert!(
+        live_text.is_empty(),
+        "reasoning-only turn must NOT emit TextDelta body; got {live_text:?}"
     );
 
-    // (2) STORED: the promoted answer must be the assistant message's CONTENT (persisted
-    // for the next turn's context), and no longer dangling in the reasoning channel.
+    // (2) STORED: The assistant message keeps text empty and reasoning intact.
     let calls = calls.lock().unwrap();
     let turn2 = &calls[1].0;
-    let answer = turn2
+    let assistant = turn2
         .iter()
-        .find(|m| m.role == Role::Assistant && m.text.contains("目录下有 2 个文件"))
-        .expect("the promoted answer must be the stored assistant CONTENT");
-    assert!(answer.tool_calls.is_empty());
+        .find(|m| m.role == Role::Assistant)
+        .expect("the assistant message must be stored");
+    assert!(assistant.tool_calls.is_empty());
+    assert_eq!(assistant.text, "", "text must remain empty without promotion");
     assert_eq!(
-        answer.reasoning, None,
-        "after promotion the answer is content, not reasoning"
+        assistant.reasoning.as_deref(),
+        Some("目录下有 2 个文件：a.png 和 b.png。"),
+        "reasoning must be preserved in reasoning field"
     );
 }
 
@@ -215,7 +217,7 @@ async fn legacy_reasoning_filler_only_turn_is_retried_not_promoted() {
 }
 
 #[tokio::test]
-async fn reasoning_only_parameter_xml_is_promoted_without_tag_loss() {
+async fn reasoning_only_parameter_xml_is_preserved_in_reasoning_channel() {
     let provider = Arc::new(RecordingProvider::new(vec![vec![
         StreamEvent::Reasoning(
             r#"Use <parameter name="path">src/main.rs</parameter> in the request."#.into(),
@@ -236,9 +238,11 @@ async fn reasoning_only_parameter_xml_is_promoted_without_tag_loss() {
         })
         .unwrap();
     let mut live_text = String::new();
+    let mut live_reasoning = String::new();
     while let Some(ev) = h.events.recv().await {
         match ev {
             AgentEvent::TextDelta(t) => live_text.push_str(&t),
+            AgentEvent::Reasoning(r) => live_reasoning.push_str(&r),
             AgentEvent::TurnComplete { .. } => break,
             _ => {}
         }
@@ -247,7 +251,11 @@ async fn reasoning_only_parameter_xml_is_promoted_without_tag_loss() {
     let _ = h.task.await;
 
     assert!(
-        live_text.contains(r#"<parameter name="path">src/main.rs</parameter>"#),
-        "real parameter XML in a promoted reasoning-only answer must be preserved; got {live_text:?}"
+        live_reasoning.contains(r#"<parameter name="path">src/main.rs</parameter>"#),
+        "real parameter XML in reasoning must be preserved in reasoning channel; got {live_reasoning:?}"
+    );
+    assert!(
+        live_text.is_empty(),
+        "reasoning-only turn must not emit text delta; got {live_text:?}"
     );
 }

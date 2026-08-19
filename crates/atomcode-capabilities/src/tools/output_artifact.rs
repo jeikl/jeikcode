@@ -74,12 +74,11 @@ impl ArtifactStore {
 }
 
 /// Default fold threshold: results larger than this (bytes) are replaced by a
-/// head+tail preview and spilled to an artifact. 64 KiB — aligned with the
-/// kernel's `DEFAULT_MAX_TOOL_RESULT_BYTES`, so a result that survives the
-/// middleware is never re-folded by the kernel cap (and a result the kernel
-/// would cap anyway is folded here FIRST, keeping the preview + fetch_output
-/// recovery path instead of a bare kernel marker). Configurable per instance
-/// via [`ArtifactMiddleware::with_threshold_bytes`]; `0` disables folding.
+/// head+tail preview and spilled to an artifact. 64 KiB — bash/grep and other
+/// unbounded tools fold here. `read_file` self-caps at 256 KiB and opts out via
+/// `never_truncate_result()`, so a 2000-line page is not folded into fetch_output.
+/// Configurable per instance via [`ArtifactMiddleware::with_threshold_bytes`];
+/// `0` disables folding.
 pub const THRESHOLD_BYTES: usize = 64 * 1024;
 /// Stable prefix embedded in a conversation-visible result when the complete
 /// tool output was replaced by an artifact-backed head/tail preview.
@@ -419,7 +418,7 @@ struct FetchArgs {
     limit: Option<usize>,
 }
 
-const FETCH_MAX_LIMIT: usize = 64 * 1024;
+const FETCH_MAX_LIMIT: usize = 256 * 1024;
 
 #[async_trait::async_trait]
 impl atomcode_kernel::tool::Tool for FetchOutputTool {
@@ -429,8 +428,8 @@ impl atomcode_kernel::tool::Tool for FetchOutputTool {
 
     fn description(&self) -> &str {
         "Read more of a large tool output that was truncated. Pass the artifact_id from a \
-truncation marker plus a byte offset and limit. Returns the requested byte slice; if the \
-artifact is unavailable, re-run the original command instead."
+truncation marker. Omit `limit` to read the next 256 KiB; do not request tiny slices. \
+If the artifact is unavailable, re-run the original command instead."
     }
 
     fn read_only_hint(&self) -> bool {
@@ -442,8 +441,8 @@ artifact is unavailable, re-run the original command instead."
             "type": "object",
             "properties": {
                 "artifact_id": {"type": "string", "description": "id from a truncation marker"},
-                "offset": {"type": "integer", "description": "byte offset to start at (default 0)"},
-                "limit": {"type": "integer", "description": "max bytes to return (default/max 65536)"}
+                "offset": {"type": "integer", "description": "byte offset to start at (default 0). After a partial result, use the next offset shown and omit `limit`."},
+                "limit": {"type": "integer", "description": "max bytes to return (default/max 262144). Omit unless you need a smaller window."}
             },
             "required": ["artifact_id"]
         })
@@ -478,7 +477,7 @@ artifact is unavailable, re-run the original command instead."
                 let body = String::from_utf8_lossy(&bytes);
                 let hint = if end < total {
                     format!(
-                        "\n\n[showing bytes {start}–{end} of {total}; call fetch_output(artifact_id=\"{}\", offset={end}) for more]",
+                        "\n\n[showing bytes {start}–{end} of {total}; omit `limit` and call fetch_output(artifact_id=\"{}\", offset={end}) for more]",
                         parsed.artifact_id
                     )
                 } else {
@@ -538,7 +537,7 @@ mod fetch_output_tests {
             r.content
         );
 
-        // limit hard-capped at 64 KiB even if bigger requested
+        // limit hard-capped at 256 KiB even if bigger requested
         let r = tool
             .execute(
                 &format!(
@@ -554,7 +553,7 @@ mod fetch_output_tests {
             r.content
         );
         assert!(
-            r.content.contains("65536") || r.content.contains("of 100000"),
+            r.content.contains("100000") || r.content.contains(&FETCH_MAX_LIMIT.to_string()),
             "pagination hint should show the hard cap or total: {}",
             r.content
         );

@@ -154,14 +154,14 @@ async fn on_text_delta_redacts_streamed_output() {
     );
 }
 
-// CLAIM 33a': the reasoning→content PROMOTION (recovering a misrouted answer) must pass
-// the promoted body through the SAME on_text_delta scrub seam — otherwise the recovery
-// would re-open exactly the redaction leak the seam closes.
+// ── Item 1a: on_reasoning_delta scrubs streamed reasoning ─────────────────────
+
+/// A hook whose `on_reasoning_delta` scrubs "SECRET" → "[REDACTED]" in each
+/// streamed reasoning chunk BEFORE it is emitted live and accumulated into the
+/// stored `Message.reasoning`.
 #[tokio::test]
-async fn promoted_reasoning_passes_through_the_text_delta_redaction_seam() {
+async fn reasoning_is_scrubbed_by_on_reasoning_delta() {
     let reg = ToolRegistry::new();
-    // The gateway misroutes the answer (carrying a secret) into the REASONING channel and
-    // leaves content empty — the case the promotion recovers.
     let provider = Arc::new(RecordingProvider::new(vec![vec![
         StreamEvent::Reasoning("the answer is SECRET data".into()),
         StreamEvent::Done { truncated: false },
@@ -171,7 +171,7 @@ async fn promoted_reasoning_passes_through_the_text_delta_redaction_seam() {
         .provider(provider)
         .tools(reg.mount(&[]))
         .persona(PERSONA)
-        .hook(Arc::new(DeltaRedactHook))
+        .hook(Arc::new(ReasoningRedactHook))
         .build()
         .spawn();
     handle
@@ -182,23 +182,22 @@ async fn promoted_reasoning_passes_through_the_text_delta_redaction_seam() {
         })
         .unwrap();
 
-    let mut streamed = String::new();
+    let mut streamed_reasoning = String::new();
     while let Some(ev) = handle.events.recv().await {
         match ev {
-            AgentEvent::TextDelta(t) => streamed.push_str(&t),
+            AgentEvent::Reasoning(r) => streamed_reasoning.push_str(&r),
             AgentEvent::TurnComplete { .. } => break,
             _ => {}
         }
     }
-    // The promoted body reached the driver as TEXT, REDACTED by on_text_delta (not the raw
-    // secret) — proving the promotion does not bypass the content-scrub seam.
+
     assert!(
-        streamed.contains("[REDACTED]"),
-        "promoted body must be emitted as text; got {streamed:?}"
+        streamed_reasoning.contains("[REDACTED]"),
+        "reasoning body must be emitted as reasoning; got {streamed_reasoning:?}"
     );
     assert!(
-        !streamed.contains("SECRET"),
-        "promoted body must be scrubbed by on_text_delta; got {streamed:?}"
+        !streamed_reasoning.contains("SECRET"),
+        "reasoning body must be scrubbed by on_reasoning_delta; got {streamed_reasoning:?}"
     );
 
     let snapshot = capture_snapshot(&mut handle).await;
@@ -209,15 +208,16 @@ async fn promoted_reasoning_passes_through_the_text_delta_redaction_seam() {
         .iter()
         .find(|m| m.role == Role::Assistant)
         .expect("an assistant message");
+    let reasoning = assistant.reasoning.as_deref().unwrap_or("");
     assert!(
-        !assistant.text.contains("SECRET"),
-        "stored promoted content must be scrubbed; got {:?}",
-        assistant.text
+        !reasoning.contains("SECRET"),
+        "stored reasoning must be scrubbed; got {:?}",
+        reasoning
     );
     assert!(
-        assistant.text.contains("[REDACTED]"),
-        "stored content must show the redaction; got {:?}",
-        assistant.text
+        reasoning.contains("[REDACTED]"),
+        "stored reasoning must show the redaction; got {:?}",
+        reasoning
     );
 }
 

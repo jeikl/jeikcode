@@ -1316,14 +1316,38 @@ fn patch_graph_with_unit(g: &mut CodeGraph, path: &Path, unit: &FileUnit, root: 
     }
 }
 
+fn path_in_focus(path: &Path, focus: Option<&Path>) -> bool {
+    let Some(focus) = focus else {
+        return true;
+    };
+    let focus = normalize_index_path(focus);
+    let path = normalize_index_path(path);
+    path == focus || path.starts_with(&focus)
+}
+
 /// Re-stat already-known unit paths. Avoids `ignore::WalkBuilder` over the
 /// whole workspace (the 10s+ "Index" cost) when we only need to know which
 /// of the files we already indexed changed.
-fn restat_known_units(units: &HashMap<PathBuf, FileUnit>) -> (Vec<Walked>, Vec<PathBuf>) {
+///
+/// When `focus` is set, only files under that directory are re-stated against
+/// disk. Everything else is trusted from the stored fingerprint so a scoped
+/// `code_explore(path: coupon-mall-demo)` does not restat 1万+ unrelated files.
+fn restat_known_units(
+    units: &HashMap<PathBuf, FileUnit>,
+    focus: Option<&Path>,
+) -> (Vec<Walked>, Vec<PathBuf>) {
     let mut walked = Vec::with_capacity(units.len());
     let mut missing = Vec::new();
-    for path in units.keys() {
+    for (path, unit) in units {
         let norm = normalize_index_path(path);
+        if !path_in_focus(&norm, focus) {
+            walked.push(Walked {
+                path: norm,
+                mtime_ns: unit.mtime_ns,
+                len: unit.len,
+            });
+            continue;
+        }
         match std::fs::metadata(&norm) {
             Ok(md) => {
                 let len = md.len();
@@ -1390,6 +1414,7 @@ fn path_under_skip_dir(p: &Path) -> bool {
 
 /// Git roots we already index: the workspace itself, its immediate children,
 /// and the nearest `.git` ancestor of known unit paths.
+#[allow(dead_code)] // reserved for explicit `atomcode init` full refresh
 fn discover_git_roots(workspace: &Path, known: &HashSet<PathBuf>) -> Vec<PathBuf> {
     let mut roots = Vec::new();
     if workspace.join(".git").exists() {
@@ -1424,6 +1449,7 @@ fn discover_git_roots(workspace: &Path, known: &HashSet<PathBuf>) -> Vec<PathBuf
     roots
 }
 
+#[allow(dead_code)] // reserved for explicit `atomcode init` full refresh
 fn git_ls_indexable(git_root: &Path) -> Vec<PathBuf> {
     let mut cmd = std::process::Command::new("git");
     cmd.args([
@@ -1457,18 +1483,36 @@ fn git_ls_indexable(git_root: &Path) -> Vec<PathBuf> {
     files
 }
 
-/// Discover **new** source files (create). Delete/modify of already-indexed
-/// files are handled by [`restat_known_units`]. This is filesystem-first —
-/// git / editor / copy / pull are all just ways the tree can change.
-/// Never WalkBuilder-s the whole workspace.
-fn discover_new_files(root: &Path, units: &HashMap<PathBuf, FileUnit>) -> Vec<Walked> {
+/// Hard cap on how many brand-new files a query-time discover will ingest.
+/// A workspace-wide `git ls-files` / `collect_files` of sibling projects used
+/// to dump 2万+ "new" files onto every cold start (224s). Query path only
+/// looks at **direct children of already-indexed directories**.
+const MAX_DISCOVER_NEW_ON_QUERY: usize = 64;
+
+/// Discover **new** source files (create) next to files we already index.
+/// Delete/modify of already-indexed files are handled by [`restat_known_units`].
+///
+/// Intentionally shallow: one `read_dir` of each known parent (and optional
+/// `focus`). No `WalkBuilder`, no `git ls-files` — those walk the whole
+/// monorepo and turn a SQLite hit into a full rebuild.
+fn discover_new_files(
+    root: &Path,
+    units: &HashMap<PathBuf, FileUnit>,
+    focus: Option<&Path>,
+) -> Vec<Walked> {
     let known: HashSet<PathBuf> = units.keys().map(|p| normalize_index_path(p)).collect();
     let mut new_files = Vec::new();
     let mut seen: HashSet<PathBuf> = HashSet::new();
 
     let mut push_new = |p: PathBuf| {
+        if new_files.len() >= MAX_DISCOVER_NEW_ON_QUERY {
+            return;
+        }
         let n = normalize_index_path(&p);
         if known.contains(&n) || !seen.insert(n.clone()) {
+            return;
+        }
+        if !path_in_focus(&n, focus) {
             return;
         }
         if let Some(w) = walked_from_disk(&n) {
@@ -1476,17 +1520,27 @@ fn discover_new_files(root: &Path, units: &HashMap<PathBuf, FileUnit>) -> Vec<Wa
         }
     };
 
-    // 1. Directories we already index: list them. A new sibling file or a new
-    //    subdirectory next to known sources is the common create path.
     let mut indexed_dirs: HashSet<PathBuf> = HashSet::new();
     for p in &known {
+        if !path_in_focus(p, focus) {
+            continue;
+        }
         if let Some(dir) = p.parent() {
             indexed_dirs.insert(dir.to_path_buf());
         }
     }
-    indexed_dirs.insert(normalize_index_path(root));
+    if let Some(focus) = focus {
+        let f = normalize_index_path(focus);
+        if f.is_dir() {
+            indexed_dirs.insert(f.clone());
+        }
+        if let Some(parent) = f.parent() {
+            indexed_dirs.insert(parent.to_path_buf());
+        }
+    } else {
+        indexed_dirs.insert(normalize_index_path(root));
+    }
 
-    let mut new_dirs: Vec<PathBuf> = Vec::new();
     for dir in &indexed_dirs {
         let Ok(rd) = std::fs::read_dir(dir) else {
             continue;
@@ -1497,31 +1551,34 @@ fn discover_new_files(root: &Path, units: &HashMap<PathBuf, FileUnit>) -> Vec<Wa
                 push_new(p);
                 continue;
             }
-            if !p.is_dir() {
-                continue;
-            }
-            if should_skip_dir(p.file_name().unwrap_or_default()) {
+            if !p.is_dir() || should_skip_dir(p.file_name().unwrap_or_default()) {
                 continue;
             }
             let pn = normalize_index_path(&p);
-            if !known.iter().any(|k| k.starts_with(&pn)) {
-                new_dirs.push(pn);
+            if known.iter().any(|k| k.starts_with(&pn)) {
+                continue;
+            }
+            // New folder next to indexed sources. Ingest only if it is a
+            // small package (e.g. `pkg/new.rs`). A large unindexed sibling
+            // project (20k files) is skipped — that was the 224s cold start.
+            let found = collect_files(&pn);
+            if found.len() > 16 {
+                continue;
+            }
+            for w in found {
+                push_new(w.path);
             }
         }
     }
 
-    // 2. New folders that appeared under indexed dirs (or a new project at root).
-    for dir in new_dirs {
-        for w in collect_files(&dir) {
-            push_new(w.path);
-        }
-    }
-
-    // 3. Optional extra net: git ls-files sees tracked files in a brand-new
-    //    subtree that we have not listed as an indexed parent yet.
-    for git_root in discover_git_roots(root, &known) {
-        for p in git_ls_indexable(&git_root) {
-            push_new(p);
+    // A scoped query (`path: coupon-mall-demo`) may point at a dir we have
+    // not fully indexed — walk just that subtree.
+    if let Some(focus) = focus {
+        let f = normalize_index_path(focus);
+        if f.is_dir() {
+            for w in collect_files(&f) {
+                push_new(w.path);
+            }
         }
     }
 
@@ -1561,10 +1618,22 @@ fn sync_units(
             _ => dirty.push(w),
         }
     }
-    let dirty_total = dirty.len();
-    if dirty_total == 0 {
+    if dirty.is_empty() {
         return (0, removed, kept, Vec::new(), deleted_paths);
     }
+
+    // Query-time safety valve: never re-tree-sitter thousands of files on
+    // a single code_explore. Remaining dirty files stay on the cached unit
+    // and will be picked up on later queries / explicit init.
+    const MAX_REPARSE_PER_QUERY: usize = 128;
+    let dirty_found = dirty.len();
+    if dirty.len() > MAX_REPARSE_PER_QUERY {
+        on_progress(&format!(
+            "Code graph: {dirty_found} dirty files; reparsing {MAX_REPARSE_PER_QUERY} this query (rest stay cached)."
+        ));
+        dirty.truncate(MAX_REPARSE_PER_QUERY);
+    }
+    let dirty_total = dirty.len();
 
     let threads = std::thread::available_parallelism()
         .map(|n| n.get())
@@ -1872,7 +1941,13 @@ impl CodeIndex {
 
     /// Cached graph lookup with no progress callbacks (tests / internal).
     pub fn get(&self, root: &Path) -> Arc<CodeGraph> {
-        self.get_with_progress(root, &|_| {})
+        self.reconcile_workspace(root, None, &|_| {})
+    }
+
+    /// Like [`get`], but restat/discover only under `focus` (a `code_explore`
+    /// `path:` scope). SQLite + the rest of the workspace stay untouched.
+    pub fn get_scoped(&self, root: &Path, focus: Option<&Path>) -> Arc<CodeGraph> {
+        self.reconcile_workspace(root, focus, &|_| {})
     }
 
     /// Current graph fingerprint (walk fingerprint) for `root`, or `None` if
@@ -1972,15 +2047,21 @@ impl CodeIndex {
     /// Cold start path: if memory is empty, try loading
     /// [`.atomcode/codegraph/units.v1.json`](DISK_CACHE_REL) written by `atomcode init`.
     pub fn get_with_progress(&self, root: &Path, on_progress: &dyn Fn(&str)) -> Arc<CodeGraph> {
-        self.reconcile_workspace(root, on_progress)
+        self.reconcile_workspace(root, None, on_progress)
     }
 
     /// Reconcile workspace state with disk.
     ///
     /// Hot path after an agent edit: trust the in-memory patch (`fast_patch_pending`)
     /// and return immediately — no `WalkBuilder`, no graph recompose, no sidecar
-    /// rebuild. Warm path: re-stat only already-known files. Cold path: full walk.
-    pub fn reconcile_workspace(&self, root: &Path, on_progress: &dyn Fn(&str)) -> Arc<CodeGraph> {
+    /// rebuild. Warm path: re-stat only already-known files (optionally only
+    /// under `focus`). Cold path: load SQLite; full walk only when no db exists.
+    pub fn reconcile_workspace(
+        &self,
+        root: &Path,
+        focus: Option<&Path>,
+        on_progress: &dyn Fn(&str),
+    ) -> Arc<CodeGraph> {
         let root = super::canonical(root);
 
         let mut guard = match self.inner.lock() {
@@ -2025,6 +2106,9 @@ impl CodeIndex {
                 let mut dirty = 0usize;
                 let mut missing = 0usize;
                 for (path, mtime_ns, len) in &snapshot {
+                    if !path_in_focus(path, focus) {
+                        continue;
+                    }
                     match std::fs::metadata(path) {
                         Ok(md) => {
                             let disk_mtime = md
@@ -2058,7 +2142,7 @@ impl CodeIndex {
                             )
                         })
                         .collect();
-                    let newcomers = discover_new_files(&root, &known_only);
+                    let newcomers = discover_new_files(&root, &known_only, focus);
                     if newcomers.is_empty() {
                         let mut guard = match self.inner.lock() {
                             Ok(g) => g,
@@ -2084,10 +2168,10 @@ impl CodeIndex {
                         }
                         drop(guard);
                     } else {
-                        return self.reconcile_known_files(&root, on_progress);
+                        return self.reconcile_known_files(&root, focus, on_progress);
                     }
                 } else {
-                    return self.reconcile_known_files(&root, on_progress);
+                    return self.reconcile_known_files(&root, focus, on_progress);
                 }
 
                 // Re-lock and continue into the cold path if the warm graph vanished.
@@ -2131,7 +2215,21 @@ impl CodeIndex {
                         .collect::<HashMap<PathBuf, FileUnit>>();
                     if !loaded.is_empty() {
                         let n_files = loaded.len();
-                        let newcomers = discover_new_files(&root, &loaded);
+                        let (mut walked_known, missing) = restat_known_units(&loaded, focus);
+                        let focused_dirty = walked_known
+                            .iter()
+                            .filter(|w| {
+                                path_in_focus(&w.path, focus)
+                                    && loaded.get(&w.path).map_or(true, |u| {
+                                        u.mtime_ns != w.mtime_ns || u.len != w.len
+                                    })
+                            })
+                            .count()
+                            + missing
+                                .iter()
+                                .filter(|p| path_in_focus(p, focus))
+                                .count();
+                        let newcomers = discover_new_files(&root, &loaded, focus);
                         let g = if disk_graph_ok {
                             on_progress(&format!(
                                 "Code graph: loaded SQLite snapshot ({n_files} files, {} symbols) — skipped tree walk.",
@@ -2148,7 +2246,7 @@ impl CodeIndex {
                             }
                             composed
                         };
-                        if newcomers.is_empty() {
+                        if newcomers.is_empty() && focused_dirty == 0 {
                             let mut guard = match self.inner.lock() {
                                 Ok(g) => g,
                                 Err(p) => p.into_inner(),
@@ -2169,21 +2267,17 @@ impl CodeIndex {
                             return g;
                         }
                         on_progress(&format!(
-                            "Code graph: {} new file(s) since last index — incremental ingest.",
+                            "Code graph: incremental after SQLite load ({} dirty, {} new).",
+                            focused_dirty,
                             newcomers.len()
                         ));
-                        let mut walked: Vec<Walked> = loaded
-                            .iter()
-                            .map(|(p, u)| Walked {
-                                path: p.clone(),
-                                mtime_ns: u.mtime_ns,
-                                len: u.len,
-                            })
-                            .collect();
-                        walked.extend(newcomers);
+                        walked_known.extend(newcomers);
                         let mut units = loaded;
+                        for p in &missing {
+                            units.remove(p);
+                        }
                         let (reparsed, removed, kept, changed, deleted) =
-                            sync_units(&mut units, &walked, on_progress);
+                            sync_units(&mut units, &walked_known, on_progress);
                         return self.finish_reconcile(
                             &root,
                             disk_fp,
@@ -2194,7 +2288,7 @@ impl CodeIndex {
                             kept,
                             changed,
                             deleted,
-                            walked.len(),
+                            walked_known.len(),
                             on_progress,
                         );
                     }
@@ -2232,7 +2326,12 @@ impl CodeIndex {
     }
 
     /// Incremental reconcile against already-known unit paths (no tree walk).
-    fn reconcile_known_files(&self, root: &Path, on_progress: &dyn Fn(&str)) -> Arc<CodeGraph> {
+    fn reconcile_known_files(
+        &self,
+        root: &Path,
+        focus: Option<&Path>,
+        on_progress: &dyn Fn(&str),
+    ) -> Arc<CodeGraph> {
         let mut guard = match self.inner.lock() {
             Ok(g) => g,
             Err(p) => p.into_inner(),
@@ -2249,7 +2348,7 @@ impl CodeIndex {
             guard.building = false;
             self.cv.notify_all();
             drop(guard);
-            return self.reconcile_workspace(root, on_progress);
+            return self.reconcile_workspace(root, focus, on_progress);
         }
         guard.building = true;
         let mut units = std::mem::take(&mut guard.units);
@@ -2257,14 +2356,14 @@ impl CodeIndex {
         drop(guard);
 
         rekey_units(&mut units);
-        let (mut walked, missing) = restat_known_units(&units);
+        let (mut walked, missing) = restat_known_units(&units, focus);
         for p in &missing {
             units.remove(p);
         }
-        let newcomers = discover_new_files(root, &units);
+        let newcomers = discover_new_files(root, &units, focus);
         if !newcomers.is_empty() {
             on_progress(&format!(
-                "Code graph: discovered {} new file(s) (git/dir incremental).",
+                "Code graph: discovered {} new sibling file(s).",
                 newcomers.len()
             ));
             walked.extend(newcomers);
@@ -3216,5 +3315,72 @@ public class OrderController
 
         assert_eq!(norm1, norm2);
         assert_eq!(norm2, norm3);
+    }
+
+    #[test]
+    fn sqlite_hit_does_not_ingest_unindexed_sibling_tree() {
+        let d = tempfile::tempdir().unwrap();
+        std::fs::write(d.path().join("keep.rs"), "fn keep() {}\n").unwrap();
+        init_workspace_index(d.path(), false, &|_| {}).expect("init");
+
+        // A huge unindexed sibling tree must not be walked on the next process start.
+        let other = d.path().join("other-project");
+        std::fs::create_dir_all(&other).unwrap();
+        for i in 0..40 {
+            std::fs::write(other.join(format!("n{i}.rs")), format!("fn n{i}() {{}}\n")).unwrap();
+        }
+
+        let idx = CodeIndex::new();
+        let g = idx.get(d.path());
+        assert!(
+            g.find_by_name("keep").into_iter().next().is_some(),
+            "sqlite snapshot must load"
+        );
+        assert!(
+            g.find_by_name("n0").is_empty(),
+            "unindexed sibling tree must not be ingested on cold start"
+        );
+        let stats = idx.last_stats(d.path()).unwrap();
+        assert!(
+            stats.cache_hit,
+            "sqlite + no known-file change must be a cache hit: {stats:?}"
+        );
+        assert_eq!(stats.reparsed, 0, "must not reparse sibling tree: {stats:?}");
+    }
+
+    #[test]
+    fn scoped_get_ignores_dirty_files_outside_focus() {
+        let d = tempfile::tempdir().unwrap();
+        let a = d.path().join("proj_a");
+        let b = d.path().join("proj_b");
+        std::fs::create_dir_all(&a).unwrap();
+        std::fs::create_dir_all(&b).unwrap();
+        std::fs::write(a.join("a.rs"), "fn alpha() {}\n").unwrap();
+        std::fs::write(b.join("b.rs"), "fn beta() {}\n").unwrap();
+
+        let idx = CodeIndex::new();
+        let g1 = idx.get(d.path());
+        assert!(g1.find_by_name("alpha").into_iter().next().is_some());
+        assert!(g1.find_by_name("beta").into_iter().next().is_some());
+
+        std::fs::write(a.join("a.rs"), "fn alpha_v2() {}\n").unwrap();
+        let g_b = idx.get_scoped(d.path(), Some(&b));
+        assert!(
+            g_b.find_by_name("alpha").into_iter().next().is_some(),
+            "scoped get of proj_b must not restat proj_a"
+        );
+        assert!(g_b.find_by_name("alpha_v2").is_empty());
+        let stats_b = idx.last_stats(d.path()).unwrap();
+        assert!(
+            stats_b.cache_hit || stats_b.reparsed == 0,
+            "focus proj_b was clean: {stats_b:?}"
+        );
+
+        let g_a = idx.get_scoped(d.path(), Some(&a));
+        assert!(
+            g_a.find_by_name("alpha_v2").into_iter().next().is_some(),
+            "scoped get of proj_a must pick up the edit"
+        );
+        assert!(g_a.find_by_name("alpha").is_empty());
     }
 }

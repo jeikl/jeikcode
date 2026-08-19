@@ -318,6 +318,14 @@ impl Tool for CodeExploreTool {
 
         let root = canonical(&ctx.working_dir);
         let max_files = a.max_files.unwrap_or(DEFAULT_MAX_FILES).clamp(1, MAX_ALLOWED_FILES);
+        let _log_guard = super::index_log::ToolCallGuard::enter(
+            "code_explore",
+            json!({
+                "query": a.query,
+                "path": a.path,
+                "max_files": max_files,
+            }),
+        );
 
         // Load project-specific thesaurus from `.atomcode/thesaurus`
         {
@@ -475,6 +483,16 @@ impl Tool for CodeExploreTool {
                 String::new()
             };
 
+            log_explore_outcome(
+                &root,
+                &self.index,
+                json!({
+                    "outcome": "zero_hit",
+                    "index_ms": t_index.as_millis() as u64,
+                    "scope_files": files_in_scope.len(),
+                    "scope_symbols": symbols_in_scope,
+                }),
+            );
             return ok(format!(
                 "🔍 Zero-Hit Diagnostic for query '{}':\n\
                  ⚠️ **0 hits ≠ feature absent** — an empty result is INCONCLUSIVE, not proof the \
@@ -521,6 +539,16 @@ impl Tool for CodeExploreTool {
         let bm25_enabled = std::env::var("ATOMCODE_EXPLORE_BM25").as_deref() == Ok("1");
         let concept_enabled = std::env::var("ATOMCODE_EXPLORE_CONCEPT").as_deref() == Ok("1");
         if let Some(cached) = query_cache_get(fp, &a.query, &scope_key, max_files, bm25_enabled, concept_enabled) {
+            log_explore_outcome(
+                &root,
+                &self.index,
+                json!({
+                    "outcome": "query_cache_hit",
+                    "index_ms": t_index.as_millis() as u64,
+                    "retrieval_ms": t_retrieval.as_millis() as u64,
+                    "candidates": scored_files.len(),
+                }),
+            );
             return ok(cached);
         }
         let t_render_start = std::time::Instant::now();
@@ -544,8 +572,44 @@ impl Tool for CodeExploreTool {
         );
         query_cache_insert(fp, &a.query, &scope_key, max_files, bm25_enabled, concept_enabled, output.clone());
 
+        log_explore_outcome(
+            &root,
+            &self.index,
+            json!({
+                "outcome": "ok",
+                "index_ms": t_index.as_millis() as u64,
+                "retrieval_ms": t_retrieval.as_millis() as u64,
+                "render_ms": t_render.as_millis() as u64,
+                "total_ms": total_cost.as_millis() as u64,
+                "candidates": scored_files.len(),
+                "shown": max_files.min(scored_files.len()),
+                "result_chars": output.len(),
+            }),
+        );
         ok(output)
     }
+}
+
+fn log_explore_outcome(root: &Path, index: &CodeIndex, mut extra: serde_json::Value) {
+    if let Some(stats) = index.last_stats(root) {
+        if let Some(obj) = extra.as_object_mut() {
+            obj.insert("cache_hit".into(), json!(stats.cache_hit));
+            obj.insert("reparsed".into(), json!(stats.reparsed));
+            obj.insert("kept".into(), json!(stats.kept));
+            obj.insert("removed".into(), json!(stats.removed));
+            if !stats.cache_hit || stats.reparsed > 0 {
+                let files: Vec<String> = stats
+                    .reparsed_files
+                    .iter()
+                    .take(200)
+                    .map(|p| p.display().to_string())
+                    .collect();
+                obj.insert("miss_files".into(), json!(files));
+                obj.insert("miss_file_count".into(), json!(stats.reparsed_files.len()));
+            }
+        }
+    }
+    super::index_log::log_tool_call(root, extra);
 }
 
 /// Helper to scan physical source files on disk for diagnostic reporting.

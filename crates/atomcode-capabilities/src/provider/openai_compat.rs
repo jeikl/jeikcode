@@ -928,9 +928,15 @@ fn format_messages(
             Role::Assistant => {
                 let mut obj = Map::new();
                 obj.insert("role".into(), json!("assistant"));
-                // `content` MUST always be present (even empty): DeepSeek/SiliconFlow
-                // reject an assistant message that omits it.
-                obj.insert("content".into(), json!(m.text));
+                // Field must be present (DeepSeek/SiliconFlow 400 if omitted). OpenCode
+                // sends JSON `null` when there is no assistant text (tool-call-only /
+                // reasoning-only turns); an empty string `""` is treated by some Grok
+                // OpenAI-compat gateways as "keep writing content" and can stall thinking.
+                if m.text.is_empty() {
+                    obj.insert("content".into(), Value::Null);
+                } else {
+                    obj.insert("content".into(), json!(m.text));
+                }
                 if !m.tool_calls.is_empty() {
                     let tcs: Vec<Value> = m
                         .tool_calls
@@ -1017,12 +1023,18 @@ fn build_request_body(
         || m_lower.contains("o1-")
         || m_lower.contains("o3-");
 
-    if let Some(mt) = options.max_tokens.or(cfg.max_tokens) {
-        if is_o_series {
-            body.insert("max_completion_tokens".into(), json!(mt));
-        } else {
-            body.insert("max_tokens".into(), json!(mt));
-        }
+    // OpenCode always sends an output cap (32k fallback). Unbounded thinking on
+    // Grok OpenAI-compat gateways is what turned a reasoning n-gram loop into
+    // `unexpected EOF during chunk size line`.
+    const DEFAULT_MAX_OUTPUT_TOKENS: u32 = 32_000;
+    let max_tokens = options
+        .max_tokens
+        .or(cfg.max_tokens)
+        .unwrap_or(DEFAULT_MAX_OUTPUT_TOKENS);
+    if is_o_series {
+        body.insert("max_completion_tokens".into(), json!(max_tokens));
+    } else {
+        body.insert("max_tokens".into(), json!(max_tokens));
     }
     if let Some(t) = options.temperature {
         if !is_o_series {
@@ -2090,7 +2102,7 @@ mod tests {
         let out = format_messages(&[m], ReasoningPolicy::Exclude, true);
         let a = &out[0];
         assert_eq!(a["role"], "assistant");
-        assert_eq!(a["content"], ""); // present even when empty
+        assert!(a["content"].is_null(), "empty assistant content must be JSON null, not \"\"");
         assert_eq!(a["tool_calls"][0]["id"], "c1");
         assert_eq!(a["tool_calls"][0]["type"], "function");
         assert_eq!(a["tool_calls"][0]["function"]["name"], "read");
@@ -2209,7 +2221,11 @@ mod tests {
             body.get("temperature").is_none(),
             "None temperature omitted"
         );
-        assert!(body.get("max_tokens").is_none(), "no max_tokens set");
+        assert_eq!(
+            body["max_tokens"].as_u64(),
+            Some(32_000),
+            "unset max_tokens falls back to OpenCode's 32k output cap"
+        );
     }
 
     #[test]

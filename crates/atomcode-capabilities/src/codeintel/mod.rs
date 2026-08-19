@@ -31,6 +31,7 @@ pub mod find_symbol;
 pub mod graph;
 pub mod index;
 pub mod index_db;
+pub mod index_log;
 pub mod lang;
 pub mod list_symbols;
 pub mod read_symbol;

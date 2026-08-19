@@ -277,6 +277,10 @@ impl Tool for CodeExploreTool {
         json!({
             "type": "object",
             "properties": {
+                "path": {
+                    "type": "string",
+                    "description": "Target directory, subproject, module, or file path to explore (e.g. 'src/tools', 'crates/atomcode-coding', 'backend', or '.' for project root). Required: specify the target module/directory to focus the search."
+                },
                 "query": {
                     "type": "string",
                     "description": "Natural language question in Chinese or English (e.g. '扣减库存并加锁防超卖', 'how does auth middleware verify JWT') OR symbol/file names (e.g. 'OrderService verifyToken')."
@@ -284,13 +288,9 @@ impl Tool for CodeExploreTool {
                 "max_files": {
                     "type": "integer",
                     "description": "Maximum number of files to render source code from (default: 12, max: 30)"
-                },
-                "path": {
-                    "type": "string",
-                    "description": "Optional subdirectory or file scope to narrow search (e.g. 'src/tools', 'packages/backend'). In a multi-project workspace with independent subprojects, MUST provide a relative path to prevent context explosion."
                 }
             },
-            "required": ["query"]
+            "required": ["query", "path"]
         })
     }
 
@@ -316,13 +316,22 @@ impl Tool for CodeExploreTool {
             return err("code_explore requires a non-empty `query`".to_string());
         }
 
+        let path_str = match a.path.as_deref().map(str::trim) {
+            Some(p) if !p.is_empty() => p,
+            _ => {
+                return err(
+                    "code_explore requires a `path` parameter specifying the target module, directory, or '.' for the project root (e.g. 'src/tools', 'crates/atomcode-coding', or '.').".to_string()
+                );
+            }
+        };
+
         let root = canonical(&ctx.working_dir);
         let max_files = a.max_files.unwrap_or(DEFAULT_MAX_FILES).clamp(1, MAX_ALLOWED_FILES);
         let _log_guard = super::index_log::ToolCallGuard::enter(
             "code_explore",
             json!({
                 "query": a.query,
-                "path": a.path,
+                "path": path_str,
                 "max_files": max_files,
             }),
         );

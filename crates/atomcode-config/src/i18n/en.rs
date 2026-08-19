@@ -376,6 +376,9 @@ pub(super) fn en(msg: Msg<'_>) -> Cow<'static, str> {
         Msg::ProviderPanelFieldSupportsVision => "Support image input?".into(),
         Msg::ProviderPanelVisionYes => "Yes [✓]  (send base64 images)".into(),
         Msg::ProviderPanelVisionNo => "No [ ]  (text only)".into(),
+        Msg::ProviderPanelFieldReasoningModel => "Reasoning model?".into(),
+        Msg::ProviderPanelReasoningYes => "Yes [✓]  (echo reasoning in history)".into(),
+        Msg::ProviderPanelReasoningNo => "No [ ]  (standard / no reasoning echo)".into(),
         Msg::ProviderPanelFieldMakeDefault => "Set as default".into(),
         Msg::ProviderPanelSwitchHint => "←→ to switch".into(),
         Msg::ProviderPanelEnvHint { env } => format!("blank uses ${env}").into(),
@@ -385,7 +388,7 @@ pub(super) fn en(msg: Msg<'_>) -> Cow<'static, str> {
             "Tab Next  ←→ Switch provider  Space Toggle  ↵ Save  Esc Back".into(),
         Msg::ProviderPanelAccountFormHint => "Tab Switch  ↵ Save  Esc Back".into(),
         Msg::ProviderPanelModelFormHint =>
-            "Tab Next  ←→ Switch account  Space Toggle image/default  ↵ Save  Esc Back".into(),
+            "Tab Next  ←→ Switch account  Space Toggle image/reasoning/default  ↵ Save  Esc Back".into(),
         // ── Model picker ──
         Msg::ModelSwitched { provider, model } =>
             format!("  Switched to {provider} · {model} for this session\n").into(),
@@ -978,6 +981,8 @@ Msg::CmdDescSetup =>
         Msg::CmdDescWhoami => "Show current logged-in user".into(),
         Msg::CmdDescModel =>
             "Set the default provider / model and switch this session".into(),
+        Msg::CmdDescModelAdd =>
+            "Quickly add a model to an existing provider account".into(),
         Msg::CmdDescProvider =>
             "Manage providers (add / edit / delete / set global default)".into(),
         Msg::CmdDescStatus => "Show session status".into(),

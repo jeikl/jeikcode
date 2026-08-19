@@ -398,6 +398,12 @@ pub enum Msg<'a> {
     ProviderPanelVisionYes,
     /// Toggle label when supports_vision is false.
     ProviderPanelVisionNo,
+    /// "Is this a reasoning / thinking model?"
+    ProviderPanelFieldReasoningModel,
+    /// Toggle label when reasoning_model is true.
+    ProviderPanelReasoningYes,
+    /// Toggle label when reasoning_model is false.
+    ProviderPanelReasoningNo,
     ProviderPanelFieldMakeDefault,
     ProviderPanelSwitchHint,
     ProviderPanelEnvHint {
@@ -1162,6 +1168,7 @@ pub enum Msg<'a> {
     CmdDescLogout,
     CmdDescWhoami,
     CmdDescModel,
+    CmdDescModelAdd,
     CmdDescProvider,
     CmdDescStatus,
     CmdDescConfig,

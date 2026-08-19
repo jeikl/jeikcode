@@ -418,6 +418,7 @@ pub(crate) fn chat_runtime_config(
         thinking_enabled: p.and_then(|p| p.thinking_enabled),
         thinking_type: p.and_then(|p| p.thinking_type.clone()),
         thinking_keep: p.and_then(|p| p.thinking_keep.clone()),
+        reasoning_model: p.and_then(|p| p.reasoning_model),
         // The daemon answers `/chat` approvals at its own seam when an interactive
         // responder is registered; otherwise run_chat_turn_v2 applies the mode-specific,
         // fail-closed fallback. Keep the runtime round-trip enabled here.

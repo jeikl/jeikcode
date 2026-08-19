@@ -47,6 +47,7 @@ chrono = "0.4"
 # Parse the bash tool-call `arguments` JSON in the VerifyCadenceHook to tell a real
 # check from a read-only `ls`/`git diff` dodge (discipline/verify.rs).
 serde_json = "1"
+serde_yaml = "0.9"
 serde = { version = "1", features = ["derive"] }
 tracing = "0.1"
 

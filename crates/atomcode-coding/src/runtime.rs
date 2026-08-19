@@ -7824,6 +7824,7 @@ mod tests {
             capable_model: Some(rank),
             pricing: None,
             supports_vision: None,
+            reasoning_model: None,
         }
     }
 

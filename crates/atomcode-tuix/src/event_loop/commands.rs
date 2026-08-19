@@ -1761,8 +1761,12 @@ fn execute_slash_command_impl(
             // `reset_to_new_session`.
             reset_to_new_session(ctx, state, renderer);
         }
-        "model" => {
-            if !crate::modals::model_picker::has_selectable_models(&ctx.config) {
+        "model" | "models" => {
+            if arg == "add" || arg == "new" {
+                let mut panel = crate::modals::ProviderPanel::open();
+                panel.open_add_model(&ctx.config);
+                *active_modal = Some(Box::new(panel));
+            } else if !crate::modals::model_picker::has_selectable_models(&ctx.config) {
                 renderer.render(UiLine::CommandOutput(t(Msg::CmdNoProviders).into_owned()));
                 renderer.flush();
             } else {
@@ -1869,7 +1873,7 @@ fn execute_slash_command_impl(
         "provider" => {
             *active_modal = Some(Box::new(crate::modals::ProviderPanel::open()));
         }
-        "modelsadd" => {
+        "modelsadd" | "modeladd" | "model-add" | "models-add" => {
             let mut panel = crate::modals::ProviderPanel::open();
             panel.open_add_model(&ctx.config);
             *active_modal = Some(Box::new(panel));

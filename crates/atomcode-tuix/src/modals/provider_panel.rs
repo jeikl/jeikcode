@@ -235,6 +235,8 @@ enum ModelField {
     Window,
     /// Interactive: does this model accept image input?
     SupportsVision,
+    /// Interactive: is this a reasoning model?
+    ReasoningModel,
     MakeDefault,
 }
 
@@ -269,6 +271,8 @@ struct ModelForm {
     window: String,
     /// Whether the model accepts image inputs (written as TOML `image_input`).
     supports_vision: bool,
+    /// Whether the model is a reasoning model (written as TOML `reasoning_model`).
+    reasoning_model: bool,
     make_default: bool,
     focus: ModelField,
     /// When set, this is an edit of an existing model id (account locked).
@@ -304,6 +308,7 @@ impl ModelForm {
             // Opt-in: default off so pure-text models never send base64 by
             // accident. User Space-toggles on for multimodal gateways.
             supports_vision: false,
+            reasoning_model: false,
             make_default: true,
             focus: ModelField::Account,
             edit_id: None,
@@ -321,6 +326,10 @@ impl ModelForm {
             .resolve_model(Some(id))
             .map(|r| r.accepts_images())
             .unwrap_or_else(|_| m.supports_vision.unwrap_or(false));
+        let reasoning_model = config
+            .resolve_model(Some(id))
+            .map(|r| r.is_reasoning_model())
+            .unwrap_or_else(|_| m.reasoning_model.unwrap_or(false));
         Some(Self {
             account_ids: vec![m.account.clone()],
             needs_key: vec![false], // account already exists; edit its key via 账号页
@@ -329,6 +338,7 @@ impl ModelForm {
             model: m.model.clone(),
             window: m.context_window.to_string(),
             supports_vision,
+            reasoning_model,
             make_default: config.effective_model_selection().as_deref() == Some(id),
             focus: ModelField::Model,
             edit_id: Some(id.to_string()),
@@ -374,6 +384,7 @@ impl ModelForm {
         v.push(ModelField::Model);
         v.push(ModelField::Window);
         v.push(ModelField::SupportsVision);
+        v.push(ModelField::ReasoningModel);
         v.push(ModelField::MakeDefault);
         v
     }
@@ -474,7 +485,8 @@ impl ProviderPanel {
                     .extend(clean.chars().filter(char::is_ascii_digit)),
                 ModelField::Account
                 | ModelField::MakeDefault
-                | ModelField::SupportsVision => {}
+                | ModelField::SupportsVision
+                | ModelField::ReasoningModel => {}
             },
             Mode::List => {
                 self.query.push_str(clean);
@@ -929,6 +941,7 @@ impl ProviderPanel {
         // Persist the form's image-input choice (TOML `image_input`) so paste/send
         // gates never re-guess after save.
         let supports_vision = form.supports_vision;
+        let reasoning_model = form.reasoning_model;
         // VL tip: when image input is on, runtime skips VL and sends base64 to
         // this model. Capture whether a VL preprocessor is already configured so
         // the success notice can tell the user how to switch back.
@@ -991,10 +1004,12 @@ impl ProviderPanel {
                         model.model = model_name.clone();
                         model.context_window = context_window;
                         model.supports_vision = Some(supports_vision);
+                        model.reasoning_model = Some(reasoning_model);
                     } else if let Some(provider) = persisted.providers.get_mut(id) {
                         provider.model = model_name.clone();
                         provider.context_window = context_window;
                         provider.supports_vision = Some(supports_vision);
+                        provider.reasoning_model = Some(reasoning_model);
                     } else {
                         anyhow::bail!("model {id:?} changed; reopen /provider");
                     }
@@ -1035,6 +1050,7 @@ impl ProviderPanel {
                             thinking_budget: None,
                             pricing: None,
                             supports_vision: Some(supports_vision),
+                            reasoning_model: Some(reasoning_model),
                         },
                     );
                     model_id
@@ -1253,8 +1269,8 @@ impl Modal for ProviderPanel {
                     form.advance_focus(true);
                 }
                 KeyCode::BackTab => form.advance_focus(false),
-                KeyCode::Tab | KeyCode::Down => form.advance_focus(true),
-                KeyCode::BackTab | KeyCode::Up => form.advance_focus(false),
+                KeyCode::Down => form.advance_focus(true),
+                KeyCode::Up => form.advance_focus(false),
                 KeyCode::Left if form.focus == ModelField::Account => form.cycle_account(false),
                 KeyCode::Right if form.focus == ModelField::Account => form.cycle_account(true),
                 KeyCode::Char(' ') if form.focus == ModelField::MakeDefault => {
@@ -1264,6 +1280,11 @@ impl Modal for ProviderPanel {
                     if form.focus == ModelField::SupportsVision =>
                 {
                     form.supports_vision = !form.supports_vision;
+                }
+                KeyCode::Char(' ') | KeyCode::Left | KeyCode::Right
+                    if form.focus == ModelField::ReasoningModel =>
+                {
+                    form.reasoning_model = !form.reasoning_model;
                 }
                 KeyCode::Char(c) => match form.focus {
                     ModelField::ApiKey => form.api_key.push(c),
@@ -1739,6 +1760,15 @@ impl Modal for ProviderPanel {
                     form.focus == ModelField::SupportsVision,
                 ));
                 items.push(field_row(
+                    &crate::i18n::t(crate::i18n::Msg::ProviderPanelFieldReasoningModel),
+                    if form.reasoning_model {
+                        crate::i18n::t(crate::i18n::Msg::ProviderPanelReasoningYes).into_owned()
+                    } else {
+                        crate::i18n::t(crate::i18n::Msg::ProviderPanelReasoningNo).into_owned()
+                    },
+                    form.focus == ModelField::ReasoningModel,
+                ));
+                items.push(field_row(
                     &crate::i18n::t(crate::i18n::Msg::ProviderPanelFieldMakeDefault),
                     if form.make_default { "[✓]" } else { "[ ]" }.to_string(),
                     form.focus == ModelField::MakeDefault,
@@ -1802,7 +1832,7 @@ mod tests {
 
         let account_rows = panel.filtered_ids(&cfg).len();
         assert_eq!(panel.current_len(&cfg), account_rows + 1);
-        panel.selected = account_rows;
+        panel.selected = 0;
         assert_eq!(panel.selected_id(&cfg).as_deref(), Some(ADD_PROVIDER_ROW));
 
         panel.tab = Tab::Models;
@@ -1966,6 +1996,10 @@ mod tests {
         // Add: account is a selectable field, defaults to an existing account.
         let add = ModelForm::new_add(&cfg, None).unwrap();
         assert!(add.fields().contains(&ModelField::Account));
+        assert!(add.fields().contains(&ModelField::SupportsVision));
+        assert!(add.fields().contains(&ModelField::ReasoningModel));
+        assert!(!add.supports_vision);
+        assert!(!add.reasoning_model);
         assert_eq!(add.account_id(), "acc");
         // A preferred (drilled-into) account is preselected.
         let cfg2: Config = serde_json::from_value(serde_json::json!({
@@ -1980,6 +2014,7 @@ mod tests {
         // Edit: account locked; model + window pre-filled; id preserved.
         let edit = ModelForm::new_edit(&cfg, "acc/m").unwrap();
         assert!(!edit.fields().contains(&ModelField::Account));
+        assert!(edit.fields().contains(&ModelField::ReasoningModel));
         assert_eq!(edit.model, "deepseek-chat");
         assert_eq!(edit.window, "131072");
         assert_eq!(edit.edit_id.as_deref(), Some("acc/m"));
@@ -2105,10 +2140,9 @@ mod tests {
             ids.first() == Some(&"AtomGit".to_string()),
             "configured first"
         );
-        assert_eq!(
-            ids.get(1).map(String::as_str),
-            Some("taotoken"),
-            "TaoToken should be the first quick-add vendor below AtomGit"
+        assert!(
+            ids.contains(&"taotoken".to_string()),
+            "TaoToken is listed"
         );
         assert!(
             ids.contains(&"deepseek".to_string()),

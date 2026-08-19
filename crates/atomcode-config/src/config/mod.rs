@@ -570,7 +570,12 @@ impl Config {
             if resolved.accepts_images() {
                 return ImageAttachSupport::Supported;
             }
-        } else if crate::util::model_name_suggests_vision(active_model) {
+        } else if let Ok(active_resolved) = self.resolve_model(None) {
+            if active_resolved.model == active_model && active_resolved.accepts_images() {
+                return ImageAttachSupport::Supported;
+            }
+        }
+        if crate::util::model_name_suggests_vision(active_model) {
             return ImageAttachSupport::Supported;
         }
         match self.vision_preprocessor_provider.as_deref() {
@@ -589,13 +594,13 @@ impl Config {
     /// gate can distinguish "nothing configured" from "preprocessor configured
     /// but unresolvable" (a typo) and message accordingly.
     pub fn image_attach_support(&self) -> ImageAttachSupport {
-        // Route through the single resolution boundary (§14.1) so both schemas
-        // work and the active model matches what the runtime builds.
-        let active_model = self
-            .resolve_model(None)
-            .map(|r| r.model)
-            .unwrap_or_default();
-        self.image_attach_support_for_model(&active_model)
+        if let Ok(resolved) = self.resolve_model(None) {
+            if resolved.accepts_images() {
+                return ImageAttachSupport::Supported;
+            }
+            return self.image_attach_support_for_model(&resolved.model);
+        }
+        ImageAttachSupport::Unconfigured
     }
 }
 
@@ -864,6 +869,7 @@ impl Config {
             capable_model: model.capable_model,
             pricing: model.pricing,
             supports_vision: model.supports_vision,
+            reasoning_model: model.reasoning_model,
         })
     }
 
@@ -1176,6 +1182,7 @@ fn project_legacy_model(account_id: &str, p: &ProviderConfig) -> ModelProfileCon
         thinking_budget: p.thinking_budget,
         pricing: p.pricing,
         supports_vision: p.supports_vision,
+        reasoning_model: p.reasoning_model,
     }
 }
 
@@ -2545,6 +2552,7 @@ model = "missing-type"
                 capable_model: None,
                 pricing: None,
                 supports_vision: None,
+                reasoning_model: None,
             },
         );
         cfg.save(&tmp).unwrap();
@@ -2735,7 +2743,8 @@ model = "missing-type"
 
     #[test]
     fn saved_config_roundtrips_language() {
-        let tmp = tempfile::NamedTempFile::new().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let cfg_path = dir.path().join("config.toml");
         let mut cfg = Config {
             language: Some(crate::locale::Locale::ZhCn),
             ..Config::with_default_provider("p")
@@ -2762,11 +2771,12 @@ model = "missing-type"
                 capable_model: None,
                 pricing: None,
                 supports_vision: None,
+                reasoning_model: None,
             },
         );
-        cfg.save(tmp.path()).unwrap();
+        cfg.save(&cfg_path).unwrap();
 
-        let loaded = Config::load(tmp.path()).unwrap();
+        let loaded = Config::load(&cfg_path).unwrap();
         assert_eq!(loaded.language, Some(crate::locale::Locale::ZhCn));
     }
 
@@ -2794,9 +2804,10 @@ model = "missing-type"
 
     #[test]
     fn config_missing_language_field_loads_as_none() {
-        let tmp = tempfile::NamedTempFile::new().unwrap();
-        std::fs::write(tmp.path(), "default_provider = \"foo\"\n[providers]\n").unwrap();
-        let loaded = Config::load(tmp.path()).unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let cfg_path = dir.path().join("config.toml");
+        std::fs::write(&cfg_path, "default_provider = \"foo\"\n[providers]\n").unwrap();
+        let loaded = Config::load(&cfg_path).unwrap();
         assert_eq!(loaded.language, None);
     }
 
@@ -2847,6 +2858,7 @@ model = "missing-type"
                 capable_model: None,
                 pricing: None,
                 supports_vision,
+                reasoning_model: None,
             },
         );
         Config {
@@ -2946,6 +2958,7 @@ model = "missing-type"
                 capable_model: None,
                 pricing: None,
                 supports_vision: Some(true),
+                reasoning_model: None,
             },
         );
         assert!(cfg.can_handle_attached_images());
@@ -3161,6 +3174,7 @@ capable_model = 5
                 thinking_budget: None,
                 pricing: None,
                 supports_vision: None,
+                reasoning_model: None,
             },
         );
         let rendered = cfg.serialize_for_disk(None).unwrap();
@@ -3210,6 +3224,7 @@ capable_model = 5
                 thinking_budget: None,
                 pricing: None,
                 supports_vision: None,
+                reasoning_model: None,
             },
         );
         cfg.default_model = Some("nope".into()); // unresolvable default → error

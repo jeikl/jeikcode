@@ -1374,6 +1374,7 @@ fn build_codingplan_provider(entry: &ModelEntry) -> ProviderConfig {
         supports_vision: Some(atomcode_config::util::model_name_suggests_vision(
             &entry.display_model_name,
         )),
+        reasoning_model: None,
     }
 }
 

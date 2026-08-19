@@ -91,30 +91,12 @@ pub const ANTHROPIC_COMPATIBLE: ProviderPreset = ProviderPreset {
 /// vendor defaults and may be overridden per account.
 pub const PRESETS: &[ProviderPreset] = &[
     ProviderPreset {
-        id: "openai-compatible",
-        display_name: "OpenAI Compatible / Custom (自定义)",
+        id: "atomgit",
+        display_name: "AtomGit",
         provider_type: ProviderType::OpenAi,
-        default_base_url: None,
+        default_base_url: Some("https://llm-api.atomgit.com/v1"),
         auth_kind: AuthKind::ApiKey,
         api_key_env: None,
-        model_source: ModelSource::DiscoveryApi,
-    },
-    ProviderPreset {
-        id: "anthropic",
-        display_name: "Anthropic (Claude)",
-        provider_type: ProviderType::Anthropic,
-        default_base_url: Some("https://api.anthropic.com/v1"),
-        auth_kind: AuthKind::ApiKey,
-        api_key_env: Some("ANTHROPIC_API_KEY"),
-        model_source: ModelSource::DiscoveryApi,
-    },
-    ProviderPreset {
-        id: "deepseek",
-        display_name: "DeepSeek",
-        provider_type: ProviderType::OpenAi,
-        default_base_url: Some("https://api.deepseek.com/v1"),
-        auth_kind: AuthKind::ApiKey,
-        api_key_env: Some("DEEPSEEK_API_KEY"),
         model_source: ModelSource::DiscoveryApi,
     },
     ProviderPreset {
@@ -134,6 +116,24 @@ pub const PRESETS: &[ProviderPreset] = &[
         auth_kind: AuthKind::ApiKey,
         api_key_env: Some("ARK_API_KEY"),
         model_source: ModelSource::Manual,
+    },
+    ProviderPreset {
+        id: "xiaomi-mimo",
+        display_name: "Xiaomi MiMo",
+        provider_type: ProviderType::OpenAi,
+        default_base_url: None,
+        auth_kind: AuthKind::ApiKey,
+        api_key_env: None,
+        model_source: ModelSource::Manual,
+    },
+    ProviderPreset {
+        id: "deepseek",
+        display_name: "DeepSeek",
+        provider_type: ProviderType::OpenAi,
+        default_base_url: Some("https://api.deepseek.com/v1"),
+        auth_kind: AuthKind::ApiKey,
+        api_key_env: Some("DEEPSEEK_API_KEY"),
+        model_source: ModelSource::DiscoveryApi,
     },
     ProviderPreset {
         id: "zhipu",
@@ -181,6 +181,15 @@ pub const PRESETS: &[ProviderPreset] = &[
         model_source: ModelSource::DiscoveryApi,
     },
     ProviderPreset {
+        id: "taotoken",
+        display_name: "TaoToken",
+        provider_type: ProviderType::OpenAi,
+        default_base_url: Some("https://taotoken.net/api/v1"),
+        auth_kind: AuthKind::ApiKey,
+        api_key_env: None,
+        model_source: ModelSource::Manual,
+    },
+    ProviderPreset {
         id: "openai",
         display_name: "OpenAI",
         provider_type: ProviderType::OpenAi,
@@ -191,7 +200,7 @@ pub const PRESETS: &[ProviderPreset] = &[
     },
     ProviderPreset {
         id: "anthropic",
-        display_name: "Anthropic",
+        display_name: "Anthropic (Claude)",
         provider_type: ProviderType::Anthropic,
         default_base_url: Some("https://api.anthropic.com"),
         auth_kind: AuthKind::ApiKey,

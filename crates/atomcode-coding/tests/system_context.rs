@@ -8,6 +8,11 @@ use atomcode_kernel::stream::StreamEvent;
 use atomcode_kernel::testkit::RecordingProvider;
 use std::sync::Arc;
 
+#[ctor::ctor]
+fn _isolate_atomcode_home() {
+    atomcode_kernel::test_support::isolate_home();
+}
+
 #[tokio::test]
 async fn session_context_block_reaches_the_provider() {
     let d = tempfile::tempdir().unwrap();
@@ -74,7 +79,7 @@ async fn session_context_block_reaches_the_provider() {
     assert!(sys.contains("GIT STATUS"), "git snapshot present");
     // The persona's static parity sections ride along too.
     assert!(
-        sys.contains("## GIT COMMITS:"),
-        "persona git-commit trailer rule present"
+        sys.contains("## RISKY ACTIONS:"),
+        "persona risky actions rule present"
     );
 }

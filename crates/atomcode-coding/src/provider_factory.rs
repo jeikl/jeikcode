@@ -115,7 +115,9 @@ impl CodingProviderFactory for DefaultCodingProviderFactory {
                 ac.context_window = cfg.context_window;
                 ac.idle_timeout = cfg.stream_timeout;
                 ac.max_tokens = default_max_tokens(cfg.context_window);
-                ac.thinking = cfg.thinking_enabled.unwrap_or(false);
+                ac.thinking = cfg
+                    .thinking_enabled
+                    .unwrap_or_else(|| cfg.reasoning_model.unwrap_or(false));
                 ac.user_agent = Some(ua.clone());
                 ac.skip_tls_verify = cfg.skip_tls_verify;
                 Arc::new(
@@ -129,7 +131,9 @@ impl CodingProviderFactory for DefaultCodingProviderFactory {
                 oc.context_window = cfg.context_window;
                 oc.idle_timeout = cfg.stream_timeout;
                 oc.max_tokens = Some(default_max_tokens(cfg.context_window));
-                oc.think = cfg.thinking_enabled.unwrap_or(false);
+                oc.think = cfg
+                    .thinking_enabled
+                    .unwrap_or_else(|| cfg.reasoning_model.unwrap_or(false));
                 oc.user_agent = Some(ua.clone());
                 oc.skip_tls_verify = cfg.skip_tls_verify;
                 Arc::new(
@@ -144,6 +148,7 @@ impl CodingProviderFactory for DefaultCodingProviderFactory {
                 // and Anthropic wire formats accept base64 when this is true.
                 pc.supports_vision = cfg.supports_vision;
                 pc.max_tokens = Some(default_max_tokens(cfg.context_window));
+                pc.reasoning_model = cfg.reasoning_model;
                 pc.reasoning_policy =
                     ReasoningPolicy::from_config(cfg.reasoning_history.as_deref())
                         .map_err(ProviderBuildError::Adapter)?;
@@ -193,6 +198,7 @@ pub fn derive_tier_config(
     tier.thinking_keep = provider.thinking_keep.clone();
     tier.reasoning_history = provider.reasoning_history.clone();
     tier.thinking_enabled = provider.thinking_enabled;
+    tier.reasoning_model = provider.reasoning_model;
     tier.user_agent = provider.user_agent.clone();
     tier.skip_tls_verify = provider.skip_tls_verify;
     tier.supports_vision = provider.accepts_images();
@@ -240,6 +246,7 @@ pub fn derive_tier_config_from_resolved(
     tier.thinking_keep = resolved.thinking_keep.clone();
     tier.reasoning_history = resolved.reasoning_history.clone();
     tier.thinking_enabled = resolved.thinking_enabled;
+    tier.reasoning_model = resolved.reasoning_model;
     tier.user_agent = resolved.user_agent.clone();
     tier.skip_tls_verify = resolved.skip_tls_verify;
     tier.supports_vision = resolved.accepts_images();

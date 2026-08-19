@@ -68,6 +68,7 @@ mod tests {
             capable_model: capable,
             pricing: None,
             supports_vision: None,
+            reasoning_model: None,
         }
     }
 

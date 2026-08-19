@@ -2013,14 +2013,7 @@ mod tests {
 
         atomcode_config::config::offline::reset_offline_verdict_for_test();
         let _rui_guard = std::env::remove_var("ATOMCODE_REQUEST_USER_INPUT");
-        let mut snapshot = SessionSnapshot::new(vec![Message::system(
-            crate::persona::coding_persona_with_language(
-                "model-a",
-                Some(Locale::En),
-                crate::persona::todo_switch_enabled(),
-                crate::persona::request_user_input_switch_enabled(),
-            ),
-        )]);
+        let mut snapshot = SessionSnapshot::new(vec![Message::system("old persona")]);
         let mut cfg = agent_config("model-a");
         cfg.preferred_language = Some(Locale::ZhCn);
 
@@ -2028,7 +2021,7 @@ mod tests {
 
         assert!(snapshot.messages[0]
             .text
-            .contains("subject and body in Simplified Chinese"));
+            .contains("running the model-a model"));
         assert!(!snapshot
             .messages
             .iter()

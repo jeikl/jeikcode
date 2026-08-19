@@ -43,6 +43,8 @@ pub struct OpenAiCompatConfig {
     pub context_window: u32,
     /// Fallback output cap when `ChatOptions::max_tokens` is `None`.
     pub max_tokens: Option<u32>,
+    /// Explicit reasoning model flag; `Some(true)` ⇒ `ReasoningPolicy::Include`, `Some(false)` ⇒ `ReasoningPolicy::Exclude`.
+    pub reasoning_model: Option<bool>,
     /// Explicit reasoning round-trip policy; `None` ⇒ derived from the model name.
     pub reasoning_policy: Option<ReasoningPolicy>,
     /// Kimi-family thinking control: `thinking.type` in the request body
@@ -130,6 +132,7 @@ impl OpenAiCompatConfig {
             model,
             context_window: 128_000,
             max_tokens: None,
+            reasoning_model: None,
             reasoning_policy: None,
             thinking_type: None,
             thinking_keep: None,
@@ -175,7 +178,9 @@ pub struct OpenAiCompatProvider {
 impl OpenAiCompatProvider {
     pub fn new(cfg: OpenAiCompatConfig) -> Result<Self, ProviderError> {
         let policy = cfg
-            .reasoning_policy
+            .reasoning_model
+            .map(|rm| if rm { ReasoningPolicy::Include } else { ReasoningPolicy::Exclude })
+            .or(cfg.reasoning_policy)
             .unwrap_or_else(|| ReasoningPolicy::derive(&cfg.model, &cfg.base_url));
         // Capture only what the builder needs so the rebuild closure is `'static`
         // and doesn't borrow `cfg` (which moves into `Self`).

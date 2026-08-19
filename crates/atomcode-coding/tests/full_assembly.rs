@@ -112,7 +112,7 @@ async fn full_assembly_lifecycle() {
         for expected in [
             "bash",
             "read_file",
-            "list_symbols",
+            "code_explore",
             "web_fetch",
             "use_skill",
             "recall",

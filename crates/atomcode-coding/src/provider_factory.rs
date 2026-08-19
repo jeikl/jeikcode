@@ -130,7 +130,7 @@ impl CodingProviderFactory for DefaultCodingProviderFactory {
                 oc.api_key = cfg.api_key.clone();
                 oc.context_window = cfg.context_window;
                 oc.idle_timeout = cfg.stream_timeout;
-                oc.max_tokens = Some(default_max_tokens(cfg.context_window));
+                oc.max_tokens = cfg.chat_options.max_tokens;
                 oc.think = cfg
                     .thinking_enabled
                     .unwrap_or_else(|| cfg.reasoning_model.unwrap_or(false));
@@ -147,7 +147,7 @@ impl CodingProviderFactory for DefaultCodingProviderFactory {
                 // Config/protocol flag — not a model-name whitelist. OpenAI
                 // and Anthropic wire formats accept base64 when this is true.
                 pc.supports_vision = cfg.supports_vision;
-                pc.max_tokens = Some(default_max_tokens(cfg.context_window));
+                pc.max_tokens = cfg.chat_options.max_tokens;
                 pc.reasoning_model = cfg.reasoning_model;
                 pc.reasoning_policy =
                     ReasoningPolicy::from_config(cfg.reasoning_history.as_deref())

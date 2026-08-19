@@ -2107,7 +2107,7 @@ async fn run() -> Result<i32> {
         // fail-closed timeout so an unanswered approval can't park the run forever.
         !is_headless,
     );
-    runtime_cfg.next_prompt_suggestions = !is_headless;
+    runtime_cfg.next_prompt_suggestions = false;
     let model_name = runtime_cfg.model.clone();
     let provider_bootstrap = if is_headless {
         atomcode_coding::ProviderBootstrap::Required
@@ -2197,7 +2197,7 @@ async fn run() -> Result<i32> {
                 // event loop). `spawn_deferred_tui_runtime` is only ever the
                 // in-TUI respawn factory, so this is never a headless path.
                 runtime_cfg.round_cap_checkpoint = true;
-                runtime_cfg.next_prompt_suggestions = true;
+                runtime_cfg.next_prompt_suggestions = false;
                 spawn_deferred_tui_runtime(runtime_cfg, session)
             },
         )

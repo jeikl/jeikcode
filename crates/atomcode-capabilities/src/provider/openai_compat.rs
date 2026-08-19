@@ -1028,18 +1028,13 @@ fn build_request_body(
         || m_lower.contains("o1-")
         || m_lower.contains("o3-");
 
-    // OpenCode always sends an output cap (32k fallback). Unbounded thinking on
-    // Grok OpenAI-compat gateways is what turned a reasoning n-gram loop into
-    // `unexpected EOF during chunk size line`.
-    const DEFAULT_MAX_OUTPUT_TOKENS: u32 = 32_000;
-    let max_tokens = options
-        .max_tokens
-        .or(cfg.max_tokens)
-        .unwrap_or(DEFAULT_MAX_OUTPUT_TOKENS);
-    if is_o_series {
-        body.insert("max_completion_tokens".into(), json!(max_tokens));
-    } else {
-        body.insert("max_tokens".into(), json!(max_tokens));
+    let max_tokens = options.max_tokens.or(cfg.max_tokens);
+    if let Some(max_tokens) = max_tokens {
+        if is_o_series {
+            body.insert("max_completion_tokens".into(), json!(max_tokens));
+        } else {
+            body.insert("max_tokens".into(), json!(max_tokens));
+        }
     }
     if let Some(t) = options.temperature {
         if !is_o_series {
@@ -1063,7 +1058,14 @@ fn build_request_body(
             }
         }
     }
-    if let Some(effort) = options.reasoning_effort {
+    let effort = options.reasoning_effort.or_else(|| {
+        if model.to_ascii_lowercase().contains("grok") {
+            Some(ReasoningEffort::High)
+        } else {
+            None
+        }
+    });
+    if let Some(effort) = effort {
         if reason_effort_applicable(model) {
             body.insert("reasoning_effort".into(), json!(effort_str(effort)));
         }
@@ -1113,6 +1115,7 @@ pub fn reason_effort_applicable(model: &str) -> bool {
         || m.contains("o3-")
         || m.contains("gemini-3.7")
         || m.contains("gemini-2.5")
+        || m.contains("grok")
 }
 
 /// True when an OPEN failure is a 400 specifically complaining about
@@ -2226,10 +2229,9 @@ mod tests {
             body.get("temperature").is_none(),
             "None temperature omitted"
         );
-        assert_eq!(
-            body["max_tokens"].as_u64(),
-            Some(32_000),
-            "unset max_tokens falls back to OpenCode's 32k output cap"
+        assert!(
+            body.get("max_tokens").is_none(),
+            "unset max_tokens is omitted by default"
         );
     }
 

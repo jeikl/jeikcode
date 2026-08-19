@@ -109,7 +109,7 @@ fn reload_runtime_provider_from(
     }
     let mut agent_cfg = config.agent_config();
     agent_cfg.round_cap_checkpoint = true; // TUI implements the checkpoint panel (Task 3+)
-    agent_cfg.next_prompt_suggestions = true;
+    agent_cfg.next_prompt_suggestions = false;
     ctx.runtime.reload_provider(
         agent_cfg,
         ctx.foreground_runtime_id,
@@ -12079,6 +12079,7 @@ fn handle_idle_key(
         let new_val = app.state.cycle_reasoning_effort();
         ctx.reasoning_effort = new_val.map(|s| s.to_string());
         persist_reasoning_effort(ctx);
+        let _ = reload_runtime_provider_from(ctx, &ctx.config);
         let msg = match new_val {
             Some(v) => format!("  reasoning_effort → {}\n", v),
             None => "  reasoning_effort cleared (API default)\n".into(),

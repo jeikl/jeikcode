@@ -13,7 +13,7 @@
 
 use super::graph::{CodeGraph, Edge, EdgeKind, SymbolId, SymbolKind, SymbolNode, Visibility};
 use super::lang::Lang;
-use super::path_for_display;
+use super::{path_for_display, path_matches_scope};
 use super::symbols::{
     extract_call_sites_from_tree, extract_symbols_from_tree, parse_source, CallSite, Symbol,
 };
@@ -1320,9 +1320,7 @@ fn path_in_focus(path: &Path, focus: Option<&Path>) -> bool {
     let Some(focus) = focus else {
         return true;
     };
-    let focus = normalize_index_path(focus);
-    let path = normalize_index_path(path);
-    path == focus || path.starts_with(&focus)
+    path_matches_scope(&normalize_index_path(path), &normalize_index_path(focus))
 }
 
 /// Re-stat already-known unit paths. Avoids `ignore::WalkBuilder` over the

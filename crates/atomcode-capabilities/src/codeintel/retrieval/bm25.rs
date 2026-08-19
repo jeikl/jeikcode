@@ -43,7 +43,7 @@ pub fn bm25_search(
 
     for node in graph.nodes.values() {
         if let Some(sc) = scope {
-            if !super::super::explore::path_matches_scope(&node.file, sc) {
+            if !super::super::path_matches_scope(&node.file, sc) {
                 continue;
             }
         }

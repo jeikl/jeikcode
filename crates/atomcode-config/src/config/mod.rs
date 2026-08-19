@@ -1399,26 +1399,6 @@ impl Default for NotificationConfig {
 /// `enabled` and `dir` are always emitted as real values — the default `dir`
 /// (`~/.atomcode/datalog`) is shown explicitly so users see exactly where
 /// logs go without having to discover that "unset == default".
-fn render_tools_section(tools: &ToolsConfig) -> String {
-    let mut out = String::new();
-    out.push_str("\n[tools.todo]\n");
-    out.push_str(&format!("enabled = {}\n", tools.todo.enabled));
-    let eager_str = match tools.todo.eager {
-        TodoEagerness::Auto => "auto",
-        TodoEagerness::Preferred => "preferred",
-        TodoEagerness::Always => "always",
-    };
-    out.push_str(&format!("eager = \"{}\"\n", eager_str));
-    out.push_str("\n[tools.bash]\n");
-    out.push_str("# 默认超时时间（秒）：当未指定 timeout 参数时使用的默认超时（默认 60）\n");
-    out.push_str(&format!("default_timeout_secs = {}\n", tools.bash.default_timeout_secs));
-    out.push_str("# 最大允许超时时间（秒）：限制 timeout 参数的最大上限（默认 1800，即 30 分钟）\n");
-    out.push_str(&format!("max_timeout_secs = {}\n", tools.bash.max_timeout_secs));
-    out.push_str("# 静默输出超时时间（秒）：进程已产生部分输出后，若连续无任何新输出的最大等待时间（默认 90）\n");
-    out.push_str(&format!("silent_kill_secs = {}\n", tools.bash.silent_kill_secs));
-    out
-}
-
 fn render_datalog_section(cfg: &DatalogConfig) -> String {
     let mut out = String::new();
     out.push_str("\n# Per-turn datalog. Each turn writes a markdown summary; each LLM\n");
@@ -1758,7 +1738,6 @@ impl Config {
             }
         }
         let mut content = toml::to_string_pretty(&persistent)?;
-        content.push_str(&render_tools_section(&self.tools));
         content.push_str(&render_datalog_section(&self.datalog));
         content.push_str(&render_notifications_section(&self.notifications));
         content.push_str(&render_network_section(&self.network));

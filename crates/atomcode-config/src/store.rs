@@ -234,7 +234,26 @@ fn atomic_replace(path: &Path, bytes: &[u8]) -> Result<()> {
     temp.as_file()
         .sync_all()
         .with_context(|| format!("Failed to sync temporary config for {}", path.display()))?;
-    temp.persist(path)
+    let mut persist_res = temp.persist(path);
+    #[cfg(windows)]
+    if let Err(mut p_err) = persist_res {
+        let mut retries = 0;
+        while retries < 15 {
+            std::thread::sleep(std::time::Duration::from_millis(10));
+            match p_err.file.persist(path) {
+                Ok(_) => {
+                    return Ok(());
+                }
+                Err(next_err) => {
+                    p_err = next_err;
+                    retries += 1;
+                }
+            }
+        }
+        persist_res = Err(p_err);
+    }
+
+    persist_res
         .map_err(|error| error.error)
         .with_context(|| format!("Failed to atomically replace config: {}", path.display()))?;
 

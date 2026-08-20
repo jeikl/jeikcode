@@ -150,19 +150,31 @@ fn format_perf_header(
 
 fn format_index_status_header(stats: Option<&super::index::RefreshStats>) -> String {
     match stats {
-        Some(stats) if stats.cache_hit => format!(
+        Some(stats) => index_status_line(stats),
+        None => "> ⚡ **Index Status**: [Cache HIT] 内存索引已就绪\n".to_string(),
+    }
+}
+
+/// Label from actual index work, not a reparsed-count threshold.
+///
+/// `reparsed > 8` used to be printed as `[Cache MISS]` even when 1万+ units were
+/// reused (`kept` huge). That was a 64-file discover cap looking like a cold miss.
+fn index_status_line(stats: &super::index::RefreshStats) -> String {
+    if stats.cache_hit {
+        format!(
             "> ⚡ **Index Status**: [Cache HIT] 内存索引已就绪（复用 {} 个文件单元，0 重建）\n",
             stats.kept
-        ),
-        Some(stats) if stats.reparsed <= 8 && stats.removed <= 8 => format!(
+        )
+    } else if stats.kept == 0 {
+        format!(
+            "> 🔄 **Index Status**: [Cache MISS] 全量重建（解析 {} 个文件，移除 {} 个）\n",
+            stats.reparsed, stats.removed
+        )
+    } else {
+        format!(
             "> ⚡ **Index Status**: [Incremental] 增量补丁（重解析 {} 个文件，保留 {} 个，移除 {} 个）\n",
             stats.reparsed, stats.kept, stats.removed
-        ),
-        Some(stats) => format!(
-            "> 🔄 **Index Status**: [Cache MISS] 索引已更新（重新解析 {} 个文件，保留 {} 个，移除 {} 个）\n",
-            stats.reparsed, stats.kept, stats.removed
-        ),
-        None => "> ⚡ **Index Status**: [Cache HIT] 内存索引已就绪\n".to_string(),
+        )
     }
 }
 
@@ -295,6 +307,18 @@ struct Args {
     path: Option<String>,
 }
 
+const WORKSPACE_ROOT_PATH_ERR: &str = "code_explore does not accept workspace-root `path` (`.`, `./`, `~`, or the working directory). Call `repo_map` first for the layout, then pass a concrete subdirectory (e.g. 'src/tools', 'crates/atomcode-coding', 'backend').";
+
+/// Tokens that mean "the whole workspace" — reserved for `repo_map`, not explore.
+fn is_workspace_root_token(p: &str) -> bool {
+    let t = p.trim().trim_end_matches(['/', '\\']);
+    matches!(t, "." | "./" | ".\\" | "~" | "")
+}
+
+fn is_workspace_root_scope(resolved: &Path, workspace: &Path) -> bool {
+    normalize_path_for_match(resolved) == normalize_path_for_match(workspace)
+}
+
 #[derive(Debug, Clone)]
 struct ScoredSymbol {
     node: SymbolNode,
@@ -354,7 +378,7 @@ impl Tool for CodeExploreTool {
          plus each symbol's callers/callees — the full call-graph panorama around a symbol.\n\
          \n\
          ALTERNATE PARALLEL BATCHES — never a one-by-one crawl (several calls per phase, then advance):\n\
-         1. Structure first: list_directory + repo_map (never skip on an unfamiliar repo).\n\
+         1. Structure first: list_directory + repo_map (never skip on an unfamiliar repo; only repo_map may use path '.').\n\
          2. Hunt: fire SEVERAL greps IN PARALLEL for candidate symbols.\n\
          3. Panorama: feed those names to SEVERAL code_explore calls IN PARALLEL (one per symbol).\n\
          4. Zoom: read_file only the specific hot spans (folded/large bodies) you now know matter.\n\
@@ -373,7 +397,7 @@ impl Tool for CodeExploreTool {
             "properties": {
                 "path": {
                     "type": "string",
-                    "description": "Target directory, subproject, module, or file path to explore (e.g. 'src/tools', 'crates/atomcode-coding', 'backend', or '.' for project root). Required: specify the target module/directory to focus the search."
+                    "description": "Target directory, subproject, or module to explore (e.g. 'src/tools', 'crates/atomcode-coding', 'backend'). Required. Do NOT pass '.' / './' / '~' / the workspace root — call repo_map first, then a concrete subdirectory from that tree."
                 },
                 "query": {
                     "type": "string",
@@ -414,10 +438,13 @@ impl Tool for CodeExploreTool {
             Some(p) if !p.is_empty() => p,
             _ => {
                 return err(
-                    "code_explore requires a `path` parameter specifying the target module, directory, or '.' for the project root (e.g. 'src/tools', 'crates/atomcode-coding', or '.').".to_string()
+                    "code_explore requires a `path` parameter naming a concrete module or directory (e.g. 'src/tools', 'crates/atomcode-coding', 'backend'). Do not pass '.' — use repo_map for the workspace overview.".to_string()
                 );
             }
         };
+        if is_workspace_root_token(path_str) {
+            return err(WORKSPACE_ROOT_PATH_ERR.to_string());
+        }
 
         let root = canonical(&ctx.working_dir);
         let max_files = a.max_files.unwrap_or(DEFAULT_MAX_FILES).clamp(1, MAX_ALLOWED_FILES);
@@ -454,6 +481,10 @@ impl Tool for CodeExploreTool {
 
         let t0 = std::time::Instant::now();
 
+        if parsed_query.path_filters.iter().any(|p| is_workspace_root_token(p)) {
+            return err(WORKSPACE_ROOT_PATH_ERR.to_string());
+        }
+
         let scope_path = if !parsed_query.path_filters.is_empty() {
             let p = &parsed_query.path_filters[0];
             let pb = Path::new(p);
@@ -472,6 +503,11 @@ impl Tool for CodeExploreTool {
                 }
             })
         };
+        if let Some(sc) = scope_path.as_deref() {
+            if is_workspace_root_scope(sc, &root) {
+                return err(WORKSPACE_ROOT_PATH_ERR.to_string());
+            }
+        }
 
         let t_index_start = std::time::Instant::now();
         let graph = self.index.get_scoped(&root, scope_path.as_deref());
@@ -2108,22 +2144,7 @@ fn render_explore_output(
     }
 
     if let Some(stats) = cache_status {
-        if stats.cache_hit {
-            out.push(format!(
-                "> ⚡ **Index Status**: [Cache HIT] 内存索引已就绪（复用 {} 个文件单元，0 重建）\n",
-                stats.kept
-            ));
-        } else if stats.reparsed <= 8 && stats.removed <= 8 {
-            out.push(format!(
-                "> ⚡ **Index Status**: [Incremental] 增量补丁（重解析 {} 个文件，保留 {} 个，移除 {} 个）\n",
-                stats.reparsed, stats.kept, stats.removed
-            ));
-        } else {
-            out.push(format!(
-                "> 🔄 **Index Status**: [Cache MISS] 索引已更新（重新解析 {} 个文件，保留 {} 个，移除 {} 个）\n",
-                stats.reparsed, stats.kept, stats.removed
-            ));
-        }
+        out.push(index_status_line(&stats));
     } else {
         out.push("> ⚡ **Index Status**: [Cache HIT] 内存索引已就绪\n".to_string());
     }
@@ -3124,6 +3145,35 @@ mod tests {
         assert!(out.contains("cached body"), "{out}");
     }
 
+    #[test]
+    fn index_status_64_reparsed_with_kept_is_incremental_not_miss() {
+        let stats = super::super::index::RefreshStats {
+            reparsed: 64,
+            removed: 0,
+            kept: 12619,
+            cache_hit: false,
+            ..Default::default()
+        };
+        let line = index_status_line(&stats);
+        assert!(line.contains("[Incremental]"), "{line}");
+        assert!(!line.contains("[Cache MISS]"), "{line}");
+        assert!(line.contains("保留 12619"), "{line}");
+    }
+
+    #[test]
+    fn index_status_full_rebuild_is_miss() {
+        let stats = super::super::index::RefreshStats {
+            reparsed: 12000,
+            removed: 0,
+            kept: 0,
+            cache_hit: false,
+            ..Default::default()
+        };
+        let line = index_status_line(&stats);
+        assert!(line.contains("[Cache MISS]"), "{line}");
+        assert!(line.contains("全量重建"), "{line}");
+    }
+
     #[tokio::test]
     async fn identical_query_rewrites_frozen_incremental_headers() {
         use atomcode_kernel::tool::{ProgressSink, Tool, ToolContext};
@@ -3131,7 +3181,8 @@ mod tests {
 
         query_cache_clear();
         let d = tempfile::tempdir().unwrap();
-        std::fs::write(d.path().join("hot.rs"), "pub fn cached_symbol() {}\n").unwrap();
+        std::fs::create_dir(d.path().join("src")).unwrap();
+        std::fs::write(d.path().join("src/hot.rs"), "pub fn cached_symbol() {}\n").unwrap();
         let idx = Arc::new(CodeIndex::new());
         let _ = idx.get(d.path());
         let tool = CodeExploreTool::new(idx);
@@ -3141,7 +3192,7 @@ mod tests {
             progress: ProgressSink::noop(),
             requester: None,
         };
-        let args = r#"{"query":"cached_symbol","path":"."}"#;
+        let args = r#"{"query":"cached_symbol","path":"src"}"#;
         let first = tool.execute(args, &ctx).await;
         assert!(!first.is_error, "{}", first.content);
         assert!(
@@ -3168,6 +3219,42 @@ mod tests {
             second.content
         );
         query_cache_clear();
+    }
+
+    #[tokio::test]
+    async fn rejects_workspace_root_path_dot() {
+        use atomcode_kernel::tool::{ProgressSink, Tool, ToolContext};
+        use tokio_util::sync::CancellationToken;
+
+        let d = tempfile::tempdir().unwrap();
+        std::fs::create_dir(d.path().join("src")).unwrap();
+        std::fs::write(d.path().join("src/hot.rs"), "pub fn cached_symbol() {}\n").unwrap();
+        let idx = Arc::new(CodeIndex::new());
+        let _ = idx.get(d.path());
+        let tool = CodeExploreTool::new(idx);
+        let ctx = ToolContext {
+            working_dir: d.path().to_path_buf(),
+            cancel: CancellationToken::new(),
+            progress: ProgressSink::noop(),
+            requester: None,
+        };
+        for args in [
+            r#"{"query":"cached_symbol","path":"."}"#,
+            r#"{"query":"cached_symbol","path":"./"}"#,
+            r#"{"query":"cached_symbol","path":"~"}"#,
+        ] {
+            let r = tool.execute(args, &ctx).await;
+            assert!(r.is_error, "root path must be rejected: {args}\n{}", r.content);
+            assert!(
+                r.content.contains("does not accept workspace-root"),
+                "error must steer to repo_map: {args}\n{}",
+                r.content
+            );
+        }
+        let ok = tool
+            .execute(r#"{"query":"cached_symbol","path":"src"}"#, &ctx)
+            .await;
+        assert!(!ok.is_error, "concrete subdirectory must still work:\n{}", ok.content);
     }
 
     fn scored(node: SymbolNode, score: f64) -> ScoredSymbol {

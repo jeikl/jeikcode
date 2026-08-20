@@ -447,10 +447,10 @@ fn build_request_body(
     if cfg.thinking && !forces_tool_use {
         body.insert("thinking".into(), json!({ "type": "adaptive" }));
     }
-    if let Some(effort) = options.reasoning_effort {
+    if let Some(effort) = &options.reasoning_effort {
         body.insert(
             "output_config".into(),
-            json!({ "effort": effort_str(effort) }),
+            json!({ "effort": effort.as_str() }),
         );
     }
     if !tools.is_empty() {
@@ -661,13 +661,8 @@ fn format_assistant_message(m: &Message, echo_thinking: bool) -> Value {
     json!({ "role": "assistant", "content": parts })
 }
 
-fn effort_str(e: ReasoningEffort) -> &'static str {
-    match e {
-        ReasoningEffort::Low => "low",
-        ReasoningEffort::Medium => "medium",
-        ReasoningEffort::High => "high",
-        ReasoningEffort::Max => "max",
-    }
+fn effort_str(e: &ReasoningEffort) -> &str {
+    e.as_str()
 }
 
 // ---------------------------------------------------------------------------

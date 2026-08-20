@@ -3337,26 +3337,16 @@ fn execute_slash_command_impl(
                     renderer.flush();
                 }
                 Some(p) => {
+                    let levels = crate::event_loop::effective_reasoning_levels_for_provider(ctx);
+                    let levels_str = levels.join(" | ");
                     if sub.is_empty() {
                         // Show current status
                         let current = p.reasoning_effort.as_deref().unwrap_or("off (API default)");
                         renderer.render(UiLine::CommandOutput(format!(
-                            "  Current reasoning effort: {current}\n  Usage: /effort high | max | off\n  Shortcut: Ctrl+T\n"
+                            "  Current reasoning effort: {current}\n  Usage: /effort {levels_str} | off\n  Shortcut: Ctrl+T\n"
                         )));
                         renderer.flush();
-                    } else if sub == "high" || sub == "max" {
-                        let mut desired = ctx.config.clone();
-                        desired.update_selection_reasoning(&provider_name, |r| {
-                            *r.reasoning_effort = Some(sub.to_string())
-                        });
-                        crate::event_loop::save_and_reload(
-                            ctx,
-                            desired,
-                            renderer,
-                            format!("  ○ Reasoning effort set to: {sub}\n"),
-                            false,
-                        );
-                    } else if sub == "off" {
+                    } else if sub == "off" || sub == "none" {
                         let mut desired = ctx.config.clone();
                         desired.update_selection_reasoning(&provider_name, |r| {
                             *r.reasoning_effort = None
@@ -3368,10 +3358,22 @@ fn execute_slash_command_impl(
                             "  ○ Reasoning effort: default (API auto)\n".to_string(),
                             false,
                         );
+                    } else if levels.iter().any(|l| l.eq_ignore_ascii_case(&sub)) || !sub.is_empty() {
+                        let mut desired = ctx.config.clone();
+                        desired.update_selection_reasoning(&provider_name, |r| {
+                            *r.reasoning_effort = Some(sub.to_string())
+                        });
+                        crate::event_loop::save_and_reload(
+                            ctx,
+                            desired,
+                            renderer,
+                            format!("  ○ Reasoning effort set to: {sub}\n"),
+                            false,
+                        );
                     } else {
-                        renderer.render(UiLine::CommandOutput(
-                            "  Usage: /effort high | max | off\n  Shortcut: Ctrl+T\n".into(),
-                        ));
+                        renderer.render(UiLine::CommandOutput(format!(
+                            "  Usage: /effort {levels_str} | off\n  Shortcut: Ctrl+T\n"
+                        )));
                         renderer.flush();
                     }
                 }

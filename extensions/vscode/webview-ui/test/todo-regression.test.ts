@@ -89,6 +89,62 @@ test('actions batch is id-addressed, transactional, and wins over leftover todos
   assert.deepEqual(mixed.map((item) => item.content), ['b', 'from-actions']);
 });
 
+test('clear + add + update in one batch replaces the plan', () => {
+  const items = applyTodoCall(
+    [
+      { content: 'old-1', status: 'completed' },
+      { content: 'old-2', status: 'in_progress' },
+    ],
+    'todowrite',
+    JSON.stringify({
+      actions: [
+        { action: 'clear' },
+        { action: 'add', content: 'new-1' },
+        { action: 'add', content: 'new-2' },
+        { action: 'update', id: 1, status: 'in_progress' },
+      ],
+    }),
+  );
+  assert.deepEqual(items, [
+    { content: 'new-1', status: 'in_progress' },
+    { content: 'new-2', status: 'pending' },
+  ]);
+});
+
+test('add on a finished list auto-clears so ids restart at 1', () => {
+  const items = applyTodoCall(
+    [
+      { content: 'done-1', status: 'completed' },
+      { content: 'done-2', status: 'completed' },
+    ],
+    'todowrite',
+    JSON.stringify({
+      actions: [
+        { action: 'add', content: 'next-1' },
+        { action: 'add', content: 'next-2' },
+        { action: 'update', id: 1, status: 'in_progress' },
+      ],
+    }),
+  );
+  assert.deepEqual(items, [
+    { content: 'next-1', status: 'in_progress' },
+    { content: 'next-2', status: 'pending' },
+  ]);
+});
+
+test('add on an unfinished list does not auto-clear', () => {
+  const items = applyTodoCall(
+    [
+      { content: 'done', status: 'completed' },
+      { content: 'open', status: 'pending' },
+    ],
+    'todowrite',
+    JSON.stringify({ action: 'add', content: 'extra' }),
+  );
+  assert.equal(items.length, 3);
+  assert.equal(items.at(-1)?.content, 'extra');
+});
+
 test('valid re-plan replaces earlier state and an empty plan clears it', () => {
   let items = applyTodoCall([], 'todo', '{"action":"add","content":"旧任务"}');
   items = applyTodoCall(items, 'todowrite', '{"todos":[{"content":"新任务","status":"pending"}]}');

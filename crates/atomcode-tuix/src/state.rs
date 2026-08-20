@@ -1976,17 +1976,39 @@ impl UiState {
         self.toggle_tool_output();
     }
 
-    /// Cycle through reasoning_effort values: None → "high" → "max" → None.
+    /// Cycle through reasoning_effort levels with a configurable list of levels.
     /// Returns the new value (None = use API default).
-    pub fn cycle_reasoning_effort(&mut self) -> Option<&'static str> {
-        let next: Option<&'static str> = match self.reasoning_effort.as_deref() {
-            None => Some("high"),
-            Some("high") => Some("max"),
-            Some("max") => None,
-            _ => Some("high"),
+    pub fn cycle_reasoning_effort_with_levels(&mut self, levels: &[String]) -> Option<String> {
+        if levels.is_empty() {
+            self.reasoning_effort = None;
+            return None;
+        }
+        let next: Option<String> = match self.reasoning_effort.as_deref() {
+            None => Some(levels[0].clone()),
+            Some(curr) => {
+                if let Some(idx) = levels.iter().position(|l| l.eq_ignore_ascii_case(curr)) {
+                    if idx + 1 < levels.len() {
+                        Some(levels[idx + 1].clone())
+                    } else {
+                        None
+                    }
+                } else {
+                    Some(levels[0].clone())
+                }
+            }
         };
-        self.reasoning_effort = next.map(|s| s.to_string());
+        self.reasoning_effort = next.clone();
         next
+    }
+
+    /// Legacy cycle helper.
+    pub fn cycle_reasoning_effort(&mut self) -> Option<String> {
+        self.cycle_reasoning_effort_with_levels(&[
+            "low".into(),
+            "medium".into(),
+            "high".into(),
+            "max".into(),
+        ])
     }
 
     pub fn tick_spinner(&mut self) -> &'static str {

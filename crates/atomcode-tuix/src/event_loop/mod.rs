@@ -9363,6 +9363,7 @@ mod external_config_tests {
                 thinking_keep: None,
                 reasoning_history: None,
                 reasoning_effort: None,
+                reasoning_levels: None,
                 thinking_enabled: None,
                 thinking_budget: None,
                 skip_tls_verify: false,
@@ -12076,11 +12077,12 @@ fn handle_idle_key(
             redraw_idle_plain(&app.buf, &app.state, ctx, renderer);
             return Ok(());
         }
-        let new_val = app.state.cycle_reasoning_effort();
-        ctx.reasoning_effort = new_val.map(|s| s.to_string());
+        let levels = effective_reasoning_levels_for_provider(ctx);
+        let new_val = app.state.cycle_reasoning_effort_with_levels(&levels);
+        ctx.reasoning_effort = new_val.clone();
         persist_reasoning_effort(ctx);
         let _ = reload_runtime_provider_from(ctx, &ctx.config);
-        let msg = match new_val {
+        let msg = match &new_val {
             Some(v) => format!("  reasoning_effort → {}\n", v),
             None => "  reasoning_effort cleared (API default)\n".into(),
         };
@@ -23993,12 +23995,43 @@ fn sync_reasoning_effort_from_provider(ctx: &mut LoopCtx) {
     let applicable = reasoning_effort_applicable_on_provider(ctx);
     ctx.reasoning_effort = if applicable {
         let sel = ctx.config.effective_model_selection().unwrap_or_default();
-        ctx.config
+        let configured = ctx.config
             .provider_config_for_selection(&sel)
-            .and_then(|p| p.reasoning_effort)
+            .and_then(|p| p.reasoning_effort);
+        if let Some(effort) = configured {
+            if effort.eq_ignore_ascii_case("off") || effort.eq_ignore_ascii_case("none") {
+                None
+            } else {
+                Some(effort)
+            }
+        } else if ctx.model_name.to_ascii_lowercase().contains("grok") {
+            Some("high".to_string())
+        } else {
+            None
+        }
     } else {
         None
     };
+}
+
+/// Retrieve the active/configured reasoning effort levels for the current model/provider.
+pub(crate) fn effective_reasoning_levels_for_provider(ctx: &LoopCtx) -> Vec<String> {
+    let selection = ctx.config.effective_model_selection().unwrap_or_default();
+    if let Some(p) = ctx.config.provider_config_for_selection(&selection) {
+        if let Some(levels) = p.reasoning_levels {
+            if !levels.is_empty() {
+                return levels;
+            }
+        }
+    }
+    let m_lower = ctx.model_name.to_ascii_lowercase();
+    if m_lower.contains("grok") {
+        vec!["low".into(), "medium".into(), "high".into(), "xhigh".into()]
+    } else if m_lower.contains("deepseek") || m_lower.contains("v4") {
+        vec!["low".into(), "medium".into(), "high".into(), "max".into()]
+    } else {
+        vec!["low".into(), "medium".into(), "high".into()]
+    }
 }
 
 /// Persist the current reasoning_effort to config.toml
@@ -24029,7 +24062,7 @@ pub(crate) fn reasoning_effort_applicable_on_provider(ctx: &LoopCtx) -> bool {
         .unwrap_or_default();
     // Model-name check delegates to the provider so the UI "applicable" hint
     // and the actual request-body gate (OpenAiProvider) can never diverge.
-    (ptype == "deepseek" || ptype == "openai")
+    (ptype == "deepseek" || ptype == "openai" || ptype == "anthropic" || ptype == "claude" || ptype == "ollama")
         && atomcode_capabilities::provider::reason_effort_applicable(&ctx.model_name)
 }
 

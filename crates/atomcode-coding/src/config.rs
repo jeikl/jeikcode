@@ -441,11 +441,13 @@ impl CodingRuntimeConfig {
         config.chat_options.max_tokens = self.max_tokens;
         config.telemetry = self.telemetry.clone();
         config.datalog = self.datalog.clone();
-        config.reasoning_history = self.reasoning_history.clone();
-        config.chat_options.reasoning_effort =
-            atomcode_kernel::provider::ReasoningEffort::from_config(
-                self.reasoning_effort.as_deref(),
-            );
+        config.chat_options.reasoning_effort = if let Some(effort) = self.reasoning_effort.as_deref() {
+            atomcode_kernel::provider::ReasoningEffort::from_config(Some(effort))
+        } else if self.model.to_ascii_lowercase().contains("grok") {
+            Some(atomcode_kernel::provider::ReasoningEffort::High)
+        } else {
+            None
+        };
         config.provider_type = self.provider_type.clone();
         config.thinking_enabled = self.thinking_enabled;
         config.thinking_type = self.thinking_type.clone();
@@ -490,9 +492,13 @@ pub fn apply_provider_config(
     }
     config.context_window = provider.context_window as u32;
     config.chat_options.max_tokens = provider.max_tokens.map(|value| value as u32);
-    config.chat_options.reasoning_effort = atomcode_kernel::provider::ReasoningEffort::from_config(
-        provider.reasoning_effort.as_deref(),
-    );
+    config.chat_options.reasoning_effort = if let Some(effort) = provider.reasoning_effort.as_deref() {
+        atomcode_kernel::provider::ReasoningEffort::from_config(Some(effort))
+    } else if provider.model.to_ascii_lowercase().contains("grok") {
+        Some(atomcode_kernel::provider::ReasoningEffort::High)
+    } else {
+        None
+    };
     config.provider_type = provider.provider_type.clone();
     config.reasoning_history = provider.reasoning_history.clone();
     config.thinking_enabled = provider.thinking_enabled;

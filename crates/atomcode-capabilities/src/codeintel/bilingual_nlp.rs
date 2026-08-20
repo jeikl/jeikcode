@@ -365,14 +365,16 @@ pub fn compute_dense_embedding(text: &str, expanded: &HashSet<String>) -> Vec<f3
     }
 
     // 1. Semantic root hashing & projection (CJK characters + subwords)
-    for (i, ch) in text.chars().enumerate() {
+    // Collect chars once — `chars().nth(i+1)` inside the loop was O(n²).
+    let chars: Vec<char> = text.chars().collect();
+    for (i, &ch) in chars.iter().enumerate() {
         let h = (ch as u32).wrapping_mul(2654435761);
         let dim = (h as usize) % VECTOR_DIM;
         let weight = if is_cjk(ch) { 1.5 } else { 0.8 };
         vec[dim] += weight / (1.0 + (i as f32) * 0.05);
 
         // Bi-gram hash for CJK
-        let next_ch = text.chars().nth(i + 1).unwrap_or(' ');
+        let next_ch = chars.get(i + 1).copied().unwrap_or(' ');
         let bi_h = ((ch as u32) << 8 | (next_ch as u32)).wrapping_mul(16777619);
         let bi_dim = (bi_h as usize) % VECTOR_DIM;
         vec[bi_dim] += weight * 1.2;

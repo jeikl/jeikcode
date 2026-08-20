@@ -46,18 +46,14 @@ pub struct CodeExploreTool {
 }
 
 /// Process-wide query-result cache, keyed by (graph fingerprint, query, scope,
-/// max_files, bm25_enabled, concept_enabled). `max_files` is part of the key
-/// because it directly changes the rendered output (how many candidate files
-/// are expanded vs. listed in Remaining); the BM25 / concept-vector flags are
-/// part of the key because they change the SCORING (opt-in env switches add
-/// bounded bonuses to raw_score) — omitting them would serve a
-/// concept-boosted render to a plain-text request. Reuses the rendered output
-/// verbatim when the same query runs against the same graph snapshot with the
-/// same rendering + scoring params (30-40 concurrent read-heavy sessions asking
-/// similar questions). The fingerprint changes when files change, so results
-/// never go stale. Bounded by a max-entry cap.
-static QUERY_RESULT_CACHE: std::sync::LazyLock<RwLock<std::collections::HashMap<(u64, String, String, usize, bool, bool), String>>> =
-    std::sync::LazyLock::new(|| RwLock::new(std::collections::HashMap::new()));
+/// max_files, bm25_enabled, concept_enabled). Stores the **body only** — never
+/// Performance / Index Status. Those two lines are rewritten on every call
+/// from this request's wall-clock and `last_stats`. Caching the full Markdown
+/// used to freeze "增量补丁（重解析 2）" and the first-hit millisecond
+/// snapshot across identical queries.
+static QUERY_RESULT_CACHE: std::sync::LazyLock<
+    RwLock<std::collections::HashMap<(u64, String, String, usize, bool, bool), String>>,
+> = std::sync::LazyLock::new(|| RwLock::new(std::collections::HashMap::new()));
 const QUERY_CACHE_MAX_ENTRIES: usize = 128;
 
 #[allow(clippy::too_many_arguments)]
@@ -92,7 +88,96 @@ fn query_cache_insert(
             guard.remove(&oldest);
         }
     }
-    guard.insert((fingerprint, query.to_string(), scope.to_string(), max_files, bm25_enabled, concept_enabled), output);
+    guard.insert(
+        (
+            fingerprint,
+            query.to_string(),
+            scope.to_string(),
+            max_files,
+            bm25_enabled,
+            concept_enabled,
+        ),
+        strip_diagnostic_headers(&output),
+    );
+}
+
+fn is_diagnostic_header(line: &str) -> bool {
+    let t = line.trim_start();
+    t.starts_with("> ⚡ **Performance**")
+        || t.starts_with("> ⚡ **Index Status**")
+        || t.starts_with("> 🔄 **Index Status**")
+}
+
+/// Drop Cost Time / Index Status so the query cache never freezes them.
+fn strip_diagnostic_headers(output: &str) -> String {
+    let mut out = String::with_capacity(output.len());
+    for line in output.lines() {
+        if is_diagnostic_header(line) {
+            continue;
+        }
+        out.push_str(line);
+        out.push('\n');
+    }
+    if !output.is_empty() && !output.ends_with('\n') && out.ends_with('\n') {
+        out.pop();
+    }
+    out
+}
+
+fn format_perf_header(
+    total: Duration,
+    index_t: Duration,
+    ret_t: Duration,
+    ren_t: Duration,
+) -> String {
+    format!(
+        "> ⚡ **Performance**: ⏱️ **Cost Time**: {}ms (Index: {}ms | Retrieval: {}ms | Render: {}ms)\n",
+        total.as_millis(),
+        index_t.as_millis(),
+        ret_t.as_millis(),
+        ren_t.as_millis()
+    )
+}
+
+fn format_index_status_header(stats: Option<&super::index::RefreshStats>) -> String {
+    match stats {
+        Some(stats) if stats.cache_hit => format!(
+            "> ⚡ **Index Status**: [Cache HIT] 内存索引已就绪（复用 {} 个文件单元，0 重建）\n",
+            stats.kept
+        ),
+        Some(stats) if stats.reparsed <= 8 && stats.removed <= 8 => format!(
+            "> ⚡ **Index Status**: [Incremental] 增量补丁（重解析 {} 个文件，保留 {} 个，移除 {} 个）\n",
+            stats.reparsed, stats.kept, stats.removed
+        ),
+        Some(stats) => format!(
+            "> 🔄 **Index Status**: [Cache MISS] 索引已更新（重新解析 {} 个文件，保留 {} 个，移除 {} 个）\n",
+            stats.reparsed, stats.kept, stats.removed
+        ),
+        None => "> ⚡ **Index Status**: [Cache HIT] 内存索引已就绪\n".to_string(),
+    }
+}
+
+/// Prepend this-request diagnostic headers onto a cached (header-less) body.
+fn with_fresh_diagnostic_headers(
+    body: &str,
+    cost: (Duration, Duration, Duration, Duration),
+    stats: Option<&super::index::RefreshStats>,
+) -> String {
+    let (total, index_t, ret_t, ren_t) = cost;
+    let mut out = String::with_capacity(body.len() + 256);
+    out.push_str(&format_perf_header(total, index_t, ret_t, ren_t));
+    out.push('\n');
+    out.push_str(&format_index_status_header(stats));
+    if !body.is_empty() {
+        out.push('\n');
+        out.push_str(body);
+    }
+    out
+}
+
+#[cfg(test)]
+fn query_cache_clear() {
+    QUERY_RESULT_CACHE.write().unwrap().clear();
 }
 
 impl CodeExploreTool {
@@ -383,6 +468,42 @@ impl Tool for CodeExploreTool {
         let graph = self.index.get_scoped(&root, scope_path.as_deref());
         let t_index = t_index_start.elapsed();
 
+        // Query-result cache: look up AFTER get_scoped (fingerprint + last_stats
+        // must reflect this restat) but BEFORE scoring / rendering. HIT skips
+        // the 34万-symbol scan. Diagnostic headers are never cached — they are
+        // rewritten from this request's wall-clock and last_stats.
+        let fp = self.index.fingerprint(&root).unwrap_or(0);
+        let scope_key = scope_path
+            .as_deref()
+            .map(|s| s.display().to_string())
+            .unwrap_or_default();
+        let bm25_enabled = std::env::var("ATOMCODE_EXPLORE_BM25").as_deref() == Ok("1");
+        let concept_enabled = std::env::var("ATOMCODE_EXPLORE_CONCEPT").as_deref() == Ok("1");
+        if let Some(cached_body) =
+            query_cache_get(fp, &a.query, &scope_key, max_files, bm25_enabled, concept_enabled)
+        {
+            let t_retrieval = Duration::ZERO;
+            let t_render = Duration::ZERO;
+            let total_cost = t0.elapsed();
+            let stats = self.index.last_stats(&root);
+            log_explore_outcome(
+                &root,
+                &self.index,
+                json!({
+                    "outcome": "query_cache_hit",
+                    "index_ms": t_index.as_millis() as u64,
+                    "retrieval_ms": 0,
+                    "render_ms": 0,
+                    "total_ms": total_cost.as_millis() as u64,
+                }),
+            );
+            return ok(with_fresh_diagnostic_headers(
+                &cached_body,
+                (total_cost, t_index, t_retrieval, t_render),
+                stats.as_ref(),
+            ));
+        }
+
         // Step 1: Score all symbols in the workspace.
         let t_retrieval_start = std::time::Instant::now();
         // Opt-in BM25 lexical recall (ATOMCODE_EXPLORE_BM25=1): surface naming-plain
@@ -535,37 +656,12 @@ impl Tool for CodeExploreTool {
         let (flow_spine, connected) = extract_flow_spine(&graph, &scored_files);
         let t_retrieval = t_retrieval_start.elapsed();
 
-        // Step 3: Render output (Mode A: Connected Flow vs Mode B: Ranked Fallback)
-        // Query-result cache: identical (fingerprint, query, scope) hits reuse
-        // the rendered output verbatim — concurrent read-heavy sessions asking
-        // the same question skip re-scoring entirely. Fingerprint changes on
-        // file edits, so results never go stale.
-        let fp = self.index.fingerprint(&root).unwrap_or(0);
-        let scope_key = scope_path.as_deref().map(|s| s.display().to_string()).unwrap_or_default();
-        // These two flags are part of the query-cache key: they change the
-        // SCORING (BM25 bonus / concept-vector bonus in raw_score), so a
-        // cached render produced with them ON is wrong for a plain request.
-        let bm25_enabled = std::env::var("ATOMCODE_EXPLORE_BM25").as_deref() == Ok("1");
-        let concept_enabled = std::env::var("ATOMCODE_EXPLORE_CONCEPT").as_deref() == Ok("1");
-        if let Some(cached) = query_cache_get(fp, &a.query, &scope_key, max_files, bm25_enabled, concept_enabled) {
-            log_explore_outcome(
-                &root,
-                &self.index,
-                json!({
-                    "outcome": "query_cache_hit",
-                    "index_ms": t_index.as_millis() as u64,
-                    "retrieval_ms": t_retrieval.as_millis() as u64,
-                    "candidates": scored_files.len(),
-                }),
-            );
-            return ok(cached);
-        }
-        let t_render_start = std::time::Instant::now();
+        // Step 3: Render. t_render wraps the real Markdown assembly, not just
+        // get_dirindex / last_stats (those two used to make Render always 0ms).
         let dirindex = self.index.get_dirindex(&root);
         let cache_status = self.index.last_stats(&root);
-        let t_render = t_render_start.elapsed();
-        let total_cost = t0.elapsed();
-        let output = render_explore_output(
+        let t_render_start = std::time::Instant::now();
+        let body = render_explore_output(
             &graph,
             &root,
             &a.query,
@@ -576,10 +672,25 @@ impl Tool for CodeExploreTool {
             scope_path.as_deref(),
             &query_tokens,
             dirindex.as_deref(),
-            cache_status,
-            Some((total_cost, t_index, t_retrieval, t_render)),
+            None,
+            None,
         );
-        query_cache_insert(fp, &a.query, &scope_key, max_files, bm25_enabled, concept_enabled, output.clone());
+        let t_render = t_render_start.elapsed();
+        let total_cost = t0.elapsed();
+        let output = with_fresh_diagnostic_headers(
+            &body,
+            (total_cost, t_index, t_retrieval, t_render),
+            cache_status.as_ref(),
+        );
+        query_cache_insert(
+            fp,
+            &a.query,
+            &scope_key,
+            max_files,
+            bm25_enabled,
+            concept_enabled,
+            output.clone(),
+        );
 
         log_explore_outcome(
             &root,
@@ -827,36 +938,60 @@ fn score_workspace_symbols(
     concept_vectors: Option<&std::collections::HashMap<SymbolId, Vec<f32>>>,
 ) -> Vec<FileCandidate> {
     let bm25_max = bm25_scores.values().copied().fold(0.0f64, f64::max);
+    let name_filters_lower: Vec<String> = parsed_query
+        .name_filters
+        .iter()
+        .map(|n| n.to_ascii_lowercase())
+        .collect();
+    let path_filters_lower: Vec<String> = parsed_query
+        .path_filters
+        .iter()
+        .map(|p| p.to_ascii_lowercase())
+        .collect();
 
-    // Parallel scoring: the graph is read-only, so every symbol scores
-    // independently (rayon work-stealing across cores); collected hits are
-    // merged into per-file buckets afterwards — the 34万-symbol scan drops
-    // from serial-seconds to parallel-milliseconds on multi-core hosts.
-    let scored: Vec<(PathBuf, ScoredSymbol)> = graph
-        .nodes
+    // Score only in-scope files. A workspace-wide `par_iter` over 36万 symbols
+    // just to `path_matches_scope`-reject 99% of them is why Retrieval was 5–7s
+    // on a 32-file `path:` query. `path_sim` is also per-file, not per-symbol.
+    let scoped_files: Vec<(&PathBuf, &Vec<SymbolId>)> = match scope {
+        Some(sc) => graph
+            .file_symbols
+            .iter()
+            .filter(|(f, _)| path_matches_scope(f, sc))
+            .collect(),
+        None => graph.file_symbols.iter().collect(),
+    };
+    let path_sims: HashMap<PathBuf, f64> = scoped_files
         .par_iter()
-        .filter_map(|(_id, node)| {
-        if let Some(sc) = scope {
-            if !path_matches_scope(&node.file, sc) {
-                return None;
-            }
-        }
+        .map(|(file, _)| {
+            (
+                (*file).clone(),
+                calculate_text_similarity(tokens, &file.to_string_lossy()),
+            )
+        })
+        .collect();
+    let nodes: Vec<&SymbolNode> = scoped_files
+        .iter()
+        .flat_map(|(_, ids)| ids.iter().filter_map(|id| graph.nodes.get(id)))
+        .collect();
 
-        // Apply field-qualified filters
+    let scored: Vec<(PathBuf, ScoredSymbol)> = nodes
+        .into_par_iter()
+        .filter_map(|node| {
         if !parsed_query.kind_filters.is_empty() {
             let kind_str = format!("{:?}", node.kind).to_ascii_lowercase();
             if !parsed_query.kind_filters.iter().any(|k| kind_str.contains(k)) {
                 return None;
             }
         }
-        if !parsed_query.name_filters.is_empty() {
-            if !parsed_query.name_filters.iter().any(|n| node.name.to_ascii_lowercase().contains(&n.to_ascii_lowercase())) {
+        if !name_filters_lower.is_empty() {
+            let name_lower = node.name.to_ascii_lowercase();
+            if !name_filters_lower.iter().any(|n| name_lower.contains(n)) {
                 return None;
             }
         }
-        if !parsed_query.path_filters.is_empty() {
+        if !path_filters_lower.is_empty() {
             let f_lower = node.file.to_string_lossy().to_ascii_lowercase();
-            if !parsed_query.path_filters.iter().any(|p| f_lower.contains(&p.to_ascii_lowercase())) {
+            if !path_filters_lower.iter().any(|p| f_lower.contains(p)) {
                 return None;
             }
         }
@@ -910,7 +1045,7 @@ fn score_workspace_symbols(
             .map(|c| calculate_text_similarity(tokens, c))
             .fold(0.0f64, f64::max);
 
-        let path_sim = calculate_text_similarity(tokens, &node.file.to_string_lossy());
+        let path_sim = path_sims.get(&node.file).copied().unwrap_or(0.0);
 
         let text_match = (name_sim + name_bonus) * 0.50 + doc_sim * 0.25 + inline_sim * 0.15 + path_sim * 0.10;
         if text_match < 8.0 {
@@ -2547,6 +2682,97 @@ mod tests {
             Path::new(r"E:\code\agents\coupon-mall-demo\backend\src\main\java\com\demo\coupon\service\CouponService.java"),
             Path::new("coupon-mall-demo/backend/src/main/java/com/demo/coupon/service")
         ));
+    }
+
+    #[test]
+    fn strip_diagnostic_headers_drops_perf_and_index_status() {
+        let raw = concat!(
+            "> ⚡ **Performance**: ⏱️ **Cost Time**: 13150ms (Index: 7386ms | Retrieval: 5763ms | Render: 0ms)\n",
+            "\n",
+            "> ⚡ **Index Status**: [Incremental] 增量补丁（重解析 2 个文件，保留 12166 个，移除 0 个）\n",
+            "\n",
+            "body line\n",
+        );
+        let stripped = strip_diagnostic_headers(raw);
+        assert!(!stripped.contains("Cost Time"), "{stripped}");
+        assert!(!stripped.contains("Index Status"), "{stripped}");
+        assert!(!stripped.contains("增量补丁"), "{stripped}");
+        assert!(stripped.contains("body line"), "{stripped}");
+    }
+
+    #[test]
+    fn fresh_headers_use_this_request_stats_not_cached_snapshot() {
+        let body = "cached body\n";
+        let hit = super::super::index::RefreshStats {
+            reparsed: 0,
+            removed: 0,
+            kept: 12168,
+            cache_hit: true,
+            ..Default::default()
+        };
+        let out = with_fresh_diagnostic_headers(
+            body,
+            (
+                Duration::from_millis(40),
+                Duration::from_millis(30),
+                Duration::from_millis(0),
+                Duration::from_millis(0),
+            ),
+            Some(&hit),
+        );
+        assert!(out.contains("Cost Time**: 40ms"), "{out}");
+        assert!(out.contains("Index: 30ms"), "{out}");
+        assert!(out.contains("Retrieval: 0ms"), "{out}");
+        assert!(out.contains("[Cache HIT]"), "{out}");
+        assert!(out.contains("复用 12168 个文件单元"), "{out}");
+        assert!(!out.contains("增量补丁"), "{out}");
+        assert!(out.contains("cached body"), "{out}");
+    }
+
+    #[tokio::test]
+    async fn identical_query_rewrites_frozen_incremental_headers() {
+        use atomcode_kernel::tool::{ProgressSink, Tool, ToolContext};
+        use tokio_util::sync::CancellationToken;
+
+        query_cache_clear();
+        let d = tempfile::tempdir().unwrap();
+        std::fs::write(d.path().join("hot.rs"), "pub fn cached_symbol() {}\n").unwrap();
+        let idx = Arc::new(CodeIndex::new());
+        let _ = idx.get(d.path());
+        let tool = CodeExploreTool::new(idx);
+        let ctx = ToolContext {
+            working_dir: d.path().to_path_buf(),
+            cancel: CancellationToken::new(),
+            progress: ProgressSink::noop(),
+            requester: None,
+        };
+        let args = r#"{"query":"cached_symbol","path":"."}"#;
+        let first = tool.execute(args, &ctx).await;
+        assert!(!first.is_error, "{}", first.content);
+        assert!(
+            first.content.contains("cached_symbol"),
+            "first hit must render the symbol:\n{}",
+            first.content
+        );
+
+        let second = tool.execute(args, &ctx).await;
+        assert!(!second.is_error, "{}", second.content);
+        assert!(
+            second.content.contains("[Cache HIT]"),
+            "second identical query must rewrite Index Status from this restat, not freeze 增量补丁:\n{}",
+            second.content
+        );
+        assert!(
+            !second.content.contains("增量补丁"),
+            "cached first-hit incremental header must not leak:\n{}",
+            second.content
+        );
+        assert!(
+            second.content.contains("Retrieval: 0ms"),
+            "query-cache HIT must skip scoring:\n{}",
+            second.content
+        );
+        query_cache_clear();
     }
 }
 

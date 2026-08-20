@@ -95,6 +95,7 @@ import {
   type ChatRecoveryEvent,
   type ChatRecoveryState,
 } from '../lib/chatTerminal';
+import { formatTurnElapsed, stampLastAssistantElapsed } from '../lib/turnTimer';
 import {
   acknowledgeLiveSteers,
   pendingSteersToDraft,
@@ -113,6 +114,10 @@ interface Message {
   ts?: number;
   /** Browser-local correlation for an optimistic /live submission. Never persisted. */
   pendingSteerId?: string;
+  /** Wall-clock duration of this assistant turn (ms). Stamped when the turn
+   *  finishes so the timeline can show "用时 12s" after refresh. Live ticks
+   *  are computed from `turnStartedAt`, not this field. */
+  elapsedMs?: number;
 }
 
 /**
@@ -522,10 +527,41 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
   // without a stale closure (refs always reflect the latest render value).
   const busyRef = useRef(false);
   busyRef.current = busy;
+  // Live turn stopwatch: epoch ms when the current agent turn started, plus a
+  // 1s tick so the label advances while busy. Cleared (and stamped onto the
+  // last assistant message) when the turn ends.
+  const [turnStartedAt, setTurnStartedAt] = useState<number | null>(null);
+  const turnStartedAtRef = useRef<number | null>(null);
+  const [nowMs, setNowMs] = useState(() => Date.now());
+  function startTurnClock() {
+    if (turnStartedAtRef.current != null) return;
+    const now = Date.now();
+    turnStartedAtRef.current = now;
+    setTurnStartedAt(now);
+  }
+  function finishTurnClock(opts?: { stamp?: boolean }) {
+    const started = turnStartedAtRef.current;
+    turnStartedAtRef.current = null;
+    setTurnStartedAt(null);
+    if (started == null || opts?.stamp === false) return;
+    setMessages((prev) => stampLastAssistantElapsed(prev, Date.now() - started));
+  }
+  function setBusyAndClock(next: boolean) {
+    if (next) startTurnClock();
+    else finishTurnClock();
+    setBusy(next);
+  }
   const [chatRecovery, setChatRecovery] = useState<ChatRecoveryState>('ready');
   const chatRecoveryRef = useRef<ChatRecoveryState>('ready');
   chatRecoveryRef.current = chatRecovery;
   const recoveryPolicy = chatRecoveryPolicy(chatRecovery);
+
+  useEffect(() => {
+    if (!busy || turnStartedAt == null) return;
+    setNowMs(Date.now());
+    const id = window.setInterval(() => setNowMs(Date.now()), 1000);
+    return () => window.clearInterval(id);
+  }, [busy, turnStartedAt]);
 
   function transitionChatRecovery(event: ChatRecoveryEvent): ChatRecoveryState {
     const next = reduceChatRecovery(chatRecoveryRef.current, event);
@@ -743,7 +779,7 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
     stopDetachedHistoryPoll();
     setHistoryHint(t('chat.detachedWatching'));
     // Show running UI; send stays locked via recovery / requestId.
-    setBusy(true);
+    setBusyAndClock(true);
     // Full turn will be rebuilt from watch replay (user + thinking + text + tools).
     dropTrailingAssistantForWatchReplay();
     ensureAssistantBubbleForWatch();
@@ -910,7 +946,7 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
     // 停在 detached_active(false),输入框被锁住。
     transitionChatRecovery({ type: 'authoritative_terminal' });
     setHistoryHint(null);
-    setBusy(false);
+    setBusyAndClock(false);
     busyRef.current = false;
     // API turn 已落盘:通知 App 刷新侧栏(消息数/自动命名标题),新建会话才会出现。
     onLiveTurnDone?.();
@@ -956,7 +992,7 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
           transitionChatRecovery({ type: 'active_check_succeeded', active: true });
           requestIdRef.current = loadId;
           setHistoryHint(t('chat.detachedWatching'));
-          setBusy(true);
+          setBusyAndClock(true);
           busyRef.current = true;
           // Follow the live API turn at the bottom of the timeline.
           atBottomRef.current = true;
@@ -1072,10 +1108,16 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
       const detachedController = abortRef.current;
       if (prevId && messagesRef.current.length > 0) {
         const sticky = activeTodosRef.current;
-        const cached =
+        let cached =
           sticky && sticky.length > 0
             ? freezeTodosIntoLastAssistant(messagesRef.current, sticky)
             : messagesRef.current;
+        // Stamp the leaving session's live stopwatch into its cache. The
+        // following setBusyAndClock(false) must NOT write elapsed onto the
+        // destination session's messages.
+        if (turnStartedAtRef.current != null) {
+          cached = stampLastAssistantElapsed(cached, Date.now() - turnStartedAtRef.current);
+        }
         messageCacheRef.current.set(prevId, cached);
       }
 
@@ -1106,6 +1148,7 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
         detachedController?.abort();
       }
       liveLifecycleRef.current = createLiveLifecycleState();
+      finishTurnClock({ stamp: false });
       setBusy(false);
       setQueued([]);
       setLivePending(null);
@@ -1150,6 +1193,7 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
             if (sessionGenerationRef.current !== switchGeneration) return;
             stopLiveStream();
             setSync(false);
+            finishTurnClock({ stamp: false });
             setBusy(false);
             setQueued([]);
             setHistoryHint(t('sync.switchFailed', { error: String(error) }));
@@ -1222,7 +1266,7 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
           transitionChatRecovery({ type: 'active_check_succeeded', active });
           if (active) {
             requestIdRef.current = loadId;
-            if (!syncRef.current) setBusy(false);
+            if (!syncRef.current) setBusyAndClock(false);
             setQueued([]);
             nextHint = t('chat.detachedActive');
             pushCommandNotice(t('chat.detachedActive'));
@@ -1238,7 +1282,7 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
           // fail closed instead of allowing a possibly concurrent send.
           requestIdRef.current = loadId;
           transitionChatRecovery({ type: 'active_check_failed' });
-          if (!syncRef.current) setBusy(false);
+          if (!syncRef.current) setBusyAndClock(false);
           setQueued([]);
           nextHint = t('chat.activeCheckFailed', { error: String(activeResult.reason) });
           pushCommandNotice(nextHint);
@@ -1436,6 +1480,7 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
         liveLifecycleRef.current = createLiveLifecycleState();
         restorePendingSteers();
         setSync(false);
+        finishTurnClock({ stamp: false });
         setBusy(false);
         setQueued([]);
         setLivePending(null);
@@ -1699,7 +1744,7 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
       liveLifecycleRef.current = lifecycle.state;
       const restored = restoreLiveSnapshot(loaded);
       setMessages(restored.messages.length > 0 ? restored.messages : []);
-      setBusy(restored.running);
+      setBusyAndClock(restored.running);
       if (queueDisposition.discardQueued) {
         setQueued([]);
         pushCommandNotice(t('sync.reconnectTerminalUnknown'));
@@ -1804,7 +1849,7 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
           type: 'input_accepted',
         });
         liveLifecycleRef.current = lifecycle.state;
-        setBusy(lifecycle.state.running);
+        setBusyAndClock(lifecycle.state.running);
         // Dedup THIS tab's own echo: we already optimistically appended it on send
         // (leaving the landing page instantly). Consume the marker and skip the
         // re-append; a peer's message still falls through and renders.
@@ -1833,7 +1878,7 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
           message: e.message,
         });
         liveLifecycleRef.current = lifecycle.state;
-        setBusy(lifecycle.state.running);
+        setBusyAndClock(lifecycle.state.running);
         if (lifecycle.terminal) {
           // A submit whose HTTP receipt is still in flight may belong to the
           // next turn; only confirmed steers are recoverable at this terminal.
@@ -2493,7 +2538,7 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
           pushNoticeToLastAssistant(t('chat.incomplete', { msg: terminal.detail }));
         }
         transitionChatRecovery({ type: 'authoritative_terminal' });
-        setBusy(false);
+        setBusyAndClock(false);
         onPermissionResolved?.(null); // 回合结束：兜底清掉任何残留审批卡片
         setUserInputReq(null);
         break;
@@ -2501,7 +2546,7 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
 
       case 'stopped':
         transitionChatRecovery({ type: 'authoritative_terminal' });
-        setBusy(false);
+        setBusyAndClock(false);
         setQueued([]); // 用户中止：丢弃排队消息（对齐 VSCode 插件）
         onPermissionResolved?.(null);
         setUserInputReq(null);
@@ -2510,7 +2555,7 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
       case 'error':
         appendToLastAssistant('\n\n' + t('chat.error', { msg: event.message }));
         transitionChatRecovery({ type: 'authoritative_terminal' });
-        setBusy(false);
+        setBusyAndClock(false);
         setQueued([]); // 出错：丢弃排队消息
         onPermissionResolved?.(null);
         setUserInputReq(null);
@@ -2633,7 +2678,7 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
       //    sender stuck on the empty page). Our own echo is deduped in the `user`
       //    case via `pendingSelfEchoRef`.
       const steering = busyRef.current;
-      setBusy(true);
+      setBusyAndClock(true);
       const now = Date.now();
       const pendingSteer: PendingLiveSteer = {
         id: crypto.randomUUID(),
@@ -2686,7 +2731,7 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
           setInput((current) => [text, current].filter(Boolean).join('\n'));
           setPendingImages((current) => [...images, ...current]);
         } else {
-          setBusy(false);
+          setBusyAndClock(false);
         }
         setQueued([]);
         setHistoryHint(t('chat.connError', { msg: String(error) }));
@@ -2699,7 +2744,7 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
     }
 
     // ── Normal path ──
-    setBusy(true);
+    setBusyAndClock(true);
     busyRef.current = true;
     // 消息发出后延迟刷新侧栏列表，给后端落盘时间；
     // done 事件中 onSessionId 会再刷一次确保更新。
@@ -2771,7 +2816,7 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
         appendToLastAssistant('\n\n' + t('chat.connError', { msg }));
       }
       if (stillCurrent) {
-        setBusy(false);
+        setBusyAndClock(false);
         setQueued([]); // 连接错误：与 stopped/error 一致，丢弃排队消息
         // 中止/连接错误时流被掐断，不会再有 done/stopped 事件 → 兜底清掉审批卡片，
         // 否则点「停止」时若正挂着审批卡片，它会一直残留。
@@ -2932,7 +2977,7 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
         if (detached && requestIdRef.current === requestAlias) {
           transitionChatRecovery({ type: 'stop_succeeded' });
           requestIdRef.current = null;
-          if (!sync) setBusy(false);
+          if (!sync) setBusyAndClock(false);
           setQueued([]);
           onPermissionResolved?.(null);
           pushCommandNotice(t('chat.detachedStopped'));
@@ -2948,7 +2993,7 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
         // still recover it. A detached stream has no reattach path, so it stays
         // explicitly locked with its stop alias available for retry.
         transitionChatRecovery({ type: 'stop_failed' });
-        if (abortRef.current === null) setBusy(false);
+        if (abortRef.current === null) setBusyAndClock(false);
       }
     }
   }
@@ -3353,6 +3398,13 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
             </svg>
           </button>
           <span class="footer-spacer" />
+          {busy && turnStartedAt != null && (
+            <span class="footer-turn-elapsed" aria-live="polite">
+              {t('chat.turnElapsedLive', {
+                time: formatTurnElapsed(nowMs - turnStartedAt),
+              })}
+            </span>
+          )}
           {tokens && (
             <span class="footer-tokens">
               {(tokens.total / 1000).toFixed(1)}k tokens
@@ -3489,7 +3541,7 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
                   <rect x="6.4" y="6.4" width="11.2" height="11.2" rx="2.6" transform="rotate(45 12 12)" stroke="currentColor" stroke-width="1.8" />
                 </svg>
               </span> */}
-              <span class="landing-brand-name">AtomCode</span>
+              <span class="landing-brand-name">JeikCode</span>
             </div>
             <div class="landing-tagline">{t('chat.greeting')}</div>
             <div class="landing-input">
@@ -3641,6 +3693,11 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
                 searchRef={setMatchRef}
                 timeLabel={timeLabel}
                 timeFull={timeFull}
+                liveElapsedMs={
+                  isLast && busy && turnStartedAt != null
+                    ? nowMs - turnStartedAt
+                    : undefined
+                }
                 search={search}
                 isActiveSearchMatch={isActiveSearchMatch}
               />
@@ -3821,6 +3878,7 @@ function AssistantMessageView({
   searchRef,
   timeLabel,
   timeFull,
+  liveElapsedMs,
   search,
   isActiveSearchMatch,
 }: {
@@ -3833,6 +3891,7 @@ function AssistantMessageView({
   searchRef?: (el: HTMLElement | null) => void;
   timeLabel?: string;
   timeFull?: string;
+  liveElapsedMs?: number;
   search: string;
   isActiveSearchMatch: boolean;
 }) {
@@ -3911,11 +3970,31 @@ function AssistantMessageView({
         </>
       )}
       {copyBtn}
+      {streaming && liveElapsedMs != null && (
+        <div class="msg-time msg-turn-elapsed is-live" aria-live="polite">
+          {t('chat.turnElapsedLive', { time: formatTurnElapsed(liveElapsedMs) })}
+        </div>
+      )}
       {/* PR #562 send-time label — under the reply, dimmed; full timestamp in
           the tooltip. Suppressed while streaming (turn isn't done yet), on
           error turns, and on tool-only turns with no text. */}
-      {timeLabel && !streaming && text && !isError && (
-        <div class="msg-time" title={timeFull}>{timeLabel}</div>
+      {timeLabel && !streaming && (text || msg.elapsedMs != null) && !isError && (
+        <div class="msg-time" title={timeFull}>
+          {timeLabel}
+          {msg.elapsedMs != null && (
+            <span class="msg-turn-elapsed">
+              {' · '}
+              {t('chat.turnElapsedDone', { time: formatTurnElapsed(msg.elapsedMs) })}
+            </span>
+          )}
+        </div>
+      )}
+      {!timeLabel && !streaming && msg.elapsedMs != null && !isError && (
+        <div class="msg-time">
+          <span class="msg-turn-elapsed">
+            {t('chat.turnElapsedDone', { time: formatTurnElapsed(msg.elapsedMs) })}
+          </span>
+        </div>
       )}
     </div>
   );

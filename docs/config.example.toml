@@ -14,6 +14,8 @@ default_provider = "deepseek"
 # auto_commit: 每轮 agent 结束后自动提交改动的文件（仅在 git 仓库内生效）
 auto_update = false
 auto_commit = false
+# Ctrl-C / 取消回合时保留已产生的部分上下文（true=保留，false=回滚该回合）
+keep_interrupted_context = true
 
 # ---- 离线 / 内网无公网环境开关（顶层键）----
 # offline_mode: 离线 / 内网无公网环境开关。
@@ -180,7 +182,7 @@ context_window = 64000
 # 日志包含未经脱敏的提示词、响应、工具输入和输出，请按敏感数据保护。
 # =============================================================================
 [datalog]
-enabled = false
+enabled = true
 dir = "~/.atomcode/datalog"
 
 # =============================================================================
@@ -268,8 +270,23 @@ eager = "auto"
 # 内核工具结果上限默认 256 KiB。
 # 设为 0 完全禁用折叠（所有工具输出原样进入上下文，超大输出会占用上下文窗口）。
 # 环境变量 ATOMCODE_TOOL_OUTPUT_THRESHOLD_BYTES 可覆盖本项（env 优先）。
+[tools.bash]
+default_timeout_secs = 60
+max_timeout_secs = 1800
+silent_kill_secs = 90
+
 [tools.tool_output]
 max_bytes = 65536
+no_fold_tools = [
+    "fetch_output",
+    "repo_map",
+    "code_explore",
+    "find_symbol",
+    "trace_chain",
+    "blast_radius",
+    "web_fetch",
+    "web_search",
+]
 
 # 同一回合里只读工具（read_file / grep / glob / list_directory）最多同时跑几个。
 # 默认 16，硬上限 256。write_file / edit_file 走独占写锁，不受这个数字限制
@@ -312,9 +329,15 @@ auto_update_marketplaces = true
 # =============================================================================
 # UI
 # =============================================================================
+[web_search]
+provider = "exa"
+
 [ui]
 theme = "auto"
-auto_copy_on_select = true
+auto_copy_on_select = false
+auto_copy_code_blocks = false
+ai_session_naming = true
+terminal_status_glyph = true
 # /resume 初次回放到终端原生 scrollback 的视觉行上限。
 # 省略时按终端自动选择；0 表示完整回放（长会话恢复会更慢）。
 # history_replay_max_rows = 5000

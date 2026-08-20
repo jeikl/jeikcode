@@ -36,7 +36,7 @@ pub fn uninstall_manifest() -> UninstallManifest {
             "codingplan_sync.json",
             "device_id",
         ],
-        state_dirs: &["staged", "telemetry", "plugins", "commands", "skills"],
+        state_dirs: &["staged", "telemetry", "plugins", "commands", "skills", "prompts", "thesaurus"],
         state_prefixes: &["notice."],
     }
 }
@@ -134,7 +134,7 @@ mod tests {
         ] {
             assert!(m.state_files.contains(&f), "missing {f}");
         }
-        for d in ["staged", "telemetry", "plugins", "commands", "skills"] {
+        for d in ["staged", "telemetry", "plugins", "commands", "skills", "prompts", "thesaurus"] {
             assert!(m.state_dirs.contains(&d), "missing {d}");
         }
     }

@@ -2073,13 +2073,9 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
       });
   }
 
-  /** Switch the active provider and notify the backend when in sync mode. */
+  /** Switch the active provider and notify the backend immediately so default model persists and syncs. */
   function switchProvider(name: string) {
     providerPinnedRef.current = true;
-    if (!sync) {
-      setProvider(name);
-      return;
-    }
     const previous = provider;
     setProvider(name);
     void postLiveProvider(name, sessionId).then((res) => {

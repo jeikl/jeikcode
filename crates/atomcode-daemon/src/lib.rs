@@ -3407,6 +3407,8 @@ pub struct ModelInfo {
     /// `null` (the model's own default). Lets the webui reflect the active
     /// effort in the selector.
     pub reasoning_effort: Option<String>,
+    /// Available reasoning effort levels for this model (e.g. `["low", "medium", "high", "xhigh"]`).
+    pub reasoning_levels: Vec<String>,
 }
 
 /// Build the `/models` list from the UNIFIED model catalog (`logical_models`)
@@ -3429,6 +3431,7 @@ fn models_from_config(config: &Config) -> Vec<ModelInfo> {
                     &p.model,
                 ),
                 reasoning_effort: p.reasoning_effort.clone(),
+                reasoning_levels: p.effective_reasoning_levels(),
             })
         })
         .collect()

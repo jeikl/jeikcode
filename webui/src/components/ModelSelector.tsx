@@ -3,14 +3,6 @@ import { getModels, ModelInfo, postLiveReasoningEffort } from '../api';
 import { useT } from '../settings';
 import { MsgKey } from '../i18n';
 
-// DeepSeek V4 reasoning effort levels. `null` clears the field → the model's
-// own default. Order is the cycle order shown in the dropdown.
-const EFFORT_OPTIONS: { val: string | null; key: MsgKey }[] = [
-  { val: null, key: 'effort.default' },
-  { val: 'high', key: 'effort.high' },
-  { val: 'max', key: 'effort.max' },
-];
-
 function areModelsEqual(a: ModelInfo[], b: ModelInfo[]): boolean {
   if (a.length !== b.length) return false;
   for (let i = 0; i < a.length; i++) {
@@ -21,7 +13,8 @@ function areModelsEqual(a: ModelInfo[], b: ModelInfo[]): boolean {
       ma.model !== mb.model ||
       ma.is_default !== mb.is_default ||
       ma.effort_applicable !== mb.effort_applicable ||
-      ma.reasoning_effort !== mb.reasoning_effort
+      ma.reasoning_effort !== mb.reasoning_effort ||
+      JSON.stringify(ma.reasoning_levels) !== JSON.stringify(mb.reasoning_levels)
     ) {
       return false;
     }
@@ -93,12 +86,35 @@ export function ModelSelector({
   }, [open, effortOpen]);
   const current = models.find((m) => m.provider === value) ?? models.find((m) => m.is_default) ?? models[0];
   // Switching models resets the effort display back to the new model's
-  // persisted value (and hides the selector entirely for non-V4 models).
+  // persisted value (and hides the selector entirely for non-effort models).
   useEffect(() => { setEffortOverride(undefined); }, [current?.provider]);
   const effort = effortOverride !== undefined ? effortOverride : (current?.reasoning_effort ?? null);
+
+  const currentLevels = (current?.reasoning_levels && current.reasoning_levels.length > 0)
+    ? current.reasoning_levels
+    : ['low', 'medium', 'high'];
+
+  const effortOptions: { val: string | null; label: string }[] = [
+    { val: null, label: t('effort.default') },
+    ...currentLevels.map((lvl) => {
+      const key = `effort.${lvl.toLowerCase()}` as MsgKey;
+      let label = lvl;
+      try {
+        const translated = t(key);
+        if (translated && translated !== key) {
+          label = translated;
+        }
+      } catch {
+        label = lvl;
+      }
+      return { val: lvl, label };
+    }),
+  ];
+
   const effortLabel = (v: string | null): string => {
-    const o = EFFORT_OPTIONS.find((x) => x.val === v) ?? EFFORT_OPTIONS[0];
-    return t(o.key);
+    if (!v) return t('effort.default');
+    const match = effortOptions.find((x) => x.val?.toLowerCase() === v.toLowerCase());
+    return match ? match.label : v;
   };
   const selectEffort = (v: string | null) => {
     const previous = effort;
@@ -141,14 +157,14 @@ export function ModelSelector({
           </button>
           {effortOpen && (
             <div class="model-dropdown">
-              {EFFORT_OPTIONS.map((o) => (
+              {effortOptions.map((o) => (
                 <button
-                  key={o.key}
-                  class={'model-item' + (o.val === effort ? ' active' : '')}
+                  key={o.val ?? 'default'}
+                  class={'model-item' + (o.val === effort || (o.val?.toLowerCase() === effort?.toLowerCase()) ? ' active' : '')}
                   type="button"
                   onClick={() => selectEffort(o.val)}
                 >
-                  <span class="model-item-model">{t(o.key)}</span>
+                  <span class="model-item-model">{o.label}</span>
                 </button>
               ))}
             </div>

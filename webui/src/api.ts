@@ -99,11 +99,12 @@ export interface ModelInfo {
   model: string;
   provider_type: string;
   is_default: boolean;
-  /** Whether this model accepts the DeepSeek `reasoning_effort` control
-   *  (deepseek-v4 family). The effort selector is shown only when true. */
+  /** Whether this model accepts reasoning_effort control. */
   effort_applicable: boolean;
-  /** Current effort: 'high' | 'max' | null (model default). */
+  /** Current effort: 'low' | 'medium' | 'high' | 'xhigh' | 'max' | null (model default). */
   reasoning_effort: string | null;
+  /** Available reasoning effort levels for this model. */
+  reasoning_levels?: string[];
 }
 
 export async function getModels(): Promise<ModelInfo[]> {

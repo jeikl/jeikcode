@@ -393,6 +393,23 @@ impl ProviderConfig {
         )
     }
 
+    /// Retrieve the effective reasoning effort levels for this provider.
+    pub fn effective_reasoning_levels(&self) -> Vec<String> {
+        if let Some(ref levels) = self.reasoning_levels {
+            if !levels.is_empty() {
+                return levels.clone();
+            }
+        }
+        let m_lower = self.model.to_ascii_lowercase();
+        if m_lower.contains("grok") {
+            vec!["low".into(), "medium".into(), "high".into(), "xhigh".into()]
+        } else if m_lower.contains("deepseek") || m_lower.contains("v4") {
+            vec!["low".into(), "medium".into(), "high".into(), "max".into()]
+        } else {
+            vec!["low".into(), "medium".into(), "high".into()]
+        }
+    }
+
     /// Resolve the API key for this provider, taking environment variables into account.
     ///
     /// Resolution order:

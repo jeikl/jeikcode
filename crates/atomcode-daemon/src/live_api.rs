@@ -1817,6 +1817,15 @@ pub(crate) async fn live_provider(
             }));
         }
     };
+    let requested_provider = req.provider.clone();
+    let _ = atomcode_config::ConfigStore::default_store().update(|cfg| {
+        if cfg.selection_exists(&requested_provider) {
+            cfg.default_model = Some(requested_provider.clone());
+            cfg.default_provider = requested_provider.clone();
+        }
+        Ok(())
+    });
+
     let requested_fingerprint =
         match crate::native_live::provider_fingerprint(&config, &req.provider) {
             Ok(fingerprint) => fingerprint,
@@ -1940,17 +1949,13 @@ pub(crate) async fn live_reasoning_effort(
 ) -> impl IntoResponse {
     let effort = match req.reasoning_effort.as_deref().map(str::trim) {
         None | Some("") => None,
-        Some(v) if v.eq_ignore_ascii_case("high") => Some("high".to_string()),
-        Some(v) if v.eq_ignore_ascii_case("max") => Some("max".to_string()),
-        Some(other) => {
-            return (
-                axum::http::StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({
-                    "ok": false,
-                    "error": format!("invalid reasoning_effort: {other}"),
-                })),
-            )
-                .into_response();
+        Some(v) => {
+            let lower = v.to_ascii_lowercase();
+            if lower == "none" || lower == "off" || lower == "default" {
+                None
+            } else {
+                Some(v.to_string())
+            }
         }
     };
     let store = atomcode_config::ConfigStore::default_store();

@@ -9146,6 +9146,38 @@ fn should_deactivate_for_missing_auth(
         && runtime_availability == RuntimeUiAvailability::Available
 }
 
+/// Thinking / reasoning knobs that live on the *current* model and are
+/// mutated from WebUI (`/live/reasoning_effort`) or TUI (`/effort`, Ctrl+T).
+/// A pinned session must keep its provider/model selection, but these fields
+/// are session-wide display + request controls — overlaying them from disk
+/// is how the TUI status bar (`grok-4.6 [high]`) follows a WebUI gear switch
+/// without retargeting the model or adopting unrelated window/url edits.
+fn overlay_provider_thinking(
+    runtime: &mut atomcode_config::ProviderConfig,
+    disk: &atomcode_config::ProviderConfig,
+) {
+    runtime.thinking_type = disk.thinking_type.clone();
+    runtime.thinking_keep = disk.thinking_keep.clone();
+    runtime.reasoning_history = disk.reasoning_history.clone();
+    runtime.reasoning_effort = disk.reasoning_effort.clone();
+    runtime.reasoning_levels = disk.reasoning_levels.clone();
+    runtime.thinking_enabled = disk.thinking_enabled;
+    runtime.thinking_budget = disk.thinking_budget;
+}
+
+fn overlay_profile_thinking(
+    runtime: &mut atomcode_config::config::provider::ModelProfileConfig,
+    disk: &atomcode_config::config::provider::ModelProfileConfig,
+) {
+    runtime.thinking_type = disk.thinking_type.clone();
+    runtime.thinking_keep = disk.thinking_keep.clone();
+    runtime.reasoning_history = disk.reasoning_history.clone();
+    runtime.reasoning_effort = disk.reasoning_effort.clone();
+    runtime.reasoning_levels = disk.reasoning_levels.clone();
+    runtime.thinking_enabled = disk.thinking_enabled;
+    runtime.thinking_budget = disk.thinking_budget;
+}
+
 /// Merge freshly-persisted config on top of the running one while keeping the
 /// pinned provider SELECTION. Ephemeral providers exist only at runtime (never
 /// on disk) so their runtime copy is always kept. The active named provider is
@@ -9154,6 +9186,12 @@ fn should_deactivate_for_missing_auth(
 /// explicit `/reload`) its on-disk edits (`context_window`, model, …) are
 /// adopted so the settings of the model you're using actually take effect;
 /// the runtime copy is used only when disk lacks that provider entirely.
+///
+/// Thinking/effort fields on the *kept* active model are always overlaid from
+/// disk (when a disk copy exists). WebUI gear switches persist there and
+/// already reassemble the live runtime; without this overlay the TUI footer
+/// kept showing the startup effort until restart.
+///
 /// Both selection fields are pinned to the running selection:
 /// `default_provider` for legacy configs and `default_model` for the canonical
 /// account/model schema.
@@ -9168,7 +9206,15 @@ fn merge_persisted_config_preserving_active(
         let keep_runtime_copy = provider.ephemeral
             || (is_active && !(adopt_active_edits && persisted.providers.contains_key(name)));
         if keep_runtime_copy {
-            persisted.providers.insert(name.clone(), provider.clone());
+            let mut runtime = provider.clone();
+            // Ephemeral providers are runtime-only; don't let a same-named
+            // disk entry leak thinking knobs into them.
+            if !provider.ephemeral {
+                if let Some(disk) = persisted.providers.get(name) {
+                    overlay_provider_thinking(&mut runtime, disk);
+                }
+            }
+            persisted.providers.insert(name.clone(), runtime);
         }
     }
     persisted.default_provider = active_name;
@@ -9177,9 +9223,11 @@ fn merge_persisted_config_preserving_active(
             let keep_runtime_profile =
                 !adopt_active_edits || !persisted.models.contains_key(active_model);
             if keep_runtime_profile {
-                persisted
-                    .models
-                    .insert(active_model.clone(), profile.clone());
+                let mut runtime = profile.clone();
+                if let Some(disk) = persisted.models.get(active_model) {
+                    overlay_profile_thinking(&mut runtime, disk);
+                }
+                persisted.models.insert(active_model.clone(), runtime);
             }
 
             if let Some(account) = current.provider_accounts.get(&profile.account) {
@@ -9556,6 +9604,105 @@ mod external_config_tests {
 
         assert_eq!(merged.providers["main"].context_window, 128_000);
         assert!(!active_provider_config_changed(&current, &merged));
+    }
+
+    #[test]
+    fn pinned_external_poll_adopts_active_reasoning_effort_without_retargeting() {
+        // WebUI `/live/reasoning_effort` writes the new gear onto the current
+        // model and reassembles the live runtime. A pinned TUI session must
+        // pick that effort up on the next config poll so the footer
+        // (`grok-4.6 [high]`) follows, without adopting unrelated window
+        // edits or switching the model.
+        let mut current = config("grok-4.6", false);
+        current.providers.get_mut("main").unwrap().reasoning_effort = Some("high".into());
+        let mut persisted = config("grok-4.6", false);
+        persisted.providers.get_mut("main").unwrap().reasoning_effort = Some("medium".into());
+        persisted.providers.get_mut("main").unwrap().context_window = 32_000;
+
+        let merged = merge_persisted_config_preserving_active(&current, persisted, false);
+
+        assert_eq!(merged.default_provider, "main");
+        assert_eq!(merged.providers["main"].model, "grok-4.6");
+        assert_eq!(
+            merged.providers["main"].reasoning_effort.as_deref(),
+            Some("medium")
+        );
+        assert_eq!(
+            merged.providers["main"].context_window, 128_000,
+            "unrelated window edits stay pinned until /reload"
+        );
+        assert!(
+            active_provider_config_changed(&current, &merged),
+            "footer sync sees the effort change even though the model did not"
+        );
+        assert!(!should_reload_provider(
+            crate::ProviderSelectionMode::Pinned,
+            &current,
+            &merged,
+            RuntimeUiAvailability::Available,
+            true,
+        ));
+    }
+
+    #[test]
+    fn pinned_new_schema_external_poll_adopts_active_reasoning_effort() {
+        let mut current = new_schema_config("account/old");
+        current
+            .models
+            .get_mut("account/old")
+            .unwrap()
+            .reasoning_effort = Some("high".into());
+        let mut persisted = new_schema_config("account/new");
+        persisted
+            .models
+            .get_mut("account/old")
+            .unwrap()
+            .reasoning_effort = Some("medium".into());
+        persisted
+            .models
+            .get_mut("account/old")
+            .unwrap()
+            .context_window = 64_000;
+
+        let merged = merge_persisted_config_preserving_active(&current, persisted, false);
+
+        assert_eq!(merged.default_model.as_deref(), Some("account/old"));
+        let resolved = merged.resolve_model(None).unwrap();
+        assert_eq!(resolved.selection_id, "account/old");
+        assert_eq!(resolved.model, "old-wire");
+        assert_eq!(resolved.reasoning_effort.as_deref(), Some("medium"));
+        assert_eq!(
+            resolved.context_window, 128_000,
+            "unrelated window edits stay pinned until /reload"
+        );
+    }
+
+    #[test]
+    fn pinned_external_poll_clears_active_reasoning_effort_from_disk() {
+        let mut current = config("grok-4.6", false);
+        current.providers.get_mut("main").unwrap().reasoning_effort = Some("high".into());
+        let persisted = config("grok-4.6", false);
+
+        let merged = merge_persisted_config_preserving_active(&current, persisted, false);
+
+        assert_eq!(merged.providers["main"].reasoning_effort, None);
+    }
+
+    #[test]
+    fn ephemeral_active_provider_does_not_adopt_disk_reasoning_effort() {
+        let mut current = config("oauth-model", true);
+        current.providers.get_mut("main").unwrap().reasoning_effort = Some("high".into());
+        let mut persisted = config("oauth-model", false);
+        persisted.providers.get_mut("main").unwrap().reasoning_effort = Some("medium".into());
+
+        let merged = merge_persisted_config_preserving_active(&current, persisted, false);
+
+        assert!(merged.providers["main"].ephemeral);
+        assert_eq!(
+            merged.providers["main"].reasoning_effort.as_deref(),
+            Some("high"),
+            "ephemeral runtime-only providers must not inherit disk thinking knobs"
+        );
     }
 
     #[test]
@@ -10315,6 +10462,7 @@ fn reconcile_persisted_config(
         }
         ctx.config = desired;
         ctx.model_name = model.clone();
+        sync_reasoning_effort_from_provider(ctx);
         atomcode_config::proxy::apply_process_proxy_config(&ctx.config.network.proxy);
         ctx.observed_config_revision = Some(snapshot.revision);
         // The active provider may have changed from a custom endpoint to an
@@ -12078,6 +12226,7 @@ fn handle_idle_key(
             return Ok(());
         }
         let levels = effective_reasoning_levels_for_provider(ctx);
+        app.state.reasoning_effort = ctx.reasoning_effort.clone();
         let new_val = app.state.cycle_reasoning_effort_with_levels(&levels);
         ctx.reasoning_effort = new_val.clone();
         persist_reasoning_effort(ctx);

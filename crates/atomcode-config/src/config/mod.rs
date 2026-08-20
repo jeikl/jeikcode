@@ -125,30 +125,59 @@ pub struct BashToolConfig {
 impl Default for BashToolConfig {
     fn default() -> Self {
         Self {
-            default_timeout_secs: 180,
+            default_timeout_secs: 60,
             max_timeout_secs: 1800,
-            silent_kill_secs: 300,
+            silent_kill_secs: 90,
         }
     }
 }
 
 /// `[tools.tool_output]` — where oversized tool results are folded into a
 /// head+tail preview and spilled to an artifact (recoverable via fetch_output).
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ToolOutputConfig {
     /// Fold threshold in bytes. Results larger than this are replaced by a
     /// preview. `None` (or missing) → the built-in default
     /// (`THRESHOLD_BYTES`, 64 KiB). `0` disables folding entirely.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default = "default_tool_output_max_bytes", skip_serializing_if = "Option::is_none")]
     pub max_bytes: Option<usize>,
     /// Tool names whose output must reach the model verbatim (never folded),
     /// regardless of size. Batch whitelist: list any built-in tool name
     /// (see `.atomcode/builtin-tools.txt` for the full catalog) and its
     /// results skip the fold preview entirely — like the intrinsic
     /// `never_truncate_result()` contract (repo_map / code_explore).
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[serde(default = "default_no_fold_tools", skip_serializing_if = "Vec::is_empty")]
     pub no_fold_tools: Vec<String>,
+}
+
+fn default_tool_output_max_bytes() -> Option<usize> {
+    Some(65536)
+}
+
+fn default_no_fold_tools() -> Vec<String> {
+    [
+        "fetch_output",
+        "repo_map",
+        "code_explore",
+        "find_symbol",
+        "trace_chain",
+        "blast_radius",
+        "web_fetch",
+        "web_search",
+    ]
+    .into_iter()
+    .map(str::to_string)
+    .collect()
+}
+
+impl Default for ToolOutputConfig {
+    fn default() -> Self {
+        Self {
+            max_bytes: Some(65536),
+            no_fold_tools: default_no_fold_tools(),
+        }
+    }
 }
 impl Default for CodingConfig {
     fn default() -> Self {
@@ -432,7 +461,7 @@ impl Default for PluginConfig {
 }
 
 fn default_auto_copy_on_select() -> bool {
-    !cfg!(windows)
+    false
 }
 
 fn default_auto_copy_code_blocks() -> bool {
@@ -467,8 +496,8 @@ pub struct UiConfig {
     #[serde(default)]
     pub theme: UiTheme,
     /// Drag-select in the conversation auto-copies to the clipboard and
-    /// shows a notice. Opt-out via `/config`. Default off on Windows
-    /// (conhost QuickEdit conflict).
+    /// shows a notice. Opt-in via `/config`. Default off (avoids hijacking
+    /// the clipboard, including Windows conhost QuickEdit).
     #[serde(default = "default_auto_copy_on_select")]
     pub auto_copy_on_select: bool,
     /// Auto-copy a rendered code block's raw source to the clipboard when the
@@ -1198,7 +1227,8 @@ fn project_legacy_model(account_id: &str, p: &ProviderConfig) -> ModelProfileCon
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DatalogConfig {
     /// When false, `DatalogWriter` becomes a no-op and no files are created.
-    #[serde(default)]
+    /// Missing key → true (this fork logs by default; set `enabled = false` to opt out).
+    #[serde(default = "default_true")]
     pub enabled: bool,
     /// Root directory under which datalog files are written. The per-project
     /// slug (`<basename>-<hash8>`) is always appended underneath, so two
@@ -1380,7 +1410,7 @@ pub fn request_user_input_enabled_from_env(env: Option<&str>) -> bool {
 impl Default for DatalogConfig {
     fn default() -> Self {
         Self {
-            enabled: false,
+            enabled: true,
             // Pre-fill the default root so it round-trips into config.toml on
             // first save — users see exactly where logs go without having to
             // discover that "unset == ~/.atomcode/datalog". Resolver still
@@ -2154,9 +2184,11 @@ model = "missing-type"
     }
 
     #[test]
-    fn auto_copy_on_select_defaults_per_platform() {
+    fn auto_copy_on_select_defaults_off() {
         let ui = UiConfig::default();
-        assert_eq!(ui.auto_copy_on_select, !cfg!(windows));
+        assert!(!ui.auto_copy_on_select);
+        let ui: UiConfig = toml::from_str("theme = \"dark\"").unwrap();
+        assert!(!ui.auto_copy_on_select, "missing key → default off");
     }
 
     #[test]
@@ -2450,7 +2482,7 @@ model = "missing-type"
     fn render_datalog_section_default_emits_active_dir() {
         let rendered = render_datalog_section(&DatalogConfig::default());
         assert!(rendered.contains("[datalog]"));
-        assert!(rendered.contains("enabled = false"));
+        assert!(rendered.contains("enabled = true"));
         assert!(
             rendered.contains("\ndir = \"~/.atomcode/datalog\"\n"),
             "default must emit the resolved dir as a real, uncommented value: {}",
@@ -2459,9 +2491,9 @@ model = "missing-type"
     }
 
     #[test]
-    fn omitted_datalog_config_defaults_to_disabled() {
+    fn omitted_datalog_config_defaults_to_enabled() {
         let config: Config = toml::from_str("").unwrap();
-        assert!(!config.datalog.enabled);
+        assert!(config.datalog.enabled);
     }
 
     #[test]
@@ -3620,9 +3652,13 @@ context_window = 131072
 
     #[test]
     fn tool_output_config_defaults_and_parses() {
-        // Absent section → None (the runtime falls back to THRESHOLD_BYTES).
+        // Absent section → fork defaults (64 KiB + explore/search whitelist).
         let defaulted: Config = toml::from_str("").unwrap();
-        assert_eq!(defaulted.tools.tool_output.max_bytes, None);
+        assert_eq!(defaulted.tools.tool_output.max_bytes, Some(65536));
+        assert_eq!(
+            defaulted.tools.tool_output.no_fold_tools,
+            default_no_fold_tools()
+        );
 
         // Explicit value round-trips.
         let configured: Config =
@@ -3637,9 +3673,9 @@ context_window = 131072
     #[test]
     fn bash_tool_config_defaults_and_parses() {
         let defaulted: Config = toml::from_str("").unwrap();
-        assert_eq!(defaulted.tools.bash.default_timeout_secs, 180);
+        assert_eq!(defaulted.tools.bash.default_timeout_secs, 60);
         assert_eq!(defaulted.tools.bash.max_timeout_secs, 1800);
-        assert_eq!(defaulted.tools.bash.silent_kill_secs, 300);
+        assert_eq!(defaulted.tools.bash.silent_kill_secs, 90);
 
         let configured: Config = toml::from_str(
             "[tools.bash]\ndefault_timeout_secs = 300\nmax_timeout_secs = 3600\nsilent_kill_secs = 600\n",

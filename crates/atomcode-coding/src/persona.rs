@@ -137,6 +137,7 @@ pub(crate) fn coding_persona_with_capabilities(
     request_user_input_enabled: bool,
     review_enabled: bool,
 ) -> String {
+    crate::custom_prompts::seed_default_prompts();
     let (identity, custom_precedence) = crate::custom_prompts::render_identity_and_precedence(model);
     let precedence_text = custom_precedence.unwrap_or_else(|| {
         "Any GLOBAL / PROJECT / USER instruction blocks or remembered facts and preferences (from \
@@ -906,8 +907,9 @@ mod tests {
         let p = coding_persona("m", false, true);
 
         // WORKFLOW gains an UNDERSTAND front step on the non-trivial line.
+        // Batch-read/batch-edit/verify-once wording is part of the compiled RULES.
         assert!(
-            p.contains("UNDERSTAND → SEARCH → PLAN"),
+            p.contains("UNDERSTAND → SEARCH (batch) → PLAN"),
             "non-trivial workflow leads with UNDERSTAND: {p}"
         );
         // The UNDERSTAND guideline ties intent to the task plan / its first items.

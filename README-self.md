@@ -12,7 +12,7 @@
 | 工具参数容错 | 基础 repair | **五级修复链 + schema 类型层 + 结构化诊断 + 失败计数熔断** |
 | 代码检索 | 基础词林 + 哈希向量 | **六类目录全景 + BM25 + 概念向量 + 查询缓存 + 并行评分** |
 | 索引性能 | 单会话独立索引 + JSON | **进程级共享索引 + 二进制缓存(zstd)+ sidecar 落盘 + 增量保存** |
-| 默认配置 | 官方模板 | **内嵌自建词林(9 个领域)+ builtin-tools 清单,首次启动自动写入** |
+| 默认配置 | 官方模板 | **内嵌自建词林(9 个领域)+ builtin-tools + `prompts/` 模板,首次启动自动写入(不覆盖已有文件)** |
 | 跨平台 | Windows/Linux/macOS/HarmonyOS | 同 + **路径/BOM/大小写全面适配修复** |
 
 ---
@@ -60,10 +60,10 @@ env  ATOMCODE_UPDATE_MANIFEST_URL / ATOMCODE_UPDATE_DOWNLOAD_BASE   (最高)
 
 ### 4. 默认配置扩充(首次启动自动写入)
 
-`CodeExploreTool::new` 时幂等 seed(不覆盖用户已有文件):
+首次启动幂等 seed(不覆盖用户已有文件):
 
-- `~/.atomcode/thesaurus/` 9 个领域词林:agent_core / ai_agent / computer_science / web_http / fullstack_dev / ecommerce / admin_system / medical / robotics;
-- `~/.atomcode/builtin-tools.txt` 内置工具清单(查哪些工具可加 `no_fold_tools` 白名单)。
+- `CodeExploreTool::new`:`~/.atomcode/thesaurus/` 9 个领域词林(agent_core / ai_agent / computer_science / web_http / fullstack_dev / ecommerce / admin_system / medical / robotics)、`builtin-tools.txt`、`mcp.json`、`.codegraphignore`;
+- Persona 组装:`~/.atomcode/prompts/` 写入 `init.yaml`(JeikCode 身份)+ `rules.yaml`(工作流/并发纪律,含 `code_explore` 禁止根 path)+ `prompts.md` + `内置工具.yaml` / `内置技能.yaml`(文档/种子,不覆盖线上 schema)。已有文件永不覆盖。
 
 ### 5. 跨平台修复(与官方代码差异)
 
@@ -80,14 +80,18 @@ env  ATOMCODE_UPDATE_MANIFEST_URL / ATOMCODE_UPDATE_DOWNLOAD_BASE   (最高)
 | `auto_update` | 默认 false | 同(默认 false,**你手动开**) |
 | `[config] update_manifest_url` | ❌ 无 | ✅ 新增:覆盖更新源(env 优先) |
 | `[config] update_download_base` | ❌ 无 | ✅ 新增 |
-| `[tools.tool_output] no_fold_tools` | ❌ 无 | ✅ 新增:工具输出不折叠白名单 |
-| `[tools.tool_output] max_bytes` | ✅ | ✅(预览已改为随阈值各半保留) |
+| `[tools.tool_output] no_fold_tools` | ❌ 无 | ✅ 默认白名单(含 `fetch_output` / `repo_map` / `code_explore` 等) |
+| `[tools.tool_output] max_bytes` | ✅ | ✅ 默认 65536 |
+| `[tools.bash]` 超时 | 180 / 300 | **60 / 90**(default / silent_kill) |
+| `[datalog] enabled` | 默认 false | **默认 true** |
+| `[ui] auto_copy_on_select` | 非 Windows 默认 true | **默认 false** |
+| `~/.atomcode/prompts/` | ❌ 无 | ✅ 首次启动写入可编辑模板 |
 | 词林 | 官方内置 | ✅ 9 个领域词林自动 seed |
 
-**推荐白名单**(`~/.atomcode/config.toml`):
+**推荐白名单**(已是代码默认,写不写行为一致):
 ```toml
 [tools.tool_output]
-no_fold_tools = ["repo_map", "code_explore", "find_symbol", "trace_chain", "blast_radius", "web_fetch", "web_search"]
+no_fold_tools = ["fetch_output", "repo_map", "code_explore", "find_symbol", "trace_chain", "blast_radius", "web_fetch", "web_search"]
 
 [config]  # 可选,想换渠道时
 # update_manifest_url = "https://.../latest.json"
@@ -138,6 +142,10 @@ auto_update = true  # 打开后重启自动无感更新(默认关,按需开)
 以下配置都是**官方分支之外**的 fork 独有项,默认值已在代码里内置(写不写行为一致),但**在新电脑上需要知道自己有哪些可调项**,故完整列出(仅结构,不含密钥):
 
 ```toml
+auto_update = false
+auto_commit = false
+keep_interrupted_context = true   # Ctrl-C 保留部分上下文; false 则回滚该回合
+
 # ── fork 独有:codeintel 图谱工具可见性 ──────────────────────────
 [codeintel]
 # "unified"(默认)= 只暴露 repo_map + code_explore(报告/探索两件套)
@@ -155,8 +163,13 @@ patterns = [                                     # 额外自定义忽略通配�
 # ── fork 独有:工具输出折叠阈值 + 不折叠白名单 ──────────────────
 [tools.tool_output]
 max_bytes = 65536                                # 超此字节折叠为头尾预览;0=禁用折叠
-no_fold_tools = ["repo_map", "code_explore", "find_symbol",
+no_fold_tools = ["fetch_output", "repo_map", "code_explore", "find_symbol",
                  "trace_chain", "blast_radius", "web_fetch", "web_search"]
+
+[tools.bash]
+default_timeout_secs = 60
+max_timeout_secs = 1800
+silent_kill_secs = 90
 
 # ── 官方字段但默认值常被自定义(保持手写以便新机可调) ──────────
 [tools.todo]
@@ -214,7 +227,7 @@ gh release create 0.0.0-dev.1 dist/* --title "0.0.0-dev.1"
 git add latest.json && git commit -m "release: 0.0.0-dev.1" && git push
 
 # 2. 服务器/各机器:安装后打开自动更新(默认已指向 local-dev 渠道)
-atomcode  # 首次启动自动写入词林/builtin-tools
+atomcode  # 首次启动自动写入词林/builtin-tools/prompts
 # 手动: atomcode upgrade
 # 自动: config.toml 加 auto_update = true → 重启无感更新
 ```

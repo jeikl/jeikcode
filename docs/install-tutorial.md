@@ -55,7 +55,7 @@ ATOMCODE_VERSION=0.0.0-dev.2 ATOMCODE_PREFIX=$HOME/bin \
 
 ```bash
 atomcode --version    # 验证
-atomcode             # 首次启动: 自动写入词林/mcp.json/.codegraphignore/builtin-tools
+atomcode             # 首次启动: 自动写入词林/mcp.json/.codegraphignore/builtin-tools/prompts
 ```
 
 **开启自动无感更新**(可选,推荐服务器):
@@ -122,6 +122,7 @@ powershell -ExecutionPolicy Bypass -File scripts\dev-install.ps1 -Uninstall   # 
 | 内置工具清单 | `ls ~/.atomcode/builtin-tools.txt` | 存在 |
 | MCP 默认接线 | `ls ~/.atomcode/mcp.json` | 存在(首次启动写入) |
 | 图谱忽略规则 | `ls ~/.atomcode/.codegraphignore` | 存在(首次启动写入) |
+| 提示词模板 | `ls ~/.atomcode/prompts/` | `init.yaml` / `rules.yaml` / `prompts.md` / `内置工具.yaml` / `内置技能.yaml` |
 | 更新渠道 | `atomcode upgrade` | 显示"already on latest"(或开始下载) |
 
 ---
@@ -135,6 +136,7 @@ powershell -ExecutionPolicy Bypass -File scripts\dev-install.ps1 -Uninstall   # 
 | Windows `Move-Item` 失败 | atomcode.exe 正在运行(NTFS 文件锁)→ 关闭后重装 |
 | 下载 404 | 该平台还没发布(见发版教程 §三);或指定 `ATOMCODE_VERSION` |
 | 首次启动没有写入词林 | 检查 `~/.atomcode/thesaurus/`;手动复制 `crates/atomcode-capabilities/assets/thesaurus/` 下的文件 |
+| 首次启动没有写入 prompts | 检查 `~/.atomcode/prompts/`;手动复制 `crates/atomcode-coding/assets/prompts/` 下的文件(已有文件不会被覆盖) |
 | 想装回官方版 | 用官方 `install.sh` 重装(会覆盖本 fork 二进制;词林等配置保留) |
 
 ---

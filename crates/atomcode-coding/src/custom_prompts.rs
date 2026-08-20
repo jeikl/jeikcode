@@ -137,6 +137,49 @@ fn strip_utf8_bom(content: &str) -> &str {
     content.strip_prefix('\u{feff}').unwrap_or(content)
 }
 
+/// Bundled first-run templates for `~/.atomcode/prompts/`. Existing files are never
+/// overwritten — the user owns their copies after the first write.
+const PROMPT_SEEDS: &[(&str, &str)] = &[
+    ("init.yaml", include_str!("../assets/prompts/init.yaml")),
+    ("rules.yaml", include_str!("../assets/prompts/rules.yaml")),
+    ("prompts.md", include_str!("../assets/prompts/prompts.md")),
+    ("内置工具.yaml", include_str!("../assets/prompts/内置工具.yaml")),
+    ("内置技能.yaml", include_str!("../assets/prompts/内置技能.yaml")),
+];
+
+/// Idempotent first-run seed of `~/.atomcode/prompts/` (or `$ATOMCODE_HOME/prompts/`).
+///
+/// Called from persona assembly so a fresh install gets editable templates without
+/// requiring a separate `atomcode setup`. Failures are silent (read-only home must
+/// not break startup). Tests skip seeding so isolated `ATOMCODE_HOME` does not
+/// leak bundled YAML into persona snapshots.
+pub fn seed_default_prompts() {
+    #[cfg(test)]
+    {
+        // Isolated ATOMCODE_HOME must not receive bundled YAML (persona snapshots).
+        let _ = resolve_prompts_dir;
+        return;
+    }
+    #[cfg(not(test))]
+    {
+        let Some(dir) = resolve_prompts_dir() else {
+            return;
+        };
+        seed_prompts_into(&dir);
+    }
+}
+
+fn seed_prompts_into(dir: &std::path::Path) {
+    let _ = std::fs::create_dir_all(dir);
+    for (name, content) in PROMPT_SEEDS {
+        let dest = dir.join(name);
+        if dest.exists() {
+            continue;
+        }
+        let _ = std::fs::write(&dest, content);
+    }
+}
+
 /// Returns the active `init.yaml` custom prompt configuration.
 pub fn get_custom_prompt_config() -> Option<CustomPromptConfig> {
     let init_path = resolve_prompts_dir()?.join("init.yaml");
@@ -418,5 +461,50 @@ doing_tasks:
         );
         let cfg: CustomPromptConfig = serde_yaml::from_str(strip_utf8_bom(yaml)).unwrap();
         assert_eq!(cfg.precedence.as_ref().unwrap().rule.as_deref(), Some("bom-ok"));
+    }
+
+    #[test]
+    fn bundled_prompt_seeds_parse() {
+        for (name, body) in PROMPT_SEEDS {
+            let stripped = strip_utf8_bom(body);
+            assert!(!stripped.trim().is_empty(), "{name} seed is empty");
+            if name.ends_with(".yaml") {
+                let parsed: Result<serde_yaml::Value, _> = serde_yaml::from_str(stripped);
+                assert!(parsed.is_ok(), "{name} must be valid YAML: {parsed:?}");
+            }
+        }
+        let init: CustomPromptConfig =
+            serde_yaml::from_str(strip_utf8_bom(include_str!("../assets/prompts/init.yaml")))
+                .expect("init.yaml");
+        assert_eq!(
+            init.identity.as_ref().unwrap().agent_name.as_deref(),
+            Some("JeikCode")
+        );
+        let rules: CustomRulesConfig =
+            serde_yaml::from_str(strip_utf8_bom(include_str!("../assets/prompts/rules.yaml")))
+                .expect("rules.yaml");
+        assert!(rules
+            .workflow
+            .as_ref()
+            .unwrap()
+            .surgical_context
+            .as_deref()
+            .unwrap()
+            .contains("NEVER pass"));
+    }
+
+    #[test]
+    fn seed_default_prompts_writes_missing_and_keeps_existing() {
+        let home = tempfile::tempdir().unwrap();
+        let prompts = home.path().join("prompts");
+        seed_prompts_into(&prompts);
+        for (name, _) in PROMPT_SEEDS {
+            assert!(prompts.join(name).is_file(), "missing seeded {name}");
+        }
+        let marker = "USER-OWNED-DO-NOT-OVERWRITE";
+        std::fs::write(prompts.join("init.yaml"), marker).unwrap();
+        seed_prompts_into(&prompts);
+        let after = std::fs::read_to_string(prompts.join("init.yaml")).unwrap();
+        assert_eq!(after, marker, "seed must not overwrite user edits");
     }
 }

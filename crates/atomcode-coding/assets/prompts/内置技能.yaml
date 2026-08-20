@@ -1,0 +1,37 @@
+﻿# AtomCode 内置技能与扩展技能定义 (内置技能.yaml)
+# ==============================================================================
+# 用户可通过修改本文件，自定义 AtomCode 在 === AVAILABLE SKILLS === 中向模型推荐的技能描述。
+# 【提示】：每个技能均附带了详细的【功能翻译】与【触发场景解释】注释。
+# ==============================================================================
+
+version: "1.0.0"
+
+skills:
+  - name: "find-skills"
+    # 【中文说明】：帮助用户发现并安装 Agent 技能。当用户询问“如何做某事”、“有没有做某事的技能”时触发。
+    description: "Helps users discover and install agent skills when they ask questions like 'how do I do X', 'find a skill for X', or 'is there a skill that can...'."
+    trigger_scenarios:
+      - "User asks to find or install skills"      # 【中文触发】：用户要求寻找或安装技能
+      - "User asks how to extend agent capabilities" # 【中文触发】：用户询问如何扩展 Agent 能力
+    path: "~/.agents/skills/find-skills/SKILL.md"
+
+  - name: "remotion-best-practices"
+    # 【中文说明】：使用 Remotion 通过 React 代码编程生成视频的最佳实践、架构模式与规范。
+    description: "Best practices, code conventions, and architecture for writing programmatic videos with Remotion."
+    trigger_scenarios:
+      - "Creating or refactoring Remotion animations and video components" # 【中文触发】：创建或重构 Remotion 视频动画组件
+    path: "~/.agents/skills/remotion-best-practices/SKILL.md"
+
+  - name: "mediabunny"
+    # 【中文说明】：多媒体处理技能，计算音视频时长、分辨率尺寸、音视频元数据提取与格式转换。
+    description: "Multimedia processing, audio/video duration, metadata extraction, and media conversion."
+    trigger_scenarios:
+      - "Working with video dimensions, audio waveforms, or media duration calculations" # 【中文触发】：音视频宽高、波形或时长计算
+    path: "~/.agents/skills/mediabunny/SKILL.md"
+
+  - name: "create-skill"
+    # 【中文说明】：交互式脚手架生成并编写一个新的 Agent 技能（包含 SKILL.md 与脚本）。
+    description: "Interactively scaffold and author a new Agent skill (SKILL.md + helper scripts)."
+    trigger_scenarios:
+      - "User wants to create a new skill or runs /create-skill" # 【中文触发】：用户希望新建技能或运行 /create-skill
+    path: "~/.atomcode/skills/create-skill/SKILL.md"

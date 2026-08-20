@@ -1,0 +1,356 @@
+# AtomCode 精简高效内置工具定义 (内置工具.yaml)
+# ==============================================================================
+# 已按用户需求裁剪：移除了未启用的细粒度 CodeIntel 衍生工具与 AtomGit 平台工具，
+# 仅保留真实挂载且高频的核心工具，极大精简向模型声明的工具报文体积。
+# 【提示】：每个参数均包含精准的【中文翻译】与【作用说明】注释。
+# ==============================================================================
+
+version: "2.0.0"
+
+tools:
+  # ============================================================================
+  # 一、核心文件与系统操作 (Filesystem & Shell)
+  # ============================================================================
+  - name: "read_file"
+    category: "filesystem"
+    # 【中文】：读取指定文件内容，返回带行号的文本或图片数据。
+    description: "Read file contents with line numbers. Supports images for vision models."
+    parameters:
+      file_path:
+        type: "string"
+        required: true
+        # 【中文】：目标文件路径
+        description: "Path to the file to read."
+      offset:
+        type: "integer"
+        required: false
+        default: 1
+        # 【中文】：起始行号（从 1 开始）
+        description: "Starting line number (1-based)."
+      limit:
+        type: "integer"
+        required: false
+        default: 2000
+        # 【中文】：最大读取行数
+        description: "Max lines to read."
+    guidance: "Use read_file instead of `bash cat`."
+
+  - name: "write_file"
+    category: "filesystem"
+    # 【中文】：创建新文件或完全重写现有文件。
+    description: "Create a new file or completely overwrite an existing file."
+    parameters:
+      file_path:
+        type: "string"
+        required: true
+        # 【中文】：目标文件路径
+        description: "Target file path to write."
+      content:
+        type: "string"
+        required: true
+        # 【中文】：完整文件内容
+        description: "Full content to write."
+    guidance: "Use write_file for new files or full rewrites; use edit_file for targeted edits."
+
+  - name: "edit_file"
+    category: "filesystem"
+    # 【中文】：在现有文件中执行高精度的局部字符串替换。
+    description: "Perform precise string replacements in an existing file."
+    parameters:
+      file_path:
+        type: "string"
+        required: true
+        # 【中文】：要修改的文件路径
+        description: "Path of the file to edit."
+      edits:
+        type: "array"
+        required: true
+        # 【中文】：待应用的替换块列表
+        description: "List of replacement blocks."
+        items:
+          old_string:
+            type: "string"
+            required: true
+            # 【中文】：待替换的唯一原始代码片段（需包含精确前导空格）
+            description: "Exact unique snippet in the file to replace, including indentation."
+          new_string:
+            type: "string"
+            required: true
+            # 【中文】：替换后的新代码片段
+            description: "Replacement snippet."
+          replace_all:
+            type: "boolean"
+            required: false
+            default: false
+            # 【中文】：是否替换所有匹配项
+            description: "Replace all occurrences."
+    guidance: "Include enough context in old_string to be unique. Never use shell sed/awk to edit code."
+
+  - name: "list_directory"
+    category: "filesystem"
+    # 【中文】：列出目录下的文件与子目录（遵循 .gitignore）。
+    description: "List directory contents respecting .gitignore."
+    parameters:
+      path:
+        type: "string"
+        required: false
+        default: "."
+        # 【中文】：目录路径
+        description: "Directory path."
+      depth:
+        type: "integer"
+        required: false
+        default: 2
+        # 【中文】：最大遍历深度
+        description: "Max recursion depth."
+
+  - name: "glob"
+    category: "filesystem"
+    # 【中文】：按通配符模式查找匹配的文件。
+    description: "Find files matching a glob pattern (e.g. `**/*.rs`)."
+    parameters:
+      pattern:
+        type: "string"
+        required: true
+        # 【中文】：通配符模式
+        description: "Glob pattern to search for."
+      path:
+        type: "string"
+        required: false
+        default: "."
+        # 【中文】：搜索根目录
+        description: "Root directory to search in."
+
+  - name: "grep"
+    category: "filesystem"
+    # 【中文】：使用正则表达式在文件内容中搜索。
+    description: "Search file contents across workspace with regex."
+    parameters:
+      pattern:
+        type: "string"
+        required: true
+        # 【中文】：搜索正则或关键词
+        description: "Regex pattern or keyword to search for."
+      path:
+        type: "string"
+        required: false
+        # 【中文】：限定搜索的目录或文件
+        description: "Subdirectory or file scope."
+      glob:
+        type: "string"
+        required: false
+        # 【中文】：文件过滤器（如 `*.rs`）
+        description: "File filter pattern."
+      case_insensitive:
+        type: "boolean"
+        required: false
+        default: false
+        # 【中文】：忽略大小写
+        description: "Case-insensitive matching."
+
+  - name: "open_file"
+    category: "filesystem"
+    # 【中文】：在系统 GUI 默认程序中打开或预览文件。
+    description: "Open/preview a local file in default system GUI."
+    parameters:
+      path:
+        type: "string"
+        required: true
+        # 【中文】：文件路径
+        description: "Path to open."
+
+  - name: "bash"
+    category: "system"
+    # 【中文】：在终端环境中执行 shell 命令行。
+    description: "Execute a shell command in the workspace."
+    parameters:
+      command:
+        type: "string"
+        required: true
+        # 【中文】：命令行指令
+        description: "Command string to run."
+      timeout_secs:
+        type: "integer"
+        required: false
+        default: 120
+        # 【中文】：超时秒数
+        description: "Execution timeout in seconds."
+
+  # ============================================================================
+  # 二、代码智能核心 (Code Intelligence - 默认挂载)
+  # ============================================================================
+  - name: "repo_map"
+    category: "codeintel"
+    # 【中文】：生成索引支撑的完整代码库文件树与 AST 符号地图。
+    description: "Generate complete, index-backed file tree and AST declaration map of the workspace."
+    parameters:
+      path:
+        type: "string"
+        required: false
+        default: "."
+        description: "Root path."
+      max_depth:
+        type: "integer"
+        required: false
+        default: 3
+        description: "Max depth."
+
+  - name: "code_explore"
+    category: "codeintel"
+    # 【中文核心工具】：全能代码探索与语义问答工具（核心主力工具，不仅用于架构探索！）。
+    # 【使用技巧】：当你确定了相关的文件夹/模块目录或符号名后，直接将 `path` 锁定到最可能存在的模块目录下，
+    # 并使用自然语言（中文或英文）直接向该模块发起提问（例如 query="如何处理消息封装", path="crates/capabilities"）。
+    # 工具会自动进行中英 NLP 语义分析、同义词扩展、AST 语法树调用链路追踪，并精准返回核心实现代码。
+    description: "Core code intelligence tool. Perform natural language semantic inquiries, symbol tracing, and source extraction directly within scoped module paths."
+    parameters:
+      path:
+        type: "string"
+        required: true
+        # 【中文】：【必填项】目标模块或子目录（如 `crates/kernel`, `src/auth`）。禁止传 `.` / `./` / `~` / 工作区根；全仓总览用 repo_map。
+        description: "Target directory or module to explore (e.g. 'src/tools', 'crates/atomcode-coding', 'backend'). Do NOT pass '.' / './' / '~' / the workspace root — call repo_map first, then a concrete subdirectory."
+      query:
+        type: "string"
+        required: true
+        # 【中文】：自然语言提问（中/英文，如“用户鉴权如何实现”）、符号名称或精确过滤（`path:`, `kind:`, `name:`）
+        description: "Natural language inquiry (Chinese/English, e.g. 'how does session compaction work'), symbol name, or field filters."
+    guidance: "Core tool for targeted module-level natural language Q&A. You MUST specify a concrete `path` subdirectory after repo_map. Do NOT pass '.' — workspace-root overview is repo_map only."
+
+  - name: "find_symbol"
+    category: "codeintel"
+    # 【中文】：查找符号的定义位置与类型签名。
+    description: "Find symbol definition and signature by name."
+    parameters:
+      name:
+        type: "string"
+        required: true
+        description: "Symbol name."
+      path:
+        type: "string"
+        required: false
+        description: "Path filter."
+
+  # ============================================================================
+  # 三、任务管理与交互 (Task & Interaction)
+  # ============================================================================
+  - name: "todowrite"
+    category: "task"
+    # 【中文】：管理结构化多步骤任务清单（待办/进行中/完成）。
+    description: "Manage structured todo list (pending, in_progress, completed)."
+    parameters:
+      actions:
+        type: "array"
+        required: true
+        # 【中文】：操作动作数组
+        description: "Actions: add, update, delete, clear, insert. clear may share a batch with add/update (clear runs first). insert and delete stay in their own batches."
+
+  - name: "request_user_input"
+    category: "interaction"
+    # 【中文】：向用户弹出交互式提问（单选/多选/文本）。
+    description: "Ask user interactive questions (single/multiple choice or text)."
+    parameters:
+      questions:
+        type: "array"
+        required: true
+        # 【中文】：提问列表
+        description: "List of questions."
+
+  - name: "memory"
+    category: "memory"
+    # 【中文】：跨会话记录重要事实或偏好。
+    description: "Persist durable notes and preferences across sessions."
+    parameters:
+      action:
+        type: "string"
+        required: true
+        enum: ["remember", "forget", "list"]
+      content:
+        type: "string"
+        required: false
+        description: "Note content."
+
+  - name: "recall"
+    category: "memory"
+    # 【中文】：检索历史会话的上下文与决策。
+    description: "Recall past session conversation context."
+    parameters:
+      query:
+        type: "string"
+        required: true
+        description: "Search keywords."
+
+  - name: "task"
+    category: "subagent"
+    # 【中文】：派生子代理执行并行探索或代码修改。
+    description: "Spawn an isolated subagent for parallel exploration or worker edits."
+    parameters:
+      subagent_type:
+        type: "string"
+        required: true
+        enum: ["explore", "worker"]
+      prompt:
+        type: "string"
+        required: true
+        description: "Subagent instructions."
+      files:
+        type: "array"
+        required: false
+        description: "File scopes."
+
+  - name: "code_review"
+    category: "subagent"
+    # 【中文】：运行代码评审子代理审查改动。
+    description: "Run code review on staged or uncommitted changes."
+    parameters:
+      scope:
+        type: "string"
+        required: false
+        description: "Review target."
+
+  - name: "fetch_output"
+    category: "utility"
+    # 【中文】：取回之前被折叠的完整超长输出。
+    description: "Fetch folded tool output by artifact ID."
+    parameters:
+      artifact_id:
+        type: "string"
+        required: true
+        description: "Artifact ID."
+
+  # ============================================================================
+  # 四、网络与技能 (Web & Skills)
+  # ============================================================================
+  - name: "web_fetch"
+    category: "web"
+    # 【中文】：抓取网页并转为 Markdown。
+    description: "Fetch webpage and convert to markdown."
+    parameters:
+      url:
+        type: "string"
+        required: true
+        description: "URL to fetch."
+
+  - name: "web_search"
+    category: "web"
+    # 【中文】：执行网络搜索。
+    description: "Search the web for query."
+    parameters:
+      query:
+        type: "string"
+        required: true
+        description: "Query string."
+
+  - name: "use_skill"
+    category: "skill"
+    # 【中文】：执行已安装的指定技能。
+    description: "Execute an installed skill by name."
+    parameters:
+      name:
+        type: "string"
+        required: true
+        description: "Skill name from AVAILABLE SKILLS."
+
+  - name: "list_skills"
+    category: "skill"
+    # 【中文】：列出已安装的全部技能。
+    description: "List all installed skills."
+    parameters: {}

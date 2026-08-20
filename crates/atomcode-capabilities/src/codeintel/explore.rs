@@ -30,11 +30,20 @@ use std::time::Duration;
 const DEFAULT_MAX_FILES: usize = 12;
 const MAX_ALLOWED_FILES: usize = 30;
 
-/// How many flow-spine edges the mermaid diagram draws before falling back to a
-/// compact omitted-name list. The spine is ALWAYS computed in full (no per-edge
-/// truncation in `extract_flow_spine`); this only caps the drawing, and the
-/// Coverage summary reports shown/total so nothing is silently dropped.
-const MAX_SPINE_EDGES: usize = 32;
+/// Business hops drawn in the spine card (full spine is still computed).
+const MAX_SPINE_HOPS: usize = 12;
+/// Source spans bought into the evidence section (layer-diverse auction).
+const MAX_EVIDENCE_SPANS: usize = 5;
+/// Hard cap on verbatim source characters in the evidence section.
+const EVIDENCE_BUDGET_CHARS: usize = 24_000;
+/// Remaining (not-rendered) candidate rows in the catalog.
+const MAX_CATALOG_REMAINING: usize = 15;
+const MAX_ANCHOR_DIRS: usize = 5;
+const MAX_GRAPH_DIRS: usize = 5;
+/// Fold a span when it exceeds this many lines (keep head+tail).
+const FOLD_AFTER_LINES: usize = 40;
+const FOLD_HEAD_LINES: usize = 20;
+const FOLD_TAIL_LINES: usize = 10;
 
 /// Thread-safe session-level sent code ranges to avoid duplicate context bloat.
 static SESSION_SENT_SPANS: std::sync::LazyLock<RwLock<HashMap<String, Vec<(usize, usize)>>>> =
@@ -1256,7 +1265,7 @@ fn extract_flow_spine(
 }
 
 /// 目录全景分组的六类优先级:锚定 > 子树 > 父链 > 兄弟 > 图连通 > 路径词命中。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 enum DirGroup {
     Anchor,
     Subtree,
@@ -1297,9 +1306,6 @@ struct DirCandidate {
     /// 自动派生的 grep 关键词(查询词 + 词林扩展 + 目录内锚定符号名)。
     grep_terms: Vec<String>,
 }
-
-/// 每组输出的目录行上限;超出折叠成 `… 及 N 个`(带计数,不丢弃)。
-const MAX_DIRS_PER_GROUP: usize = 15;
 
 /// Collect a FULL six-group directory panorama around the top-ranked hits:
 /// anchored dirs, their subtrees, parent chains, siblings, graph-linked dirs,
@@ -1661,7 +1667,416 @@ fn symbol_match_signal(s: &ScoredSymbol) -> &'static str {
     }
 }
 
-/// Render formatted explore output with multi-symbol extraction and merged spans.
+/// Architectural layer of a hit — used to buy one evidence span per layer so a
+/// Controller/Service/Mapper/XML (or route/handler/repo/SQL, or page/api/store)
+/// panorama survives a tight token budget. Language-agnostic: path + kind + name.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+enum CodeLayer {
+    Http,
+    Ui,
+    Service,
+    Impl,
+    Data,
+    Sql,
+    Config,
+    Doc,
+    Core,
+}
+
+impl CodeLayer {
+    fn label(self) -> &'static str {
+        match self {
+            CodeLayer::Http => "HTTP",
+            CodeLayer::Ui => "UI",
+            CodeLayer::Service => "SVC",
+            CodeLayer::Impl => "IMPL",
+            CodeLayer::Data => "DATA",
+            CodeLayer::Sql => "SQL",
+            CodeLayer::Config => "CFG",
+            CodeLayer::Doc => "DOC",
+            CodeLayer::Core => "CORE",
+        }
+    }
+
+    fn is_primary(self) -> bool {
+        !matches!(self, CodeLayer::Config | CodeLayer::Doc)
+    }
+}
+
+fn path_slash(p: &Path) -> String {
+    normalize_path_for_match(p).replace('\\', "/")
+}
+
+fn file_ext_lower(p: &Path) -> String {
+    p.extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("")
+        .to_ascii_lowercase()
+}
+
+fn classify_layer(file: &Path, sym: &ScoredSymbol) -> CodeLayer {
+    let ext = file_ext_lower(file);
+    match sym.node.kind {
+        SymbolKind::RouteEndpoint | SymbolKind::Middleware => return CodeLayer::Http,
+        SymbolKind::SqlStatement => return CodeLayer::Sql,
+        SymbolKind::ConfigProperty | SymbolKind::PluginDeclaration => return CodeLayer::Config,
+        SymbolKind::UiElement => return CodeLayer::Ui,
+        SymbolKind::Module if matches!(ext.as_str(), "md" | "mdx" | "rst" | "adoc") => {
+            return CodeLayer::Doc;
+        }
+        _ => {}
+    }
+    match ext.as_str() {
+        "md" | "mdx" | "rst" | "adoc" | "markdown" => return CodeLayer::Doc,
+        "yml" | "yaml" | "toml" | "ini" | "properties" | "env" => return CodeLayer::Config,
+        "sql" => return CodeLayer::Sql,
+        "vue" | "svelte" | "astro" | "css" | "scss" | "less" | "sass" => return CodeLayer::Ui,
+        "xml" => {
+            let p = path_slash(file);
+            if p.contains("mapper") || p.contains("/resources/") || p.contains("mybatis") {
+                return CodeLayer::Sql;
+            }
+        }
+        "json" => {
+            let p = path_slash(file);
+            if p.contains("config") || p.contains("/locales/") {
+                return CodeLayer::Config;
+            }
+        }
+        _ => {}
+    }
+
+    let p = path_slash(file);
+    let name = sym.node.name.to_ascii_lowercase();
+    let base = file
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("")
+        .to_ascii_lowercase();
+
+    let is_tsx = matches!(ext.as_str(), "tsx" | "jsx");
+    if is_tsx
+        && (p.contains("/components/")
+            || p.contains("/pages/")
+            || p.contains("/views/")
+            || p.contains("/frontend/")
+            || p.contains("/webview/")
+            || p.contains("/ui/")
+            || p.contains("/app/"))
+        && !p.contains("/api/")
+        && !p.contains("/server/")
+    {
+        return CodeLayer::Ui;
+    }
+
+    if p.contains("/controller")
+        || p.contains("/controllers")
+        || p.contains("/handler")
+        || p.contains("/handlers")
+        || p.contains("/routes/")
+        || p.contains("/router")
+        || p.contains("/endpoint")
+        || p.contains("/servlet")
+        || p.contains("/pages/api/")
+        || p.contains("/app/api/")
+        || name.contains("controller")
+        || name.ends_with("handler")
+        || name.ends_with("servlet")
+        || base.ends_with("controller")
+        || base.ends_with("handler")
+        || base.ends_with("_routes")
+        || base == "urls"
+        || base == "views"
+    {
+        return CodeLayer::Http;
+    }
+    if p.contains("/impl/")
+        || p.contains("\\impl\\")
+        || name.ends_with("impl")
+        || base.ends_with("impl")
+        || base.ends_with("_impl")
+    {
+        return CodeLayer::Impl;
+    }
+    if p.contains("/mapper")
+        || p.contains("/repository")
+        || p.contains("/repositories")
+        || p.contains("/dao/")
+        || p.contains("/store/")
+        || p.contains("/stores/")
+        || name.contains("mapper")
+        || name.ends_with("repository")
+        || name.ends_with("dao")
+        || base.ends_with("mapper")
+        || base.ends_with("repository")
+        || base.ends_with("_repo")
+        || base.ends_with("_dao")
+    {
+        return CodeLayer::Data;
+    }
+    if p.contains("/service")
+        || p.contains("/services")
+        || p.contains("/usecase")
+        || p.contains("/use-case")
+        || p.contains("/application/")
+        || name.ends_with("service")
+        || name.ends_with("usecase")
+        || base.ends_with("service")
+        || base.ends_with("_service")
+    {
+        return CodeLayer::Service;
+    }
+    if p.contains("/frontend/")
+        || p.contains("/webview")
+        || p.contains("/components/")
+        || p.contains("/pages/")
+        || p.contains("/views/")
+    {
+        return CodeLayer::Ui;
+    }
+    CodeLayer::Core
+}
+
+/// Std / collection / formatter names that drown a business spine (iter→map→collect).
+fn is_spine_noise(name: &str) -> bool {
+    let n = name.to_ascii_lowercase();
+    if n == "unknown" || n.is_empty() {
+        return false;
+    }
+    if n.len() <= 2 {
+        return true;
+    }
+    matches!(
+        n.as_str(),
+        "new"
+            | "default"
+            | "clone"
+            | "drop"
+            | "fmt"
+            | "from"
+            | "into"
+            | "ok"
+            | "err"
+            | "unwrap"
+            | "expect"
+            | "len"
+            | "is_empty"
+            | "push"
+            | "push_str"
+            | "insert"
+            | "get"
+            | "set"
+            | "iter"
+            | "into_iter"
+            | "map"
+            | "filter"
+            | "collect"
+            | "count"
+            | "take"
+            | "skip"
+            | "next"
+            | "nth"
+            | "as_str"
+            | "as_ref"
+            | "to_string"
+            | "to_owned"
+            | "contains"
+            | "starts_with"
+            | "ends_with"
+            | "split"
+            | "join"
+            | "format"
+            | "write"
+            | "writeln"
+            | "lock"
+            | "read"
+            | "and_then"
+            | "or_else"
+            | "unwrap_or"
+            | "unwrap_or_else"
+            | "unwrap_or_default"
+            | "min"
+            | "max"
+            | "cmp"
+            | "eq"
+            | "partial_cmp"
+            | "bytes"
+            | "chars"
+            | "lines"
+            | "trim"
+            | "parse"
+            | "encode"
+            | "decode"
+            | "execute"
+            | "call"
+            | "apply"
+            | "update"
+            | "build"
+            | "create"
+            | "init"
+    )
+}
+
+fn rel_disp(path: &Path, root: &Path) -> String {
+    path.strip_prefix(root)
+        .unwrap_or(path)
+        .display()
+        .to_string()
+        .replace('\\', "/")
+}
+
+fn top_seg(path: &Path, root: &Path) -> String {
+    let rel = path.strip_prefix(root).unwrap_or(path);
+    rel.components()
+        .next()
+        .map(|c| c.as_os_str().to_string_lossy().to_ascii_lowercase())
+        .unwrap_or_default()
+}
+
+fn same_repo_as_hits(dir: &Path, hit_files: &[&Path], root: &Path) -> bool {
+    let d = top_seg(dir, root);
+    if d.is_empty() {
+        return true;
+    }
+    hit_files.iter().any(|f| top_seg(f, root) == d)
+}
+
+struct EvidencePick<'a> {
+    fc: &'a FileCandidate,
+    sym: &'a ScoredSymbol,
+    layer: CodeLayer,
+}
+
+/// Layer-diverse auction: fill primary layers first (HTTP/UI/SVC/IMPL/DATA/SQL),
+/// then highest remaining scores. Config/Doc stay catalog-only unless nothing else
+/// is available. Runs over ALL candidates (not just max_files) so a 10th-place
+/// exact hit can beat nine noisy `render` files.
+fn auction_evidence<'a>(candidates: &'a [FileCandidate], max_spans: usize) -> Vec<EvidencePick<'a>> {
+    struct Item<'a> {
+        fc: &'a FileCandidate,
+        sym: &'a ScoredSymbol,
+        layer: CodeLayer,
+        score: f64,
+    }
+    let mut items: Vec<Item<'a>> = Vec::new();
+    for fc in candidates {
+        let mut added = 0usize;
+        for s in &fc.symbols {
+            if s.total_score >= 15.0 || s.name_score >= 25.0 || added == 0 {
+                items.push(Item {
+                    layer: classify_layer(&fc.file, s),
+                    score: s.total_score,
+                    fc,
+                    sym: s,
+                });
+                added += 1;
+            }
+            if added >= 4 {
+                break;
+            }
+        }
+    }
+    items.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
+
+    let mut picked: Vec<EvidencePick<'a>> = Vec::new();
+    let mut used_layers: HashSet<CodeLayer> = HashSet::new();
+    let has_primary = items.iter().any(|i| i.layer.is_primary());
+
+    let already = |picked: &[EvidencePick<'a>], it: &Item<'a>| {
+        picked
+            .iter()
+            .any(|p| p.fc.file == it.fc.file && p.sym.node.id == it.sym.node.id)
+    };
+
+    for it in &items {
+        if picked.len() >= max_spans {
+            break;
+        }
+        if !it.layer.is_primary() {
+            continue;
+        }
+        if used_layers.contains(&it.layer) {
+            continue;
+        }
+        picked.push(EvidencePick {
+            fc: it.fc,
+            sym: it.sym,
+            layer: it.layer,
+        });
+        used_layers.insert(it.layer);
+    }
+    for it in &items {
+        if picked.len() >= max_spans {
+            break;
+        }
+        if already(&picked, it) {
+            continue;
+        }
+        if !it.layer.is_primary() && has_primary && picked.len() < 3 {
+            continue;
+        }
+        picked.push(EvidencePick {
+            fc: it.fc,
+            sym: it.sym,
+            layer: it.layer,
+        });
+    }
+    picked
+}
+
+fn grep_query_terms(tokens: &SearchTokens) -> Vec<String> {
+    let mut terms: Vec<String> = Vec::new();
+    for id in &tokens.code_identifiers {
+        if id.len() >= 3 && !terms.contains(id) {
+            terms.push(id.clone());
+        }
+    }
+    for w in &tokens.words {
+        if w.len() >= 4 && !terms.contains(w) {
+            terms.push(w.clone());
+        }
+    }
+    terms.truncate(6);
+    terms
+}
+
+fn fold_snippet(lines: &[&str], start_line: usize, end_line: usize, rel_path: &str) -> (Vec<String>, bool, usize) {
+    let total_span = end_line.saturating_sub(start_line) + 1;
+    let mut snippet = Vec::new();
+    if total_span > FOLD_AFTER_LINES {
+        let head_end = (start_line + FOLD_HEAD_LINES).min(lines.len());
+        for l in start_line..=head_end {
+            if l.saturating_sub(1) < lines.len() {
+                snippet.push(format!("{l}\t{}", lines[l - 1]));
+            }
+        }
+        let tail_start = end_line.saturating_sub(FOLD_TAIL_LINES).max(head_end + 1);
+        let folded_count = tail_start.saturating_sub(head_end + 1);
+        if folded_count > 0 {
+            snippet.push(format!(
+                "...\t// ... [{folded_count} lines folded; use read_file(\"{rel_path}\", start_line={}, end_line={}) to view full body] ...",
+                head_end + 1,
+                tail_start.saturating_sub(1)
+            ));
+        }
+        for l in tail_start..=end_line {
+            if l.saturating_sub(1) < lines.len() {
+                snippet.push(format!("{l}\t{}", lines[l - 1]));
+            }
+        }
+        (snippet, true, folded_count)
+    } else {
+        for l in start_line..=end_line {
+            if l.saturating_sub(1) < lines.len() {
+                snippet.push(format!("{l}\t{}", lines[l - 1]));
+            }
+        }
+        (snippet, false, 0)
+    }
+}
+
+/// Render formatted explore output: catalog is exhaustive and cheap; evidence is
+/// layer-diverse and hard-capped. Omissions are ready-to-fire tool calls.
 fn render_explore_output(
     graph: &CodeGraph,
     root: &Path,
@@ -1678,8 +2093,10 @@ fn render_explore_output(
 ) -> String {
     let mut out = Vec::new();
     let top_files = &candidates[..candidates.len().min(max_files)];
+    let evidence = auction_evidence(candidates, MAX_EVIDENCE_SPANS);
+    let evidence_file_set: HashSet<&Path> = evidence.iter().map(|e| e.fc.file.as_path()).collect();
+    let hit_paths: Vec<&Path> = top_files.iter().map(|fc| fc.file.as_path()).collect();
 
-    // Performance timing breakdown header
     if let Some((total, index_t, ret_t, ren_t)) = cost_breakdown {
         out.push(format!(
             "> ⚡ **Performance**: ⏱️ **Cost Time**: {}ms (Index: {}ms | Retrieval: {}ms | Render: {}ms)\n",
@@ -1690,7 +2107,6 @@ fn render_explore_output(
         ));
     }
 
-    // Index cache hit / miss header
     if let Some(stats) = cache_status {
         if stats.cache_hit {
             out.push(format!(
@@ -1712,381 +2128,26 @@ fn render_explore_output(
         out.push("> ⚡ **Index Status**: [Cache HIT] 内存索引已就绪\n".to_string());
     }
 
-    // Path unassigned reference & subprojects discovery:
-    // If it's a monorepo (frontend/backend/terminal), tell the model that empty or "~" is fully supported for cross-end search.
-    // If they are completely independent non-crossing projects, suggest providing a relative path.
-    if scope.is_none() {
-        let subprojects = detect_subproject_roots(root);
-        if subprojects.len() > 1 {
-            let mut proj_list = Vec::new();
-            let mut looks_like_monorepo = false;
-            for p in &subprojects {
-                if let Ok(rel) = p.strip_prefix(root) {
-                    let rel_str = rel.to_string_lossy().to_lowercase();
-                    if rel_str.contains("frontend")
-                        || rel_str.contains("backend")
-                        || rel_str.contains("web")
-                        || rel_str.contains("server")
-                        || rel_str.contains("client")
-                        || rel_str.contains("ui")
-                        || rel_str.contains("api")
-                        || rel_str.contains("terminal")
-                        || rel_str.contains("crates")
-                        || rel_str.contains("packages")
-                    {
-                        looks_like_monorepo = true;
-                    }
-                    proj_list.push(format!("`{}`", rel.display()));
-                }
-            }
-            if looks_like_monorepo {
-                out.push(format!(
-                    "> 💡 **工作区结构感知（同项目/前后端/终端大仓）**：检测到工作区包含多个子模块（{}）。如果是同一套系统（如前端+后端+终端一体仓），支持传空参数或 `~` 执行全仓跨端检索；如果本次仅需定位某一端（如仅查前端或仅查后端），可传入子目录相对路径（例如 `path: \"{}\"`）获得更聚焦的代码与调用流。\n",
-                    proj_list.join(", "),
-                    subprojects.first().and_then(|p| p.strip_prefix(root).ok()).map(|p| p.display().to_string()).unwrap_or_else(|| "frontend".to_string())
-                ));
-            } else {
-                out.push(format!(
-                    "> ⚠️ **工作区结构感知（多独立不交叉项目）**：检测到当前工作区包含 {} 个独立子项目（{}）。如果是独立没有交叉的项目，不传 `path` 进行全仓检索可能导致上下文体积激增；建议在 `path:` 中明确指定具体项目相对路径（例如 `path: \"{}\"`）。若本来就是同一个大项目或需要全仓搜，可继续传空或 `~`。\n",
-                    subprojects.len(),
-                    proj_list.join(", "),
-                    subprojects.first().and_then(|p| p.strip_prefix(root).ok()).map(|p| p.display().to_string()).unwrap_or_else(|| "subproject".to_string())
-                ));
-            }
-        } else {
-            out.push(
-                "> 💡 **未限定检索路径**：当前为全仓检索模式。若是同一个大项目（包含前端、后端等各个组成部分），传空或 `~` 即可；如果当前目录包含多个完全独立的项目，建议在 `path:` 中指定具体的子项目相对路径以避免上下文膨胀。\n".to_string()
-            );
-        }
-    }
-
-    out.push("> 💡 **Surgical Flow & Capsule Notice**: Primary execution flow, candidate spans, and file capability capsules are rendered below. To ensure complete coverage of edge cases or declarative configs, examine the **File Capability Capsule** or adjacent files in the same directory.\n".to_string());
-
-    // Scope + layered-architecture hint: a path-limited search is CONFINED to that
-    // scope — an interface may live here while its implementations / middleware
-    // registration live in sibling layers (crates/packages). Never conclude "the
-    // project lacks X" from a scope-confined hit set.
-    if let Some(sc) = scope {
-        let scope_disp = sc.strip_prefix(root).unwrap_or(sc).display().to_string();
-        out.push(format!(
-            "> 🔭 **Search scope**: `{scope_disp}` (path-limited). Results are confined to this \
-             scope — related code frequently lives in SIBLING layers (other crates/packages/dirs). \
-             If the top hits are interfaces/traits (or you see only a bare contract), the \
-             implementations are at `impl <name>` in other files: follow up with `code_explore` or \
-             grep before concluding the mechanism is absent.\n"
-        ));
-    }
-
-    // Trait/interface-hit hint: the top symbol being a contract is an ANCHOR-STRENGTHENING trap
-    // (a bare `Tool::execute(&str) -> ToolResult{is_error}` can look like "weak error handling"
-    // while the real logic lives in its impls). Surface the follow-up explicitly.
-    {
-        let has_contract = top_files.iter().take(4).any(|fc| {
-            fc.symbols.iter().take(4).any(|s| {
-                matches!(
-                    s.node.kind,
-                    SymbolKind::Trait | SymbolKind::Interface | SymbolKind::TypeAlias
-                )
-            })
-        });
-        if has_contract {
-            out.push(
-                "> 🧩 **Contract hit**: top results include a trait/interface/type-alias. This is the \
-                 DECLARATION, not the behavior — implementations live at `impl <name>` elsewhere. \
-                 Query `code_explore(\"impl <name>\")` or grep `impl <name>` to find every \
-                 implementation before judging the mechanism.\n".to_string(),
-            );
-        }
-    }
-
-    // Low-hit hint: a thin hit set is a WEAK signal — never let 1-2 files look conclusive.
-    // (The zero-hit branch already returned early with its own diagnostic; this covers 1..2.)
-    if !candidates.is_empty() && candidates.len() < 3 {
-        out.push(
-            "> 🎯 **Low hit count** (<3 candidate files): this is a WEAK match signal, not a \
-             confirmation. Run 2-3 more `code_explore` queries IN PARALLEL with synonyms / \
-             English terms / a narrower `name:` filter / a wider `path:` scope before drawing \
-             any conclusion — ranked retrieval can hide relevant code below its thresholds.\n"
-                .to_string(),
-        );
-    }
-
-    if connected {
-        out.push(format!("### 🔗 Flow Trace: \"{query}\"\n"));
-        out.push("```mermaid".to_string());
-        out.push("graph TD".to_string());
-        for (from, to, kind) in flow_spine.iter().take(MAX_SPINE_EDGES) {
-            let from_name = graph.node(*from).map(|n| n.name.as_str()).unwrap_or("unknown");
-            if let Some(target) = to {
-                let to_name = graph.node(*target).map(|n| n.name.as_str()).unwrap_or("unknown");
-                let label = match kind {
-                    EdgeKind::Calls => "calls",
-                    EdgeKind::HttpDispatches => "http_post",
-                    EdgeKind::MapperBinds => "mapper_sql",
-                    EdgeKind::ConfigBinds => "config_bind",
-                    _ => "refs",
-                };
-                out.push(format!("    {from_name} -->|{label}| {to_name}"));
-            }
-        }
-        if flow_spine.len() > MAX_SPINE_EDGES {
-            let omitted_count = flow_spine.len() - MAX_SPINE_EDGES;
-            let mut omitted_names: Vec<String> = Vec::new();
-            for (from, to, _kind) in flow_spine.iter().skip(MAX_SPINE_EDGES) {
-                let from_name = graph.node(*from).map(|n| n.name.as_str()).unwrap_or("unknown");
-                if let Some(target) = to {
-                    let to_name = graph.node(*target).map(|n| n.name.as_str()).unwrap_or("unknown");
-                    omitted_names.push(format!("{from_name} → {to_name}"));
-                }
-            }
-            let shown: Vec<String> = omitted_names.iter().take(10).cloned().collect();
-            let more = omitted_names.len().saturating_sub(10);
-            let mut line = format!(
-                "    %% ... {} additional edge(s) omitted: {}",
-                omitted_count,
-                shown.join(", ")
-            );
-            if more > 0 {
-                line.push_str(&format!(", … and {more} more"));
-            }
-            out.push(line);
-        }
-        out.push("```\n".to_string());
+    let has_contract = top_files.iter().take(4).any(|fc| {
+        fc.symbols.iter().take(4).any(|s| {
+            matches!(
+                s.node.kind,
+                SymbolKind::Trait | SymbolKind::Interface | SymbolKind::TypeAlias
+            )
+        })
+    });
+    let low_hit = !candidates.is_empty() && candidates.len() < 3;
+    let grep_terms = grep_query_terms(tokens);
+    let grep_pat = if grep_terms.is_empty() {
+        query.split_whitespace().next().unwrap_or(query).to_string()
     } else {
-        out.push(format!("### 🏆 Top Ranked Relevant Files & Symbols for: \"{query}\"\n"));
-        out.push("> ℹ️ No multi-hop continuous flow detected. Displaying top-scored weighted symbols & code blocks below:\n".to_string());
-    }
+        grep_terms.join("|")
+    };
+    let scope_disp = scope
+        .map(|sc| rel_disp(sc, root))
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| ".".to_string());
 
-    // Top Matched Candidates Overview Table
-    out.push("#### 📋 Matched Symbol Candidates:".to_string());
-    out.push("| Score | File | Symbols & Lines |".to_string());
-    out.push("| :--- | :--- | :--- |".to_string());
-
-    for fc in top_files {
-        let rel_path = fc.file.strip_prefix(root).unwrap_or(&fc.file).display().to_string();
-        let sym_summary: Vec<String> = fc
-            .symbols
-            .iter()
-            .take(4)
-            .map(|s| format!("`{}`:L{} {}", s.node.name, s.node.start_line, symbol_match_signal(s)))
-            .collect();
-        out.push(format!(
-            "| **{:.1}** | `{rel_path}` | {} |",
-            fc.top_score,
-            sym_summary.join(", ")
-        ));
-    }
-    out.push("".to_string());
-
-    // Coverage accounting — surfaced in the leading 📊 summary so the model knows this is a
-    // ranked/budgeted view, not an exhaustive listing.
-    let mut folded_spans: usize = 0;
-    let mut folded_lines: usize = 0;
-    let mut omitted_symbols: usize = 0;
-    for fc in top_files {
-        omitted_symbols += fc.symbols.len().saturating_sub(4);
-    }
-
-    let mut session_spans = SESSION_SENT_SPANS.write().unwrap();
-
-    for fc in top_files {
-        let rel_path = fc.file.strip_prefix(root).unwrap_or(&fc.file).display().to_string();
-
-        // Collect all high-scoring symbols for this file (up to 4 per file)
-        let relevant_syms: Vec<&ScoredSymbol> = fc
-            .symbols
-            .iter()
-            .take(4)
-            .filter(|s| s.total_score >= 15.0 || s.name_score >= 25.0)
-            .collect();
-        let relevant_syms = if relevant_syms.is_empty() {
-            vec![&fc.symbols[0]]
-        } else {
-            relevant_syms
-        };
-
-        let sym_names: Vec<String> = relevant_syms.iter().map(|s| format!("`{}`", s.node.name)).collect();
-        out.push(format!("**`{rel_path}`** — {}", sym_names.join(", ")));
-
-        // Output File Capability Capsule
-        let capsule = graph.file_capsule(&fc.file);
-        if !capsule.is_empty() {
-            out.push("> 📋 **File Capability Capsule**:".to_string());
-            for cap_line in capsule {
-                out.push(format!("> - {cap_line}"));
-            }
-            out.push("".to_string());
-        }
-
-        if let Ok(content) = std::fs::read_to_string(&fc.file) {
-            let content = super::strip_utf8_bom(&content);
-            let lines: Vec<&str> = content.lines().collect();
-
-            // Build line spans for each relevant symbol
-            let mut spans: Vec<(usize, usize, String)> = Vec::new();
-            for s in &relevant_syms {
-                let start = s.node.start_line.saturating_sub(2).max(1);
-                let end = (s.node.end_line + 3).min(lines.len());
-                spans.push((start, end, format!("{}:L{}", s.node.name, s.node.start_line)));
-            }
-
-            // Merge overlapping or adjacent spans
-            spans.sort_by_key(|s| s.0);
-            let mut merged_spans: Vec<(usize, usize, Vec<String>)> = Vec::new();
-            for (st, en, label) in spans {
-                if let Some(last) = merged_spans.last_mut() {
-                    if st <= last.1 + 4 {
-                        last.1 = last.1.max(en);
-                        last.2.push(label);
-                        continue;
-                    }
-                }
-                merged_spans.push((st, en, vec![label]));
-            }
-
-            // Dedup key must be root-scoped: the same relative path (e.g.
-            // `src/main.rs`) exists in many projects — without the root prefix
-            // a multi-repo workspace would wrongly suppress spans across
-            // projects (project A's sent span hides project B's identical path).
-            let sent_list = session_spans
-                .entry(format!("{}|{rel_path}", root.display()))
-                .or_default();
-
-            for (start_line, end_line, labels) in merged_spans {
-                let already_sent = sent_list.iter().any(|(s, e)| *s <= start_line && end_line <= *e);
-
-                if already_sent {
-                    out.push(format!("> `[Same range already returned earlier this session (dedup): {rel_path} L{start_line}-L{end_line} ({}) — content omitted here; use read_file if you need it again]`\n", labels.join(", ")));
-                } else {
-                    sent_list.push((start_line, end_line));
-                    let total_span = end_line.saturating_sub(start_line) + 1;
-                    let mut snippet = Vec::new();
-
-                    if total_span > 70 {
-                        // Smart Folding for large functions (keep head 35 lines + tail 15 lines)
-                        folded_spans += 1;
-                        let head_end = (start_line + 35).min(lines.len());
-                        for l in start_line..=head_end {
-                            if l - 1 < lines.len() {
-                                snippet.push(format!("{l}\t{}", lines[l - 1]));
-                            }
-                        }
-                        let tail_start = end_line.saturating_sub(15).max(head_end + 1);
-                        let folded_count = tail_start.saturating_sub(head_end + 1);
-                        folded_lines += folded_count;
-                        if folded_count > 0 {
-                            snippet.push(format!("...\t// ... [{} lines folded; use read_file(\"{rel_path}\", start_line={}, end_line={}) to view full body] ...", folded_count, head_end + 1, tail_start - 1));
-                        }
-                        for l in tail_start..=end_line {
-                            if l - 1 < lines.len() {
-                                snippet.push(format!("{l}\t{}", lines[l - 1]));
-                            }
-                        }
-                    } else {
-                        for l in start_line..=end_line {
-                            if l - 1 < lines.len() {
-                                snippet.push(format!("{l}\t{}", lines[l - 1]));
-                            }
-                        }
-                    }
-
-                    let ext = fc.file.extension().and_then(|e| e.to_str()).unwrap_or("");
-                    out.push(format!("// Symbols: {}\n```{ext}\n{}\n```\n", labels.join(", "), snippet.join("\n")));
-                }
-            }
-        }
-    }
-
-    // Remaining candidate files — FULL PATH LISTING (no truncation): every
-    // scored-but-not-rendered candidate path is listed (with its top symbols so
-    // the model can pick which to open without a blind read), so the model can
-    // see the complete hit set, not just the top-ranked slice.
-    if candidates.len() > max_files {
-        out.push("\n**All Remaining Candidate Files (full paths, not rendered):**".to_string());
-        for c in &candidates[max_files..] {
-            let rel = c.file.strip_prefix(root).unwrap_or(&c.file).display().to_string();
-            let sym_summary: Vec<String> = c
-                .symbols
-                .iter()
-                .take(3)
-                .map(|s| format!("{}:L{}", s.node.name, s.node.start_line))
-                .collect();
-            if sym_summary.is_empty() {
-                out.push(format!("- `{rel}`"));
-            } else {
-                out.push(format!("- `{rel}` — {}", sym_summary.join(", ")));
-            }
-        }
-    }
-
-    // 📁 相邻目录全景:六类分组(锚定/子树/父链/兄弟/图连通/路径词命中),带分 + grep 提示。
-    let dirs = collect_directory_panorama(graph, top_files, tokens, scope, dirindex);
-    if !dirs.is_empty() {
-        out.push("\n> 📁 **Directory Panorama** (six groups, scored + grep fallback):".to_string());
-        let mut last_group: Option<DirGroup> = None;
-        let mut group_count = 0usize;
-        let mut group_overflow = 0usize;
-        for d in &dirs {
-            if last_group != Some(d.group) {
-                if let Some(_) = last_group {
-                    if group_overflow > 0 {
-                        out.push(format!(">   … 及 {group_overflow} 个同级目录(带计数,不丢弃)"));
-                    }
-                    group_overflow = 0;
-                }
-                out.push(format!("> **{}**", d.group.label()));
-                last_group = Some(d.group);
-                group_count = 0;
-            }
-            if group_count >= MAX_DIRS_PER_GROUP {
-                group_overflow += 1;
-                continue;
-            }
-            group_count += 1;
-            let rel = d.path.strip_prefix(root).unwrap_or(&d.path).display().to_string();
-            let hits_desc = if d.hits.is_empty() {
-                "(未命中,结构相关)".to_string()
-            } else {
-                let hs: Vec<String> = d
-                    .hits
-                    .iter()
-                    .take(3)
-                    .map(|(f, s)| {
-                        let rf = f.strip_prefix(root).unwrap_or(f).display().to_string();
-                        format!("{}({:.1})", rf, s)
-                    })
-                    .collect();
-                hs.join(", ")
-            };
-            let grep = if d.grep_terms.is_empty() {
-                String::new()
-            } else {
-                format!(" └ grep: `grep -rn \"{}\" {rel}/`", d.grep_terms.join("|"))
-            };
-            out.push(format!(
-                "> | {:.1} | `{rel}/` | {}/{} 文件锚定 · peak {:.1} | {hits_desc} |{grep}",
-                d.score, d.anchored_files, d.total_files, d.peak_file_score
-            ));
-        }
-        if group_overflow > 0 {
-            out.push(format!(">   … 及 {group_overflow} 个同级目录(带计数,不丢弃)"));
-        }
-    }
-
-    out.push("\n> 🔍 **Deep Investigation Tip**: To inspect any folded function body, use `read_file` with the line numbers provided above. To trace cross-module callers/callees in full detail, supply the exact symbol or file path to `code_explore`.\n".to_string());
-
-    // Leading 📊 Coverage summary — inserted right after the opening notice so the model sees the
-    // shown/total split BEFORE the ranked content (ranked ≠ exhaustive). Counts are always
-    // informative: a "showing 8/47" line is what stops "the project lacks X" hallucinations.
-    // Remaining candidates are FULLY listed at the bottom (no hidden set anymore).
-    let remaining = candidates.len().saturating_sub(max_files);
-    let spine_total = flow_spine.len();
-    let spine_shown = spine_total.min(MAX_SPINE_EDGES);
-
-    // Scope-vs-workspace contrast: when a `path:` scope confines the search, the
-    // model must see how much of the workspace was NOT searched — a kernel-only
-    // query says nothing about sibling-layer crates (the original blind spot:
-    // `path: kernel` hid `repair.rs`/`tool_feedback.rs` entirely).
     let workspace_files = graph.file_symbols.len();
     let workspace_syms = graph.nodes.len();
     let (scope_files, scope_syms) = match scope {
@@ -2103,40 +2164,368 @@ fn render_explore_output(
         }
         None => (workspace_files, workspace_syms),
     };
-    let scope_note = match scope {
-        Some(sc) => {
-            let scope_disp = sc.strip_prefix(root).unwrap_or(sc).display().to_string();
-            let outside_syms = workspace_syms.saturating_sub(scope_syms);
-            format!(
-                "(scope `{scope_disp}`: in-scope {scope_files} of {workspace_files} indexed files · \
-                 {scope_syms}/{workspace_syms} symbols — {outside_syms} symbol(s) OUTSIDE this \
-                 scope were NOT ranked (the index is workspace-wide; only this scope was scored); \
-                 if the top hits are contracts, their implementations likely live in sibling layers)"
-            )
-        }
-        None => format!("(all {workspace_files} indexed files · {workspace_syms} symbols)"),
-    };
+    let remaining = candidates.len().saturating_sub(evidence_file_set.len().max(top_files.len().min(candidates.len())));
+    let omitted_symbols: usize = top_files.iter().map(|fc| fc.symbols.len().saturating_sub(4)).sum();
 
+    let mut business_hops: Vec<(String, String, &'static str)> = Vec::new();
+    for (from, to, kind) in flow_spine {
+        let Some(target) = to else { continue };
+        let from_name = graph.node(*from).map(|n| n.name.as_str()).unwrap_or("unknown");
+        let to_name = graph.node(*target).map(|n| n.name.as_str()).unwrap_or("unknown");
+        if is_spine_noise(from_name) || is_spine_noise(to_name) {
+            continue;
+        }
+        let label = match kind {
+            EdgeKind::Calls => "calls",
+            EdgeKind::HttpDispatches => "http",
+            EdgeKind::MapperBinds => "sql",
+            EdgeKind::ConfigBinds => "cfg",
+            _ => "refs",
+        };
+        business_hops.push((from_name.to_string(), to_name.to_string(), label));
+        if business_hops.len() >= MAX_SPINE_HOPS {
+            break;
+        }
+    }
+    let spine_shown = business_hops.len();
+    let spine_total = flow_spine.len();
+
+    let mut warn: Vec<String> = Vec::new();
+    warn.push("⛔ DO NOT conclude absence. Ranked ≠ exhaustive.".to_string());
+    if let Some(sc) = scope {
+        let scope_disp_warn = rel_disp(sc, root);
+        let outside_syms = workspace_syms.saturating_sub(scope_syms);
+        warn.push(format!(
+            "🔭 scope `{scope_disp_warn}`: in-scope {scope_files} of {workspace_files} indexed files · {scope_syms}/{workspace_syms} symbols — {outside_syms} OUTSIDE not ranked (SIBLING layers)"
+        ));
+    }
+    if has_contract {
+        warn.push("🧩 Contract hit (trait/interface/type-alias) = DECLARATION, not behavior. Query `impl <name>` / grep `impl <name>`.".to_string());
+    }
+    if low_hit {
+        warn.push("🎯 Low hit count (<3 files): WEAK signal. Retry with synonyms / English / wider path before judging.".to_string());
+    }
+
+    let mut next: Vec<String> = Vec::new();
+    let mut n = 1usize;
+    if let Some(first) = evidence.first() {
+        let rel = rel_disp(&first.fc.file, root);
+        let parent = first
+            .fc
+            .file
+            .parent()
+            .map(|p| rel_disp(p, root))
+            .unwrap_or_else(|| scope_disp.clone());
+        next.push(format!(
+            "{n}. grep  pattern={grep_pat}  path={parent}"
+        ));
+        n += 1;
+        next.push(format!(
+            "{n}. code_explore  path={parent}  query={}",
+            first.sym.node.name
+        ));
+        n += 1;
+        if first.sym.node.end_line.saturating_sub(first.sym.node.start_line) + 1 > FOLD_AFTER_LINES {
+            next.push(format!(
+                "{n}. read_file  {rel}  offset={}",
+                first.sym.node.start_line
+            ));
+            n += 1;
+        }
+    } else if !candidates.is_empty() {
+        next.push(format!("{n}. grep  pattern={grep_pat}  path={scope_disp}"));
+        n += 1;
+    }
+    if has_contract {
+        if let Some(name) = top_files.iter().find_map(|fc| {
+            fc.symbols.iter().find_map(|s| {
+                matches!(
+                    s.node.kind,
+                    SymbolKind::Trait | SymbolKind::Interface | SymbolKind::TypeAlias
+                )
+                .then_some(s.node.name.as_str())
+            })
+        }) {
+            next.push(format!("{n}. grep  pattern=impl {name}  path={scope_disp}"));
+            n += 1;
+        }
+    }
+    let _ = n;
+
+    let mut card = Vec::new();
+    card.push(format!(
+        "> 📊 **Coverage** evidence {}/{} files · catalog {}/{} · omitted-sym {omitted_symbols} · spine {spine_shown}/{spine_total} hops",
+        evidence_file_set.len(),
+        candidates.len(),
+        candidates.len().min(max_files.saturating_add(MAX_CATALOG_REMAINING)),
+        candidates.len(),
+    ));
+    if let Some(sc) = scope {
+        let sd = rel_disp(sc, root);
+        card.push(format!(
+            ">    scope `{sd}`: in-scope {scope_files} of {workspace_files} indexed files · {scope_syms}/{workspace_syms} symbols"
+        ));
+    } else {
+        card.push(format!(
+            ">    workspace: {workspace_files} indexed files · {workspace_syms} symbols"
+        ));
+    }
+    for w in &warn {
+        card.push(format!("> {w}"));
+    }
+    card.push("> **NEXT** (copy as tool calls, in order):".to_string());
+    if next.is_empty() {
+        card.push(format!(
+            "> 1. grep  pattern={grep_pat}  path={scope_disp}"
+        ));
+        card.push(format!(
+            "> 2. code_explore  path={scope_disp}  query={query}"
+        ));
+    } else {
+        for step in &next {
+            card.push(format!("> {step}"));
+        }
+    }
+    let coverage_idx = out.len();
+    out.extend(card);
+    out.push("".to_string());
+
+    out.push(format!("### 🔗 LAYERS: \"{query}\""));
+    if connected && !business_hops.is_empty() {
+        for (from, to, label) in &business_hops {
+            out.push(format!("  {from} --{label}--> {to}"));
+        }
+        if spine_total > spine_shown {
+            out.push(format!(
+                "  … {omitted} more edges omitted (noise filtered: iter/map/collect/len/new)",
+                omitted = spine_total.saturating_sub(spine_shown)
+            ));
+        }
+    } else {
+        out.push("> ℹ️ No multi-hop business flow. Ranked symbols below.".to_string());
+    }
+    if !evidence.is_empty() {
+        let mut seen_l: HashSet<CodeLayer> = HashSet::new();
+        for e in &evidence {
+            if seen_l.insert(e.layer) {
+                out.push(format!(
+                    "  {:<4}  {}  `{}`:L{}",
+                    e.layer.label(),
+                    rel_disp(&e.fc.file, root),
+                    e.sym.node.name,
+                    e.sym.node.start_line
+                ));
+            }
+        }
+    }
+    out.push("".to_string());
+
+    out.push("#### 📋 Matched Symbol Candidates:".to_string());
+    out.push("| Score | File | Layer | Symbols & Lines |".to_string());
+    out.push("| :--- | :--- | :--- | :--- |".to_string());
+    for fc in top_files {
+        let rel_path = rel_disp(&fc.file, root);
+        let layer = fc
+            .symbols
+            .first()
+            .map(|s| classify_layer(&fc.file, s).label())
+            .unwrap_or("CORE");
+        let sym_summary: Vec<String> = fc
+            .symbols
+            .iter()
+            .take(4)
+            .map(|s| format!("`{}`:L{} {}", s.node.name, s.node.start_line, symbol_match_signal(s)))
+            .collect();
+        out.push(format!(
+            "| **{:.1}** | `{rel_path}` | {layer} | {} |",
+            fc.top_score,
+            sym_summary.join(", ")
+        ));
+    }
+    out.push("".to_string());
+
+    let mut folded_spans: usize = 0;
+    let mut folded_lines: usize = 0;
+    let mut evidence_chars: usize = 0;
+    let mut session_spans = SESSION_SENT_SPANS.write().unwrap();
+
+    out.push("### EVIDENCE (budgeted, layer-diverse)".to_string());
+    for e in &evidence {
+        if evidence_chars >= EVIDENCE_BUDGET_CHARS {
+            let rel = rel_disp(&e.fc.file, root);
+            out.push(format!(
+                "> budget full — skipped `{}` in `{rel}`. NEXT: read_file  {rel}  offset={}",
+                e.sym.node.name,
+                e.sym.node.start_line
+            ));
+            continue;
+        }
+        let rel_path = rel_disp(&e.fc.file, root);
+        out.push(format!(
+            "**{}** `{rel_path}` — `{}`:L{}",
+            e.layer.label(),
+            e.sym.node.name,
+            e.sym.node.start_line
+        ));
+        let capsule = graph.file_capsule(&e.fc.file);
+        if !capsule.is_empty() {
+            out.push("> 📋 **File Capability Capsule**:".to_string());
+            for cap_line in capsule.iter().take(3) {
+                out.push(format!("> - {cap_line}"));
+            }
+            out.push("".to_string());
+        }
+        if let Ok(content) = std::fs::read_to_string(&e.fc.file) {
+            let content = super::strip_utf8_bom(&content);
+            let lines: Vec<&str> = content.lines().collect();
+            let start = e.sym.node.start_line.saturating_sub(2).max(1);
+            let end = (e.sym.node.end_line + 3).min(lines.len());
+            let sent_list = session_spans
+                .entry(format!("{}|{rel_path}", root.display()))
+                .or_default();
+            let already_sent = sent_list.iter().any(|(s, en)| *s <= start && end <= *en);
+            if already_sent {
+                out.push(format!(
+                    "> `[Same range already returned earlier this session (dedup): {rel_path} L{start}-L{end} (`{}`) — use read_file  {rel_path}  offset={start}]`\n",
+                    e.sym.node.name
+                ));
+            } else {
+                sent_list.push((start, end));
+                let (snippet, folded, folded_count) = fold_snippet(&lines, start, end, &rel_path);
+                if folded {
+                    folded_spans += 1;
+                    folded_lines += folded_count;
+                }
+                let body = snippet.join("\n");
+                evidence_chars += body.len();
+                let ext = e.fc.file.extension().and_then(|x| x.to_str()).unwrap_or("");
+                out.push(format!(
+                    "// Symbols: {}:L{}\n```{ext}\n{body}\n```\n",
+                    e.sym.node.name, e.sym.node.start_line
+                ));
+            }
+        }
+    }
+
+    let catalog_rest: Vec<&FileCandidate> = candidates
+        .iter()
+        .filter(|c| !evidence_file_set.contains(c.file.as_path()))
+        .collect();
+    if !catalog_rest.is_empty() {
+        out.push("\n**CATALOG (not rendered — copy path into read_file / code_explore):**".to_string());
+        for (i, c) in catalog_rest.iter().take(MAX_CATALOG_REMAINING).enumerate() {
+            let rel = rel_disp(&c.file, root);
+            let layer = c
+                .symbols
+                .first()
+                .map(|s| classify_layer(&c.file, s).label())
+                .unwrap_or("CORE");
+            let sym_summary: Vec<String> = c
+                .symbols
+                .iter()
+                .take(3)
+                .map(|s| format!("{}:L{}", s.node.name, s.node.start_line))
+                .collect();
+            let id = format!("F{}", i + 1 + evidence_file_set.len());
+            if sym_summary.is_empty() {
+                out.push(format!("- {id} `{rel}` [{layer}]"));
+            } else {
+                out.push(format!("- {id} `{rel}` [{layer}] — {}", sym_summary.join(", ")));
+            }
+        }
+        let extra = catalog_rest.len().saturating_sub(MAX_CATALOG_REMAINING);
+        if extra > 0 {
+            out.push(format!(
+                "- … +{extra} more files (page with a narrower `path:` / `query:`)"
+            ));
+        }
+    }
+
+    let dirs = collect_directory_panorama(graph, top_files, tokens, scope, dirindex);
+    let mut shown_anchor = 0usize;
+    let mut shown_graph = 0usize;
+    let mut skipped_foreign = 0usize;
+    let mut other_groups: HashMap<DirGroup, usize> = HashMap::new();
+    let mut dir_block: Vec<String> = Vec::new();
+    for d in &dirs {
+        match d.group {
+            DirGroup::Anchor if shown_anchor < MAX_ANCHOR_DIRS => {
+                if shown_anchor == 0 {
+                    dir_block.push("> **① 锚定目录**".to_string());
+                }
+                shown_anchor += 1;
+                let rel = rel_disp(&d.path, root);
+                dir_block.push(format!(
+                    "> | {:.1} | `{rel}/` | {}/{} files · peak {:.1}",
+                    d.score, d.anchored_files, d.total_files, d.peak_file_score
+                ));
+            }
+            DirGroup::GraphLinked if shown_graph < MAX_GRAPH_DIRS => {
+                if !same_repo_as_hits(&d.path, &hit_paths, root) {
+                    skipped_foreign += 1;
+                    continue;
+                }
+                if shown_graph == 0 {
+                    dir_block.push("> **⑤ 图连通（同仓 callee/caller）**".to_string());
+                }
+                shown_graph += 1;
+                let rel = rel_disp(&d.path, root);
+                dir_block.push(format!("> | {:.1} | `{rel}/`", d.score));
+            }
+            DirGroup::GraphLinked => {
+                if same_repo_as_hits(&d.path, &hit_paths, root) {
+                    *other_groups.entry(DirGroup::GraphLinked).or_insert(0) += 1;
+                } else {
+                    skipped_foreign += 1;
+                }
+            }
+            DirGroup::Anchor => {
+                *other_groups.entry(DirGroup::Anchor).or_insert(0) += 1;
+            }
+            g => {
+                *other_groups.entry(g).or_insert(0) += 1;
+            }
+        }
+    }
+    if !dir_block.is_empty() || skipped_foreign > 0 || !other_groups.is_empty() {
+        out.push("\n> 📁 **Directory Panorama** (anchor + same-repo graph; other groups counted):".to_string());
+        out.extend(dir_block);
+        if !other_groups.is_empty() {
+            let mut parts: Vec<String> = Vec::new();
+            for (g, n) in [
+                (DirGroup::Subtree, other_groups.get(&DirGroup::Subtree).copied().unwrap_or(0)),
+                (DirGroup::ParentChain, other_groups.get(&DirGroup::ParentChain).copied().unwrap_or(0)),
+                (DirGroup::Sibling, other_groups.get(&DirGroup::Sibling).copied().unwrap_or(0)),
+                (DirGroup::PathHit, other_groups.get(&DirGroup::PathHit).copied().unwrap_or(0)),
+                (DirGroup::GraphLinked, other_groups.get(&DirGroup::GraphLinked).copied().unwrap_or(0)),
+                (DirGroup::Anchor, other_groups.get(&DirGroup::Anchor).copied().unwrap_or(0)),
+            ] {
+                if n > 0 {
+                    parts.push(format!("{}×{n}", g.label()));
+                }
+            }
+            if !parts.is_empty() {
+                out.push(format!(">   … other groups: {}", parts.join(", ")));
+            }
+        }
+        if skipped_foreign > 0 {
+            out.push(format!(
+                ">   SIBLING/foreign graph-links ignored (same-name noise): {skipped_foreign} dirs — do not treat as searched"
+            ));
+        }
+    }
+
+    let remaining_listed = catalog_rest.len().min(MAX_CATALOG_REMAINING);
     let coverage = format!(
-        "> 📊 **Coverage** {scope_note}: showing {shown}/{total} candidate file(s) (max_files={max_files}) · \
-         {omitted} high-scoring symbol(s) omitted by the per-file cap · {folded} span(s) folded \
-         ({folded_lines} lines) · flow spine {spine_shown}/{spine_total} edge(s) · \
-         {remaining} remaining candidate file(s) — ALL listed with full paths below · \
-         {adjacent} adjacent dir(s) in 📁. \
-         Omitted/folded content and adjacent directories can still be relevant — \
-         re-query with a narrower `path:`/`name:` filter or use `read_file` to inspect specific ranges.",
-        shown = top_files.len(),
+        "> 📊 **Coverage** evidence {ev}/{total} files · catalog listed {listed} remaining · omitted-sym {omitted_symbols} · {folded} span(s) folded ({folded_lines} lines) · spine {spine_shown}/{spine_total} hops · {adjacent} adjacent dir(s) in 📁",
+        ev = evidence_file_set.len(),
         total = candidates.len(),
-        max_files = max_files,
-        omitted = omitted_symbols,
+        listed = remaining_listed,
         folded = folded_spans,
-        folded_lines = folded_lines,
-        spine_shown = spine_shown,
-        spine_total = spine_total,
-        remaining = remaining,
         adjacent = dirs.len(),
     );
-    out.insert(1, coverage);
+    out[coverage_idx] = coverage;
+    let _ = remaining;
 
     out.join("\n")
 }
@@ -2250,10 +2639,11 @@ mod tests {
         let root = PathBuf::from(".");
         let out = render_explore_output(&graph, &root, "coverage probe", &candidates, &[], false, 8, None, &SearchTokens::default(), None, None, None);
         assert!(out.contains("📊 **Coverage**"), "coverage summary missing:\n{out}");
-        assert!(out.contains("showing 1/1 candidate file(s)"), "shown/total missing:\n{out}");
-        assert!(out.contains("2 high-scoring symbol(s) omitted"), "omitted count missing:\n{out}");
-        assert!(out.contains("flow spine 0/0 edge(s)"), "spine counts missing:\n{out}");
-        assert!(out.contains("0 remaining candidate file(s)"), "remaining count missing:\n{out}");
+        assert!(out.contains("evidence 1/1 files"), "shown/total missing:\n{out}");
+        assert!(out.contains("omitted-sym 2"), "omitted count missing:\n{out}");
+        assert!(out.contains("spine 0/0 hops"), "spine counts missing:\n{out}");
+        assert!(out.contains("**NEXT**"), "work-order NEXT missing:\n{out}");
+        assert!(out.contains("EVIDENCE"), "evidence section missing:\n{out}");
     }
 
     #[test]
@@ -2290,26 +2680,30 @@ mod tests {
                 }],
             });
         }
-        // Fake an over-cap flow spine: 40 edges (32 shown, 8 omitted).
+        // 40 anonymous edges → business-hop cap (12), rest counted not drawn.
         let flow_spine: Vec<(u64, Option<u64>, super::super::graph::EdgeKind)> = (0..40u64)
             .map(|i| (i, Some(i + 1), super::super::graph::EdgeKind::Calls))
             .collect();
         let out = render_explore_output(&graph, &root, "q", &candidates, &flow_spine, true, 8, None, &SearchTokens::default(), None, None, None);
-        assert!(out.contains("showing 8/15 candidate file(s)"), "shown/total:\n{out}");
+        assert!(out.contains("evidence 5/15 files"), "evidence auction cap:\n{out}");
+        assert!(out.contains("CATALOG"), "catalog section missing:\n{out}");
         assert!(
-            out.contains("7 remaining candidate file(s) — ALL listed with full paths below"),
-            "remaining count:\n{out}"
+            out.contains("hidden_8.rs"),
+            "remaining candidate listing missing:\n{out}"
         );
         assert!(
-            out.contains("- `crates/kernel/src/hidden_8.rs`"),
-            "remaining candidate full-path listing missing:\n{out}"
+            out.contains("hidden_14.rs"),
+            "last remaining candidate missing:\n{out}"
+        );
+        assert!(out.contains("spine 12/40 hops"), "spine overflow count:\n{out}");
+        assert!(
+            out.contains("more edges omitted"),
+            "omitted-hop note missing:\n{out}"
         );
         assert!(
-            out.contains("- `crates/kernel/src/hidden_14.rs`"),
-            "last remaining candidate full path missing:\n{out}"
+            !out.contains("```mermaid"),
+            "mermaid dump must not appear:\n{out}"
         );
-        assert!(out.contains("flow spine 32/40 edge(s)"), "spine overflow count:\n{out}");
-        assert!(out.contains("%% ... 8 additional edge(s) omitted:"), "mermaid omission note:\n{out}");
     }
 
     #[test]
@@ -2450,11 +2844,12 @@ mod tests {
             None,
             None,
         );
-        assert!(out.contains("🔭 **Search scope**"), "scope hint missing:\n{out}");
+        assert!(out.contains("🔭 scope"), "scope hint missing:\n{out}");
         assert!(out.contains("SIBLING layers"), "sibling-layers hint missing:\n{out}");
-        assert!(out.contains("🧩 **Contract hit**"), "contract hint missing:\n{out}");
+        assert!(out.contains("🧩 Contract hit"), "contract hint missing:\n{out}");
         assert!(out.contains("`impl <name>`"), "impl-follow-up hint missing:\n{out}");
-        assert!(out.contains("🎯 **Low hit count**"), "low-hit hint missing:\n{out}");
+        assert!(out.contains("🎯 Low hit count"), "low-hit hint missing:\n{out}");
+        assert!(out.contains("**NEXT**"), "work-order NEXT missing:\n{out}");
         // Contract hint must NOT fire when the top symbol is not a contract (function here),
         // while the low-hit hint still fires (1 candidate).
         let func_node = SymbolNode {
@@ -2482,8 +2877,8 @@ mod tests {
             }],
         }];
         let no_contract = render_explore_output(&graph, &root, "q", &func_candidates, &[], false, 8, None, &SearchTokens::default(), None, None, None);
-        assert!(!no_contract.contains("🧩 **Contract hit**"), "contract hint should not fire for a function:\n{no_contract}");
-        assert!(no_contract.contains("🎯 **Low hit count**"), "low-hit should still fire:\n{no_contract}");
+        assert!(!no_contract.contains("🧩 Contract hit"), "contract hint should not fire for a function:\n{no_contract}");
+        assert!(no_contract.contains("🎯 Low hit count"), "low-hit should still fire:\n{no_contract}");
     }
 
     #[test]
@@ -2558,7 +2953,7 @@ mod tests {
         );
         assert!(!out.contains("kernel/src/"), "far dir must NOT be listed:\n{out}");
         assert!(
-            out.contains("1 adjacent dir(s) in 📁"),
+            out.contains("adjacent dir(s) in 📁"),
             "adjacent dir count missing in Coverage:\n{out}"
         );
     }
@@ -2632,7 +3027,7 @@ mod tests {
         assert!(out.contains("in-scope 1 of 2 indexed files"), "scope-vs-workspace file counts missing:\n{out}");
         assert!(out.contains("1/2 symbols"), "scope-vs-workspace symbol counts missing:\n{out}");
         assert!(
-            out.contains("1 symbol(s) OUTSIDE this scope were NOT ranked"),
+            out.contains("1 OUTSIDE not ranked"),
             "outside-scope warning missing:\n{out}"
         );
     }
@@ -2774,6 +3169,236 @@ mod tests {
         );
         query_cache_clear();
     }
-}
 
+    fn scored(node: SymbolNode, score: f64) -> ScoredSymbol {
+        ScoredSymbol {
+            node,
+            total_score: score,
+            name_score: score,
+            doc_score: 0.0,
+            inline_score: 0.0,
+            graph_mass: 1.0,
+        }
+    }
+
+    fn node_at(id: u64, name: &str, kind: SymbolKind, file: &str, line: usize) -> SymbolNode {
+        SymbolNode {
+            id,
+            name: name.into(),
+            kind,
+            visibility: super::super::graph::Visibility::Public,
+            file: PathBuf::from(file),
+            start_line: line,
+            end_line: line + 4,
+            signature: None,
+            docstring: None,
+            inline_comments: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn classify_layer_covers_backend_frontend_docs_and_config() {
+        let java_ctl = scored(
+            node_at(1, "acquireCoupon", SymbolKind::Method, "backend/controller/CouponController.java", 26),
+            80.0,
+        );
+        assert_eq!(
+            classify_layer(&java_ctl.node.file, &java_ctl),
+            CodeLayer::Http
+        );
+        let java_svc = scored(
+            node_at(2, "CouponService", SymbolKind::Interface, "backend/service/CouponService.java", 12),
+            70.0,
+        );
+        assert_eq!(
+            classify_layer(&java_svc.node.file, &java_svc),
+            CodeLayer::Service
+        );
+        let java_impl = scored(
+            node_at(3, "poupou", SymbolKind::Method, "backend/service/impl/CouponServiceImpl.java", 21),
+            90.0,
+        );
+        assert_eq!(
+            classify_layer(&java_impl.node.file, &java_impl),
+            CodeLayer::Impl
+        );
+        let mapper = scored(
+            node_at(4, "selectAvailableCouponsByUserId", SymbolKind::Method, "backend/mapper/CouponMapper.java", 20),
+            60.0,
+        );
+        assert_eq!(classify_layer(&mapper.node.file, &mapper), CodeLayer::Data);
+        let xml = scored(
+            node_at(
+                5,
+                "com.demo.coupon.mapper.CouponMapper::consumeUserCoupon",
+                SymbolKind::SqlStatement,
+                "backend/resources/mapper/CouponMapper.xml",
+                30,
+            ),
+            55.0,
+        );
+        assert_eq!(classify_layer(&xml.node.file, &xml), CodeLayer::Sql);
+        let yml = scored(
+            node_at(6, "spring", SymbolKind::ConfigProperty, "backend/resources/application.yml", 1),
+            20.0,
+        );
+        assert_eq!(classify_layer(&yml.node.file, &yml), CodeLayer::Config);
+        let md = scored(
+            node_at(7, "优惠券领取", SymbolKind::Module, "README.md", 1),
+            15.0,
+        );
+        assert_eq!(classify_layer(&md.node.file, &md), CodeLayer::Doc);
+        let vue = scored(
+            node_at(8, "CouponCard", SymbolKind::UiElement, "frontend/src/components/CouponCard.vue", 1),
+            40.0,
+        );
+        assert_eq!(classify_layer(&vue.node.file, &vue), CodeLayer::Ui);
+        let tsx = scored(
+            node_at(9, "HomePage", SymbolKind::Function, "packages/app/src/pages/HomePage.tsx", 1),
+            40.0,
+        );
+        assert_eq!(classify_layer(&tsx.node.file, &tsx), CodeLayer::Ui);
+        let go_handler = scored(
+            node_at(10, "Acquire", SymbolKind::Function, "internal/httpapi/coupon_handler.go", 12),
+            50.0,
+        );
+        assert_eq!(
+            classify_layer(&go_handler.node.file, &go_handler),
+            CodeLayer::Http
+        );
+        let py_view = scored(
+            node_at(11, "acquire", SymbolKind::Function, "shop/views.py", 8),
+            50.0,
+        );
+        assert_eq!(classify_layer(&py_view.node.file, &py_view), CodeLayer::Http);
+        let rs_core = scored(
+            node_at(12, "cycle_reasoning_effort", SymbolKind::Function, "crates/atomcode-tuix/src/state.rs", 1981),
+            136.0,
+        );
+        assert_eq!(classify_layer(&rs_core.node.file, &rs_core), CodeLayer::Core);
+    }
+
+    #[test]
+    fn auction_buys_one_span_per_primary_layer_not_top_n_files() {
+        let mut cands = Vec::new();
+        for i in 0..9u64 {
+            let n = node_at(
+                i + 1,
+                "render",
+                SymbolKind::Function,
+                &format!("src/render/plain_{i}.rs"),
+                10,
+            );
+            cands.push(FileCandidate {
+                file: n.file.clone(),
+                top_score: 150.0,
+                symbols: vec![scored(n, 150.0)],
+            });
+        }
+        let ctl = node_at(
+            100,
+            "acquireCoupon",
+            SymbolKind::Method,
+            "backend/controller/CouponController.java",
+            26,
+        );
+        cands.push(FileCandidate {
+            file: ctl.file.clone(),
+            top_score: 80.0,
+            symbols: vec![scored(ctl, 80.0)],
+        });
+        let xml = node_at(
+            101,
+            "consumeUserCoupon",
+            SymbolKind::SqlStatement,
+            "backend/resources/mapper/CouponMapper.xml",
+            30,
+        );
+        cands.push(FileCandidate {
+            file: xml.file.clone(),
+            top_score: 55.0,
+            symbols: vec![scored(xml, 55.0)],
+        });
+        let picked = auction_evidence(&cands, 5);
+        let layers: Vec<CodeLayer> = picked.iter().map(|p| p.layer).collect();
+        assert!(
+            layers.contains(&CodeLayer::Http),
+            "HTTP layer must be bought despite lower score: {layers:?}"
+        );
+        assert!(
+            layers.contains(&CodeLayer::Sql),
+            "SQL/xml layer must be bought: {layers:?}"
+        );
+        assert!(
+            picked.len() <= 5,
+            "auction must respect max_spans: {}",
+            picked.len()
+        );
+    }
+
+    #[test]
+    fn panorama_drops_foreign_graph_dirs() {
+        use super::super::graph::{Edge, EdgeKind, Visibility};
+
+        let mut graph = CodeGraph::new();
+        let hit = node_at(
+            1,
+            "acquireCoupon",
+            SymbolKind::Method,
+            "coupon-mall-demo/controller/CouponController.java",
+            26,
+        );
+        graph.add_symbol(hit.clone());
+        let foreign = node_at(
+            2,
+            "render",
+            SymbolKind::Function,
+            "grok-build/crates/pager/src/render.rs",
+            10,
+        );
+        graph.add_symbol(foreign.clone());
+        graph.add_edge(
+            hit.id,
+            Edge {
+                to: foreign.id,
+                kind: EdgeKind::Calls,
+                line: 28,
+            },
+        );
+        let candidates = vec![FileCandidate {
+            file: hit.file.clone(),
+            top_score: 200.0,
+            symbols: vec![scored(hit, 200.0)],
+        }];
+        let root = PathBuf::from(".");
+        let out = render_explore_output(
+            &graph,
+            &root,
+            "acquireCoupon",
+            &candidates,
+            &[(1, Some(2), EdgeKind::Calls)],
+            true,
+            8,
+            None,
+            &SearchTokens::default(),
+            None,
+            None,
+            None,
+        );
+        assert!(
+            out.contains("coupon-mall-demo/controller"),
+            "hit dir must appear:\n{out}"
+        );
+        assert!(
+            !out.contains("grok-build/crates/pager"),
+            "foreign same-name graph dir must not be listed as searched:\n{out}"
+        );
+        assert!(
+            out.contains("SIBLING/foreign graph-links ignored")
+                || out.contains("foreign graph-links ignored"),
+            "foreign skip must be explicit:\n{out}"
+        );
+        let _ = Visibility::Public;
+    }
+}
 

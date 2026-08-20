@@ -30,17 +30,16 @@ const MAX_SYMBOLS_PER_FILE: usize = 40;
 const MAX_SYMBOL_OUTPUT_BYTES: usize = 64 * 1024;
 
 /// Appended to every tree section: what the default tree shows, how to explore
-/// deeper files with one root-scoped `code_explore` call (never a subpackage),
+/// deeper files with a scoped `code_explore` (never workspace-root `.`),
 /// and the cross-check duty — if `code_explore`'s hits don't cover every
 /// subdirectory the tree shows, re-explore the directories it missed.
 const TREE_NOTE: &str = "\
 NOTE: top-level files are listed in full; subdirectories are recursed to the \
 deepest level but files inside them are only counted, not named — nothing is \
-elided. To explore deeper files, call `code_explore` ONCE against the project \
-root (e.g. `code_explore(\"<root>\")`) — it searches every file recursively \
-across all subdirectories; do NOT scope `code_explore` to a subpackage. If \
-`code_explore`'s hits do not cover every subdirectory shown here, re-explore \
-the directories it missed.";
+elided. To explore deeper files, pick a concrete subdirectory from this tree \
+and call `code_explore` with that `path` (e.g. `crates/atomcode-coding`, \
+`backend`) — do NOT pass `.` / the workspace root; that is reserved for \
+`repo_map`. If hits miss a subdirectory shown here, re-explore that directory.";
 
 pub struct RepoMapTool {
     index: Arc<CodeIndex>,
@@ -89,9 +88,9 @@ impl Tool for RepoMapTool {
          MODES — default `tree` = structure only (small, never truncated). Pass `mode: full` \
          (tree + budgeted symbol outline) or `symbols` (symbols only) when you already know the \
          layout and need types/functions. In a multi-project workspace, pass `path:` to map ONE repo \
-         at a time (the default spans ALL repos as separate subtrees). To see files under deeper \
-         directories, call `code_explore` once against the project root (never a subpackage); if \
-         its hits miss any subdirectory shown in the tree, re-explore those directories.\n\
+         at a time (the default spans ALL repos as separate subtrees; `.` is allowed here). To see \
+         files under deeper directories, call `code_explore` with a concrete subdirectory from this \
+         tree — never `path: '.'`. If hits miss a subdirectory shown here, re-explore that directory.\n\
          \n\
          CAUTION — a directory tree is NOT proof a mechanism is absent: it shows WHERE things live, \
          not WHAT exists. Empty-looking trees can hide code in sibling crates/layers (interface here, \
@@ -700,9 +699,13 @@ mod tests {
         // Deep files are counted, not named; nothing is elided or folded.
         assert!(map_output.contains("(2 files"));
         assert!(!map_output.contains("util.rs"));
-        // The TREE_NOTE explains deeper-file exploration via root code_explore.
+        // The TREE_NOTE explains deeper-file exploration via scoped code_explore.
         assert!(map_output.contains("code_explore"));
         assert!(map_output.contains("nothing is elided"));
+        assert!(
+            map_output.contains("do NOT pass `.`") || map_output.contains("do NOT pass"),
+            "TREE_NOTE must forbid workspace-root code_explore:\n{map_output}"
+        );
     }
 
     #[tokio::test]

@@ -1,10 +1,12 @@
 ﻿//! Custom prompt loader and in-memory cache with hot-reloading for AtomCode.
 //!
 //! Loads configuration from `$ATOMCODE_HOME/prompts/` (or `~/.atomcode/prompts/`):
-//! - `init.yaml`: Identity, Precedence, Platform, Environment.
+//! - `init.yaml`: Identity, Precedence, Platform, Environment. **Loaded** — overrides built-in identity.
 //! - `rules.yaml`: Workflow, Tools Discipline, Doing Tasks, Task Tracking, Delegation, etc.
-//! - `内置工具.yaml`: Tool parameter definitions and guidance.
-//! - `内置技能.yaml`: Skills catalog and trigger rules.
+//!   **Loaded** — when present, **replaces** the compiled-in `RULES` persona block (not merged).
+//! - `内置工具.yaml` / `内置技能.yaml`: documentation / seed only. **Not loaded.**
+//!   Live tool schema comes from each `Tool::description()` / `parameters_schema()` in Rust;
+//!   live skills come from installed skill dirs (`SKILL.md`), not this YAML.
 //!
 //! Utilizes an in-memory cache with modification timestamp (`mtime`) validation:
 //! - If the files have not been modified: returns cached in-memory structure with 0 parsing cost.

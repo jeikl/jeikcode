@@ -1058,7 +1058,7 @@ fn build_request_body(
             }
         }
     }
-    let effort = options.reasoning_effort.or_else(|| {
+    let effort = options.reasoning_effort.as_ref().cloned().or_else(|| {
         if model.to_ascii_lowercase().contains("grok") {
             Some(ReasoningEffort::High)
         } else {
@@ -1067,7 +1067,7 @@ fn build_request_body(
     });
     if let Some(effort) = effort {
         if reason_effort_applicable(model) {
-            body.insert("reasoning_effort".into(), json!(effort_str(effort)));
+            body.insert("reasoning_effort".into(), json!(effort.as_str()));
         }
     }
     // Kimi-family `thinking` object — only when configured (omitted otherwise so non-Kimi
@@ -1162,13 +1162,8 @@ fn thinking_body_value(thinking_type: Option<&str>, thinking_keep: Option<&str>)
     Some(Value::Object(obj))
 }
 
-fn effort_str(e: ReasoningEffort) -> &'static str {
-    match e {
-        ReasoningEffort::Low => "low",
-        ReasoningEffort::Medium => "medium",
-        ReasoningEffort::High => "high",
-        ReasoningEffort::Max => "max",
-    }
+fn effort_str(e: &ReasoningEffort) -> &str {
+    e.as_str()
 }
 
 // ---------------------------------------------------------------------------

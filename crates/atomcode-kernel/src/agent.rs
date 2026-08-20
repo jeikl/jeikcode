@@ -203,19 +203,21 @@ fn round_tool_signature(calls: &[ToolCall]) -> String {
 
 /// Maximum number of `parallel_safe` (read-only) tools that run CONCURRENTLY in
 /// Phase ② of the tool loop. Read from `ATOMCODE_MAX_PARALLEL_TOOLS` (a positive
-/// integer); anything unset, unparseable, or `< 1` falls back to the default 8.
-/// A cap of 1 makes Phase ② effectively serial (one permit) without disabling the
-/// gate. Side-effecting tools always take the exclusive write-lock regardless of
-/// this cap, so it bounds only read-only overlap.
+/// integer); anything unset, unparseable, or `< 1` falls back to
+/// [`DEFAULT_MAX_PARALLEL_TOOLS`]. A cap of 1 makes Phase ② effectively serial
+/// (one permit) without disabling the gate. Side-effecting tools always take the
+/// exclusive write-lock regardless of this cap, so it bounds only read-only overlap.
 ///
 /// Returns the RAW env value (or default). The caller is responsible for clamping
 /// with [`MAX_PARALLEL_TOOLS_CEILING`] before passing to `Semaphore::new`.
+const DEFAULT_MAX_PARALLEL_TOOLS: usize = 16;
+
 fn env_max_parallel_tools() -> usize {
     std::env::var("ATOMCODE_MAX_PARALLEL_TOOLS")
         .ok()
         .and_then(|v| v.parse::<usize>().ok())
         .filter(|n| *n >= 1)
-        .unwrap_or(8)
+        .unwrap_or(DEFAULT_MAX_PARALLEL_TOOLS)
 }
 
 /// Hard upper bound applied to the parallel-tools cap (both the env path and the
@@ -806,7 +808,7 @@ pub struct Agent {
     /// safety at this altitude; see `cap_tool_result`). `0` = unbounded.
     max_tool_result_bytes: usize,
     /// Injectable override for the parallel-tools concurrency cap (Phase ②).
-    /// `None` = read `ATOMCODE_MAX_PARALLEL_TOOLS` env (default 4). `Some(n)` wins
+    /// `None` = read `ATOMCODE_MAX_PARALLEL_TOOLS` env (default 16). `Some(n)` wins
     /// over the env var. Either path is clamped to `[1, MAX_PARALLEL_TOOLS_CEILING]`
     /// at the `Semaphore::new` call site so the semaphore can never panic.
     /// See `AgentBuilder::max_parallel_tools`.
@@ -3270,7 +3272,7 @@ impl RunningAgent {
             // tools take a WRITE-lock (an exclusive barrier — no read or write runs
             // alongside them, so a mutation is never observed mid-flight by a
             // concurrent read). A `Semaphore` bounds how many run at once
-            // (`ATOMCODE_MAX_PARALLEL_TOOLS`, default 4). Futures are polled on the
+            // (`ATOMCODE_MAX_PARALLEL_TOOLS`, default 16). Futures are polled on the
             // CURRENT task via `FuturesOrdered` (NOT `tokio::spawn`) so no `Send`
             // bound is imposed and each future owns cloned handles — it holds NO
             // borrow of `&self` across an await. Results are collected in EMISSION
@@ -3764,7 +3766,7 @@ impl Default for AgentBuilder {
             // context window / OOM the host unless the embedder opts into `0`.
             max_tool_result_bytes: DEFAULT_MAX_TOOL_RESULT_BYTES,
             // NEUTRAL default: `None` → read ATOMCODE_MAX_PARALLEL_TOOLS env (or
-            // fall back to 4). An embedder opts in via `AgentBuilder::max_parallel_tools`.
+            // fall back to 16). An embedder opts in via `AgentBuilder::max_parallel_tools`.
             max_parallel_tools: None,
             // NEUTRAL default: no strategy injected → NoCompaction (always noop) and
             // no threshold → the kernel NEVER auto-compacts unless an embedder opts in.
@@ -3893,7 +3895,7 @@ impl AgentBuilder {
     /// `parallel_safe` (read-only) tools may execute simultaneously; it is clamped
     /// to `[1, MAX_PARALLEL_TOOLS_CEILING]` at the `Semaphore::new` call site.
     /// When not set, the cap is read from `ATOMCODE_MAX_PARALLEL_TOOLS` env (default
-    /// 4). Use this in tests and embedders that need a deterministic, process-global-
+    /// 16). Use this in tests and embedders that need a deterministic, process-global-
     /// env-free cap (avoids the env-var race between parallel test threads).
     pub fn max_parallel_tools(mut self, n: usize) -> Self {
         self.max_parallel_tools = Some(n);
@@ -4962,7 +4964,8 @@ mod parallel_tools_cap_clamp_tests {
     #[test]
     fn default_cap_is_within_bounds() {
         // env_max_parallel_tools() reads the env; in a test context with no env var set
-        // it returns 4. We only care that the value survives the clamp unchanged.
+        // it returns DEFAULT_MAX_PARALLEL_TOOLS (16). We only care that the value
+        // survives the clamp unchanged.
         let raw = env_max_parallel_tools();
         let clamped = raw.clamp(1, MAX_PARALLEL_TOOLS_CEILING);
         assert_eq!(

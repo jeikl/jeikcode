@@ -55,12 +55,19 @@ function validateActionsMix(actions: Record<string, unknown>[]): boolean {
     if (!kind) return false;
     kinds.add(kind);
   }
-  if (kinds.has('clear') && kinds.size > 1) return false;
   if (kinds.has('delete') && [...kinds].some((kind) => kind !== 'delete')) return false;
   if (kinds.has('insert') && [...kinds].some((kind) => kind !== 'insert' && kind !== 'update')) {
     return false;
   }
+  if (kinds.has('clear') && [...kinds].some((kind) => kind !== 'clear' && kind !== 'add' && kind !== 'update')) {
+    return false;
+  }
   return true;
+}
+
+function maybeAutoClearFinished(items: TodoItemData[]): TodoItemData[] {
+  if (items.length > 0 && items.every((item) => item.status === 'completed')) return [];
+  return items;
 }
 
 function parsePlanItems(todos: unknown): TodoItemData[] | undefined {
@@ -126,7 +133,7 @@ function applyOne(items: TodoItemData[], value: Record<string, unknown>): TodoIt
   const kind = actionKind(value);
   if (kind === 'add') {
     if (typeof value.content !== 'string' || value.content.trim().length === 0) return undefined;
-    return [...items, { content: value.content.trim(), status: 'pending' }];
+    return [...maybeAutoClearFinished(items), { content: value.content.trim(), status: 'pending' }];
   }
   if (kind === 'insert') {
     if (typeof value.content !== 'string' || value.content.trim().length === 0) return undefined;
@@ -163,7 +170,7 @@ function applyOne(items: TodoItemData[], value: Record<string, unknown>): TodoIt
 function applyBatch(items: TodoItemData[], actions: Record<string, unknown>[]): TodoItemData[] | undefined {
   if (!validateActionsMix(actions)) return undefined;
   const kinds = new Set(actions.map(actionKind));
-  if (kinds.has('clear')) return [];
+  let next = kinds.has('clear') ? [] : items;
 
   if (kinds.has('delete')) {
     const ids: number[] = [];
@@ -173,12 +180,14 @@ function applyBatch(items: TodoItemData[], actions: Record<string, unknown>[]): 
       if (!ids.includes(id)) ids.push(id);
     }
     ids.sort((a, b) => b - a);
-    const next = items.slice();
-    for (const id of ids) next.splice(id - 1, 1);
-    return next;
+    const deleted = next.slice();
+    for (const id of ids) deleted.splice(id - 1, 1);
+    return deleted;
   }
 
-  let next = items;
+  if (actions.some((action) => actionKind(action) === 'add')) {
+    next = maybeAutoClearFinished(next);
+  }
   for (const action of actions) {
     if (actionKind(action) !== 'add') continue;
     const applied = applyOne(next, action);

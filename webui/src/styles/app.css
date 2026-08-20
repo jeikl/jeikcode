@@ -1265,6 +1265,19 @@ body {
 .footer-hint { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .footer-spacer { flex: 1; }
 .footer-tokens { opacity: 0.7; font-size: 11px; white-space: nowrap; }
+.footer-turn-elapsed {
+  font-variant-numeric: tabular-nums;
+  font-size: 11px;
+  opacity: 0.75;
+  white-space: nowrap;
+  color: var(--app-secondary-foreground);
+}
+.msg-turn-elapsed {
+  font-variant-numeric: tabular-nums;
+}
+.msg-turn-elapsed.is-live {
+  opacity: 0.85;
+}
 
 .btn-send {
   width: 34px;

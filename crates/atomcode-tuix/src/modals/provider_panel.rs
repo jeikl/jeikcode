@@ -1046,6 +1046,7 @@ impl ProviderPanel {
                             thinking_keep: None,
                             reasoning_history: None,
                             reasoning_effort: None,
+                            reasoning_levels: None,
                             thinking_enabled: None,
                             thinking_budget: None,
                             pricing: None,

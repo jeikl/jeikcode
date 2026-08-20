@@ -417,8 +417,8 @@ fn build_request_body(
     // Thinking: a per-call effort level wins (`think:"high"`), else the cfg flag
     // (`think:true`). `tool_choice` has no Ollama equivalent — ignored.
     let _ = ToolChoice::Auto;
-    if let Some(effort) = options.reasoning_effort {
-        body.insert("think".into(), json!(effort_str(effort)));
+    if let Some(effort) = &options.reasoning_effort {
+        body.insert("think".into(), json!(effort.as_str()));
     } else if cfg.think {
         body.insert("think".into(), json!(true));
     }
@@ -439,13 +439,8 @@ fn build_request_body(
     Value::Object(body)
 }
 
-fn effort_str(e: ReasoningEffort) -> &'static str {
-    match e {
-        ReasoningEffort::Low => "low",
-        ReasoningEffort::Medium => "medium",
-        ReasoningEffort::High => "high",
-        ReasoningEffort::Max => "max",
-    }
+fn effort_str(e: &ReasoningEffort) -> &str {
+    e.as_str()
 }
 
 // ---------------------------------------------------------------------------

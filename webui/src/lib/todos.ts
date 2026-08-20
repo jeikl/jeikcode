@@ -67,12 +67,19 @@ function validateActionsMix(actions: Record<string, unknown>[]): boolean {
     if (!kind) return false;
     kinds.add(kind);
   }
-  if (kinds.has('clear') && kinds.size > 1) return false;
   if (kinds.has('delete') && [...kinds].some((kind) => kind !== 'delete')) return false;
   if (kinds.has('insert') && [...kinds].some((kind) => kind !== 'insert' && kind !== 'update')) {
     return false;
   }
+  if (kinds.has('clear') && [...kinds].some((kind) => kind !== 'clear' && kind !== 'add' && kind !== 'update')) {
+    return false;
+  }
   return true;
+}
+
+function maybeAutoClearFinished(list: TodoItem[]): TodoItem[] {
+  if (list.length > 0 && list.every((item) => item.status === 'completed')) return [];
+  return list;
 }
 
 /** Full-list plan shape. Returns null when args are not a valid plan. */
@@ -118,7 +125,7 @@ function applyOne(list: TodoItem[], v: Record<string, unknown>): TodoItem[] {
   if (kind === 'add') {
     const content = typeof v.content === 'string' ? v.content.trim() : '';
     if (!content) return list;
-    return [...list, { content, status: 'pending' as const }];
+    return [...maybeAutoClearFinished(list), { content, status: 'pending' as const }];
   }
   if (kind === 'insert') {
     const content = typeof v.content === 'string' ? v.content.trim() : '';
@@ -173,7 +180,7 @@ function applyOne(list: TodoItem[], v: Record<string, unknown>): TodoItem[] {
 function applyBatch(list: TodoItem[], actions: Record<string, unknown>[]): TodoItem[] {
   if (!validateActionsMix(actions)) return list;
   const kinds = new Set(actions.map(actionKind));
-  if (kinds.has('clear')) return [];
+  let next = kinds.has('clear') ? [] : list;
 
   if (kinds.has('delete')) {
     const ids: number[] = [];
@@ -184,12 +191,14 @@ function applyBatch(list: TodoItem[], actions: Record<string, unknown>[]): TodoI
       }
     }
     ids.sort((a, b) => b - a);
-    const next = list.slice();
-    for (const id of ids) next.splice(id - 1, 1);
-    return next;
+    const deleted = next.slice();
+    for (const id of ids) deleted.splice(id - 1, 1);
+    return deleted;
   }
 
-  let next = list;
+  if (actions.some((action) => actionKind(action) === 'add')) {
+    next = maybeAutoClearFinished(next);
+  }
   for (const action of actions) {
     if (actionKind(action) !== 'add') continue;
     next = applyOne(next, action);

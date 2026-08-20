@@ -60,29 +60,41 @@ pub enum RateLimitRetryOwner {
 /// NEUTRAL reasoning/thinking effort level. The provider adapter maps it onto the
 /// backend's wire format (e.g. OpenAI's `reasoning_effort` string, or an
 /// Anthropic thinking `budget_tokens`); an adapter MAY ignore it if unsupported.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ReasoningEffort {
     Low,
     Medium,
     High,
-    /// Maximum effort — DeepSeek V4 accepts `reasoning_effort: "max"` beyond the
-    /// OpenAI low/medium/high ladder.
     Max,
+    XHigh,
+    Custom(String),
 }
 
 impl ReasoningEffort {
-    /// Parse a config string (`"low"|"medium"|"high"|"max"`, case-insensitive) into an
-    /// effort level. `None`/empty/`"off"` ⇒ `None` (no opinion); an UNKNOWN value also ⇒
-    /// `None` (effort is a non-critical optimization — unlike `reasoning_history`, a typo
-    /// degrades to the adapter default rather than failing the turn). Lets a driver plumb
-    /// a per-provider `reasoning_effort` config knob into [`ChatOptions::reasoning_effort`].
+    pub fn as_str(&self) -> &str {
+        match self {
+            ReasoningEffort::Low => "low",
+            ReasoningEffort::Medium => "medium",
+            ReasoningEffort::High => "high",
+            ReasoningEffort::Max => "max",
+            ReasoningEffort::XHigh => "xhigh",
+            ReasoningEffort::Custom(s) => s.as_str(),
+        }
+    }
+
+    /// Parse a config string into an effort level.
     pub fn from_config(s: Option<&str>) -> Option<ReasoningEffort> {
-        match s.unwrap_or("").trim().to_ascii_lowercase().as_str() {
+        let val = s?.trim();
+        if val.is_empty() || val.eq_ignore_ascii_case("off") || val.eq_ignore_ascii_case("none") {
+            return None;
+        }
+        match val.to_ascii_lowercase().as_str() {
             "low" => Some(ReasoningEffort::Low),
             "medium" => Some(ReasoningEffort::Medium),
             "high" => Some(ReasoningEffort::High),
             "max" => Some(ReasoningEffort::Max),
-            _ => None,
+            "xhigh" => Some(ReasoningEffort::XHigh),
+            other => Some(ReasoningEffort::Custom(other.to_string())),
         }
     }
 }
@@ -165,11 +177,19 @@ mod tests {
             Some(ReasoningEffort::Max),
             "case-insensitive"
         );
-        // off / empty / unset / unknown → no opinion (None), never a panic.
+        assert_eq!(
+            ReasoningEffort::from_config(Some("xhigh")),
+            Some(ReasoningEffort::XHigh)
+        );
+        // off / empty / unset → no opinion (None)
         assert_eq!(ReasoningEffort::from_config(Some("off")), None);
+        assert_eq!(ReasoningEffort::from_config(Some("none")), None);
         assert_eq!(ReasoningEffort::from_config(Some("")), None);
         assert_eq!(ReasoningEffort::from_config(None), None);
-        assert_eq!(ReasoningEffort::from_config(Some("bogus")), None);
+        assert_eq!(
+            ReasoningEffort::from_config(Some("custom_val")),
+            Some(ReasoningEffort::Custom("custom_val".into()))
+        );
     }
 
     #[test]

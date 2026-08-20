@@ -175,3 +175,73 @@ test('foldTodoToolCall handles clear and delete', () => {
   assert.equal(cur, null);
 });
 
+test('clear + add + update in one batch replaces the plan', () => {
+  const list = applyTodoAction(
+    [
+      { content: 'old-1', status: 'completed' },
+      { content: 'old-2', status: 'in_progress' },
+    ],
+    JSON.stringify({
+      actions: [
+        { action: 'clear' },
+        { action: 'add', content: 'new-1' },
+        { action: 'add', content: 'new-2' },
+        { action: 'update', id: 1, status: 'in_progress' },
+      ],
+    }),
+  );
+  assert.deepEqual(list, [
+    { content: 'new-1', status: 'in_progress' },
+    { content: 'new-2', status: 'pending' },
+  ]);
+});
+
+test('add on a finished list auto-clears so ids restart at 1', () => {
+  const list = applyTodoAction(
+    [
+      { content: 'done-1', status: 'completed' },
+      { content: 'done-2', status: 'completed' },
+    ],
+    JSON.stringify({
+      actions: [
+        { action: 'add', content: 'next-1' },
+        { action: 'add', content: 'next-2' },
+        { action: 'update', id: 1, status: 'in_progress' },
+      ],
+    }),
+  );
+  assert.deepEqual(list, [
+    { content: 'next-1', status: 'in_progress' },
+    { content: 'next-2', status: 'pending' },
+  ]);
+});
+
+test('add on an unfinished list does not auto-clear', () => {
+  const list = applyTodoAction(
+    [
+      { content: 'done', status: 'completed' },
+      { content: 'open', status: 'pending' },
+    ],
+    JSON.stringify({ action: 'add', content: 'extra' }),
+  );
+  assert.equal(list.length, 3);
+  assert.equal(list[2]?.content, 'extra');
+});
+
+test('clear + delete in one batch is rejected', () => {
+  const before = [
+    { content: 'a', status: 'pending' as const },
+    { content: 'b', status: 'pending' as const },
+  ];
+  const list = applyTodoAction(
+    before,
+    JSON.stringify({
+      actions: [
+        { action: 'clear' },
+        { action: 'delete', id: 1 },
+      ],
+    }),
+  );
+  assert.deepEqual(list, before);
+});
+

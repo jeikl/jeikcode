@@ -210,10 +210,10 @@ fn action_kind(v: &serde_json::Value) -> Option<&'static str> {
 
 /// Legal `actions` mixes (id-shifting ops cannot share a batch with a different kind):
 /// - `add` + `update` (add only appends; existing ids stay)
+/// - `clear` + `add` + `update` (`clear` always runs first, then add, then update)
 /// - `insert` + `update` (internally: all inserts first, then updates by post-insert id)
 /// - `delete` only (any order; ids are pre-batch)
-/// - `clear` only
-/// - `update` only
+/// - `clear` only / `update` only / `add` only
 fn validate_actions_mix(arr: &[serde_json::Value]) -> Result<(), String> {
     let mut kinds = std::collections::BTreeSet::new();
     for (i, item) in arr.iter().enumerate() {
@@ -229,12 +229,6 @@ fn validate_actions_mix(arr: &[serde_json::Value]) -> Result<(), String> {
         }
     }
     let has = |k: &str| kinds.contains(k);
-    if has("clear") && kinds.len() > 1 {
-        return Err(
-            "todowrite: `clear` must be the only action in this batch. Add new tasks in a following call."
-                .into(),
-        );
-    }
     if has("delete") && kinds.iter().any(|k| *k != "delete") {
         return Err(
             "todowrite: `delete` can only be batched with other deletes (ids would shift)."
@@ -247,7 +241,23 @@ fn validate_actions_mix(arr: &[serde_json::Value]) -> Result<(), String> {
                 .into(),
         );
     }
+    if has("clear") && kinds.iter().any(|k| *k != "clear" && *k != "add" && *k != "update") {
+        return Err(
+            "todowrite: `clear` can only be batched with `add` and/or `update` (`clear` runs first)."
+                .into(),
+        );
+    }
     Ok(())
+}
+
+/// A non-empty list whose every item is `completed` is a closed plan.
+/// The next `add` starts a new plan at id 1 instead of appending as 7,8,9…
+/// (models often skip `clear` when pivoting). An in-progress / pending list
+/// is left alone — that is still the current task.
+fn maybe_auto_clear_finished(list: &mut Vec<TodoItem>) {
+    if !list.is_empty() && list.iter().all(|t| t.status == TodoStatus::Completed) {
+        list.clear();
+    }
 }
 
 /// Batch apply. Id-shifting work runs first; `update` always sees the list
@@ -263,7 +273,6 @@ fn apply_actions_batch(
 
     if kinds.contains("clear") {
         tmp.clear();
-        return Ok(tmp);
     }
 
     if kinds.contains("delete") {
@@ -286,7 +295,12 @@ fn apply_actions_batch(
         return Ok(tmp);
     }
 
-    // Adds first: append-only, existing 1..n stay put.
+    // Adds first: append-only, existing 1..n stay put. A finished list (every
+    // item completed) is treated as a closed plan — auto-clear so a new batch
+    // of adds restarts at id 1 instead of appending as 7,8,9…
+    if arr.iter().any(|item| action_kind(item) == Some("add")) {
+        maybe_auto_clear_finished(&mut tmp);
+    }
     for item in arr {
         if action_kind(item) == Some("add") {
             try_apply_one_action(&mut tmp, item)?;
@@ -351,6 +365,7 @@ fn try_apply_one_action(list: &mut Vec<TodoItem>, v: &serde_json::Value) -> Resu
             if let Some(content) = v.get("content").and_then(|c| c.as_str()) {
                 let content = content.trim();
                 if !content.is_empty() {
+                    maybe_auto_clear_finished(list);
                     list.push(TodoItem {
                         content: content.to_string(),
                         status: TodoStatus::Pending,
@@ -556,11 +571,11 @@ Do NOT call this tool unless the list must change. Never re-mark an item already
 a failed result reprints the unchanged list — fix ids from it, do not retry blindly.\n\
 Legal mixes only:\n\
 - `add` + `update` (add appends; existing ids do not shift). First plan: add… + update #1 in_progress.\n\
+- `clear` + `add` + `update` (`clear` ALWAYS runs first, then add, then update). Use this to replace a plan in ONE call.\n\
 - `insert` + `update` (internally inserts first, then updates — `id` is AFTER inserts).\n\
 - several `update` (any order; `id` is the current list).\n\
 - several `delete` (any order; `id` is the current list). Do NOT mix delete with anything else.\n\
-- `clear` alone. To rebuild: a later call with `add`s. Do NOT mix clear with anything else.\n\
-Never mix insert/delete/clear with a different id-shifting action in one batch.\n\
+- `insert` stays with inserts/updates only. Do NOT mix insert with add/clear/delete.\n\
 `id`/`position` are 1-based. update/delete order in the JSON does not matter.\n\
 The MOMENT you START a task set it `in_progress`; the MOMENT it is verified done set it `completed`.\n\
 Keep EXACTLY ONE task `in_progress` after the batch (enforced).";
@@ -583,7 +598,7 @@ impl Tool for TodoTool {
             "properties": {
                 "actions": {
                     "type": "array",
-                    "description": "Batch of same-kind (or add+update / insert+update) operations. delete-only, clear-only. Never put clear in the same array as adds — clear first, add in the next call. update/delete ids may be in any order.",
+                    "description": "Batch of same-kind (or add+update / clear+add+update / insert+update) operations. delete-only. `clear` runs FIRST when mixed with add/update. insert stays with inserts/updates only. update/delete ids may be in any order.",
                     "items": {
                         "type": "object",
                         "properties": {
@@ -603,7 +618,7 @@ impl Tool for TodoTool {
                 "content": { "type": "string", "description": "For action=add/insert: task text." },
                 "todos": {
                     "type": "array",
-                    "description": "Legacy resume-only full-list replace. Do not send on new work — use `clear` in one call, then `add`s in the next.",
+                    "description": "Legacy resume-only full-list replace. Do not send on new work — use `clear` + `add`s in the same `actions` array.",
                     "items": {
                         "type": "object",
                         "properties": {
@@ -1355,14 +1370,76 @@ mod tests {
         assert_eq!(list.len(), 2, "illegal mix must not apply");
         apply_todo_action(
             &mut list,
-            r#"{"actions":[{"action":"clear"},{"action":"add","content":"x"}]}"#,
-        );
-        assert_eq!(list.len(), 2, "clear+add must not apply");
-        apply_todo_action(
-            &mut list,
             r#"{"actions":[{"action":"insert","position":1,"content":"x"},{"action":"add","content":"y"}]}"#,
         );
         assert_eq!(list.len(), 2, "insert+add must not apply");
+        apply_todo_action(
+            &mut list,
+            r#"{"actions":[{"action":"clear"},{"action":"delete","id":1}]}"#,
+        );
+        assert_eq!(list.len(), 2, "clear+delete must not apply");
+    }
+
+    #[test]
+    fn apply_todo_actions_clear_then_add_update_replaces_plan() {
+        let mut list = vec![
+            TodoItem {
+                content: "old-1".into(),
+                status: TodoStatus::Completed,
+            },
+            TodoItem {
+                content: "old-2".into(),
+                status: TodoStatus::InProgress,
+            },
+        ];
+        apply_todo_action(
+            &mut list,
+            r#"{"actions":[{"action":"clear"},{"action":"add","content":"new-1"},{"action":"add","content":"new-2"},{"action":"update","id":1,"status":"in_progress"}]}"#,
+        );
+        assert_eq!(list.len(), 2);
+        assert_eq!(list[0].content, "new-1");
+        assert_eq!(list[0].status, TodoStatus::InProgress);
+        assert_eq!(list[1].content, "new-2");
+        assert_eq!(list[1].status, TodoStatus::Pending);
+    }
+
+    #[test]
+    fn add_on_finished_list_auto_clears_so_ids_restart() {
+        let mut list = vec![
+            TodoItem {
+                content: "done-1".into(),
+                status: TodoStatus::Completed,
+            },
+            TodoItem {
+                content: "done-2".into(),
+                status: TodoStatus::Completed,
+            },
+        ];
+        apply_todo_action(
+            &mut list,
+            r#"{"actions":[{"action":"add","content":"next-1"},{"action":"add","content":"next-2"},{"action":"update","id":1,"status":"in_progress"}]}"#,
+        );
+        assert_eq!(list.len(), 2, "finished list must be replaced, not appended");
+        assert_eq!(list[0].content, "next-1");
+        assert_eq!(list[0].status, TodoStatus::InProgress);
+        assert_eq!(list[1].content, "next-2");
+    }
+
+    #[test]
+    fn add_on_unfinished_list_does_not_auto_clear() {
+        let mut list = vec![
+            TodoItem {
+                content: "done".into(),
+                status: TodoStatus::Completed,
+            },
+            TodoItem {
+                content: "still-open".into(),
+                status: TodoStatus::Pending,
+            },
+        ];
+        apply_todo_action(&mut list, r#"{"action":"add","content":"extra"}"#);
+        assert_eq!(list.len(), 3);
+        assert_eq!(list[2].content, "extra");
     }
 
     #[test]

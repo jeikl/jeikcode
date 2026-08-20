@@ -370,10 +370,10 @@ current with ONE `todowrite` per turn that includes EVERY status change you alre
 - First plan: `todowrite {\"actions\":[{\"action\":\"add\",\"content\":\"…\"},{\"action\":\"add\",\"content\":\"…\"},{\"action\":\"update\",\"id\":1,\"status\":\"in_progress\"}]}`.\n\
 - Insert: `{\"action\":\"insert\",\"position\":N,\"content\":\"...\"}` inside `actions`.\n\
 - Delete: `{\"action\":\"delete\",\"id\":N}` inside `actions`.\n\
-- User pivots to genuinely different multi-step work: REPLACE the plan with one \
-`todowrite {\"actions\":[{\"action\":\"clear\"}]}` then a second call of `add`s — \
-`clear` cannot share a batch with other actions. Do NOT resend a full `todos` list, \
-and do NOT reset or empty the list merely to answer a question \
+- User pivots to genuinely different multi-step work: REPLACE the plan in ONE call — \
+`todowrite {\"actions\":[{\"action\":\"clear\"},{\"action\":\"add\",\"content\":\"…\"},{\"action\":\"add\",\"content\":\"…\"},{\"action\":\"update\",\"id\":1,\"status\":\"in_progress\"}]}` \
+(`clear` runs first, then add/update). `insert` and `delete` stay in their own batches. \
+Do NOT resend a full `todos` list, and do NOT reset or empty the list merely to answer a question \
 or because a step was hard; only replace it when genuinely different multi-step work begins.\n\
 Keep exactly one item in_progress after each batch (this is enforced for you) and \
 mark an item done only after that step is actually verified (never on intent). Do not \
@@ -509,14 +509,15 @@ The context window is managed for you: as it fills, older turns are automaticall
 - NEVER jump to negative conclusions (\"the project lacks X mechanism\") based on a single code snippet: ALWAYS inspect the returned `File Capability Capsule` (Types/Traits, Middleware, Pipelines, Plugins) to see all co-located capabilities in that file. A top hit that is a trait/interface is the DECLARATION, not the behavior — the implementations live at `impl <name>` in other files (often in OTHER crates/packages/layers); grep `impl <name>` or query `code_explore(\"impl <name>\")` before judging the mechanism.
 - PATH-SCOPE DISCIPLINE: a `path:`-limited search is CONFINED to that scope — code in sibling layers (other crates/packages/dirs) is NOT in the hit set at all. In layered architectures, first check `repo_map`/`list_directory` to see WHICH crates carry the target capability, then choose the scope deliberately; prefer the whole `crates/`/`packages/` tree over a single crate when answering an existence question (\"does X exist here\"). Remember a hit set is only ever a RANKED SKELETON (see the 📊 Coverage line): low counts, omitted symbols and folded spans are reasons to re-query, not reasons to conclude absence.
 - BATCHED PARALLEL EXPLORATION — DUAL CHANNELS, CODE_EXPLORE IS CORE: fire `grep` (keyword patterns) AND `code_explore` (natural language / symbols) IN PARALLEL in the same batch — they are complementary channels, not alternatives. `code_explore` is the CORE tool: semantic NLP, flow spine, call-graph panorama, verbatim source. grep supplies the exact keyword hits only it can see. Cross-validate the two result sets: (1) code_explore empty but grep hit → `read_file` the grepped files to understand them; (2) `read_file` surfaces a symbol → hand it straight back to `code_explore(<symbol>)` for its call-graph context; (3) files appearing in BOTH code_explore results AND grep hits are HIGH-PRIORITY — inspect them first, overlap is the strongest relevance signal. If the panorama is incomplete (Coverage shows omissions, or a sibling crate/layer is likely), loop BACK with another parallel grep+code_explore batch until covered — never crawl one tool at a time, never fall into blind `grep` + `read_file` loops.
-- For simple changes (rename, one-line fix, config tweak): just do it — search, edit, verify, done.
-- For non-trivial features or multi-file changes: UNDERSTAND → SEARCH → PLAN (approach, one sentence) → EDIT → VERIFY → SUMMARIZE.
-- For bug reports (\"not working\"/\"wrong output\"/\"error\"): REPRODUCE (run failing command) → DIAGNOSE via CODE_EXPLORE → FIX → VERIFY.
+- For simple changes (rename, one-line fix, config tweak): just do it — batch-search, batch-edit, verify-once, done.
+- For non-trivial features or multi-file changes: UNDERSTAND → SEARCH (batch) → PLAN (approach, one sentence) → EDIT (batch) → VERIFY once → SUMMARIZE.
+- For bug reports (\"not working\"/\"wrong output\"/\"error\"): REPRODUCE (run failing command) → DIAGNOSE via CODE_EXPLORE → FIX (batch) → VERIFY once.
 
 Guidelines:
 - UNDERSTAND: before diving in, pin down what the user actually wants — the concrete outcome and its scope. For multi-step work this IS the task plan: state the goal in one sentence as part of PLAN; its first items are the outcomes the user asked for. Capture the goal AS the plan — don't echo the request back as prose — then proceed.
 - REPRODUCE: when a runnable reproduction exists, run the failing command with bash BEFORE reading code — see the real error first. If no runnable reproduction exists, skip straight to DIAGNOSE.
-- VERIFY: unless the user explicitly forbids compiling, testing, or running commands, run a fast check (`cargo check`, `tsc --noEmit`, or equivalent). Avoid full builds, dev servers, or watchers.
+- VERIFY: unless the user explicitly forbids compiling, testing, or running commands, run ONE fast check (`cargo check`, `tsc --noEmit`, or equivalent) AFTER all related edits in the unit are complete — not after every file or hunk. If it fails, batch remaining fixes, then re-verify once. Avoid full builds, dev servers, or watchers.
+- Do NOT edit-one-then-test-one. Independent reads go in one batch; independent edits go in one batch; verification is a gate after the batch.
 - The turn ends naturally when no more tool calls are needed.
 - CARRY IT THROUGH: complete the task end-to-end through VERIFY in one go — don't stop after the first step to ask \"should I continue?\".
 - STOP WHEN STUCK: if after 3 rounds of search/read you haven't found the issue, stop. Tell the user what you checked and suggest next diagnostic steps.
@@ -526,9 +527,9 @@ Call multiple tools in ONE turn whenever they have NO data dependency on each ot
 
 MANDATORY parallel scenarios (MUST emit all in ONE response):
 - Exploratory research, ROUND 1: 1x list_directory + 1x repo_map in ONE response — both are structure tools, no dependency between them. For functional/investigation questions you MAY add code_explore in the same batch — `path:` already scopes it, it does not depend on the structure round. (Omit code_explore only for a pure structural census.)
-- Reading multiple files for context: read_file × N in one response.
+- Reading multiple files for context: read_file × N in one response. There is NO per-turn cap of 4 — if you need 8, 12, or more independent reads, emit them all now. Writes in the same batch are executed serially inside the runtime; still emit them together so the user sees one batch.
 - Searching for multiple patterns, symbols, or paths: code_explore / grep × N / glob × N in one response.
-- Modifying multiple files: emit all independent `edit_file` calls in ONE round (do not edit one file then re-read before the next independent file).
+- Modifying multiple files: emit all independent `edit_file` / `write_file` calls in ONE round (do not edit one file then re-read before the next independent file). Do not stop at 4.
 - Same file, several independent hunks: ONE `edit_file` with `edits:[{old_string,new_string},…]` applied top-to-bottom on one buffer — do not edit-one-then-read-one.
 - Creating multiple new files: write_file × N in one response. Only use `write_file` for brand-new files or full-file rewrites; never to replace a batch of in-file hunks.
 - Verification: Run build/check (`cargo check`, `tsc --noEmit`, etc.) ONCE after all related edits in the batch are complete, NOT after every individual file.
@@ -1108,6 +1109,10 @@ mod tests {
         assert!(
             !p.contains("minimal tool calls"),
             "must not tell the model to minimize tool calls (contradicts ## TOOLS:)"
+        );
+        assert!(
+            p.contains("NO per-turn cap of 4") && p.contains("Do not stop at 4"),
+            "must not teach a 4-tool batch ceiling: {p}"
         );
     }
 

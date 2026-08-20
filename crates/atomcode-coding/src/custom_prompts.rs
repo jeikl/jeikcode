@@ -119,7 +119,20 @@ fn resolve_prompts_dir() -> Option<PathBuf> {
             return Some(PathBuf::from(p).join("prompts"));
         }
     }
-    Some(dirs::home_dir()?.join(".atomcode").join("prompts"))
+    // Unit tests must not leak the developer's `~/.atomcode/prompts` into persona
+    // snapshots. Production still loads the user home; tests opt in via ATOMCODE_HOME.
+    #[cfg(test)]
+    {
+        return None;
+    }
+    #[cfg(not(test))]
+    {
+        Some(dirs::home_dir()?.join(".atomcode").join("prompts"))
+    }
+}
+
+fn strip_utf8_bom(content: &str) -> &str {
+    content.strip_prefix('\u{feff}').unwrap_or(content)
 }
 
 /// Returns the active `init.yaml` custom prompt configuration.
@@ -144,7 +157,7 @@ pub fn get_custom_prompt_config() -> Option<CustomPromptConfig> {
     let mut w = c.write().ok()?;
     let config = if init_path.is_file() {
         if let Ok(content) = std::fs::read_to_string(&init_path) {
-            serde_yaml::from_str::<CustomPromptConfig>(&content).ok()
+            serde_yaml::from_str::<CustomPromptConfig>(strip_utf8_bom(&content)).ok()
         } else {
             None
         }
@@ -179,7 +192,7 @@ pub fn get_custom_rules_config() -> Option<CustomRulesConfig> {
     let mut w = c.write().ok()?;
     let config = if rules_path.is_file() {
         if let Ok(content) = std::fs::read_to_string(&rules_path) {
-            serde_yaml::from_str::<CustomRulesConfig>(&content).ok()
+            serde_yaml::from_str::<CustomRulesConfig>(strip_utf8_bom(&content)).ok()
         } else {
             None
         }
@@ -348,6 +361,13 @@ pub fn render_custom_rules() -> Option<String> {
         out.push_str(&format!("## CHINESE CODE SUPPORT:\n{cs}\n\n"));
     }
 
+    // Task tracking — custom rules replace the built-in RULES block AND skip
+    // TODO_USAGE, so this section must be rendered here or todowrite guidance
+    // never reaches the model.
+    if let Some(tt) = &cfg.task_tracking {
+        out.push_str(&format!("## TASK TRACKING:\n{tt}\n\n"));
+    }
+
     Some(out.trim_end().to_string())
 }
 
@@ -385,5 +405,16 @@ doing_tasks:
         let cfg: CustomRulesConfig = serde_yaml::from_str(yaml).unwrap();
         assert_eq!(cfg.workflow.as_ref().unwrap().first_round_reflex.as_deref(), Some("Structure then dive."));
         assert_eq!(cfg.doing_tasks.as_ref().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn strip_utf8_bom_lets_yaml_parse() {
+        let yaml = "\u{feff}version: \"2.0.0\"\nprecedence:\n  rule: bom-ok\n";
+        assert!(
+            serde_yaml::from_str::<CustomPromptConfig>(yaml).is_err(),
+            "serde_yaml rejects a leading BOM — the loader must strip it first"
+        );
+        let cfg: CustomPromptConfig = serde_yaml::from_str(strip_utf8_bom(yaml)).unwrap();
+        assert_eq!(cfg.precedence.as_ref().unwrap().rule.as_deref(), Some("bom-ok"));
     }
 }

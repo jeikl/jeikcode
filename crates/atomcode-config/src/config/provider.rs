@@ -73,6 +73,9 @@ pub struct ProviderConfig {
     /// matches the applicable heuristic (see OpenAiProvider).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reasoning_effort: Option<String>,
+    /// Customizable list of reasoning effort levels (e.g. `["low", "medium", "high", "xhigh"]`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning_levels: Option<Vec<String>>,
     /// Whether extended thinking is enabled for this provider.
     /// For Claude: sends `thinking.type = "enabled"` in request body.
     /// Default: not set (thinking disabled).
@@ -246,6 +249,8 @@ pub struct ModelProfileConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reasoning_effort: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning_levels: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub thinking_enabled: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub thinking_budget: Option<u32>,
@@ -297,6 +302,7 @@ pub struct ResolvedModelConfig {
     pub thinking_keep: Option<String>,
     pub reasoning_history: Option<String>,
     pub reasoning_effort: Option<String>,
+    pub reasoning_levels: Option<Vec<String>>,
     pub thinking_enabled: Option<bool>,
     pub thinking_budget: Option<u32>,
     pub capable_model: Option<i64>,
@@ -343,6 +349,7 @@ impl ResolvedModelConfig {
             thinking_keep: self.thinking_keep.clone(),
             reasoning_history: self.reasoning_history.clone(),
             reasoning_effort: self.reasoning_effort.clone(),
+            reasoning_levels: self.reasoning_levels.clone(),
             thinking_enabled: self.thinking_enabled,
             thinking_budget: self.thinking_budget,
             skip_tls_verify: self.skip_tls_verify,
@@ -731,6 +738,7 @@ output_per_million = 0
             thinking_keep: None,
             reasoning_history: None,
             reasoning_effort: None,
+            reasoning_levels: None,
             thinking_enabled: None,
             thinking_budget: None,
             skip_tls_verify: false,
@@ -762,6 +770,7 @@ output_per_million = 0
             thinking_keep: None,
             reasoning_history: None,
             reasoning_effort: None,
+            reasoning_levels: None,
             thinking_enabled: None,
             thinking_budget: None,
             skip_tls_verify: true,
@@ -884,6 +893,7 @@ output_per_million = 0
             thinking_keep: None,
             reasoning_history: None,
             reasoning_effort: None,
+            reasoning_levels: None,
             thinking_enabled: None,
             thinking_budget: None,
             skip_tls_verify: false,
@@ -914,6 +924,7 @@ output_per_million = 0
             thinking_keep: None,
             reasoning_history: None,
             reasoning_effort: None,
+            reasoning_levels: None,
             thinking_enabled: None,
             thinking_budget: None,
             skip_tls_verify: false,
@@ -944,6 +955,7 @@ output_per_million = 0
             thinking_keep: None,
             reasoning_history: None,
             reasoning_effort: None,
+            reasoning_levels: None,
             thinking_enabled: None,
             thinking_budget: None,
             skip_tls_verify: false,

@@ -18,6 +18,7 @@ use super::symbols::{
     extract_call_sites_from_tree, extract_symbols_from_tree, parse_source, CallSite, Symbol,
 };
 use ignore::WalkBuilder;
+use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::hash::{DefaultHasher, Hash, Hasher};
@@ -1355,6 +1356,37 @@ fn path_in_focus(path: &Path, focus: Option<&Path>) -> bool {
     path_matches_scope(&normalize_index_path(path), &normalize_index_path(focus))
 }
 
+fn restat_one(path: &Path, unit: &FileUnit, focus: Option<&Path>) -> Result<Walked, PathBuf> {
+    let norm = normalize_index_path(path);
+    if !path_in_focus(&norm, focus) {
+        return Ok(Walked {
+            path: norm,
+            mtime_ns: unit.mtime_ns,
+            len: unit.len,
+        });
+    }
+    match std::fs::metadata(&norm) {
+        Ok(md) => {
+            let len = md.len();
+            if len > MAX_INDEX_FILE_BYTES {
+                return Err(norm);
+            }
+            let mtime_ns = md
+                .modified()
+                .ok()
+                .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
+                .map(|d| d.as_nanos())
+                .unwrap_or(0);
+            Ok(Walked {
+                path: norm,
+                mtime_ns,
+                len,
+            })
+        }
+        Err(_) => Err(norm),
+    }
+}
+
 /// Re-stat already-known unit paths. Avoids `ignore::WalkBuilder` over the
 /// whole workspace (the 10s+ "Index" cost) when we only need to know which
 /// of the files we already indexed changed.
@@ -1362,42 +1394,21 @@ fn path_in_focus(path: &Path, focus: Option<&Path>) -> bool {
 /// When `focus` is set, only files under that directory are re-stated against
 /// disk. Everything else is trusted from the stored fingerprint so a scoped
 /// `code_explore(path: coupon-mall-demo)` does not restat 1万+ unrelated files.
+/// Parallel `metadata()` — Windows NTFS serial restat of 1万+ files is seconds.
 fn restat_known_units(
     units: &HashMap<PathBuf, FileUnit>,
     focus: Option<&Path>,
 ) -> (Vec<Walked>, Vec<PathBuf>) {
-    let mut walked = Vec::with_capacity(units.len());
+    let mut results: Vec<Result<Walked, PathBuf>> = units
+        .par_iter()
+        .map(|(path, unit)| restat_one(path, unit, focus))
+        .collect();
+    let mut walked = Vec::with_capacity(results.len());
     let mut missing = Vec::new();
-    for (path, unit) in units {
-        let norm = normalize_index_path(path);
-        if !path_in_focus(&norm, focus) {
-            walked.push(Walked {
-                path: norm,
-                mtime_ns: unit.mtime_ns,
-                len: unit.len,
-            });
-            continue;
-        }
-        match std::fs::metadata(&norm) {
-            Ok(md) => {
-                let len = md.len();
-                if len > MAX_INDEX_FILE_BYTES {
-                    missing.push(norm);
-                    continue;
-                }
-                let mtime_ns = md
-                    .modified()
-                    .ok()
-                    .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
-                    .map(|d| d.as_nanos())
-                    .unwrap_or(0);
-                walked.push(Walked {
-                    path: norm,
-                    mtime_ns,
-                    len,
-                });
-            }
-            Err(_) => missing.push(norm),
+    for r in results.drain(..) {
+        match r {
+            Ok(w) => walked.push(w),
+            Err(p) => missing.push(p),
         }
     }
     walked.sort_by(|a, b| a.path.cmp(&b.path));
@@ -2226,27 +2237,28 @@ impl CodeIndex {
                 let kept_hint = guard.units.len();
                 drop(guard);
 
-                let mut dirty = 0usize;
-                let mut missing = 0usize;
-                for (path, mtime_ns, len) in &snapshot {
-                    if !path_in_focus(path, focus) {
-                        continue;
-                    }
-                    match std::fs::metadata(path) {
-                        Ok(md) => {
-                            let disk_mtime = md
-                                .modified()
-                                .ok()
-                                .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
-                                .map(|d| d.as_nanos())
-                                .unwrap_or(0);
-                            if disk_mtime != *mtime_ns || md.len() != *len {
-                                dirty += 1;
+                let (dirty, missing) = snapshot
+                    .par_iter()
+                    .filter(|(path, _, _)| path_in_focus(path, focus))
+                    .map(|(path, mtime_ns, len)| {
+                        match std::fs::metadata(path) {
+                            Ok(md) => {
+                                let disk_mtime = md
+                                    .modified()
+                                    .ok()
+                                    .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
+                                    .map(|d| d.as_nanos())
+                                    .unwrap_or(0);
+                                if disk_mtime != *mtime_ns || md.len() != *len {
+                                    (1usize, 0usize)
+                                } else {
+                                    (0, 0)
+                                }
                             }
+                            Err(_) => (0, 1),
                         }
-                        Err(_) => missing += 1,
-                    }
-                }
+                    })
+                    .reduce(|| (0, 0), |a, b| (a.0 + b.0, a.1 + b.1));
 
                 if dirty == 0 && missing == 0 {
                     // Known files are clean. Still look for *created* files
@@ -2283,6 +2295,7 @@ impl CodeIndex {
                                 cache_hit: true,
                                 ..Default::default()
                             });
+                            guard.last_update_instant = Some(Instant::now());
                             if guard.dirindex.is_none() {
                                 let di = Arc::new(super::retrieval::DirIndex::build(&warm_graph));
                                 persist_derived_sidecars(&root, Some(di.as_ref()), None);

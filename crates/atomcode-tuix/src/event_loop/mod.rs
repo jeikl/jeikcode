@@ -15605,14 +15605,14 @@ fn handle_approval_key(
 
     // Navigation: move the selection and repaint the footer, no decision yet.
     match code {
-        KeyCode::Up => {
+        KeyCode::Up | KeyCode::Char('k') | KeyCode::Char('K') => {
             if let Some(p) = app.state.approval_panel.as_mut() {
                 p.move_up();
             }
             redraw_idle_plain(&app.buf, &mut app.state, ctx, renderer);
             return Ok(());
         }
-        KeyCode::Down => {
+        KeyCode::Down | KeyCode::Char('j') | KeyCode::Char('J') => {
             if let Some(p) = app.state.approval_panel.as_mut() {
                 p.move_down();
             }
@@ -15874,6 +15874,30 @@ fn handle_user_input_key(
                 p.move_down();
             }
         }
+        (UserInputMode::Single | UserInputMode::Multiple, KeyCode::Char('k' | 'K'))
+            if !app
+                .state
+                .user_input_panel
+                .as_ref()
+                .map(|p| p.is_other_row())
+                .unwrap_or(false) =>
+        {
+            if let Some(p) = app.state.user_input_panel.as_mut() {
+                p.move_up();
+            }
+        }
+        (UserInputMode::Single | UserInputMode::Multiple, KeyCode::Char('j' | 'J'))
+            if !app
+                .state
+                .user_input_panel
+                .as_ref()
+                .map(|p| p.is_other_row())
+                .unwrap_or(false) =>
+        {
+            if let Some(p) = app.state.user_input_panel.as_mut() {
+                p.move_down();
+            }
+        }
         (_, KeyCode::PageUp) => {
             if let Some(p) = app.state.user_input_panel.as_mut() {
                 p.page_up();
@@ -16053,6 +16077,16 @@ fn handle_user_input_batch_key(
             app.state.user_input_batch.as_mut().unwrap().questions[cur].move_up();
         }
         (UserInputMode::Single | UserInputMode::Multiple, KeyCode::Down) => {
+            app.state.user_input_batch.as_mut().unwrap().questions[cur].move_down();
+        }
+        (UserInputMode::Single | UserInputMode::Multiple, KeyCode::Char('k' | 'K'))
+            if !app.state.user_input_batch.as_ref().unwrap().questions[cur].is_other_row() =>
+        {
+            app.state.user_input_batch.as_mut().unwrap().questions[cur].move_up();
+        }
+        (UserInputMode::Single | UserInputMode::Multiple, KeyCode::Char('j' | 'J'))
+            if !app.state.user_input_batch.as_ref().unwrap().questions[cur].is_other_row() =>
+        {
             app.state.user_input_batch.as_mut().unwrap().questions[cur].move_down();
         }
         (_, KeyCode::PageUp) => {

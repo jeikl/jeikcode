@@ -41,10 +41,14 @@ build_target() { # <rust-target> <asset-name>
 # target key 与 updater detect_target() 完全一致; 本 fork 仅发布两个平台:
 # linux-x64 + windows-x64(其余 target 行已按需移除)。
 build_target x86_64-unknown-linux-gnu      atomcode-linux-x64
-build_target x86_64-pc-windows-msvc        atomcode-windows-x64.exe
+build_target x86_64-pc-windows-gnu        atomcode-windows-x64.exe
+build_target x86_64-pc-windows-msvc       atomcode-windows-x64.exe
 
 echo "==> 生成 latest.json"
-python3 - "$VERSION" <<'PY'
+PYTHON_BIN="python3"
+command -v python3 >/dev/null 2>&1 || PYTHON_BIN="python"
+
+"$PYTHON_BIN" - "$VERSION" <<'PY'
 import hashlib, json, os, sys, datetime
 version = sys.argv[1]
 target_map = {

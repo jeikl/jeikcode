@@ -3900,6 +3900,14 @@ async fn run_upgrade_cli(force: bool) -> Result<()> {
                     backup.display()
                 );
                 println!("  Run `atomcode` to start the new version.");
+
+                // 🔍 升级后扫描 ~/.atomcode 全量非模型配置变更并进行多选交互
+                if let Some(home) = dirs::home_dir().map(|h| h.join(".atomcode")) {
+                    let diffs = atomcode::config_sync::scan_atomcode_config_diffs(&home);
+                    if !diffs.is_empty() {
+                        let _ = atomcode::config_sync::prompt_interactive_config_sync(diffs);
+                    }
+                }
             }
             // CLI path never spawns a rollback via this channel and the
             // driver below translates errors into the returned Result

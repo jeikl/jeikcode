@@ -169,12 +169,6 @@ tools:
         required: true
         # 【中文】：命令行指令
         description: "Command string to run."
-      timeout_secs:
-        type: "integer"
-        required: false
-        default: 120
-        # 【中文】：超时秒数
-        description: "Execution timeout in seconds."
 
   # ============================================================================
   # 二、代码智能核心 (Code Intelligence - 默认挂载)

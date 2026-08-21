@@ -14,6 +14,7 @@ fn _isolate_atomcode_home() {
 
 #[cfg(unix)]
 pub mod askpass;
+pub mod config_sync;
 pub mod uninstall;
 
 /// ACP (Agent Client Protocol) stdio server — lets atomcode be driven by Zed /

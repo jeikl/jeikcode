@@ -67,8 +67,7 @@ impl Tool for BashTool {
         json!({
             "type": "object",
             "properties": {
-                "command": { "type": "string", "description": "The shell command to run" },
-                "timeout": { "type": "integer", "description": "Max seconds to wait (default 60, configurable in [tools.bash])" }
+                "command": { "type": "string", "description": "The shell command to run" }
             },
             "required": ["command"]
         })

@@ -125,9 +125,9 @@ pub struct BashToolConfig {
 impl Default for BashToolConfig {
     fn default() -> Self {
         Self {
-            default_timeout_secs: 60,
+            default_timeout_secs: 900,
             max_timeout_secs: 1800,
-            silent_kill_secs: 90,
+            silent_kill_secs: 900,
         }
     }
 }
@@ -3673,9 +3673,9 @@ context_window = 131072
     #[test]
     fn bash_tool_config_defaults_and_parses() {
         let defaulted: Config = toml::from_str("").unwrap();
-        assert_eq!(defaulted.tools.bash.default_timeout_secs, 60);
+        assert_eq!(defaulted.tools.bash.default_timeout_secs, 900);
         assert_eq!(defaulted.tools.bash.max_timeout_secs, 1800);
-        assert_eq!(defaulted.tools.bash.silent_kill_secs, 90);
+        assert_eq!(defaulted.tools.bash.silent_kill_secs, 900);
 
         let configured: Config = toml::from_str(
             "[tools.bash]\ndefault_timeout_secs = 300\nmax_timeout_secs = 3600\nsilent_kill_secs = 600\n",

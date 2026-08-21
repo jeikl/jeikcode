@@ -77,13 +77,8 @@ impl Default for StatusReminderHook {
 
 #[async_trait]
 impl LifecycleHooks for StatusReminderHook {
-    async fn pre_request(&self, messages: &mut Vec<Message>, ctx: &TurnCtx) {
-        // Skip a turn's FIRST round (see module doc: avoids a user-after-user pair on the
-        // wire AND prefix churn on the cacheable user message).
-        if ctx.round < 2 {
-            return;
-        }
-        messages.push(Message::user(Self::render(Local::now(), ctx)));
+    async fn pre_request(&self, _messages: &mut Vec<Message>, _ctx: &TurnCtx) {
+        // 彻底禁用每轮动态注入 <system-reminder>，保持消息流纯净
     }
 }
 

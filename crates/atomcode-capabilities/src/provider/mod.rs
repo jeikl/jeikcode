@@ -127,6 +127,25 @@ pub(crate) fn push_system_coalesced(out: &mut Vec<Value>, text: &str) {
     out.push(json!({ "role": "system", "content": text }));
 }
 
+/// Coalesce consecutive user entries into ONE wire entry.
+/// Appends additional user text to the bottom of the previous user message.
+pub(crate) fn push_user_coalesced(out: &mut Vec<Value>, text: &str) {
+    if let Some(last) = out.last_mut() {
+        if last.get("role").and_then(Value::as_str) == Some("user") {
+            if let Some(prev) = last.get("content").and_then(Value::as_str) {
+                let joined = if prev.is_empty() || text.is_empty() {
+                    format!("{prev}{text}")
+                } else {
+                    format!("{prev}\n\n{text}")
+                };
+                last["content"] = json!(joined);
+                return;
+            }
+        }
+    }
+    out.push(json!({ "role": "user", "content": text }));
+}
+
 /// Map an HTTP error status to a plain-language headline so the TUI shows the
 /// *cause*, not a bare `HTTP 401:` (which, when the server returns an empty
 /// body, carried no hint at all). Shared by every provider protocol

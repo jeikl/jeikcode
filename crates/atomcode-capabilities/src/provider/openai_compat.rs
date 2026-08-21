@@ -888,10 +888,8 @@ fn format_messages(
             Role::User => {
                 if m.images.is_empty() || !supports_vision {
                     // Text-only (no images), OR a vision-incapable target: `content`
-                    // stays a STRING. For the vision-incapable case the image bytes are
-                    // dropped and only the caption (with our `[Image #N]` marker) survives
-                    // — a multimodal array here 400s the whole request on a text model.
-                    out.push(json!({ "role": "user", "content": m.text }));
+                    // stays a STRING. Coalesce consecutive user text into one wire entry.
+                    super::push_user_coalesced(&mut out, &m.text);
                 } else {
                     // Multimodal: `content` becomes an array — text part first (if any),
                     // then each image as an OpenAI `image_url` base64 data URL. NOTE on
@@ -958,7 +956,12 @@ fn format_messages(
                             // repair, then wrap-as-`{"input":…}` if still unsalvageable, so we
                             // never put non-JSON on the wire.
                             let args = if serde_json::from_str::<Value>(&tc.arguments).is_ok() {
-                                tc.arguments.clone()
+                                // 深度清洗：检测历史中残留的破坏性 _truncated 占位符入参，自动修复为合法 Schema
+                                if tc.arguments.contains("_truncated") {
+                                    crate::tools::repair::repair_tool_args(&tc.name, &tc.arguments)
+                                } else {
+                                    tc.arguments.clone()
+                                }
                             } else {
                                 let repaired =
                                     crate::tools::repair::repair_tool_args(&tc.name, &tc.arguments);

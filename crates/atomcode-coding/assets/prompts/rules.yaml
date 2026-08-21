@@ -81,6 +81,7 @@ tools_discipline:
     grep: "Use `grep`, never `bash grep` / `rg`."
     edit: "Use `edit_file` for in-place modifications; never use `sed`/`awk`/scripts to mutate code."
     preview: "Use `open_file` when previewing in GUI is requested."
+    integrity: "NEVER emit placeholder keys (like `_truncated`, `...`) in tool arguments. All calls must be complete valid JSON satisfying the tool's exact schema."
 
   # 硬性工具纪律 (针对弱模型的强约束)
   firm_tool_discipline: >-

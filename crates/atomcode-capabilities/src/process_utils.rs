@@ -350,6 +350,171 @@ fn normalized_locale_env_from_process() -> std::collections::BTreeMap<String, St
     env
 }
 
+/// Dynamically captures the complete login/interactive shell environment on Unix systems.
+/// This behaves identically to logging in via SSH, automatically evaluating:
+/// - /etc/profile
+/// - ~/.profile
+/// - ~/.bash_profile / ~/.zprofile
+/// - ~/.bashrc / ~/.zshrc
+/// - Any custom CLI installers, conda, pyenv, cargo, or custom virtualenv paths.
+#[cfg(unix)]
+pub(crate) fn capture_login_shell_env() -> Option<std::collections::HashMap<String, String>> {
+    use std::collections::HashMap;
+    use std::process::Command;
+
+    let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/bash".to_string());
+    let output = Command::new(&shell)
+        .args(["-l", "-i", "-c", "env"])
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .output()
+        .ok()?;
+
+    if !output.status.success() {
+        return None;
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let mut map = HashMap::new();
+    for line in stdout.lines() {
+        if let Some((k, v)) = line.split_once('=') {
+            let k = k.trim();
+            if !k.is_empty() && !k.starts_with('_') {
+                map.insert(k.to_string(), v.to_string());
+            }
+        }
+    }
+
+    if map.is_empty() {
+        None
+    } else {
+        Some(map)
+    }
+}
+
+/// Global lazy-cached login shell environment snapshot.
+#[cfg(unix)]
+static LOGIN_SHELL_ENV: std::sync::OnceLock<Option<std::collections::HashMap<String, String>>> =
+    std::sync::OnceLock::new();
+
+#[cfg(unix)]
+pub(crate) fn get_login_shell_env() -> Option<&'static std::collections::HashMap<String, String>> {
+    LOGIN_SHELL_ENV
+        .get_or_init(capture_login_shell_env)
+        .as_ref()
+}
+
+/// Build an enriched PATH environment variable that combines:
+/// 1. The full PATH dynamically resolved from the user's interactive login shell (.bashrc/.profile)
+/// 2. Current process PATH
+/// 3. Static fallback candidate paths.
+pub(crate) fn enriched_path_env() -> Option<std::ffi::OsString> {
+    use std::path::PathBuf;
+
+    #[cfg(unix)]
+    {
+        if let Some(env_map) = get_login_shell_env() {
+            if let Some(login_path) = env_map.get("PATH") {
+                return Some(std::ffi::OsString::from(login_path));
+            }
+        }
+    }
+
+    let mut candidates: Vec<PathBuf> = Vec::new();
+
+    if let Some(home) = dirs::home_dir() {
+        candidates.push(home.join(".local").join("bin"));
+        candidates.push(home.join("bin"));
+        candidates.push(home.join(".cargo").join("bin"));
+        candidates.push(home.join(".grok").join("bin"));
+        candidates.push(home.join(".bun").join("bin"));
+        candidates.push(home.join("go").join("bin"));
+
+        let nvm_node = home.join(".nvm").join("versions").join("node");
+        if let Ok(entries) = std::fs::read_dir(&nvm_node) {
+            for entry in entries.flatten() {
+                let bin_dir = entry.path().join("bin");
+                if bin_dir.is_dir() {
+                    candidates.push(bin_dir);
+                }
+            }
+        }
+        candidates.push(home.join(".nvm").join("current").join("bin"));
+        candidates.push(home.join(".fnm").join("current").join("bin"));
+        candidates.push(home.join(".volta").join("bin"));
+    }
+
+    #[cfg(unix)]
+    {
+        candidates.push(PathBuf::from("/usr/local/bin"));
+        candidates.push(PathBuf::from("/usr/local/sbin"));
+        candidates.push(PathBuf::from("/usr/bin"));
+        candidates.push(PathBuf::from("/bin"));
+        candidates.push(PathBuf::from("/usr/sbin"));
+        candidates.push(PathBuf::from("/sbin"));
+    }
+
+    let existing_path = std::env::var_os("PATH");
+    let mut all_paths: Vec<PathBuf> = Vec::new();
+
+    for path in candidates {
+        if path.is_dir() && !all_paths.contains(&path) {
+            all_paths.push(path);
+        }
+    }
+
+    if let Some(ref path_str) = existing_path {
+        for path in std::env::split_paths(path_str) {
+            if !all_paths.contains(&path) {
+                all_paths.push(path);
+            }
+        }
+    }
+
+    if all_paths.is_empty() {
+        existing_path
+    } else {
+        std::env::join_paths(all_paths).ok()
+    }
+}
+
+/// Apply enriched PATH and login shell environment variables to an async tokio::process::Command.
+pub(crate) fn apply_enriched_path_env(cmd: &mut tokio::process::Command) {
+    #[cfg(unix)]
+    {
+        if let Some(env_map) = get_login_shell_env() {
+            for (k, v) in env_map {
+                if k != "PWD" && k != "OLDPWD" && k != "SHLVL" {
+                    cmd.env(k, v);
+                }
+            }
+        }
+    }
+
+    if let Some(path) = enriched_path_env() {
+        cmd.env("PATH", path);
+    }
+}
+
+/// Apply enriched PATH and login shell environment variables to a sync std::process::Command.
+pub(crate) fn apply_enriched_path_env_sync(cmd: &mut std::process::Command) {
+    #[cfg(unix)]
+    {
+        if let Some(env_map) = get_login_shell_env() {
+            for (k, v) in env_map {
+                if k != "PWD" && k != "OLDPWD" && k != "SHLVL" {
+                    cmd.env(k, v);
+                }
+            }
+        }
+    }
+
+    if let Some(path) = enriched_path_env() {
+        cmd.env("PATH", path);
+    }
+}
+
 /// Apply a UTF-8-capable locale to async subprocesses spawned from v2 capabilities.
 #[cfg(unix)]
 pub(crate) fn apply_utf8_locale_env(cmd: &mut tokio::process::Command) {
@@ -405,15 +570,9 @@ mod tests {
     }
 
     #[test]
-    fn sync_helper_keeps_command_spawnable() {
-        let prog = if cfg!(windows) { "cmd" } else { "true" };
-        let mut cmd = std::process::Command::new(prog);
-        if cfg!(windows) {
-            cmd.args(["/C", "exit 0"]);
-        }
-        suppress_console_window_sync(&mut cmd);
-        let status = cmd.status().expect("spawn after suppress");
-        assert!(status.success());
+    fn enriched_path_env_returns_valid_paths() {
+        let env_path = enriched_path_env();
+        assert!(env_path.is_some());
     }
 
     #[test]

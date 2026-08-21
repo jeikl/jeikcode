@@ -1647,8 +1647,25 @@ const ATOMCODE_PERSONA_PREFIX: &str =
 const MODEL_CHANGE_CONTEXT_PREFIX: &str = "=== MODEL CHANGE ===";
 
 fn persona_model(text: &str) -> Option<&str> {
-    text.strip_prefix(ATOMCODE_PERSONA_PREFIX)
-        .and_then(|rest| rest.split_once(" model.").map(|(model, _)| model))
+    if let Some(rest) = text.strip_prefix(ATOMCODE_PERSONA_PREFIX) {
+        return rest.split_once(" model.").map(|(model, _)| model);
+    }
+    // Handle custom persona templates, e.g., "You are JeikCode, an AI coding agent by JeikCode running the {model} model."
+    if let Some(pos) = text.find(" running the ") {
+        let rest = &text[pos + " running the ".len()..];
+        return rest.split_once(" model.").map(|(model, _)| model);
+    }
+    None
+}
+
+fn is_persona_message(message: &Message) -> bool {
+    if message.role != Role::System {
+        return false;
+    }
+    message.text.starts_with(ATOMCODE_PERSONA_PREFIX)
+        || (message.text.contains(" running the ")
+            && message.text.contains(" model.")
+            && (message.text.contains("## PRECEDENCE:") || message.text.contains("## WORKFLOW:")))
 }
 
 /// Legacy drivers persist conversation history without the separately supplied
@@ -1668,9 +1685,7 @@ fn reconcile_coding_persona(
         request_user_input_enabled,
         review_enabled,
     );
-    let is_persona = |message: &Message| {
-        message.role == Role::System && message.text.starts_with(ATOMCODE_PERSONA_PREFIX)
-    };
+    let is_persona = |message: &Message| is_persona_message(message);
     let is_model_change = |message: &Message| {
         message.role == Role::System && message.text.starts_with(MODEL_CHANGE_CONTEXT_PREFIX)
     };

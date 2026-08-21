@@ -315,7 +315,7 @@ fn shell_tool_description(
     macro_rules! base {
         () => {
             "Run a shell command in the working directory and return its combined \
-             stdout/stderr and exit code. Default timeout 60s (max 300). Destructive \
+             stdout/stderr and exit code. Destructive \
              commands (recursive force delete, sudo, dd, history rewrites, …) are flagged \
              risky and may require approval.\n\
              Prefer the dedicated tools over bash for file operations — they are \

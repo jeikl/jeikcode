@@ -952,18 +952,46 @@ impl CompatProjector {
                 ));
             }
             ChatEvent::Error { message } => {
+                let err_text = format!("\n\n[Error / Upstream Details]\n{message}");
+                let text_item_id = format!("msg_{}", self.next_block);
                 out.push(self.responses_event(
-                    "response.failed",
+                    "response.output_item.added",
                     json!({
-                        "type": "response.failed",
-                        "response": {
-                            "id": self.response_id,
-                            "status": "failed",
-                            "error": { "message": message }
+                        "type": "response.output_item.added",
+                        "output_index": 0,
+                        "item": {
+                            "id": text_item_id,
+                            "type": "message",
+                            "status": "completed",
+                            "role": "assistant",
+                            "content": [{
+                                "type": "output_text",
+                                "text": err_text
+                            }]
                         }
                     }),
                 ));
-            }
+                out.push(self.responses_event(
+                    "response.completed",
+                    json!({
+                        "type": "response.completed",
+                        "response": {
+                            "id": self.response_id,
+                            "status": "completed",
+                            "output": [{
+                                "id": text_item_id,
+                                "type": "message",
+                                "status": "completed",
+                                "role": "assistant",
+                                "content": [{
+                                "type": "output_text",
+                                "text": err_text
+                            }]
+                        }]
+                    }
+                }),
+            ));
+        }
             _ => {}
         }
         out
@@ -1235,16 +1263,59 @@ impl CompatProjector {
                 });
             }
             ChatEvent::Error { message } => {
+                let err_text = format!("\n\n[Error / Upstream Details]\n{message}");
+                if self.text_block.is_none() {
+                    let idx = self.next_block;
+                    self.next_block += 1;
+                    self.text_block = Some(idx);
+                    out.push(SseChunk {
+                        event: Some("content_block_start".into()),
+                        data: json!({
+                            "type": "content_block_start",
+                            "index": idx,
+                            "content_block": { "type": "text", "text": "" }
+                        })
+                        .to_string(),
+                    });
+                }
+                let text_block_idx = self.text_block.unwrap_or(0);
                 out.push(SseChunk {
-                    event: Some("error".into()),
+                    event: Some("content_block_delta".into()),
                     data: json!({
-                        "type": "error",
-                        "error": {
-                            "type": "api_error",
-                            "message": message
+                        "type": "content_block_delta",
+                        "index": text_block_idx,
+                        "delta": {
+                            "type": "text_delta",
+                            "text": err_text
                         }
                     })
                     .to_string(),
+                });
+                out.push(SseChunk {
+                    event: Some("content_block_stop".into()),
+                    data: json!({
+                        "type": "content_block_stop",
+                        "index": text_block_idx
+                    })
+                    .to_string(),
+                });
+                out.push(SseChunk {
+                    event: Some("message_delta".into()),
+                    data: json!({
+                        "type": "message_delta",
+                        "delta": {
+                            "stop_reason": "end_turn",
+                            "stop_sequence": null
+                        },
+                        "usage": {
+                            "output_tokens": 0
+                        }
+                    })
+                    .to_string(),
+                });
+                out.push(SseChunk {
+                    event: Some("message_stop".into()),
+                    data: json!({ "type": "message_stop" }).to_string(),
                 });
             }
             _ => {}

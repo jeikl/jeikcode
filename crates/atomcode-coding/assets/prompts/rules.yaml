@@ -11,12 +11,13 @@ version: "2.0.0"
 # 1. 核心工作流程 (Workflow)
 # ------------------------------------------------------------------------------
 workflow:
-  # 第一轮探索反射：先看整体结构，再精准下潜
-  # 【中文】：在面对陌生的代码库时，第一轮必须在同一次请求中并行调用 list_directory 与 repo_map，快速建立全景目录树；一旦明确大致模块，立即使用 code_explore 进行深度探索，避免无目的地盲目 grep。
+  # 第一轮探索反射：结构导航后，立即以 code_explore (CodeGraph) 为核心主力深度下潜
+  # 【中文】：在面对代码库或架构问题时，第一轮通过 repo_map/list_directory 建立结构后，必须立即把 code_explore 作为核心主力工具（Core Tool），直接获取调用图与源码，严禁陷入多轮低效的 grep-and-read 漫游。
   first_round_reflex: >-
     FIRST-ROUND REFLEX — STRUCTURE THEN DIVE: On an unfamiliar repository or broad architecture question,
     your FIRST turn establishes the FILE STRUCTURE — call `list_directory` (depth 2-3) AND `repo_map` in parallel.
-    Once you know the general layer, DIVE with `code_explore` for the call-graph panorama plus verbatim source.
+    Once you know the general layer, DIVE with `code_explore` as your CORE tool for the full call-graph panorama
+    plus verbatim source, replacing multi-round grep-and-wander.
   
   # 针对性精准探索 (核心主力)
   # 【中文】：对于任何功能咨询、调用链路追踪或 bug 排查，先 repo_map 看大观，再把 code_explore 的 path 锁到具体子目录（禁止传 `.` / `./` / `~` / 工作区根）。只有 repo_map 可以扫全仓。
@@ -32,11 +33,12 @@ workflow:
     NEVER jump to negative conclusions ("the project lacks X mechanism") based on a single code snippet.
     Trait/interface is just declaration; implementations live at `impl <name>` in other files.
 
-  # 双通道并行探索
-  # 【中文】：在同一轮中并行触发 grep（精确关键词）与 code_explore（自然语言/语义调用链），两者互为补充。
+  # 双通道并行探索：code_explore (CodeGraph) 为主，grep 为辅
+  # 【中文】：探索时 code_explore 是首要核心（语义意图、调用关系图、连带源码一网打尽），grep 仅用于补充精确字面量匹配。
   batched_parallel_exploration: >-
-    BATCHED PARALLEL EXPLORATION: Fire `grep` (exact keywords) AND `code_explore` (semantic/call graphs) IN PARALLEL
-    in the same turn — they are complementary channels.
+    BATCHED PARALLEL EXPLORATION — CODE_EXPLORE IS CORE: Fire `code_explore` (semantic/call graphs/flow panorama)
+    AND `grep` (exact keywords) IN PARALLEL. `code_explore` is the primary code-intelligence engine; use grep
+    only as a secondary channel for literal constants.
 
   # 任务的标准阶段 — 批量读、批量改、一次验证，禁止「一小改一测试」。
   general_phases:
@@ -75,10 +77,11 @@ tools_discipline:
 
   # 工具首选规范
   tool_preferences:
-    read: "Use `read_file`, never `bash cat`."
+    explore: "Use `code_explore` as the PRIMARY code-intelligence tool to understand flows, caller/callee trees, and cross-file architecture before reading raw files."
+    read: "Use `read_file`, never `bash cat`. Use it for reading full files or specific spans after code_explore outlines the targets."
     list: "Use `list_directory`, never `bash ls`."
     glob: "Use `glob`, never `bash find`."
-    grep: "Use `grep`, never `bash grep` / `rg`."
+    grep: "Use `grep`, never `bash grep` / `rg`. Reserve grep for exact text literals or regex patterns."
     edit: "Use `edit_file` for in-place modifications; never use `sed`/`awk`/scripts to mutate code."
     preview: "Use `open_file` when previewing in GUI is requested."
     integrity: "NEVER emit placeholder keys (like `_truncated`, `...`) in tool arguments. All calls must be complete valid JSON satisfying the tool's exact schema."
@@ -93,6 +96,10 @@ tools_discipline:
 # ------------------------------------------------------------------------------
 locating_code:
   repo_map_rule: "Use `repo_map` in Round 1 for global AST architecture and directory structure."
+  explore_first: >-
+    PRIMARY EXPLORATION: For ANY investigation into features, execution flow, or bugs, ALWAYS prioritize
+    `code_explore` with natural language or key symbols — it traverses the full call tree and delivers
+    verbatim code in one round-trip, replacing manual grep + read loops.
   business_concepts: >-
     When user mentions business concepts (e.g. 优惠券, 结算, 开票, 扣减库存, 审批流):
     Call `code_explore` with the concept name — NLP and thesaurus will link to corresponding code.

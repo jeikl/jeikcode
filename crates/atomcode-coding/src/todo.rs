@@ -191,26 +191,7 @@ impl LifecycleHooks for TodoHook {
     async fn pre_request(&self, messages: &mut Vec<Message>, _ctx: &TurnCtx) {
         let todos = derive_current_todos(messages);
         self.sync_live(&todos);
-        if todos.is_empty() {
-            return;
-        }
-        // ASCII-safe body (the model doesn't need glyph prettiness; the TUI renders
-        // the pretty version). Tail-append so the cached prefix is preserved.
-        // The anchor line (mid-work drift backstop) leads, so the current in_progress
-        // pointer is the first thing the model sees — above the list and the rules.
-        let anchor = todo_anchor_line(&todos)
-            .map(|a| format!("{a}\n\n"))
-            .unwrap_or_default();
-        let body = format!(
-            "{anchor}Current task list (each line is `#<id> <task>`) — keep it accurate and finish it:\n\
-- The MOMENT you START or FINISH items: one `todowrite` with `actions` covering every status change you already know (e.g. complete #1 and set #2 `in_progress` in the SAME array).\n\
-- Skip `todowrite` this turn if the list already matches reality. Never re-mark an item already in that status.\n\
-- First plan / replace a plan: `actions` of `add`s (plus `clear` first if replacing). Do NOT resend a full `todos` list.\n\
-- Do NOT stop, summarize, or hand back while ANY item is still pending or in_progress — keep working through them, unless you truly need approval, are genuinely stuck, or the request is ambiguous.\n\
-{}",
-            render_todos_numbered(&todos, false)
-        );
-        messages.push(Message::user(system_reminder(&body)));
+        // 彻底禁用每轮向消息末尾注入 <system-reminder>，防止上下文污染与串行干扰
     }
 
     /// The model wants to stop. If the task list still has OPEN items (pending or in_progress),

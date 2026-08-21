@@ -141,6 +141,7 @@ impl Tool for BashTool {
         };
         #[cfg(unix)]
         crate::process_utils::apply_utf8_locale_env(&mut cmd);
+        crate::process_utils::apply_enriched_path_env(&mut cmd);
         // Windows GBK locale (CP936): a Python child the model runs (python -c, scripts)
         // defaults its `subprocess` text pipes AND stdio to the console code page, so reading
         // UTF-8 output with the GBK codec dies with UnicodeDecodeError (#876). `PYTHONUTF8=1`
@@ -2415,6 +2416,7 @@ pub async fn run_shell(
             // grandchildren that setsid() detached from us).
             .kill_on_drop(true);
         crate::process_utils::apply_utf8_locale_env(&mut cmd);
+        crate::process_utils::apply_enriched_path_env(&mut cmd);
         // Detach child from the controlling terminal so neither it nor any
         // grandchild (ssh, git credential helpers, server-side hook output
         // rendered by git) can write directly to /dev/tty.  Without this,

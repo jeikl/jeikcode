@@ -1695,16 +1695,14 @@ fn reconcile_coding_persona(
         .find(|message| is_persona(message))
         .and_then(|message| persona_model(&message.text))
         .map(str::to_owned);
-    let retained_model_change = if previous_model.as_deref() == Some(cfg.model.as_str()) {
-        snapshot
-            .messages
-            .iter()
-            .rev()
-            .find(|message| is_model_change(message))
-            .cloned()
-    } else {
+    let existing_transition = snapshot.messages.iter().find_map(|m| {
+        if m.role == Role::System {
+            if let Some(idx) = m.text.find(MODEL_CHANGE_CONTEXT_PREFIX) {
+                return Some(m.text[idx..].to_string());
+            }
+        }
         None
-    };
+    });
     let already_current = snapshot
         .messages
         .first()
@@ -1727,15 +1725,21 @@ fn reconcile_coding_persona(
     snapshot
         .messages
         .retain(|message| !is_persona(message) && !is_model_change(message));
-    snapshot.messages.insert(0, Message::system(persona));
-    if let Some(previous_model) = previous_model.filter(|previous| previous != &cfg.model) {
-        snapshot.messages.push(Message::system(format!(
-            "{MODEL_CHANGE_CONTEXT_PREFIX}\nThe active model changed from {previous_model} to {model}. From this point onward, {model} is the current model. Treat any earlier assistant claim about its model identity as historical context, not the current runtime identity.",
+    
+    // 如果发生了模型切换，将模型切换通知安全地作为系统前缀的一部分附加在 persona 末尾，
+    // 严禁作为独立 System 消息 push 到历史消息末尾（否则会导致中间插入 System 消息而被 Gemini/OpenAI/Claude 协议丢弃或报错导致 content 为空）
+    let full_persona = if let Some(previous_model) = previous_model.filter(|previous| previous != &cfg.model) {
+        format!(
+            "{persona}\n\n{MODEL_CHANGE_CONTEXT_PREFIX}\nThe active model changed from {previous_model} to {model}. From this point onward, {model} is the current model. Treat any earlier assistant claim about its model identity as historical context, not the current runtime identity.",
             model = cfg.model
-        )));
-    } else if let Some(model_change) = retained_model_change {
-        snapshot.messages.push(model_change);
-    }
+        )
+    } else if let Some(retained) = existing_transition {
+        format!("{persona}\n\n{retained}")
+    } else {
+        persona
+    };
+
+    snapshot.messages.insert(0, Message::system(full_persona));
     snapshot.cache_epoch = snapshot.cache_epoch.saturating_add(1);
 }
 
@@ -1938,26 +1942,15 @@ mod tests {
         let personas = snapshot
             .messages
             .iter()
-            .filter(|message| message.text.starts_with(ATOMCODE_PERSONA_PREFIX))
+            .filter(|message| is_persona_message(message))
             .count();
         assert_eq!(personas, 1);
         assert!(snapshot.messages[0]
             .text
             .contains("running the deepseek-v4-flash model"));
-        assert!(!snapshot.messages[0].text.contains("old-model"));
-        let transitions: Vec<_> = snapshot
-            .messages
-            .iter()
-            .filter(|message| message.text.starts_with(MODEL_CHANGE_CONTEXT_PREFIX))
-            .collect();
-        assert_eq!(transitions.len(), 1);
-        assert!(transitions[0].text.contains("old-model"));
-        assert!(transitions[0].text.contains("deepseek-v4-flash"));
-        assert_eq!(
-            snapshot.messages.last(),
-            transitions.first().copied(),
-            "the model-change boundary must be the most recent system context"
-        );
+        assert!(snapshot.messages[0].text.contains(MODEL_CHANGE_CONTEXT_PREFIX));
+        assert!(snapshot.messages[0].text.contains("old-model"));
+        assert!(snapshot.messages[0].text.contains("deepseek-v4-flash"));
         assert_eq!(snapshot.cache_epoch, 1);
     }
 
@@ -1979,16 +1972,10 @@ mod tests {
         reconcile_coding_persona(&mut snapshot, &agent_config("model-b"), true, true, true);
         reconcile_coding_persona(&mut snapshot, &agent_config("model-c"), true, true, true);
 
-        let transitions: Vec<_> = snapshot
-            .messages
-            .iter()
-            .filter(|message| message.text.starts_with(MODEL_CHANGE_CONTEXT_PREFIX))
-            .collect();
-        assert_eq!(transitions.len(), 1);
-        assert!(transitions[0].text.contains("model-b"));
-        assert!(transitions[0].text.contains("model-c"));
-        assert!(!transitions[0].text.contains("model-a"));
-        assert_eq!(snapshot.messages.last(), transitions.first().copied());
+        assert!(snapshot.messages[0].text.contains(MODEL_CHANGE_CONTEXT_PREFIX));
+        assert!(snapshot.messages[0].text.contains("model-b"));
+        assert!(snapshot.messages[0].text.contains("model-c"));
+        assert!(!snapshot.messages[0].text.contains("model-a"));
     }
 
     #[test]
@@ -2060,21 +2047,14 @@ mod tests {
             Message::assistant("I am model-a", vec![]),
         ]);
         reconcile_coding_persona(&mut snapshot, &agent_config("model-b"), true, true, true);
-        let transition = snapshot.messages.last().cloned().unwrap();
         let mut cfg = agent_config("model-b");
         cfg.preferred_language = Some(Locale::ZhCn);
 
         reconcile_coding_persona(&mut snapshot, &cfg, true, true, true);
 
-        assert_eq!(snapshot.messages.last(), Some(&transition));
-        assert_eq!(
-            snapshot
-                .messages
-                .iter()
-                .filter(|message| message.text.starts_with(MODEL_CHANGE_CONTEXT_PREFIX))
-                .count(),
-            1
-        );
+        assert!(snapshot.messages[0].text.contains(MODEL_CHANGE_CONTEXT_PREFIX));
+        assert!(snapshot.messages[0].text.contains("model-a"));
+        assert!(snapshot.messages[0].text.contains("model-b"));
     }
 
     #[tokio::test]

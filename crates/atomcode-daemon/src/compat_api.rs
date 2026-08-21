@@ -1109,7 +1109,8 @@ async fn collect_compat_response(
         }
     };
 
-    let mut text = String::new();
+    let mut text_blocks: Vec<String> = Vec::new();
+    let mut current_block = String::new();
     let mut reasoning = String::new();
     let mut tool_trace = String::new();
     let mut session_id = String::new();
@@ -1120,9 +1121,12 @@ async fn collect_compat_response(
         // Still run projector for any side effects / ordering consistency.
         let _ = projector.project(event.clone());
         match event {
-            ChatEvent::TextDelta { content } => text.push_str(&content),
+            ChatEvent::TextDelta { content } => current_block.push_str(&content),
             ChatEvent::ReasoningDelta { content } => reasoning.push_str(&content),
             ChatEvent::ToolBatchStarted { calls } => {
+                if !current_block.is_empty() {
+                    text_blocks.push(std::mem::take(&mut current_block));
+                }
                 for c in calls {
                     tool_trace.push_str(&format!(
                         "\n[tool_start] {} ({}) parallel\n{}\n",
@@ -1131,6 +1135,9 @@ async fn collect_compat_response(
                 }
             }
             ChatEvent::ToolCallStarted { id, name, arguments } => {
+                if !current_block.is_empty() {
+                    text_blocks.push(std::mem::take(&mut current_block));
+                }
                 tool_trace.push_str(&format!("\n[tool_start] {name} ({id})\n{arguments}\n"));
             }
             ChatEvent::ToolOutputChunk { id, chunk } => {
@@ -1146,6 +1153,9 @@ async fn collect_compat_response(
                 success,
                 ..
             } => {
+                if !current_block.is_empty() {
+                    text_blocks.push(std::mem::take(&mut current_block));
+                }
                 tool_trace.push_str(&format!(
                     "\n[tool_result] {name} ({id}) success={success}\n{output}\n"
                 ));
@@ -1164,21 +1174,33 @@ async fn collect_compat_response(
                     }
                 }
             }
-            ChatEvent::Error { message } => error = Some(message),
+            ChatEvent::Error { message } => {
+                error = Some(message);
+            }
             _ => {}
         }
     }
+    if !current_block.is_empty() {
+        text_blocks.push(current_block);
+    }
     active_conns.fetch_sub(1, Ordering::Relaxed);
 
-    if let Some(err) = error.filter(|_e| text.is_empty() && reasoning.is_empty()) {
-        return api_error(StatusCode::BAD_GATEWAY, err, "turn_failed");
-    }
+    // 核心实现：非流式下只返回最后一段真正回答用户的有效 content；若触发错误，则将完整错误信息作为正文返回
+    let final_text = if let Some(err_msg) = error {
+        if let Some(last) = text_blocks.last().filter(|s| !s.trim().is_empty()) {
+            format!("{last}\n\n[Error / Upstream Details]\n{err_msg}")
+        } else {
+            format!("[Error / Upstream Details]\n{err_msg}")
+        }
+    } else {
+        text_blocks.pop().unwrap_or_default()
+    };
 
     match format {
         WireFormat::OpenAiChat => {
             let mut message = json!({
                 "role": "assistant",
-                "content": text,
+                "content": final_text,
             });
             if !reasoning.is_empty() {
                 message["reasoning_content"] = json!(reasoning);
@@ -1225,7 +1247,7 @@ async fn collect_compat_response(
             output.push(json!({
                 "type": "message",
                 "role": "assistant",
-                "content": [{"type": "output_text", "text": text}]
+                "content": [{"type": "output_text", "text": final_text}]
             }));
             Json(json!({
                 "id": id,
@@ -1247,7 +1269,7 @@ async fn collect_compat_response(
             if !tool_trace.is_empty() {
                 content.push(json!({"type": "text", "text": tool_trace}));
             }
-            content.push(json!({"type": "text", "text": text}));
+            content.push(json!({"type": "text", "text": final_text}));
             Json(json!({
                 "id": id,
                 "type": "message",

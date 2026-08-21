@@ -5,6 +5,10 @@
     "windows-x64": {
       "sha256": "7389341014c15ed4579aaaeda272ea42b480b53627225fa5acd29708da58f183",
       "size": 63981056
+    },
+    "linux-x64": {
+      "sha256": "cf573282876b6004552f4e566269e6b89e96aba8a74e2602af6fd4ccf5b1b34c",
+      "size": 54152288
     }
   }
 }

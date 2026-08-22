@@ -8717,14 +8717,21 @@ pub async fn run_loop(mut ctx: LoopCtx, renderer: &mut dyn Renderer) -> Result<E
                 }
             }
 
-            // ── Suspend ──
+            // ── Suspend / Terminal signal ──
             _ = sigtstp.recv() => {
-                renderer.render(UiLine::ClearTransient);
-                renderer.shutdown();
-                app.state.on_suspend();
-                // Disable raw mode before SIGSTOP so shell gets a sane terminal.
-                let _ = crossterm::terminal::disable_raw_mode();
-                unsafe { libc::raise(libc::SIGSTOP); }
+                // Do not raise SIGSTOP to suspend the process, which drops the CLI to shell [1]+ Stopped.
+                // Keep terminal in raw mode and refresh UI.
+                let _ = crossterm::terminal::enable_raw_mode();
+                renderer.reset();
+                match app.state.phase {
+                    UiPhase::Streaming => {
+                        draw_spinner_now(&mut app.state, &app.buf, &ctx, renderer, app.message_queue.len(), app.menu.selected);
+                    }
+                    _ => {
+                        redraw_idle_plain(&app.buf, &app.state, &ctx, renderer);
+                    }
+                }
+                renderer.flush();
             }
 
             // ── Resume ──

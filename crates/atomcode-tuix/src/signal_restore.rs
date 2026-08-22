@@ -95,6 +95,11 @@ pub(crate) fn arm() {
         for sig in [libc::SIGTERM, libc::SIGINT, libc::SIGHUP] {
             libc::sigaction(sig, &sa, core::ptr::null_mut());
         }
+        // Ignore job-control stopping signals so reading stdin/tcsetattr or terminal key sequences
+        // never cause the Linux kernel to stop the process ([1]+ Stopped).
+        libc::signal(libc::SIGTTIN, libc::SIG_IGN);
+        libc::signal(libc::SIGTTOU, libc::SIG_IGN);
+        libc::signal(libc::SIGTSTP, libc::SIG_IGN);
     }
 }
 

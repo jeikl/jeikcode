@@ -125,7 +125,8 @@ async fn full_assembly_lifecycle() {
         }
     }
 
-    // Leading-system run order: persona → SESSION CONTEXT → MEMORY, all BEFORE the user.
+    // Prefix order: persona → SESSION CONTEXT (System) → MEMORY (frozen synthetic User),
+    // all BEFORE the real query. Memory is user-owned so it sits in sacred_floor.
     {
         let calls = calls1.lock().unwrap();
         let first = &calls[0].0;
@@ -142,28 +143,35 @@ async fn full_assembly_lifecycle() {
             shape()
         );
         assert!(
-            first[2].role == Role::System && first[2].text.starts_with("=== MEMORY ==="),
-            "memory block injected after the context block: {:?}",
+            first[2].role == Role::User
+                && first[2].synthetic
+                && first[2].text.starts_with("=== MEMORY ==="),
+            "memory block injected as frozen user prefix after the context block: {:?}",
             shape()
         );
         assert!(first[2].text.contains("prefers tabs"));
-        // StatusReminderHook is SKIPPED on a turn's round 1 (this is a single-round text
-        // turn), so NO status tail rides this request — the last message is the user turn,
-        // not a "<system-reminder>". (The reminder appears from round 2 onward; covered by
-        // the hook's own unit tests.)
+        // StatusReminderHook injects a synthetic date user ABOVE the real query
+        // (Grok Build order). The last message is still the user's turn.
         assert_eq!(
             first.last().unwrap().role,
             Role::User,
             "round 1 ends at the user turn"
         );
-        // Scope to USER messages: the reminder is a user-role tail. (The persona — a System
-        // message — legitimately *mentions* the `<system-reminder>` tag to explain it, so a
-        // blanket text search would false-positive on the persona.)
         assert!(
-            !first
-                .iter()
-                .any(|m| m.role == Role::User && m.text.contains("<system-reminder>")),
-            "no status reminder (user tail) on a turn's round 1: {:?}",
+            !first.last().unwrap().synthetic,
+            "last user must be the real query, not a reminder"
+        );
+        let reminder = first
+            .iter()
+            .rev()
+            .nth(1)
+            .expect("date reminder sits immediately above the query");
+        assert!(
+            reminder.synthetic
+                && reminder.role == Role::User
+                && reminder.text.contains("<system-reminder>")
+                && reminder.text.contains("Current date"),
+            "date reminder above query: {:?}",
             shape()
         );
     }
@@ -237,8 +245,18 @@ async fn full_assembly_lifecycle() {
         assert!(first.iter().any(|m| m.text == "the second task"));
         let system_count = first.iter().filter(|m| m.role == Role::System).count();
         assert_eq!(
-            system_count, 3,
-            "persona + session-context + memory exactly once each (resume reconciles in place, no double-inject)"
+            system_count, 2,
+            "persona + session-context exactly once each (resume reconciles in place, no double-inject)"
+        );
+        let memory_count = first
+            .iter()
+            .filter(|m| {
+                m.role == Role::User && m.synthetic && m.text.starts_with("=== MEMORY ===")
+            })
+            .count();
+        assert_eq!(
+            memory_count, 1,
+            "memory frozen user prefix exactly once (resume reconciles in place, no double-inject)"
         );
     }
 

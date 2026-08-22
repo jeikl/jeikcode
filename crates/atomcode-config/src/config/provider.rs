@@ -154,7 +154,7 @@ pub fn resolve_supports_vision(
         return v;
     }
     match provider_type {
-        "openai" | "claude" | "anthropic" => false,
+        "openai" | "claude" | "anthropic" | "responses" | "openai-responses" => false,
         _ => crate::util::model_name_suggests_vision(model),
     }
 }
@@ -185,6 +185,40 @@ pub fn resolve_is_reasoning_model(
         || u.contains("mimo")
 }
 
+/// Cycle list for Ctrl+T / `/effort` when `reasoning_levels` is unset.
+///
+/// Any Grok model gets the four official gears (`low/medium/high/xhigh`).
+/// DeepSeek V4-style models get `max` as the top gear. Everything else uses
+/// the three-step `low/medium/high` ladder.
+///
+/// `reasoning_effort` (the current wire value) is a **separate** field: set
+/// either one and the UI still shows the control; this list is what gets cycled.
+pub fn default_reasoning_levels_for(model: &str) -> Vec<String> {
+    let m = model.to_ascii_lowercase();
+    if m.contains("grok") {
+        vec![
+            "low".into(),
+            "medium".into(),
+            "high".into(),
+            "xhigh".into(),
+        ]
+    } else if m.contains("deepseek") || m.contains("v4") {
+        vec!["low".into(), "medium".into(), "high".into(), "max".into()]
+    } else {
+        vec!["low".into(), "medium".into(), "high".into()]
+    }
+}
+
+/// Suggested current gear when adding a model that has no `reasoning_effort` yet.
+pub fn default_reasoning_effort_for(model: &str) -> Option<String> {
+    let m = model.to_ascii_lowercase();
+    if m.contains("grok") {
+        Some("high".into())
+    } else {
+        None
+    }
+}
+
 /// A provider *account*: a reusable connection + credential identity (new schema,
 /// design §3.2). `provider` references a preset id (see
 /// [`super::provider_preset`]) or a custom-compatible preset. One account can
@@ -193,7 +227,7 @@ pub fn resolve_is_reasoning_model(
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProviderAccountConfig {
     /// Preset id or custom protocol preset (`openai-compatible` /
-    /// `anthropic-compatible`).
+    /// `anthropic-compatible` / `responses-compatible`).
     pub provider: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub display_name: Option<String>,
@@ -394,20 +428,18 @@ impl ProviderConfig {
     }
 
     /// Retrieve the effective reasoning effort levels for this provider.
+    ///
+    /// `reasoning_levels` (the Ctrl+T cycle list) wins when set. Otherwise the
+    /// model-name heuristic in [`default_reasoning_levels_for`] applies.
+    /// `reasoning_effort` is the *current* gear sent on the wire — a different
+    /// field. Setting either is enough for the UI to show the control.
     pub fn effective_reasoning_levels(&self) -> Vec<String> {
         if let Some(ref levels) = self.reasoning_levels {
             if !levels.is_empty() {
                 return levels.clone();
             }
         }
-        let m_lower = self.model.to_ascii_lowercase();
-        if m_lower.contains("grok") {
-            vec!["low".into(), "medium".into(), "high".into(), "xhigh".into()]
-        } else if m_lower.contains("deepseek") || m_lower.contains("v4") {
-            vec!["low".into(), "medium".into(), "high".into(), "max".into()]
-        } else {
-            vec!["low".into(), "medium".into(), "high".into()]
-        }
+        default_reasoning_levels_for(&self.model)
     }
 
     /// Resolve the API key for this provider, taking environment variables into account.
@@ -440,7 +472,9 @@ impl ProviderConfig {
         }
 
         let env_var = match self.provider_type.as_str() {
-            "openai" | "openai-compat" | "openai_compat" => "OPENAI_API_KEY",
+            "openai" | "openai-compat" | "openai_compat" | "responses" | "openai-responses" => {
+                "OPENAI_API_KEY"
+            }
             "claude" | "anthropic" => "ANTHROPIC_API_KEY",
             "ollama" => "OLLAMA_API_KEY",
             _ => "",
@@ -869,6 +903,44 @@ output_per_million = 0
         // Explicit override wins over name heuristic
         assert!(!resolve_is_reasoning_model(Some(false), "grok-4.6", ""));
         assert!(resolve_is_reasoning_model(Some(true), "gpt-4o", ""));
+    }
+
+    #[test]
+    fn any_grok_model_gets_four_thinking_gears() {
+        for name in ["grok-4.6", "grok-4.5", "x-ai/grok-4", "GROK-beta"] {
+            assert_eq!(
+                default_reasoning_levels_for(name),
+                vec!["low", "medium", "high", "xhigh"]
+            );
+            assert_eq!(default_reasoning_effort_for(name).as_deref(), Some("high"));
+        }
+        let cfg = ProviderConfig {
+            provider_type: "responses".into(),
+            api_key: None,
+            model: "grok-4.6".into(),
+            base_url: None,
+            system_prompt: None,
+            user_agent: None,
+            context_window: 128000,
+            max_tokens: None,
+            thinking_type: None,
+            thinking_keep: None,
+            reasoning_history: None,
+            reasoning_effort: None,
+            reasoning_levels: None,
+            thinking_enabled: None,
+            thinking_budget: None,
+            skip_tls_verify: false,
+            ephemeral: false,
+            capable_model: None,
+            pricing: None,
+            supports_vision: None,
+            reasoning_model: None,
+        };
+        assert_eq!(
+            cfg.effective_reasoning_levels(),
+            vec!["low", "medium", "high", "xhigh"]
+        );
     }
 
     #[test]

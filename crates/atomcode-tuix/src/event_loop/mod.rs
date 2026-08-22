@@ -8720,8 +8720,9 @@ pub async fn run_loop(mut ctx: LoopCtx, renderer: &mut dyn Renderer) -> Result<E
             // ── Suspend / Terminal signal ──
             _ = sigtstp.recv() => {
                 // Do not raise SIGSTOP to suspend the process, which drops the CLI to shell [1]+ Stopped.
-                // Keep terminal in raw mode and refresh UI.
-                let _ = crossterm::terminal::enable_raw_mode();
+                // Reclaim the TTY (a child may have stolen the foreground pgrp)
+                // and keep raw mode so the next keystroke stays in the TUI.
+                crate::signal_restore::recover_tty();
                 renderer.reset();
                 match app.state.phase {
                     UiPhase::Streaming => {
@@ -8736,7 +8737,7 @@ pub async fn run_loop(mut ctx: LoopCtx, renderer: &mut dyn Renderer) -> Result<E
 
             // ── Resume ──
             _ = sigcont.recv() => {
-                let _ = crossterm::terminal::enable_raw_mode();
+                crate::signal_restore::recover_tty();
                 renderer.reset();
                 app.state.on_resume();
                 match app.state.phase {
@@ -19779,6 +19780,7 @@ mod coding_runtime_event_tests {
             text: "thought".into(),
             opaque: Some("sig".into()),
             provider: Some("anthropic".into()),
+            id: None,
         }];
 
         // Verify the kernel message itself carries the reasoning blocks on its
@@ -24228,20 +24230,9 @@ fn sync_reasoning_effort_from_provider(ctx: &mut LoopCtx) {
 pub(crate) fn effective_reasoning_levels_for_provider(ctx: &LoopCtx) -> Vec<String> {
     let selection = ctx.config.effective_model_selection().unwrap_or_default();
     if let Some(p) = ctx.config.provider_config_for_selection(&selection) {
-        if let Some(levels) = p.reasoning_levels {
-            if !levels.is_empty() {
-                return levels;
-            }
-        }
+        return p.effective_reasoning_levels();
     }
-    let m_lower = ctx.model_name.to_ascii_lowercase();
-    if m_lower.contains("grok") {
-        vec!["low".into(), "medium".into(), "high".into(), "xhigh".into()]
-    } else if m_lower.contains("deepseek") || m_lower.contains("v4") {
-        vec!["low".into(), "medium".into(), "high".into(), "max".into()]
-    } else {
-        vec!["low".into(), "medium".into(), "high".into()]
-    }
+    atomcode_config::config::provider::default_reasoning_levels_for(&ctx.model_name)
 }
 
 /// Persist the current reasoning_effort to config.toml
@@ -24265,15 +24256,14 @@ fn persist_reasoning_effort(ctx: &mut LoopCtx) {
 
 pub(crate) fn reasoning_effort_applicable_on_provider(ctx: &LoopCtx) -> bool {
     let selection = ctx.config.effective_model_selection().unwrap_or_default();
-    let ptype = ctx
-        .config
-        .provider_config_for_selection(&selection)
-        .map(|p| p.provider_type)
-        .unwrap_or_default();
-    // Model-name check delegates to the provider so the UI "applicable" hint
-    // and the actual request-body gate (OpenAiProvider) can never diverge.
-    (ptype == "deepseek" || ptype == "openai" || ptype == "anthropic" || ptype == "claude" || ptype == "ollama")
-        && atomcode_capabilities::provider::reason_effort_applicable(&ctx.model_name)
+    let p = ctx.config.provider_config_for_selection(&selection);
+    atomcode_capabilities::provider::effort_control_applicable(
+        &ctx.model_name,
+        p.as_ref().and_then(|p| p.reasoning_model),
+        p.as_ref().and_then(|p| p.reasoning_effort.as_deref()),
+        p.as_ref()
+            .and_then(|p| p.reasoning_levels.as_deref()),
+    )
 }
 
 /// Install a [`crate::modals::password::PasswordModal`] as the active modal on

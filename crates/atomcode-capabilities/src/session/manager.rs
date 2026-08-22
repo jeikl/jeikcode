@@ -3713,6 +3713,9 @@ fn validate_snapshot(snapshot: &SessionSnapshot) -> SessionResult<()> {
             if let Some(provider) = &block.provider {
                 validate_string("reasoning provider", provider, MAX_STORED_STRING_BYTES)?;
             }
+            if let Some(id) = &block.id {
+                validate_string("reasoning item id", id, MAX_STORED_STRING_BYTES)?;
+            }
         }
     }
     Ok(())

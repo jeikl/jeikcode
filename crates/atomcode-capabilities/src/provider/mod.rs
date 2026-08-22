@@ -4,6 +4,8 @@
 //! seam; these types implement it against real backends. Three adapters live here:
 //!   - [`OpenAiCompatProvider`] — the **OpenAI-compatible** chat/completions surface
 //!     (GLM / DeepSeek / any OpenAI-shaped endpoint);
+//!   - [`ResponsesProvider`] — the **OpenAI Responses API** (`/v1/responses`), including
+//!     native `function_call` items and `reasoning.encrypted_content` round-trip;
 //!   - [`AnthropicProvider`] — the **Anthropic Messages API** (`/v1/messages`, Claude),
 //!     including the signed extended-thinking round-trip;
 //!   - [`OllamaProvider`] — the **Ollama native** `/api/chat` (local models, NDJSON).
@@ -19,6 +21,7 @@ mod anthropic;
 mod atomgit_sign;
 mod ollama;
 mod openai_compat;
+mod responses;
 mod pricing_catalog;
 mod reasoning;
 mod retry;
@@ -28,8 +31,10 @@ pub use anthropic::{AnthropicConfig, AnthropicProvider};
 pub use atomgit_sign::{atomgit_request_signer, is_atomgit_gateway, signer_available};
 pub use ollama::{OllamaConfig, OllamaProvider};
 pub use openai_compat::{
-    model_suggests_vision, reason_effort_applicable, OpenAiCompatConfig, OpenAiCompatProvider,
+    effort_control_applicable, model_suggests_vision, reason_effort_applicable,
+    resolve_wire_effort, OpenAiCompatConfig, OpenAiCompatProvider,
 };
+pub use responses::{ResponsesConfig, ResponsesProvider};
 pub use pricing_catalog::{
     ensure_models_dev_catalog, resolve_models_dev_pricing, spawn_models_dev_catalog_refresh,
     CatalogPricing,
@@ -125,25 +130,6 @@ pub(crate) fn push_system_coalesced(out: &mut Vec<Value>, text: &str) {
         }
     }
     out.push(json!({ "role": "system", "content": text }));
-}
-
-/// Coalesce consecutive user entries into ONE wire entry.
-/// Appends additional user text to the bottom of the previous user message.
-pub(crate) fn push_user_coalesced(out: &mut Vec<Value>, text: &str) {
-    if let Some(last) = out.last_mut() {
-        if last.get("role").and_then(Value::as_str) == Some("user") {
-            if let Some(prev) = last.get("content").and_then(Value::as_str) {
-                let joined = if prev.is_empty() || text.is_empty() {
-                    format!("{prev}{text}")
-                } else {
-                    format!("{prev}\n\n{text}")
-                };
-                last["content"] = json!(joined);
-                return;
-            }
-        }
-    }
-    out.push(json!({ "role": "user", "content": text }));
 }
 
 /// Map an HTTP error status to a plain-language headline so the TUI shows the

@@ -28,6 +28,7 @@ pub mod onboarding_wizard;
 pub mod password;
 pub mod plugin_manager;
 pub mod provider_panel;
+mod upstream_models;
 pub mod proxy_picker;
 mod qr;
 pub mod rewind;

@@ -335,6 +335,11 @@ fn run(
             PollAction::Continue => continue,
             PollAction::Exit => return,
             PollAction::Sleep => {
+                // Unix: EIO here usually means we lost the foreground pgrp
+                // (SIGTTIN ignored → read returns EIO). Reclaim before retrying
+                // or we spin forever while bash shows `[Stopped]`.
+                #[cfg(unix)]
+                crate::signal_restore::recover_tty();
                 std::thread::sleep(Duration::from_millis(50));
                 continue;
             }
@@ -342,6 +347,8 @@ fn run(
         let ev = match event::read() {
             Ok(e) => e,
             Err(_) => {
+                #[cfg(unix)]
+                crate::signal_restore::recover_tty();
                 std::thread::sleep(Duration::from_millis(50));
                 continue;
             }

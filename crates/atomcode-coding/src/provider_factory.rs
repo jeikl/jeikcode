@@ -3,6 +3,7 @@ use std::sync::Arc;
 use atomcode_capabilities::provider::{
     atomgit_request_signer, is_atomgit_gateway, signer_available, AnthropicConfig,
     AnthropicProvider, OllamaConfig, OllamaProvider, OpenAiCompatConfig, OpenAiCompatProvider,
+    ResponsesConfig, ResponsesProvider,
     ReasoningPolicy, RequestSigner,
 };
 use atomcode_kernel::provider::LlmProvider;
@@ -110,6 +111,26 @@ impl CodingProviderFactory for DefaultCodingProviderFactory {
             .clone()
             .unwrap_or_else(|| self.default_user_agent.clone());
         let provider: Arc<dyn LlmProvider> = match cfg.provider_type.as_str() {
+            "responses" | "openai-responses" => {
+                let mut rc = ResponsesConfig::new(&cfg.api_key, &cfg.base_url, &cfg.model);
+                rc.context_window = cfg.context_window;
+                rc.idle_timeout = cfg.stream_timeout;
+                rc.max_tokens = cfg.chat_options.max_tokens;
+                rc.supports_vision = cfg.supports_vision;
+                rc.reasoning_model = cfg.reasoning_model;
+                rc.reasoning_policy =
+                    ReasoningPolicy::from_config(cfg.reasoning_history.as_deref())
+                        .map_err(ProviderBuildError::Adapter)?;
+                rc.user_agent = Some(ua.clone());
+                rc.skip_tls_verify = cfg.skip_tls_verify;
+                if let Some(authenticator) = &self.authenticator {
+                    rc.request_signer = authenticator.request_signer(&cfg.base_url)?;
+                }
+                Arc::new(
+                    ResponsesProvider::new(rc)
+                        .map_err(|e| ProviderBuildError::Adapter(e.message))?,
+                )
+            }
             "claude" | "anthropic" => {
                 let mut ac = AnthropicConfig::new(&cfg.api_key, &cfg.base_url, &cfg.model);
                 ac.context_window = cfg.context_window;
@@ -342,7 +363,7 @@ mod tests {
     #[test]
     fn dispatches_all_supported_provider_types() {
         let factory = DefaultCodingProviderFactory::new("fallback-agent");
-        for kind in ["openai", "claude", "ollama"] {
+        for kind in ["openai", "claude", "ollama", "responses"] {
             assert!(
                 factory.build(&config(kind), None).is_ok(),
                 "provider type {kind}"

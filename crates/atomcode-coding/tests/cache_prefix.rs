@@ -2,7 +2,7 @@
 //!
 //! The kernel proves the wire prefix is byte-stable / append-only with NoopHooks
 //! (`atomcode-kernel/tests/cache_prefix.rs`). This test re-proves it through the
-//! REAL assembly — every coding hook (MemoryHook rewriting the leading-system run,
+//! REAL assembly — every coding hook (MemoryHook rewriting the frozen user prefix,
 //! Snapshot/Transcript, CurrentDate's tail projection, VerifyCadence, Telemetry)
 //! plus the full toolset — which is exactly where the project's historical cache
 //! breaks lived: the system/persona rebuilt per round, skill/tool reorder, or memory
@@ -69,12 +69,22 @@ fn is_strict_prefix(a: &str, b: &str) -> bool {
     a.len() < b.len() && b.as_bytes().starts_with(a.as_bytes())
 }
 
-/// Leading run of System messages — the persona plus any MemoryHook-injected block.
+/// Leading run of System messages — persona plus SESSION CONTEXT.
 fn leading_system(messages: &[Message]) -> &[Message] {
     let n = messages
         .iter()
         .take_while(|m| m.role == Role::System)
         .count();
+    &messages[..n]
+}
+
+/// Frozen prefix: leading systems plus synthetic user blocks (memory / skills / MCP)
+/// before the first real query. Compaction cannot drain this span.
+fn frozen_prefix(messages: &[Message]) -> &[Message] {
+    let n = messages
+        .iter()
+        .position(|m| m.role == Role::User && !m.synthetic)
+        .unwrap_or(messages.len());
     &messages[..n]
 }
 
@@ -116,13 +126,13 @@ async fn full_assembly_wire_prefix_is_cacheable_across_turns() {
     let home = tempfile::tempdir().unwrap();
     let project = tempfile::tempdir().unwrap();
     std::env::set_var("ATOMCODE_HOME", home.path());
-    // A memory the MemoryHook injects into the leading-system run — the run that must
+    // A memory the MemoryHook injects into the frozen user prefix — the span that must
     // then stay FROZEN across every subsequent round/turn.
     std::fs::write(home.path().join("memory.md"), "- the user prefers tabs\n").unwrap();
 
     let cfg = cfg(project.path());
     // Deterministic toolset: pin skills to an (empty) temp dir, MCP off, web off.
-    // Memory ON — the hook that rewrites the leading-system run is the main risk.
+    // Memory ON — the hook that rewrites the frozen user prefix is the main risk.
     let opts = PrepareOptions {
         session: SessionMode::Disabled,
         skill_dirs: Some(vec![project.path().join("skills")]),
@@ -157,17 +167,15 @@ async fn full_assembly_wire_prefix_is_cacheable_across_turns() {
 
     let frozen_tools = tool_block_repr(&calls[0].1);
     let leading0 = history_repr(leading_system(&calls[0].0));
+    let prefix0 = history_repr(frozen_prefix(&calls[0].0));
     assert!(!leading0.is_empty(), "there must be a leading system run");
-    // Sanity: memory really did land in the frozen leading run (else we'd be
+    // Sanity: memory really did land in the frozen user prefix (else we'd be
     // "verifying" a trivial persona-only system).
     assert!(
-        calls[0]
-            .0
-            .iter()
-            .take_while(|m| m.role == Role::System)
-            .count()
-            >= 2,
-        "MemoryHook should add a system block after the persona"
+        calls[0].0.iter().any(|m| {
+            m.role == Role::User && m.synthetic && m.text.starts_with("=== MEMORY ===")
+        }),
+        "MemoryHook should add a frozen user block after the persona"
     );
 
     for (i, (msgs, tools, _opts)) in calls.iter().enumerate() {
@@ -177,16 +185,22 @@ async fn full_assembly_wire_prefix_is_cacheable_across_turns() {
             frozen_tools,
             "tool block must be byte-identical on call {i} (frozen, no reorder)"
         );
-        // (2) leading system run (persona + MEMORY block) byte-identical — NOT rebuilt
-        //     or re-injected per round/turn (the historical cache break).
+        // (2) leading system run (persona + SESSION CONTEXT) byte-identical.
         assert_eq!(
             history_repr(leading_system(msgs)),
             leading0,
             "leading system run must be byte-identical on call {i}"
         );
+        // (3) frozen user prefix (memory/skills/MCP) byte-identical — NOT rebuilt
+        //     or re-injected per round/turn (the historical cache break).
+        assert_eq!(
+            history_repr(frozen_prefix(msgs)),
+            prefix0,
+            "frozen user prefix must be byte-identical on call {i}"
+        );
     }
 
-    // (3) append-only: each call's stored history (minus the ephemeral date tail) is a
+    // (4) append-only: each call's stored history (minus the ephemeral date tail) is a
     //     STRICT byte prefix of the next — no head mutation, no mid-session rewrite.
     for w in calls.windows(2) {
         let prev = history_repr(without_date_tail(&w[0].0));

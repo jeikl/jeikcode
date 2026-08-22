@@ -1,10 +1,13 @@
-//! `TodoHook` — injects the current todo list as an ephemeral `<system-reminder>` at
-//! the TAIL of every request, so the model always sees current progress even after the
-//! originating todowrite result is compacted away. Cache-safe: tail-only, per-request
-//! clone (never stored) — mirrors PlanModeGate / StatusReminderHook.
+//! `TodoHook` — injects the current todo list as a stored `<system-reminder>`
+//! immediately ABOVE the current real user query (Grok Build order). Tool-loop
+//! rounds do not rewind a tail reminder, so the previous request stays a prefix
+//! of the next. The originating todowrite result remains in history; this
+//! reminder re-surfaces the list after compaction.
 
 use async_trait::async_trait;
-use atomcode_capabilities::reminder::system_reminder;
+use atomcode_capabilities::reminder::{
+    insert_before_last_real_user, reminder_already_before_last_real_user, system_reminder,
+};
 use atomcode_capabilities::tools::todo::{
     derive_current_todos, render_todos_numbered, TodoItem, TodoLive, TodoStatus,
 };
@@ -101,7 +104,10 @@ impl LifecycleHooks for TodoEagerHook {
         } else {
             "Before acting, decide whether this task benefits from a todo list. If it has multiple requests, phases, files, dependencies, ambiguity, or requires investigation plus changes, call `todowrite` now. Skip it only for a genuinely simple one-step or purely informational request."
         };
-        messages.push(Message::user(system_reminder(lead)));
+        insert_before_last_real_user(
+            messages,
+            Message::synthetic_user(system_reminder(lead)),
+        );
     }
 
     async fn pre_request_options(
@@ -186,31 +192,48 @@ actually working on as in_progress (`{\"action\":\"update\",\"id\":<id>,\"status
     None
 }
 
-#[async_trait]
-impl LifecycleHooks for TodoHook {
-    async fn pre_request(&self, messages: &mut Vec<Message>, _ctx: &TurnCtx) {
-        let todos = derive_current_todos(messages);
-        self.sync_live(&todos);
-        if todos.is_empty() {
-            return;
-        }
-        // ASCII-safe body (the model doesn't need glyph prettiness; the TUI renders
-        // the pretty version). Tail-append so the cached prefix is preserved.
-        // The anchor line (mid-work drift backstop) leads, so the current in_progress
-        // pointer is the first thing the model sees — above the list and the rules.
-        let anchor = todo_anchor_line(&todos)
-            .map(|a| format!("{a}\n\n"))
-            .unwrap_or_default();
-        let body = format!(
-            "{anchor}Current task list (each line is `#<id> <task>`) — keep it accurate and finish it:\n\
+fn todo_reminder_body(todos: &[TodoItem]) -> String {
+    // ASCII-safe body (the model doesn't need glyph prettiness; the TUI renders
+    // the pretty version). The anchor line (mid-work drift backstop) leads, so the
+    // current in_progress pointer is the first thing in this block — above the list.
+    let anchor = todo_anchor_line(todos)
+        .map(|a| format!("{a}\n\n"))
+        .unwrap_or_default();
+    format!(
+        "{anchor}Current task list (each line is `#<id> <task>`) — keep it accurate and finish it:\n\
 - The MOMENT you START or FINISH items: one `todowrite` with `actions` covering every status change you already know (e.g. complete #1 and set #2 `in_progress` in the SAME array).\n\
 - Skip `todowrite` this turn if the list already matches reality. Never re-mark an item already in that status.\n\
 - First plan / replace a plan: `actions` of `add`s (plus `clear` first if replacing). Do NOT resend a full `todos` list.\n\
 - Do NOT stop, summarize, or hand back while ANY item is still pending or in_progress — keep working through them, unless you truly need approval, are genuinely stuck, or the request is ambiguous.\n\
 {}",
-            render_todos_numbered(&todos, false)
+        render_todos_numbered(todos, false)
+    )
+}
+
+#[async_trait]
+impl LifecycleHooks for TodoHook {
+    async fn pre_request(&self, messages: &mut Vec<Message>, _ctx: &TurnCtx) {
+        // Live TUI sync only. Injection happens in `turn_start` (stored, ABOVE the
+        // real user query) so tool-loop rounds do not rewind a tail reminder.
+        let todos = derive_current_todos(messages);
+        self.sync_live(&todos);
+    }
+
+    async fn turn_start(&self, convo: &mut Conversation) {
+        let todos = derive_current_todos(&convo.messages);
+        self.sync_live(&todos);
+        if todos.is_empty() {
+            return;
+        }
+        if reminder_already_before_last_real_user(&convo.messages, |t| {
+            t.contains("Current task list")
+        }) {
+            return;
+        }
+        insert_before_last_real_user(
+            &mut convo.messages,
+            Message::synthetic_user(system_reminder(&todo_reminder_body(&todos))),
         );
-        messages.push(Message::user(system_reminder(&body)));
     }
 
     /// The model wants to stop. If the task list still has OPEN items (pending or in_progress),
@@ -293,52 +316,70 @@ mod tests {
         assert!(todo_anchor_line(&todos).is_none());
     }
 
-    #[tokio::test]
-    async fn pre_request_prepends_anchor_for_in_progress() {
-        let mut msgs = vec![
-            Message::user("do it"),
-            todowrite_msg(r#"{"todos":[{"content":"step one","status":"in_progress"}]}"#),
-        ];
-        TodoHook::new().pre_request(&mut msgs, &TurnCtx::default()).await;
-        let last = &msgs[msgs.len() - 1];
-        assert!(
-            last.text.contains("currently ON task #1"),
-            "anchor must lead: {}",
-            last.text
-        );
-        assert!(
-            last.text.contains("step one"),
-            "anchor must name the task: {}",
-            last.text
-        );
-        // The anchor precedes the list body.
-        assert!(
-            last.text.contains("Skip `todowrite` this turn if the list already matches"),
-            "must discourage no-op updates: {}",
-            last.text
-        );
-        let anchor_at = last.text.find("currently ON task").unwrap();
-        let list_at = last.text.find("Current task list").unwrap();
-        assert!(
-            anchor_at < list_at,
-            "anchor must come before the list: {}",
-            last.text
-        );
+    fn convo_with(msgs: Vec<Message>) -> Conversation {
+        let mut c = Conversation::default();
+        c.messages = msgs;
+        c
+    }
+
+    fn reminder_before_query(convo: &Conversation) -> &Message {
+        let i = convo
+            .messages
+            .iter()
+            .rposition(|m| m.role == Role::User && !m.synthetic)
+            .expect("real user query");
+        assert!(i > 0, "reminder must sit above the query");
+        &convo.messages[i - 1]
     }
 
     #[tokio::test]
-    async fn injects_reminder_when_list_present() {
-        let mut msgs = vec![
+    async fn turn_start_prepends_anchor_for_in_progress() {
+        let mut convo = convo_with(vec![
+            Message::user("do it"),
+            todowrite_msg(r#"{"todos":[{"content":"step one","status":"in_progress"}]}"#),
+        ]);
+        TodoHook::new().turn_start(&mut convo).await;
+        let reminder = reminder_before_query(&convo);
+        assert!(
+            reminder.text.contains("currently ON task #1"),
+            "anchor must lead: {}",
+            reminder.text
+        );
+        assert!(
+            reminder.text.contains("step one"),
+            "anchor must name the task: {}",
+            reminder.text
+        );
+        assert!(
+            reminder.text.contains("Skip `todowrite` this turn if the list already matches"),
+            "must discourage no-op updates: {}",
+            reminder.text
+        );
+        let anchor_at = reminder.text.find("currently ON task").unwrap();
+        let list_at = reminder.text.find("Current task list").unwrap();
+        assert!(
+            anchor_at < list_at,
+            "anchor must come before the list: {}",
+            reminder.text
+        );
+        assert_eq!(convo.messages.last().unwrap().role, Role::Assistant);
+    }
+
+    #[tokio::test]
+    async fn injects_reminder_above_the_user_query() {
+        let mut convo = convo_with(vec![
             Message::user("do the thing"),
             todowrite_msg(r#"{"todos":[{"content":"step one","status":"in_progress"}]}"#),
-        ];
-        let before = msgs.len();
-        TodoHook::new().pre_request(&mut msgs, &TurnCtx::default()).await;
-        assert_eq!(msgs.len(), before + 1, "one reminder appended");
-        let last = &msgs[msgs.len() - 1];
-        assert_eq!(last.role, Role::User);
-        assert!(last.text.contains("system-reminder"), "{}", last.text);
-        assert!(last.text.contains("step one"), "{}", last.text);
+        ]);
+        let before = convo.messages.len();
+        TodoHook::new().turn_start(&mut convo).await;
+        assert_eq!(convo.messages.len(), before + 1, "one reminder inserted");
+        let reminder = reminder_before_query(&convo);
+        assert_eq!(reminder.role, Role::User);
+        assert!(reminder.synthetic);
+        assert!(reminder.text.contains("system-reminder"), "{}", reminder.text);
+        assert!(reminder.text.contains("step one"), "{}", reminder.text);
+        assert_eq!(convo.messages[1].text, "do the thing");
     }
 
     #[tokio::test]
@@ -353,7 +394,8 @@ mod tests {
             Message::user("do it"),
             todowrite_msg(r#"{"todos":[{"content":"only","status":"pending"}]}"#),
         ];
-        hook.pre_request(&mut msgs, &TurnCtx::default()).await;
+        let mut convo = convo_with(msgs);
+        hook.turn_start(&mut convo).await;
 
         let ctx = ToolContext {
             working_dir: std::path::PathBuf::from("."),
@@ -371,10 +413,10 @@ mod tests {
 
     #[tokio::test]
     async fn no_injection_when_no_list() {
-        let mut msgs = vec![Message::user("hi"), Message::assistant("hello", vec![])];
-        let before = msgs.len();
-        TodoHook::new().pre_request(&mut msgs, &TurnCtx::default()).await;
-        assert_eq!(msgs.len(), before, "empty list → no injection");
+        let mut convo = convo_with(vec![Message::user("hi"), Message::assistant("hello", vec![])]);
+        let before = convo.messages.len();
+        TodoHook::new().turn_start(&mut convo).await;
+        assert_eq!(convo.messages.len(), before, "empty list → no injection");
     }
 
     #[tokio::test]
@@ -389,7 +431,12 @@ mod tests {
             },
         )
         .await;
-        assert!(msgs.last().unwrap().text.contains("todowrite"));
+        assert!(
+            msgs.iter().any(|m| m.synthetic && m.text.contains("todowrite")),
+            "eager nudge must sit above the query: {:?}",
+            msgs.iter().map(|m| m.text.as_str()).collect::<Vec<_>>()
+        );
+        assert_eq!(msgs.last().unwrap().text, "analyze and fix this");
     }
 
     #[tokio::test]
@@ -408,7 +455,12 @@ mod tests {
         TodoEagerHook::new("deepseek-v4-flash", "openai", TodoEagerness::Auto)
             .pre_request(&mut deepseek, &ctx)
             .await;
-        assert_eq!(deepseek.len(), 2, "new DeepSeek generation gets the nudge");
+        assert_eq!(
+            deepseek.len(),
+            2,
+            "new DeepSeek generation gets the nudge"
+        );
+        assert_eq!(deepseek.last().unwrap().text, "analyze and fix this");
     }
 
     #[tokio::test]

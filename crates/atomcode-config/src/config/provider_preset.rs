@@ -19,6 +19,7 @@ pub enum ProviderType {
     OpenAi,
     Anthropic,
     Ollama,
+    Responses,
 }
 
 impl ProviderType {
@@ -28,6 +29,7 @@ impl ProviderType {
             Self::OpenAi => "openai",
             Self::Anthropic => "anthropic",
             Self::Ollama => "ollama",
+            Self::Responses => "responses",
         }
     }
 }
@@ -79,6 +81,17 @@ pub const ANTHROPIC_COMPATIBLE: ProviderPreset = ProviderPreset {
     id: "anthropic-compatible",
     display_name: "Anthropic-compatible endpoint",
     provider_type: ProviderType::Anthropic,
+    default_base_url: None,
+    auth_kind: AuthKind::ApiKey,
+    api_key_env: None,
+    model_source: ModelSource::Manual,
+};
+
+/// Generic OpenAI Responses API custom endpoint (`POST /v1/responses`).
+pub const RESPONSES_COMPATIBLE: ProviderPreset = ProviderPreset {
+    id: "responses-compatible",
+    display_name: "OpenAI Responses endpoint",
+    provider_type: ProviderType::Responses,
     default_base_url: None,
     auth_kind: AuthKind::ApiKey,
     api_key_env: None,
@@ -218,6 +231,7 @@ pub const PRESETS: &[ProviderPreset] = &[
     },
     OPENAI_COMPATIBLE,
     ANTHROPIC_COMPATIBLE,
+    RESPONSES_COMPATIBLE,
 ];
 
 /// Exact lookup of a preset by its `id`.
@@ -236,13 +250,13 @@ mod tests {
     use super::*;
     use std::collections::HashSet;
 
-    /// The curated vendor set (14 vendors + 2 generic compatible presets) must
+    /// The curated vendor set (14 vendors + 3 generic compatible presets) must
     /// all be present and resolvable by id.
     #[test]
     fn registry_covers_the_curated_vendors() {
         assert!(
-            PRESETS.len() >= 16,
-            "expected the curated vendor set (>=16), got {}",
+            PRESETS.len() >= 17,
+            "expected the curated vendor set (>=17), got {}",
             PRESETS.len()
         );
         for id in [
@@ -262,6 +276,7 @@ mod tests {
             "ollama",
             "openai-compatible",
             "anthropic-compatible",
+            "responses-compatible",
         ] {
             assert!(preset(id).is_some(), "missing preset: {id}");
         }
@@ -302,7 +317,7 @@ mod tests {
             // public endpoint (Xiaomi MiMo) legitimately leave it unset.
             let endpoint_optional = matches!(
                 p.id,
-                "openai-compatible" | "anthropic-compatible" | "xiaomi-mimo"
+                "openai-compatible" | "anthropic-compatible" | "responses-compatible" | "xiaomi-mimo"
             );
             if !endpoint_optional {
                 assert!(

@@ -397,8 +397,8 @@ const SKILLS_USAGE: &str = "\n\n## SKILLS:\n\
 If a task clearly matches an installed skill's description — not only when the user names the \
 skill — you MUST load its exact listed name with `use_skill` and follow it BEFORE doing the \
 work. Never infer or guess a skill name from the task type or from common workflows. When any skills \
-are installed, they are listed under the '=== AVAILABLE SKILLS ===' section of this system \
-prompt; if that section is absent, none are installed — proceed normally without `use_skill`. \
+are installed, they are listed under the '=== AVAILABLE SKILLS ===' user-prefix block \
+(before the first real query); if that section is absent, none are installed — proceed normally without `use_skill`. \
 This takes \
 priority over asking the user a clarifying question: if a listed description matches the \
 request, load that exact skill FIRST and let it drive the questions — do \

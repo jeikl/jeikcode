@@ -3427,8 +3427,11 @@ fn models_from_config(config: &Config) -> Vec<ModelInfo> {
                 model: p.model.clone(),
                 provider_type: p.provider_type.clone(),
                 is_default: id == &default_selection,
-                effort_applicable: atomcode_capabilities::provider::reason_effort_applicable(
+                effort_applicable: atomcode_capabilities::provider::effort_control_applicable(
                     &p.model,
+                    p.reasoning_model,
+                    p.reasoning_effort.as_deref(),
+                    p.reasoning_levels.as_deref(),
                 ),
                 reasoning_effort: p.reasoning_effort.clone(),
                 reasoning_levels: p.effective_reasoning_levels(),

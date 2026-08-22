@@ -16,8 +16,8 @@ use async_trait::async_trait;
 use atomcode_capabilities::tools::{
     ApprovalRequest, PermissionDecision, PermissionStore, APPROVAL_KIND,
 };
-use atomcode_kernel::hook::{LifecycleHooks, TurnCtx};
-use atomcode_kernel::message::Message;
+use atomcode_kernel::hook::LifecycleHooks;
+use atomcode_kernel::message::{Conversation, Message};
 use atomcode_kernel::middleware::{BeforeOutcome, ToolMiddleware};
 use atomcode_kernel::request::RequestCtx;
 use atomcode_kernel::tool::{RiskLevel, Tool, ToolCall};
@@ -131,11 +131,9 @@ implementation — not even as code blocks in your reply. Investigate with read-
 then present a concise implementation plan and STOP, waiting for the user to review and \
 switch to build mode. Writing the full solution now defeats the purpose of plan mode.";
 
-/// Injects the wrapped [`PLAN_MODE_REMINDER_BODY`] as an ephemeral request tail while plan
-/// mode is active.
-/// Shares the same `Arc<AtomicBool>` as the [`PlanModeGate`] so they toggle together.
-/// Cache-safe: the tail is appended in `pre_request` (not stored), so the cached prefix is
-/// untouched and an OFF↔ON toggle only changes ephemeral bytes past the prefix.
+/// Injects the wrapped [`PLAN_MODE_REMINDER_BODY`] above the current user query
+/// while plan mode is active (Grok Build order). Stored on `turn_start` so
+/// tool-loop rounds do not rewind a tail reminder.
 pub struct PlanModeReminderHook {
     active: Arc<AtomicBool>,
 }
@@ -148,12 +146,22 @@ impl PlanModeReminderHook {
 
 #[async_trait]
 impl LifecycleHooks for PlanModeReminderHook {
-    async fn pre_request(&self, messages: &mut Vec<Message>, _ctx: &TurnCtx) {
-        if self.active.load(Ordering::Relaxed) {
-            messages.push(Message::user(
-                atomcode_capabilities::reminder::system_reminder(PLAN_MODE_REMINDER_BODY),
-            ));
+    async fn turn_start(&self, convo: &mut Conversation) {
+        if !self.active.load(Ordering::Relaxed) {
+            return;
         }
+        if atomcode_capabilities::reminder::reminder_already_before_last_real_user(
+            &convo.messages,
+            |t| t.contains("PLAN MODE"),
+        ) {
+            return;
+        }
+        atomcode_capabilities::reminder::insert_before_last_real_user(
+            &mut convo.messages,
+            Message::synthetic_user(atomcode_capabilities::reminder::system_reminder(
+                PLAN_MODE_REMINDER_BODY,
+            )),
+        );
     }
 }
 
@@ -301,32 +309,31 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn reminder_tail_only_when_active_prefix_unchanged() {
+    async fn reminder_sits_above_the_query_when_active() {
         let flag = Arc::new(AtomicBool::new(false));
         let hook = PlanModeReminderHook::new(flag.clone());
-        let mut msgs = vec![Message::system("sys"), Message::user("hi")];
-        let before = msgs.clone();
+        let mut convo = Conversation::default();
+        convo.messages = vec![Message::system("sys"), Message::user("hi")];
+        let before = convo.messages.clone();
 
-        // Build mode: nothing injected — the last user turn stays clean + cacheable.
-        hook.pre_request(&mut msgs, &TurnCtx::default()).await;
-        assert_eq!(msgs, before, "build mode must not inject a plan reminder");
-
-        // Plan mode: exactly one ephemeral tail; the cached prefix is byte-identical.
-        flag.store(true, Ordering::Relaxed);
-        hook.pre_request(&mut msgs, &TurnCtx::default()).await;
-        assert_eq!(msgs.len(), 3, "exactly one reminder tail appended");
+        hook.turn_start(&mut convo).await;
         assert_eq!(
-            msgs[..2],
-            before[..],
-            "the cached prefix must be byte-identical"
+            convo.messages, before,
+            "build mode must not inject a plan reminder"
+        );
+
+        flag.store(true, Ordering::Relaxed);
+        hook.turn_start(&mut convo).await;
+        assert_eq!(convo.messages.len(), 3, "exactly one reminder inserted");
+        assert_eq!(convo.messages[0], before[0], "system prefix stays frozen");
+        assert!(convo.messages[1].synthetic);
+        assert!(
+            convo.messages[1].text.contains("PLAN MODE"),
+            "reminder sits above the query: {:?}",
+            convo.messages[1].text
         );
         assert!(
-            msgs[2].text.contains("PLAN MODE"),
-            "tail carries the plan reminder: {:?}",
-            msgs[2].text
-        );
-        assert!(
-            msgs[2].text.to_lowercase().contains("stop"),
+            convo.messages[1].text.to_lowercase().contains("stop"),
             "must tell the model to STOP after planning"
         );
     }

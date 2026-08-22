@@ -2544,7 +2544,7 @@ impl RunningAgent {
                     // boundary, paired with this opaque token + provider. A redacted
                     // block (no preceding text) yields an empty-text block. Pure storage
                     // — no live event (the text already streamed via Reasoning above).
-                    StreamEvent::ReasoningSignature { opaque, provider } => {
+                    StreamEvent::ReasoningSignature { opaque, provider, id } => {
                         saw_stream_content = true; // provider streamed a (signed) reasoning block
                         if suppress_internal_stream {
                             continue;
@@ -2553,6 +2553,7 @@ impl RunningAgent {
                             text: std::mem::take(&mut reasoning_block_text),
                             opaque: Some(opaque),
                             provider: Some(provider),
+                            id,
                         });
                     }
                     StreamEvent::ToolCall(c) => {

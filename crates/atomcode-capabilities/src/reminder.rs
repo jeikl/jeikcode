@@ -1,10 +1,13 @@
 //! The `<system-reminder>` convention — the ONE place that owns it.
 //!
 //! Runtime context (the per-turn status from [`StatusReminderHook`], plan-mode notices, …)
-//! is injected into the conversation as a tail `Role::User` message WRAPPED in
-//! `<system-reminder>…</system-reminder>`, so the model reads it as system-injected ambient
-//! context rather than the user's own words. (The coding persona documents this contract to
-//! the model; the Anthropic adapter coalesces the resulting user-after-user pair.)
+//! is injected as a **synthetic** `Role::User` message WRAPPED in
+//! `<system-reminder>…</system-reminder>`, placed **immediately ABOVE** the current
+//! real user query (Grok Build order). Recency then lands on the user's request, not
+//! the ambient block. Consecutive user messages stay consecutive on OpenAI / Responses
+//! wires; the Anthropic adapter is the only path that still merges them (Messages API
+//! requires alternating roles), and because the reminder sits first the merged block
+//! still ends with the query.
 //!
 //! EVERY injector MUST build its reminder through [`system_reminder`] — that is the whole
 //! point of centralizing the convention: the wrapper can no longer be forgotten. The bug
@@ -35,6 +38,42 @@ pub fn is_system_reminder(text: &str) -> bool {
     text.trim_start().starts_with(&opening)
 }
 
+/// Insert `item` immediately before the last real (non-synthetic) user message.
+///
+/// Grok Build sends ambient user blocks first and the `<user_query>` last. Putting
+/// the reminder at the tail used to steal recency; inserting here keeps the query
+/// as the last user turn. If there is no real user yet, the item is appended.
+pub fn insert_before_last_real_user(
+    messages: &mut Vec<atomcode_kernel::message::Message>,
+    item: atomcode_kernel::message::Message,
+) {
+    use atomcode_kernel::message::Role;
+    let pos = messages
+        .iter()
+        .rposition(|m| m.role == Role::User && !m.synthetic)
+        .unwrap_or(messages.len());
+    messages.insert(pos, item);
+}
+
+/// True when the slot immediately before the last real user is already a reminder
+/// matching `pred`. Lets `turn_start` injectors stay idempotent.
+pub fn reminder_already_before_last_real_user(
+    messages: &[atomcode_kernel::message::Message],
+    pred: impl Fn(&str) -> bool,
+) -> bool {
+    use atomcode_kernel::message::Role;
+    let Some(i) = messages
+        .iter()
+        .rposition(|m| m.role == Role::User && !m.synthetic)
+    else {
+        return false;
+    };
+    i > 0
+        && messages[i - 1].synthetic
+        && is_system_reminder(&messages[i - 1].text)
+        && pred(&messages[i - 1].text)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -57,5 +96,36 @@ mod tests {
         assert!(!is_system_reminder("我提到了 <system-reminder> 这个词"));
         assert!(!is_system_reminder("修复登录错误"));
         assert!(!is_system_reminder(""));
+    }
+
+    #[test]
+    fn insert_before_last_real_user_puts_reminder_above_query() {
+        use atomcode_kernel::message::Message;
+        let mut msgs = vec![
+            Message::system("sys"),
+            Message::user("the query"),
+        ];
+        insert_before_last_real_user(
+            &mut msgs,
+            Message::synthetic_user(system_reminder("ambient")),
+        );
+        assert_eq!(msgs.len(), 3);
+        assert!(msgs[1].synthetic && is_system_reminder(&msgs[1].text));
+        assert_eq!(msgs[2].text, "the query");
+        assert!(!msgs[2].synthetic);
+    }
+
+    #[test]
+    fn insert_before_last_real_user_skips_earlier_real_users() {
+        use atomcode_kernel::message::Message;
+        let mut msgs = vec![
+            Message::user("first"),
+            Message::assistant("ok", vec![]),
+            Message::user("second"),
+        ];
+        insert_before_last_real_user(&mut msgs, Message::synthetic_user(system_reminder("r")));
+        assert_eq!(msgs[0].text, "first");
+        assert!(msgs[2].synthetic);
+        assert_eq!(msgs[3].text, "second");
     }
 }

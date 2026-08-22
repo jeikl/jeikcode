@@ -1122,16 +1122,25 @@ async fn signed_reasoning_blocks_are_finalized_per_signature_in_order() {
         StreamEvent::ReasoningSignature {
             opaque: "sigA".into(),
             provider: "anthropic".into(),
+            id: None,
         },
         StreamEvent::Reasoning("plan B".into()),
         StreamEvent::ReasoningSignature {
             opaque: "sigB".into(),
             provider: "anthropic".into(),
+            id: None,
         },
         // a redacted block: signature with no preceding text.
         StreamEvent::ReasoningSignature {
             opaque: "redacted".into(),
             provider: "anthropic".into(),
+            id: None,
+        },
+        StreamEvent::Reasoning("plan C".into()),
+        StreamEvent::ReasoningSignature {
+            opaque: "encC".into(),
+            provider: "openai-responses".into(),
+            id: Some("rs_c".into()),
         },
         StreamEvent::TextDelta("done".into()),
         StreamEvent::Done { truncated: false },
@@ -1176,17 +1185,26 @@ async fn signed_reasoning_blocks_are_finalized_per_signature_in_order() {
             ReasoningBlock {
                 text: "plan A".into(),
                 opaque: Some("sigA".into()),
-                provider: Some("anthropic".into())
+                provider: Some("anthropic".into()),
+                id: None,
             },
             ReasoningBlock {
                 text: "plan B".into(),
                 opaque: Some("sigB".into()),
-                provider: Some("anthropic".into())
+                provider: Some("anthropic".into()),
+                id: None,
             },
             ReasoningBlock {
                 text: String::new(),
                 opaque: Some("redacted".into()),
-                provider: Some("anthropic".into())
+                provider: Some("anthropic".into()),
+                id: None,
+            },
+            ReasoningBlock {
+                text: "plan C".into(),
+                opaque: Some("encC".into()),
+                provider: Some("openai-responses".into()),
+                id: Some("rs_c".into()),
             },
         ],
         "one ReasoningBlock finalized per signature, in order"
@@ -1194,7 +1212,7 @@ async fn signed_reasoning_blocks_are_finalized_per_signature_in_order() {
     // The flat reasoning string still carries ALL the thinking text (OpenAI path back-compat).
     assert_eq!(
         a.reasoning.as_deref(),
-        Some("plan Aplan B"),
+        Some("plan Aplan Bplan C"),
         "flat reasoning still accumulates all text"
     );
     assert_eq!(a.text, "done");

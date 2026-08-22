@@ -77,6 +77,14 @@ context_window = 64000
 # (unset = auto-detect: deepseek-v4* → include, deepseek-reasoner/r1 → exclude)
 # reasoning_history = "include"  # 或 "exclude"
 # reasoning_effort = "high"
+#
+# Grok（Responses）四档思考：low / medium / high / xhigh
+# 写在 [models.*] 上；Ctrl+T 按 reasoning_levels 循环。省略 levels 时
+# 模型名含 grok 也会默认这四档。
+# reasoning_effort = "high"
+# reasoning_levels = ["low", "medium", "high", "xhigh"]
+# reasoning_model = true
+# reasoning_history = "include"
 
 # -------- 智谱 GLM-5.2（通过 Zhipu API）----------
 [providers.glm]

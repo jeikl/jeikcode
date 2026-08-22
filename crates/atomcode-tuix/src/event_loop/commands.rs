@@ -1764,7 +1764,7 @@ fn execute_slash_command_impl(
         "model" | "models" => {
             if arg == "add" || arg == "new" {
                 let mut panel = crate::modals::ProviderPanel::open();
-                panel.open_add_model(&ctx.config);
+                panel.open_add_model(&ctx.config, ctx.wake_tx.clone());
                 *active_modal = Some(Box::new(panel));
             } else if !crate::modals::model_picker::has_selectable_models(&ctx.config) {
                 renderer.render(UiLine::CommandOutput(t(Msg::CmdNoProviders).into_owned()));
@@ -1875,7 +1875,7 @@ fn execute_slash_command_impl(
         }
         "modelsadd" | "modeladd" | "model-add" | "models-add" => {
             let mut panel = crate::modals::ProviderPanel::open();
-            panel.open_add_model(&ctx.config);
+            panel.open_add_model(&ctx.config, ctx.wake_tx.clone());
             *active_modal = Some(Box::new(panel));
         }
         "proxy" => {

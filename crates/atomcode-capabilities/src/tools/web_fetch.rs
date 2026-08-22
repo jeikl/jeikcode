@@ -76,7 +76,7 @@ impl Tool for WebFetchTool {
          this tool when the user provides a specific http(s) URL to read, extract, or summarize; \
          prefer it over running `curl` or `wget` through the shell because it handles page \
          charset and rendering. Also use it after `web_search` to read a specific result. Do NOT \
-         call this tool if a more specific, dedicated skill (listed under AVAILABLE SKILLS in the system prompt) \
+         call this tool if a more specific, dedicated skill (listed under AVAILABLE SKILLS in the user-prefix catalog) \
          matches the URL or domain of the page you want to fetch (e.g., platform-specific issue trackers or document sites); \
          instead, you MUST use the use_skill tool. Only http/https URLs are allowed; requests to localhost / private / \
          cloud-metadata addresses are blocked. Returns the full page by default; pass `max_chars` to cap."
@@ -261,7 +261,7 @@ fn render_body(
         return err(format!(
             "web_fetch: page fetched but no readable text at {final_url}.\n\n\
              Hint: If this page belongs to a specific platform (e.g. GitCode/GitHub issues, documentation databases, API specs), \
-             check if there is a dedicated skill listed under AVAILABLE SKILLS in the system prompt that can fetch it via API."
+             check if there is a dedicated skill listed under AVAILABLE SKILLS in the user-prefix catalog that can fetch it via API."
         ));
     }
     let cap_note = if hit_cap {

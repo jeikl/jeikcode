@@ -409,10 +409,20 @@ fn build_request_body(
     );
     body.insert("stream".into(), json!(true));
 
-    let (system, msgs) = format_messages(messages, cfg.thinking);
+    let (system, mut msgs) = format_messages(messages, cfg.thinking);
     if let Some(s) = system {
-        body.insert("system".into(), json!(s));
+        // Prompt-cache breakpoint #1: frozen system. Next request that keeps this
+        // system byte-identical reads it from cache.
+        body.insert(
+            "system".into(),
+            json!([{
+                "type": "text",
+                "text": s,
+                "cache_control": { "type": "ephemeral" },
+            }]),
+        );
     }
+    apply_message_cache_breakpoint(&mut msgs);
     body.insert("messages".into(), json!(msgs));
 
     // Sampling params are OMITTED unless the embedder opts in for an older Claude.
@@ -447,14 +457,11 @@ fn build_request_body(
     if cfg.thinking && !forces_tool_use {
         body.insert("thinking".into(), json!({ "type": "adaptive" }));
     }
-    if let Some(effort) = &options.reasoning_effort {
-        body.insert(
-            "output_config".into(),
-            json!({ "effort": effort.as_str() }),
-        );
+    if let Some(effort) = super::openai_compat::resolve_wire_effort(model, options) {
+        body.insert("output_config".into(), json!({ "effort": effort }));
     }
     if !tools.is_empty() {
-        let t: Vec<Value> = tools
+        let mut t: Vec<Value> = tools
             .iter()
             .map(|td| {
                 json!({
@@ -464,9 +471,41 @@ fn build_request_body(
                 })
             })
             .collect();
+        // Prompt-cache breakpoint #2: frozen tool schemas (last tool). Anthropic
+        // allows 4 breakpoints; system + tools + last history message is the
+        // Claude-Code layout that keeps prefix hits across tool-loop rounds.
+        if let Some(last) = t.last_mut() {
+            last["cache_control"] = json!({ "type": "ephemeral" });
+        }
         body.insert("tools".into(), json!(t));
     }
     Value::Object(body)
+}
+
+/// Mark the last user/assistant content block as a cache breakpoint so the next
+/// request can reuse everything up to and including this message.
+fn apply_message_cache_breakpoint(messages: &mut [Value]) {
+    let Some(last) = messages.last_mut() else {
+        return;
+    };
+    match last.get_mut("content") {
+        Some(Value::String(text)) => {
+            let text = text.clone();
+            last["content"] = json!([{
+                "type": "text",
+                "text": text,
+                "cache_control": { "type": "ephemeral" },
+            }]);
+        }
+        Some(Value::Array(blocks)) => {
+            if let Some(block) = blocks.last_mut() {
+                if block.is_object() {
+                    block["cache_control"] = json!({ "type": "ephemeral" });
+                }
+            }
+        }
+        _ => {}
+    }
 }
 
 /// Split kernel messages into the Anthropic top-level `system` string (joined leading
@@ -950,12 +989,14 @@ impl AnthropicSseDecoder {
                         out.push(StreamEvent::ReasoningSignature {
                             opaque: b.signature,
                             provider: "anthropic".into(),
+                            id: None,
                         });
                     }
                     "redacted_thinking" => {
                         out.push(StreamEvent::ReasoningSignature {
                             opaque: b.redacted_data,
                             provider: "anthropic".into(),
+                            id: None,
                         });
                     }
                     _ => {}
@@ -1096,6 +1137,21 @@ mod tests {
         );
     }
 
+    #[test]
+    fn reminder_above_query_merges_with_query_last() {
+        let msgs = vec![
+            Message::synthetic_user("<system-reminder>\nCurrent date: 2026-08-22\n</system-reminder>"),
+            Message::user("the real question"),
+        ];
+        let (_system, out) = format_messages(&msgs, false);
+        assert_eq!(out.len(), 1);
+        assert_eq!(
+            out[0]["content"],
+            json!("<system-reminder>\nCurrent date: 2026-08-22\n</system-reminder>\n\nthe real question"),
+            "merged Anthropic user block must end with the real query"
+        );
+    }
+
     fn line(event: &str, v: Value) -> String {
         format!("event: {event}\ndata: {v}\n\n")
     }
@@ -1190,11 +1246,13 @@ mod tests {
                 text: "let me think".into(),
                 opaque: Some("sig-1".into()),
                 provider: Some("anthropic".into()),
+                id: None,
             },
             ReasoningBlock {
                 text: String::new(),
                 opaque: Some("redacted-data".into()),
                 provider: Some("anthropic".into()),
+                id: None,
             },
         ];
         let (_s, out) = format_messages(&[Message::user("hi"), a], true);
@@ -1219,6 +1277,7 @@ mod tests {
             text: "x".into(),
             opaque: Some("s".into()),
             provider: Some("anthropic".into()),
+            id: None,
         }];
         let (_s, out) = format_messages(&[Message::user("hi"), a], false);
         // thinking disabled → no signed blocks echoed; plain text content.
@@ -1235,11 +1294,13 @@ mod tests {
                 text: "from openai".into(),
                 opaque: Some("oai-sig".into()),
                 provider: Some("openai".into()),
+                id: None,
             },
             ReasoningBlock {
                 text: "no provider".into(),
                 opaque: Some("x".into()),
                 provider: None,
+                id: None,
             },
         ];
         // thinking ENABLED, but every block is foreign → collapses to a plain string.
@@ -1259,11 +1320,13 @@ mod tests {
                 text: "ours".into(),
                 opaque: Some("sig-a".into()),
                 provider: Some("anthropic".into()),
+                id: None,
             },
             ReasoningBlock {
                 text: "theirs".into(),
                 opaque: Some("sig-b".into()),
                 provider: Some("openai".into()),
+                id: None,
             },
         ];
         let (_s, out) = format_messages(&[Message::user("hi"), a], true);
@@ -1313,7 +1376,20 @@ mod tests {
             "max_tokens from cfg when options has none"
         );
         assert_eq!(body["stream"], true);
-        assert_eq!(body["system"], "s");
+        assert_eq!(
+            body["system"][0]["text"],
+            "s",
+            "system is a cached text block"
+        );
+        assert_eq!(
+            body["system"][0]["cache_control"]["type"],
+            "ephemeral"
+        );
+        assert_eq!(
+            body["messages"][0]["content"][0]["cache_control"]["type"],
+            "ephemeral",
+            "last message is a cache breakpoint"
+        );
         assert!(body.get("tools").is_none(), "empty tools omitted");
         assert!(body.get("tool_choice").is_none(), "Auto omits tool_choice");
         assert!(body.get("thinking").is_none(), "thinking off by default");
@@ -1354,7 +1430,12 @@ mod tests {
         // tools use input_schema, NOT function.parameters.
         assert_eq!(
             body["tools"][0],
-            json!({"name":"read","description":"d","input_schema":{"type":"object"}})
+            json!({
+                "name":"read",
+                "description":"d",
+                "input_schema":{"type":"object"},
+                "cache_control":{"type":"ephemeral"}
+            })
         );
     }
 
@@ -1595,7 +1676,7 @@ mod tests {
         assert_eq!(kinds(&ev), vec!["reason", "reasonsig"]);
         assert!(matches!(&ev[0], StreamEvent::Reasoning(s) if s == "step 1"));
         assert!(
-            matches!(&ev[1], StreamEvent::ReasoningSignature { opaque, provider } if opaque == "sig-xyz" && provider == "anthropic")
+            matches!(&ev[1], StreamEvent::ReasoningSignature { opaque, provider, .. } if opaque == "sig-xyz" && provider == "anthropic")
         );
     }
 

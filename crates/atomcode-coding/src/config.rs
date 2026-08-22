@@ -449,6 +449,7 @@ impl CodingRuntimeConfig {
             None
         };
         config.provider_type = self.provider_type.clone();
+        config.reasoning_history = self.reasoning_history.clone();
         config.thinking_enabled = self.thinking_enabled;
         config.thinking_type = self.thinking_type.clone();
         config.thinking_keep = self.thinking_keep.clone();

@@ -79,6 +79,11 @@ pub struct ReasoningBlock {
     /// `provider.is_some()`.
     #[serde(default)]
     pub provider: Option<String>,
+    /// Provider-native item id for prefix-cache replay (OpenAI Responses `rs_…`).
+    /// Anthropic thinking blocks do not use this (`signature` lives in `opaque`).
+    /// ADDITIVE: `#[serde(default)]` so older snapshots still deserialize.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub id: Option<String>,
 }
 
 /// Kernel-native per-message execution stats, recorded at on_model_response.
@@ -533,6 +538,71 @@ impl Conversation {
         {
             Some(idx) => idx + 1,
             None => lead_system,
+        }
+    }
+
+    /// Index at which a frozen prefix injection (memory / skills / MCP) lands:
+    /// after the leading System run and any already-injected synthetic User
+    /// messages, and before the first real (non-synthetic) User.
+    ///
+    /// Those synthetic users sit inside [`Self::sacred_floor`], so compaction
+    /// cannot drain them. They stay off `Role::System` so a consecutive-system
+    /// merger cannot fold user-owned catalog/memory/MCP bytes into the persona.
+    pub fn frozen_prefix_end(&self) -> usize {
+        let mut i = 0;
+        while i < self.messages.len() && self.messages[i].role == Role::System {
+            i += 1;
+        }
+        while i < self.messages.len()
+            && self.messages[i].role == Role::User
+            && self.messages[i].synthetic
+        {
+            i += 1;
+        }
+        i
+    }
+
+    /// Locate a prefix block by header among messages that precede the first
+    /// real user (leading systems + frozen synthetic users).
+    fn find_before_first_real_user(&self, header: &str) -> Option<usize> {
+        let end = self
+            .messages
+            .iter()
+            .position(|m| m.role == Role::User && !m.synthetic)
+            .unwrap_or(self.messages.len());
+        self.messages[..end]
+            .iter()
+            .position(|m| m.text.starts_with(header))
+    }
+
+    /// Insert, refresh, or remove a frozen synthetic-user prefix block identified
+    /// by a stable header (`=== MEMORY ===`, skill catalog, MCP instructions).
+    ///
+    /// A leftover `Role::System` copy from older sessions is converted (removed
+    /// from the system run, re-inserted as a synthetic user at
+    /// [`Self::frozen_prefix_end`]) so resume stays compaction-safe and does not
+    /// grow a duplicate.
+    pub fn reconcile_frozen_user_block(&mut self, header: &str, block: Option<String>) {
+        let existing = self.find_before_first_real_user(header);
+        match (block, existing) {
+            (Some(text), Some(i))
+                if self.messages[i].role == Role::User && self.messages[i].synthetic =>
+            {
+                self.messages[i] = Message::synthetic_user(text);
+            }
+            (Some(text), Some(i)) => {
+                self.messages.remove(i);
+                let at = self.frozen_prefix_end();
+                self.messages.insert(at, Message::synthetic_user(text));
+            }
+            (Some(text), None) => {
+                let at = self.frozen_prefix_end();
+                self.messages.insert(at, Message::synthetic_user(text));
+            }
+            (None, Some(i)) => {
+                self.messages.remove(i);
+            }
+            (None, None) => {}
         }
     }
 
@@ -1081,16 +1151,26 @@ mod tests {
                 text: "let me think".into(),
                 opaque: Some("sig-abc".into()),
                 provider: Some("anthropic".into()),
+                id: None,
             },
             // a redacted block: no readable text, opaque only.
             ReasoningBlock {
                 text: String::new(),
                 opaque: Some("redacted-data".into()),
                 provider: Some("anthropic".into()),
+                id: None,
             },
         ];
         let back: Message = serde_json::from_str(&serde_json::to_string(&with).unwrap()).unwrap();
         assert_eq!(back.reasoning_blocks, with.reasoning_blocks);
+
+        // Responses item id round-trips; older snapshots without `id` stay None.
+        with.reasoning_blocks[0].id = Some("rs_abc".into());
+        let back: Message = serde_json::from_str(&serde_json::to_string(&with).unwrap()).unwrap();
+        assert_eq!(back.reasoning_blocks[0].id.as_deref(), Some("rs_abc"));
+        let old_block = r#"{"text":"t","opaque":"sig","provider":"anthropic"}"#;
+        let b: ReasoningBlock = serde_json::from_str(old_block).unwrap();
+        assert_eq!(b.id, None);
     }
 
     // Mirrors production `cancel_backfills_missing_tool_results`: an assistant
@@ -1443,6 +1523,69 @@ mod tests {
         c3.push(Message::user("hi"));
         c3.push(Message::assistant("ho", vec![]));
         assert_eq!(c3.sacred_floor(), 1);
+
+        // Frozen synthetic-user prefix (memory/skills/MCP) is inside the floor.
+        let mut c4 = Conversation::new();
+        c4.push(Message::system("persona"));
+        c4.push(Message::synthetic_user("=== MEMORY ===\n- tabs"));
+        c4.push(Message::synthetic_user("=== AVAILABLE SKILLS ===\n- x"));
+        c4.push(Message::user("real task"));
+        assert_eq!(c4.frozen_prefix_end(), 3);
+        assert_eq!(c4.sacred_floor(), 4);
+    }
+
+    #[test]
+    fn reconcile_frozen_user_block_inserts_after_systems_as_synthetic_user() {
+        let mut c = Conversation::new();
+        c.push(Message::system("persona"));
+        c.push(Message::system("=== SESSION CONTEXT ==="));
+        c.push(Message::user("task"));
+        c.reconcile_frozen_user_block("=== MEMORY ===", Some("=== MEMORY ===\n- tabs".into()));
+        assert_eq!(c.messages[2].role, Role::User);
+        assert!(c.messages[2].synthetic);
+        assert!(c.messages[2].text.starts_with("=== MEMORY ==="));
+        assert_eq!(c.messages[3].text, "task");
+        assert_eq!(c.sacred_floor(), 4);
+    }
+
+    #[test]
+    fn reconcile_frozen_user_block_converts_legacy_system_and_does_not_grow() {
+        let mut c = Conversation::new();
+        c.push(Message::system("persona"));
+        c.push(Message::system("=== MEMORY ===\nstale"));
+        c.push(Message::user("task"));
+        c.reconcile_frozen_user_block("=== MEMORY ===", Some("=== MEMORY ===\nfresh".into()));
+        assert_eq!(c.messages.len(), 3);
+        assert_eq!(c.messages[1].role, Role::User);
+        assert!(c.messages[1].synthetic);
+        assert_eq!(c.messages[1].text, "=== MEMORY ===\nfresh");
+        assert_eq!(c.messages[2].text, "task");
+    }
+
+    #[test]
+    fn apply_plan_never_drains_frozen_user_prefix() {
+        let mut c = Conversation::new();
+        c.push(Message::system("PERSONA-FROZEN"));
+        c.push(Message::synthetic_user("=== MEMORY ===\n- tabs"));
+        c.push(Message::synthetic_user("=== AVAILABLE SKILLS ===\n- x"));
+        c.push(Message::user("the task"));
+        c.push(Message::assistant("aaaaaaaaaa", vec![]));
+        c.push(Message::tool_result("c1", "bbbbbbbbbb", false));
+        c.push(Message::assistant("cccccccccc", vec![]));
+        c.push(Message::user("dddddddddd"));
+        let floor = c.sacred_floor();
+        assert_eq!(floor, 4);
+        let prefix = c.messages[..floor].to_vec();
+        let plan = CompactionPlan {
+            drain_from: 0,
+            drain_to: c.messages.len(),
+            summary: Some("SUMMARIZED".into()),
+            rewrites: vec![],
+            resume_note: None,
+        };
+        let report = c.apply_plan(plan, floor);
+        assert!(report.committed, "drain of post-floor history must commit");
+        assert_eq!(&c.messages[..floor], &prefix[..], "frozen user prefix survives");
     }
 
     // Draining a middle range with a summary: messages shrink, ONE synthetic

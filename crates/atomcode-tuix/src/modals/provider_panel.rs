@@ -5,9 +5,16 @@
 // hidden (MenuKind::Plugin). See docs/plans/2026-07-28-provider-panel-ui-design.md.
 
 use anyhow::Result;
-use atomcode_config::config::provider::{ModelProfileConfig, ProviderAccountConfig};
+use atomcode_config::config::provider::{
+    default_reasoning_effort_for, default_reasoning_levels_for, ModelProfileConfig,
+    ProviderAccountConfig,
+};
 use atomcode_config::config::{provider_preset, Config};
 use crossterm::event::{KeyCode, KeyModifiers};
+use std::sync::{mpsc, Arc, Mutex};
+use tokio::sync::mpsc::Sender as WakeSender;
+
+use super::upstream_models::{self, UpstreamListSpec};
 
 use super::{tab_chip, Modal, ModalAction};
 use crate::event_loop::{
@@ -57,18 +64,40 @@ struct AddForm {
     focus: FormField,
 }
 
-/// The `PRESETS` index of the custom `openai-compatible` / `anthropic-compatible`
-/// protocol preset — the only two the add form offers (fully-custom provider).
-fn compat_preset_idx(anthropic: bool) -> usize {
-    let id = if anthropic {
-        "anthropic-compatible"
-    } else {
-        "openai-compatible"
-    };
+/// Custom-provider protocol cycle: OpenAI chat/completions → Anthropic Messages →
+/// OpenAI Responses → back.
+const COMPAT_PRESET_IDS: [&str; 3] = [
+    "openai-compatible",
+    "anthropic-compatible",
+    "responses-compatible",
+];
+
+fn compat_preset_idx(id: &str) -> usize {
     provider_preset::PRESETS
         .iter()
         .position(|p| p.id == id)
         .unwrap_or(0)
+}
+
+fn cycle_compat_preset_id(current: &str, forward: bool) -> &'static str {
+    let i = COMPAT_PRESET_IDS
+        .iter()
+        .position(|id| *id == current)
+        .unwrap_or(0);
+    let next = if forward {
+        (i + 1) % COMPAT_PRESET_IDS.len()
+    } else {
+        (i + COMPAT_PRESET_IDS.len() - 1) % COMPAT_PRESET_IDS.len()
+    };
+    COMPAT_PRESET_IDS[next]
+}
+
+fn protocol_label_for(id: &str) -> &'static str {
+    match id {
+        "anthropic-compatible" => "Anthropic",
+        "responses-compatible" => "Responses",
+        _ => "OpenAI",
+    }
 }
 
 impl AddForm {
@@ -76,7 +105,7 @@ impl AddForm {
     fn new() -> Self {
         Self {
             name: String::new(),
-            preset_idx: compat_preset_idx(false),
+            preset_idx: compat_preset_idx("openai-compatible"),
             base_url: String::new(),
             api_key: String::new(),
             focus: FormField::Name,
@@ -85,11 +114,7 @@ impl AddForm {
 
     /// Human protocol label for the toggle.
     fn protocol_label(&self) -> &'static str {
-        if self.preset().id == "anthropic-compatible" {
-            "Anthropic"
-        } else {
-            "OpenAI"
-        }
+        protocol_label_for(self.preset().id)
     }
 
     fn preset(&self) -> &'static provider_preset::ProviderPreset {
@@ -117,11 +142,8 @@ impl AddForm {
         self.focus = fields[next];
     }
 
-    fn cycle_preset(&mut self, _forward: bool) {
-        // Only two protocols (OpenAI-compatible ↔ Anthropic-compatible), so both
-        // directions toggle. Neither ships a default endpoint — keep base_url.
-        let to_anthropic = self.preset().id == "openai-compatible";
-        self.preset_idx = compat_preset_idx(to_anthropic);
+    fn cycle_preset(&mut self, forward: bool) {
+        self.preset_idx = compat_preset_idx(cycle_compat_preset_id(self.preset().id, forward));
         if !self.fields().contains(&self.focus) {
             self.focus = FormField::Name;
         }
@@ -177,11 +199,7 @@ impl EditForm {
     }
 
     fn protocol_label(&self) -> &'static str {
-        if self.preset().id == "anthropic-compatible" {
-            "Anthropic"
-        } else {
-            "OpenAI"
-        }
+        protocol_label_for(self.preset().id)
     }
 
     /// Field sequence. A gateway-locked account only exposes base_url.
@@ -211,15 +229,11 @@ impl EditForm {
         self.focus = fields[next];
     }
 
-    fn cycle_preset(&mut self, _forward: bool) {
+    fn cycle_preset(&mut self, forward: bool) {
         if self.vendor_locked || self.protocol_locked {
             return; // managed/curated vendor — protocol not editable
         }
-        // Only two choices (OpenAI-compatible ↔ Anthropic-compatible), so both
-        // directions just toggle. Neither ships a default endpoint, so base_url
-        // stays as the user typed it.
-        let to_anthropic = self.preset().id == "openai-compatible";
-        self.preset_idx = compat_preset_idx(to_anthropic);
+        self.preset_idx = compat_preset_idx(cycle_compat_preset_id(self.preset().id, forward));
         if !self.fields().contains(&self.focus) {
             self.focus = FormField::Preset;
         }
@@ -281,6 +295,8 @@ struct ModelForm {
     candidates: Vec<String>,
     candidate_idx: usize,
     fetch_status: Option<String>,
+    /// In-flight `GET /models` result. Shared so `Clone` (used on save) is cheap.
+    fetch_rx: Arc<Mutex<Option<mpsc::Receiver<Result<Vec<String>, String>>>>>,
 }
 
 impl ModelForm {
@@ -315,6 +331,7 @@ impl ModelForm {
             candidates: Vec::new(),
             candidate_idx: 0,
             fetch_status: None,
+            fetch_rx: Arc::new(Mutex::new(None)),
         })
     }
 
@@ -345,6 +362,7 @@ impl ModelForm {
             candidates: Vec::new(),
             candidate_idx: 0,
             fetch_status: None,
+            fetch_rx: Arc::new(Mutex::new(None)),
         })
     }
 
@@ -359,6 +377,115 @@ impl ModelForm {
                 .map(|s| s.as_str())
                 .collect()
         }
+    }
+
+    fn clamp_candidate_idx(&mut self) {
+        let n = self.filtered_candidates().len();
+        if n == 0 {
+            self.candidate_idx = 0;
+        } else if self.candidate_idx >= n {
+            self.candidate_idx = n - 1;
+        }
+    }
+
+    fn accept_highlighted_candidate(&mut self) -> bool {
+        let candidates = self.filtered_candidates();
+        if candidates.is_empty() {
+            return false;
+        }
+        let chosen = candidates[self.candidate_idx.min(candidates.len() - 1)];
+        if self.model.trim() == chosen {
+            return false;
+        }
+        self.model = chosen.to_string();
+        true
+    }
+
+    fn apply_fetch_result(&mut self) -> bool {
+        let received = {
+            let mut guard = match self.fetch_rx.lock() {
+                Ok(g) => g,
+                Err(_) => return false,
+            };
+            let Some(rx) = guard.as_mut() else {
+                return false;
+            };
+            match rx.try_recv() {
+                Ok(v) => {
+                    *guard = None;
+                    Some(v)
+                }
+                Err(mpsc::TryRecvError::Disconnected) => {
+                    *guard = None;
+                    Some(Err("disconnected".into()))
+                }
+                Err(mpsc::TryRecvError::Empty) => None,
+            }
+        };
+        let Some(result) = received else {
+            return false;
+        };
+        match result {
+            Ok(ids) if !ids.is_empty() => {
+                self.fetch_status = Some(format!("已加载 {} 个上游模型 · 输入即筛选 · ↑↓ 选择 · Tab/↵ 填入", ids.len()));
+                self.candidates = ids;
+                self.candidate_idx = 0;
+            }
+            Ok(_) => {
+                self.candidates.clear();
+                self.fetch_status = Some("上游无模型列表，可直接输入模型 id".into());
+            }
+            Err(_) => {
+                self.candidates.clear();
+                self.fetch_status = Some("上游列表请求失败，可直接输入模型 id".into());
+            }
+        }
+        true
+    }
+
+    fn start_fetch(&mut self, config: &Config, wake_tx: WakeSender<()>) {
+        let Some(spec) = upstream_spec_for_account(config, self.account_id(), &self.api_key) else {
+            self.candidates.clear();
+            self.fetch_status = Some("无可用上游地址，可直接输入模型 id".into());
+            if let Ok(mut g) = self.fetch_rx.lock() {
+                *g = None;
+            }
+            return;
+        };
+        self.fetch_status = Some("正在请求上游 /models …".into());
+        self.candidates.clear();
+        self.candidate_idx = 0;
+        let (tx, rx) = mpsc::channel();
+        if let Ok(mut g) = self.fetch_rx.lock() {
+            *g = Some(rx);
+        }
+        match tokio::runtime::Handle::try_current() {
+            Ok(handle) => {
+                handle.spawn(async move {
+                    let result = upstream_models::fetch_upstream_model_ids(spec).await;
+                    let _ = tx.send(result);
+                    let _ = wake_tx.try_send(());
+                });
+            }
+            Err(_) => {
+                self.fetch_status = Some("上游列表请求失败，可直接输入模型 id".into());
+                if let Ok(mut g) = self.fetch_rx.lock() {
+                    *g = None;
+                }
+            }
+        }
+    }
+
+    fn start_fetch_if_idle(&mut self, config: &Config, wake_tx: WakeSender<()>) {
+        let inflight = self
+            .fetch_rx
+            .lock()
+            .ok()
+            .is_some_and(|g| g.is_some());
+        if inflight || !self.candidates.is_empty() {
+            return;
+        }
+        self.start_fetch(config, wake_tx);
     }
 
     fn account_id(&self) -> &str {
@@ -450,6 +577,44 @@ const LIST_HEADER_ROWS: usize = 4;
 const ADD_PROVIDER_ROW: &str = "\u{1}add-provider";
 const ADD_MODEL_ROW: &str = "\u{1}add-model";
 
+fn upstream_spec_for_account(
+    config: &Config,
+    account_id: &str,
+    form_api_key: &str,
+) -> Option<UpstreamListSpec> {
+    let accounts = config.logical_accounts();
+    let account = accounts.get(account_id)?;
+    let preset = provider_preset::preset_or_compatible(&account.provider);
+    let base_url = account
+        .base_url
+        .clone()
+        .or_else(|| preset.default_base_url.map(str::to_string))?;
+    if base_url.trim().is_empty() {
+        return None;
+    }
+    let mut api_key = form_api_key.trim().to_string();
+    if api_key.is_empty() {
+        api_key = account
+            .api_key
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .unwrap_or("")
+            .to_string();
+    }
+    if api_key.is_empty() {
+        if let Some(env) = preset.api_key_env {
+            api_key = std::env::var(env).unwrap_or_default();
+        }
+    }
+    Some(UpstreamListSpec {
+        protocol: preset.provider_type.wire().to_string(),
+        base_url,
+        api_key,
+        skip_tls_verify: account.skip_tls_verify,
+    })
+}
+
 fn is_add_shortcut(code: &KeyCode, mods: KeyModifiers) -> bool {
     matches!(
         code,
@@ -479,7 +644,11 @@ impl ProviderPanel {
             },
             Mode::Model(form) => match form.focus {
                 ModelField::ApiKey => form.api_key.push_str(clean),
-                ModelField::Model => form.model.push_str(clean),
+                ModelField::Model => {
+                    form.model.push_str(clean);
+                    form.candidate_idx = 0;
+                    form.clamp_candidate_idx();
+                }
                 ModelField::Window => form
                     .window
                     .extend(clean.chars().filter(char::is_ascii_digit)),
@@ -508,9 +677,10 @@ impl ProviderPanel {
     }
 
     /// Open directly into adding a model under an existing account.
-    pub fn open_add_model(&mut self, config: &atomcode_config::Config) {
+    pub fn open_add_model(&mut self, config: &atomcode_config::Config, wake_tx: WakeSender<()>) {
         self.tab = Tab::Models;
-        if let Some(form) = ModelForm::new_add(config, None) {
+        if let Some(mut form) = ModelForm::new_add(config, None) {
+            form.start_fetch(config, wake_tx);
             self.mode = Mode::Model(form);
         }
     }
@@ -549,7 +719,10 @@ impl ProviderPanel {
                 .default_base_url
                 .is_some_and(|u| !atomcode_auth::gateway_crypto::is_atomgit_gateway(u));
             if !has_dispatchable_endpoint
-                || matches!(p.id, "openai-compatible" | "anthropic-compatible")
+                || matches!(
+                    p.id,
+                    "openai-compatible" | "anthropic-compatible" | "responses-compatible"
+                )
                 || atomcode_config::config::is_codingplan_provider_name(p.id)
                 || ids.iter().any(|i| i == p.id)
             {
@@ -694,12 +867,15 @@ impl ProviderPanel {
         }
     }
 
-    fn begin_add_for_current_tab(&mut self, config: &Config) {
+    fn begin_add_for_current_tab(&mut self, config: &Config, wake_tx: WakeSender<()>) {
         self.pending_delete = None;
         self.mode = match self.tab {
             Tab::Accounts => Mode::Add(AddForm::new()),
             Tab::Models => ModelForm::new_add(config, self.account_filter.as_deref())
-                .map(Mode::Model)
+                .map(|mut form| {
+                    form.start_fetch(config, wake_tx);
+                    Mode::Model(form)
+                })
                 .unwrap_or_else(|| Mode::Add(AddForm::new())),
         };
     }
@@ -795,14 +971,15 @@ impl ProviderPanel {
                 .and_then(|preset| preset.default_base_url)
                 .map(str::to_string)
         });
-        // Map the stored provider to a protocol toggle (OpenAI/Anthropic
-        // compatible). original == preset so a no-op edit leaves the real stored
-        // provider (e.g. "deepseek"/"openai") untouched (see save_edit's guard).
-        let anthropic = matches!(
-            provider_preset::preset_or_compatible(&provider).provider_type,
-            provider_preset::ProviderType::Anthropic
-        );
-        let preset_idx = compat_preset_idx(anthropic);
+        // Map the stored provider to a protocol toggle. original == preset so a
+        // no-op edit leaves the real stored provider (e.g. "deepseek"/"openai")
+        // untouched (see save_edit's guard).
+        let protocol_id = match provider_preset::preset_or_compatible(&provider).provider_type {
+            provider_preset::ProviderType::Anthropic => "anthropic-compatible",
+            provider_preset::ProviderType::Responses => "responses-compatible",
+            _ => "openai-compatible",
+        };
+        let preset_idx = compat_preset_idx(protocol_id);
         let vendor_locked = atomcode_config::config::is_codingplan_provider_name(id);
         EditForm {
             id: id.to_string(),
@@ -1000,16 +1177,41 @@ impl ProviderPanel {
 
                 let selection_id = if let Some(id) = &edit_id {
                     // Edit in place — new-schema model or legacy provider.
+                    let grok = model_name.to_ascii_lowercase().contains("grok");
                     if let Some(model) = persisted.models.get_mut(id) {
                         model.model = model_name.clone();
                         model.context_window = context_window;
                         model.supports_vision = Some(supports_vision);
-                        model.reasoning_model = Some(reasoning_model);
+                        model.reasoning_model = Some(grok || reasoning_model);
+                        if grok {
+                            if model.reasoning_levels.as_ref().is_none_or(|l| l.is_empty()) {
+                                model.reasoning_levels =
+                                    Some(default_reasoning_levels_for(&model_name));
+                            }
+                            if model.reasoning_effort.is_none() {
+                                model.reasoning_effort = default_reasoning_effort_for(&model_name);
+                            }
+                            if model.reasoning_history.is_none() {
+                                model.reasoning_history = Some("include".into());
+                            }
+                        }
                     } else if let Some(provider) = persisted.providers.get_mut(id) {
                         provider.model = model_name.clone();
                         provider.context_window = context_window;
                         provider.supports_vision = Some(supports_vision);
-                        provider.reasoning_model = Some(reasoning_model);
+                        provider.reasoning_model = Some(grok || reasoning_model);
+                        if grok {
+                            if provider.reasoning_levels.as_ref().is_none_or(|l| l.is_empty()) {
+                                provider.reasoning_levels =
+                                    Some(default_reasoning_levels_for(&model_name));
+                            }
+                            if provider.reasoning_effort.is_none() {
+                                provider.reasoning_effort = default_reasoning_effort_for(&model_name);
+                            }
+                            if provider.reasoning_history.is_none() {
+                                provider.reasoning_history = Some("include".into());
+                            }
+                        }
                     } else {
                         anyhow::bail!("model {id:?} changed; reopen /provider");
                     }
@@ -1032,6 +1234,8 @@ impl ProviderPanel {
                     } else {
                         base
                     };
+                    let grok = model_name.to_ascii_lowercase().contains("grok");
+                    let persist_reasoning = grok || reasoning_model;
                     persisted.models.insert(
                         model_id.clone(),
                         ModelProfileConfig {
@@ -1044,14 +1248,15 @@ impl ProviderPanel {
                             capable_model: None,
                             thinking_type: None,
                             thinking_keep: None,
-                            reasoning_history: None,
-                            reasoning_effort: None,
-                            reasoning_levels: None,
+                            reasoning_history: grok.then(|| "include".to_string()),
+                            reasoning_effort: default_reasoning_effort_for(&model_name),
+                            reasoning_levels: persist_reasoning
+                                .then(|| default_reasoning_levels_for(&model_name)),
                             thinking_enabled: None,
                             thinking_budget: None,
                             pricing: None,
                             supports_vision: Some(supports_vision),
-                            reasoning_model: Some(reasoning_model),
+                            reasoning_model: Some(grok || reasoning_model),
                         },
                     );
                     model_id
@@ -1239,6 +1444,7 @@ impl Modal for ProviderPanel {
 
         // ── Add / edit model ──
         if let Mode::Model(form) = &mut self.mode {
+            let _ = form.apply_fetch_result();
             match code {
                 KeyCode::Esc => self.mode = Mode::List,
                 KeyCode::Up if form.focus == ModelField::Model => {
@@ -1261,19 +1467,24 @@ impl Modal for ProviderPanel {
                 }
                 KeyCode::Tab => {
                     if form.focus == ModelField::Model {
-                        let candidates = form.filtered_candidates();
-                        if !candidates.is_empty() {
-                            let chosen = candidates[form.candidate_idx.min(candidates.len() - 1)];
-                            form.model = chosen.to_string();
-                        }
+                        let _ = form.accept_highlighted_candidate();
                     }
                     form.advance_focus(true);
+                    if form.focus == ModelField::Model {
+                        form.start_fetch_if_idle(&ctx.config, ctx.wake_tx.clone());
+                    }
                 }
                 KeyCode::BackTab => form.advance_focus(false),
                 KeyCode::Down => form.advance_focus(true),
                 KeyCode::Up => form.advance_focus(false),
-                KeyCode::Left if form.focus == ModelField::Account => form.cycle_account(false),
-                KeyCode::Right if form.focus == ModelField::Account => form.cycle_account(true),
+                KeyCode::Left if form.focus == ModelField::Account => {
+                    form.cycle_account(false);
+                    form.start_fetch(&ctx.config, ctx.wake_tx.clone());
+                }
+                KeyCode::Right if form.focus == ModelField::Account => {
+                    form.cycle_account(true);
+                    form.start_fetch(&ctx.config, ctx.wake_tx.clone());
+                }
                 KeyCode::Char(' ') if form.focus == ModelField::MakeDefault => {
                     form.make_default = !form.make_default;
                 }
@@ -1289,7 +1500,11 @@ impl Modal for ProviderPanel {
                 }
                 KeyCode::Char(c) => match form.focus {
                     ModelField::ApiKey => form.api_key.push(c),
-                    ModelField::Model => form.model.push(c),
+                    ModelField::Model => {
+                        form.model.push(c);
+                        form.candidate_idx = 0;
+                        form.clamp_candidate_idx();
+                    }
                     ModelField::Window if c.is_ascii_digit() => form.window.push(c),
                     _ => {}
                 },
@@ -1299,6 +1514,8 @@ impl Modal for ProviderPanel {
                     }
                     ModelField::Model => {
                         form.model.pop();
+                        form.candidate_idx = 0;
+                        form.clamp_candidate_idx();
                     }
                     ModelField::Window => {
                         form.window.pop();
@@ -1306,6 +1523,10 @@ impl Modal for ProviderPanel {
                     _ => {}
                 },
                 KeyCode::Enter => {
+                    if form.focus == ModelField::Model && form.accept_highlighted_candidate() {
+                        self.draw(buf, state, ctx, renderer);
+                        return Ok(ModalAction::Continue);
+                    }
                     let form = form.clone();
                     if self.save_model(&form, ctx, renderer) {
                         return Ok(ModalAction::Close);
@@ -1349,7 +1570,7 @@ impl Modal for ProviderPanel {
             }
             // Ctrl+A: add. Letter keys are reserved for the search filter.
             code if is_add_shortcut(&code, mods) => {
-                self.begin_add_for_current_tab(&ctx.config);
+                self.begin_add_for_current_tab(&ctx.config, ctx.wake_tx.clone());
             }
             // Ctrl+E: edit the selected row.
             KeyCode::Char('e') if ctrl => {
@@ -1361,7 +1582,10 @@ impl Modal for ProviderPanel {
                     self.mode = match self.tab {
                         Tab::Accounts => Mode::EditAccount(Self::open_edit(&ctx.config, &id)),
                         Tab::Models => match ModelForm::new_edit(&ctx.config, &id) {
-                            Some(f) => Mode::Model(f),
+                            Some(mut f) => {
+                                f.start_fetch(&ctx.config, ctx.wake_tx.clone());
+                                Mode::Model(f)
+                            }
                             None => Mode::List,
                         },
                     };
@@ -1410,7 +1634,7 @@ impl Modal for ProviderPanel {
                     match self.tab {
                         // Set default + switch session.
                         Tab::Models if id == ADD_MODEL_ROW => {
-                            self.begin_add_for_current_tab(&ctx.config);
+                            self.begin_add_for_current_tab(&ctx.config, ctx.wake_tx.clone());
                         }
                         Tab::Models => {
                             if set_default_provider_and_reload(ctx, &id, renderer) {
@@ -1711,6 +1935,9 @@ impl Modal for ProviderPanel {
                     form.model.clone(),
                     form.focus == ModelField::Model,
                 ));
+                if let Some(status) = &form.fetch_status {
+                    items.push((format!("    {status}"), String::new()));
+                }
                 if form.focus == ModelField::Model {
                     let candidates = form.filtered_candidates();
                     if !candidates.is_empty() {
@@ -1808,6 +2035,13 @@ impl Modal for ProviderPanel {
         self.draw(buf, state, ctx, renderer);
         Ok(ModalAction::Continue)
     }
+
+    fn poll_background(&mut self) -> bool {
+        match &mut self.mode {
+            Mode::Model(form) => form.apply_fetch_result(),
+            _ => false,
+        }
+    }
 }
 
 #[cfg(test)]
@@ -1857,12 +2091,44 @@ mod tests {
         panel.tab = Tab::Models;
         panel.account_filter = Some("acc".into());
 
-        panel.begin_add_for_current_tab(&cfg);
+        let (wake_tx, _wake_rx) = tokio::sync::mpsc::channel(1);
+        panel.begin_add_for_current_tab(&cfg, wake_tx);
 
         let Mode::Model(form) = &panel.mode else {
             panic!("model add row should open the model form");
         };
         assert_eq!(form.account_id(), "acc");
+    }
+
+    #[test]
+    fn model_id_filters_the_upstream_candidate_list_as_you_type() {
+        let mut form = ModelForm {
+            account_ids: vec!["acc".into()],
+            needs_key: vec![false],
+            account_idx: 0,
+            api_key: String::new(),
+            model: "grok-4".into(),
+            window: String::new(),
+            supports_vision: false,
+            reasoning_model: false,
+            make_default: false,
+            focus: ModelField::Model,
+            edit_id: None,
+            candidates: vec![
+                "grok-4.5".into(),
+                "grok-4.6".into(),
+                "gpt-4o".into(),
+            ],
+            candidate_idx: 0,
+            fetch_status: None,
+            fetch_rx: Arc::new(Mutex::new(None)),
+        };
+        let filtered: Vec<&str> = form.filtered_candidates();
+        assert_eq!(filtered, vec!["grok-4.5", "grok-4.6"]);
+        form.candidate_idx = 1;
+        assert!(form.accept_highlighted_candidate());
+        assert_eq!(form.model, "grok-4.6");
+        assert!(!form.accept_highlighted_candidate());
     }
 
     #[test]
@@ -1880,10 +2146,12 @@ mod tests {
         );
         assert!(f.base_url.is_empty());
         assert_eq!(f.protocol_label(), "OpenAI");
-        // ←→ toggles between the two protocols only (never a vendor list).
         f.cycle_preset(true);
         assert_eq!(f.protocol_label(), "Anthropic");
         assert_eq!(f.preset().id, "anthropic-compatible");
+        f.cycle_preset(true);
+        assert_eq!(f.protocol_label(), "Responses");
+        assert_eq!(f.preset().id, "responses-compatible");
         f.cycle_preset(true);
         assert_eq!(f.protocol_label(), "OpenAI");
     }
@@ -2047,8 +2315,8 @@ mod tests {
             id: "account".into(),
             is_legacy: false,
             materialize_provider: None,
-            preset_idx: compat_preset_idx(false),
-            original_preset_idx: compat_preset_idx(false),
+            preset_idx: compat_preset_idx("openai-compatible"),
+            original_preset_idx: compat_preset_idx("openai-compatible"),
             vendor_locked: false,
             protocol_locked: false,
             api_key: String::new(),

@@ -206,7 +206,7 @@ impl OpenAiCompatProvider {
 /// Build a fresh streaming HTTP client from the process's current proxy env.
 /// Extracted so [`SwappableClient`] can rebuild an identical client with an EMPTY
 /// connection pool when a pooled connection goes stale.
-fn build_http_client(
+pub(crate) fn build_http_client(
     connect_timeout: std::time::Duration,
     skip_tls_verify: bool,
     user_agent: Option<String>,
@@ -375,7 +375,7 @@ pub(crate) struct SwappableClient {
 }
 
 impl SwappableClient {
-    fn new(
+    pub(crate) fn new(
         force_tls12: bool,
         build: impl Fn(bool) -> Result<reqwest::Client, ProviderError> + Send + Sync + 'static,
     ) -> Result<Self, ProviderError> {
@@ -443,7 +443,7 @@ impl LlmProvider for OpenAiCompatProvider {
         } else {
             options
         };
-        let body = build_request_body(
+        let mut body = build_request_body(
             &self.cfg.model,
             messages,
             tools,
@@ -451,6 +451,11 @@ impl LlmProvider for OpenAiCompatProvider {
             &self.cfg,
             self.policy,
         );
+        if let Some(sid) = self.session_id.get().filter(|s| !s.is_empty()) {
+            if let Value::Object(map) = &mut body {
+                map.insert("prompt_cache_key".into(), json!(sid));
+            }
+        }
         super::wire_dump_request(&self.cfg.model, &body); // byte-level dump (ATOMCODE_WIRE_DUMP=1)
                                                           // Serialize once and reuse the exact bytes across retries (hence `.body()`
                                                           // with an explicit content-type rather than re-serializing via `.json()`).
@@ -702,6 +707,9 @@ async fn open_stream(
         // one upstream for prefix-cache affinity. Empty ⇒ omitted (sub-agent/summary).
         if !session_id.is_empty() {
             req = req.header("x-atomcode-session-id", session_id);
+            // grok2api / LiteLLM pin prefix-cache affinity on this name; AtomCode's
+            // own header is kept for product-side diagnostics.
+            req = req.header("x-session-id", session_id);
         }
         let was_capped = tls12_probe || atomcode_config::tls::should_cap_url(url);
         // TTFB watchdog for THIS attempt. `send()` resolves as soon as the response
@@ -888,8 +896,10 @@ fn format_messages(
             Role::User => {
                 if m.images.is_empty() || !supports_vision {
                     // Text-only (no images), OR a vision-incapable target: `content`
-                    // stays a STRING. Coalesce consecutive user text into one wire entry.
-                    super::push_user_coalesced(&mut out, &m.text);
+                    // stays a STRING. Consecutive user messages stay consecutive on the
+                    // wire (Grok Build / OpenAI / Responses all accept them). Merging
+                    // would rewrite a previously cached user block and drop prefix hits.
+                    out.push(json!({ "role": "user", "content": m.text }));
                 } else {
                     // Multimodal: `content` becomes an array — text part first (if any),
                     // then each image as an OpenAI `image_url` base64 data URL. NOTE on
@@ -1061,17 +1071,8 @@ fn build_request_body(
             }
         }
     }
-    let effort = options.reasoning_effort.as_ref().cloned().or_else(|| {
-        if model.to_ascii_lowercase().contains("grok") {
-            Some(ReasoningEffort::High)
-        } else {
-            None
-        }
-    });
-    if let Some(effort) = effort {
-        if reason_effort_applicable(model) {
-            body.insert("reasoning_effort".into(), json!(effort.as_str()));
-        }
+    if let Some(effort) = resolve_wire_effort(model, options) {
+        body.insert("reasoning_effort".into(), json!(effort));
     }
     // Kimi-family `thinking` object — only when configured (omitted otherwise so non-Kimi
     // gateways don't 400 on an unknown top-level key). Port of v1's `thinking_body_value`.
@@ -1107,8 +1108,11 @@ fn supports_tool_choice(model: &str) -> bool {
     !model.contains("deepseek-v4")
 }
 
-/// Whether a model accepts a top-level `reasoning_effort` control. Exposed so a UI
-/// (the TUI effort hint) and the request-body gate can never diverge.
+/// Whether a model-name heuristic says this family takes a thinking-effort
+/// control. Used as the FALLBACK when the user has not configured
+/// `reasoning_effort` / `reasoning_levels` / `reasoning_model` on the model.
+/// The wire still sends whatever custom level the user DID configure — see
+/// [`resolve_wire_effort`] and [`effort_control_applicable`].
 pub fn reason_effort_applicable(model: &str) -> bool {
     let m = model.to_ascii_lowercase();
     m.contains("deepseek-v4")
@@ -1119,6 +1123,48 @@ pub fn reason_effort_applicable(model: &str) -> bool {
         || m.contains("gemini-3.7")
         || m.contains("gemini-2.5")
         || m.contains("grok")
+}
+
+/// Effort string that actually rides the wire (Chat Completions
+/// `reasoning_effort`, Responses `reasoning.effort`, Anthropic
+/// `output_config.effort`, Ollama `think`).
+///
+/// Per-model custom levels always win (`ChatOptions.reasoning_effort`, which
+/// already carries the user's `config.toml` / Ctrl+T value as a raw string via
+/// [`ReasoningEffort::Custom`]). Grok defaults to `"high"` when unset.
+pub fn resolve_wire_effort(model: &str, options: &ChatOptions) -> Option<String> {
+    if let Some(effort) = &options.reasoning_effort {
+        return Some(effort.as_str().to_string());
+    }
+    if model.to_ascii_lowercase().contains("grok") {
+        Some(ReasoningEffort::High.as_str().to_string())
+    } else {
+        None
+    }
+}
+
+/// Whether the UI should expose thinking-effort controls for this model.
+/// True when the user configured a custom level list / current effort /
+/// `reasoning_model`, OR the model-name heuristic matches.
+pub fn effort_control_applicable(
+    model: &str,
+    reasoning_model: Option<bool>,
+    reasoning_effort: Option<&str>,
+    reasoning_levels: Option<&[String]>,
+) -> bool {
+    if reasoning_model == Some(true) {
+        return true;
+    }
+    if reasoning_effort.is_some_and(|e| {
+        let t = e.trim();
+        !t.is_empty() && !t.eq_ignore_ascii_case("off") && !t.eq_ignore_ascii_case("none")
+    }) {
+        return true;
+    }
+    if reasoning_levels.is_some_and(|l| !l.is_empty()) {
+        return true;
+    }
+    reason_effort_applicable(model)
 }
 
 /// True when an OPEN failure is a 400 specifically complaining about
@@ -2350,24 +2396,44 @@ mod tests {
     }
 
     #[test]
-    fn reasoning_effort_only_for_v4() {
-        let cfg = OpenAiCompatConfig::new("k", "https://x", "glm-5.1");
+    fn reasoning_effort_custom_level_reaches_wire_for_any_model() {
+        // Per-model custom levels (config.toml / Ctrl+T) ride the wire regardless
+        // of the model-name heuristic — a gateway that rejects the field self-heals.
+        let cfg = OpenAiCompatConfig::new("k", "https://x", "my-custom-reasoner");
         let opts = ChatOptions {
-            reasoning_effort: Some(ReasoningEffort::High),
+            reasoning_effort: Some(ReasoningEffort::Custom("xhigh".into())),
             ..Default::default()
         };
         let body = build_request_body(
-            "glm-5.1",
+            "my-custom-reasoner",
             &[Message::user("hi")],
             &[],
             &opts,
             &cfg,
             ReasoningPolicy::Exclude,
         );
+        assert_eq!(body["reasoning_effort"], "xhigh");
+    }
+
+    #[test]
+    fn effort_control_applicable_honors_per_model_config() {
         assert!(
-            body.get("reasoning_effort").is_none(),
-            "non-v4 omits reasoning_effort"
+            effort_control_applicable("glm-5.1", None, Some("high"), None),
+            "configured effort enables the control on any model"
         );
+        let levels = ["low".into(), "xhigh".into()];
+        assert!(effort_control_applicable(
+            "glm-5.1",
+            None,
+            None,
+            Some(levels.as_slice())
+        ));
+        assert!(effort_control_applicable("glm-5.1", Some(true), None, None));
+        assert!(
+            !effort_control_applicable("glm-5.1", None, None, None),
+            "no config + unknown family → hidden"
+        );
+        assert!(effort_control_applicable("grok-4.6", None, None, None));
     }
 
     #[test]
@@ -2435,6 +2501,24 @@ mod tests {
                 "shared prefix message {i} must serialize identically"
             );
         }
+    }
+
+    #[test]
+    fn consecutive_user_messages_stay_separate_on_the_wire() {
+        let out = format_messages(
+            &[
+                Message::synthetic_user("<system-reminder>\ndate\n</system-reminder>"),
+                Message::user("the query"),
+            ],
+            ReasoningPolicy::Exclude,
+            true,
+        );
+        assert_eq!(out.len(), 2, "must not coalesce consecutive users");
+        assert_eq!(
+            out[0]["content"],
+            json!("<system-reminder>\ndate\n</system-reminder>")
+        );
+        assert_eq!(out[1]["content"], json!("the query"));
     }
 
     #[test]
@@ -3478,6 +3562,10 @@ mod tests {
         assert!(
             head.contains("x-atomcode-session-id: sess-abc-123"),
             "session-affinity header must be forwarded: {head}"
+        );
+        assert!(
+            head.contains("x-session-id: sess-abc-123"),
+            "gateway cache-affinity header must be forwarded: {head}"
         );
         assert!(
             head.contains("user-agent: atomcode/9.9.9"),

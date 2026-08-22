@@ -617,16 +617,15 @@ async fn prepare_with_plugin_hooks_reusing_lease(
 
     // Hooks in the CANONICAL ORDER (registration order = HookChain execution order):
     // 1. SessionContextHook — session_start: inject env + project-instructions + git
-    //    snapshot after persona. Rewrites the leading-system run (like MemoryHook); runs
-    //    FIRST so the order is persona → context → memory.
-    // 2. MemoryHook    — session_start: inject memory.md after the leading-system run
-    //    (fresh inject / resume reconcile). Both 1 and 2 reconcile by their own header
-    //    prefix, so they compose (the insert position is computed live each time).
-    // 2b. SkillCatalogHook — session_start: inject the AVAILABLE SKILLS catalog after
-    //    memory (persona → context → memory → skills). Same header-prefix reconcile.
-    // 2c. McpInstructionsHook — session_start / turn_start: inject the MCP server
-    //     instructions after skills (persona → context → memory → skills → mcp).
-    //     Keeps prompt prefix cache stable and preserves the user query at the tail.
+    //    snapshot after persona as a System message. Rewrites in place on turn_start.
+    // 2. MemoryHook    — session_start: inject memory.md as a frozen synthetic User
+    //    after the leading-system run (fresh inject / resume reconcile). Inside
+    //    sacred_floor — compaction cannot drain it.
+    // 2b. SkillCatalogHook — session_start: inject the AVAILABLE SKILLS catalog as a
+    //    frozen synthetic User after memory. Same sacred-floor protection.
+    // 2c. McpInstructionsHook — session_start / turn_start: inject MCP server
+    //     instructions as a frozen synthetic User after skills. Unchanged bytes
+    //     keep the prompt-cache prefix stable; the user query stays at the tail.
     // 3. SnapshotHook  — turn_complete: persist .snapshot + .meta.
     // 4. TranscriptHook— turn_complete: append the .jsonl record. (No coupling with
     //    3 — the order is fixed purely for determinism.)
@@ -646,7 +645,7 @@ async fn prepare_with_plugin_hooks_reusing_lease(
     if opts.memory {
         hooks.push(Arc::new(MemoryHook::for_project(&cfg.working_dir)));
     }
-    // Skill catalog — leading system message (persona → context → memory → skills), so
+    // Skill catalog — frozen synthetic user (persona → context → memory → skills), so
     // the model sees which skills are installed and can trigger one on a description
     // match. `None` (no skills) makes the hook a no-op. Reconciles in place on resume.
     // Capture whether any skill is installed BEFORE the catalog is moved — SkillFirstHook
@@ -676,10 +675,10 @@ async fn prepare_with_plugin_hooks_reusing_lease(
         ));
     }
     // Status awareness is UNCONDITIONAL (production parity): a per-turn <system-reminder>
-    // with date + round budget (NO context-usage gauge — pressure is handled silently by
-    // auto-compaction, never pushed to the model). Serves recall's relative-date resolution and
-    // lets the model pace itself. Injected from round 2 of each turn (round 1 is skipped — see
-    // StatusReminderHook — to avoid a user-after-user wire pair).
+    // with the calendar date (NO context-usage gauge — pressure is handled silently by
+    // auto-compaction). Injected on `turn_start` immediately ABOVE the real user query
+    // (Grok Build order). Consecutive user messages are kept on OpenAI/Responses wires;
+    // Anthropic merges them with the query last.
     hooks.push(Arc::new(StatusReminderHook::new()));
     // Pin the workspace root the cadence uses to gate out-of-workspace edits (e.g. a throwaway
     // /tmp write must not arm the "run cargo check" nudge). INVARIANT: this must equal the dir

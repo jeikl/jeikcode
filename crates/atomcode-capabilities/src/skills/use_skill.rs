@@ -35,7 +35,7 @@ impl Tool for UseSkillTool {
         "Invoke a named skill (a reusable prompt/workflow template) and return its content \
          with your arguments substituted, plus the skill's install path and bundled file list. \
          The name must exactly match a skill listed under '=== AVAILABLE SKILLS ===' in the \
-         system prompt or returned by list_skills. Never invent or guess a skill name. Trigger \
+         user-prefix catalog or returned by list_skills. Never invent or guess a skill name. Trigger \
          a skill when the task matches its listed description — not only when the user names it. \
          list_skills shows any lower-priority skills omitted from the prompt catalog. For \
          instruction-only skills, omit `arguments` or pass an empty string."

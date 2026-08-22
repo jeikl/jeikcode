@@ -1,5 +1,5 @@
-//! `SkillCatalogHook` — injects the `=== AVAILABLE SKILLS ===` catalog as a leading
-//! `Role::System` message at session start.
+//! `SkillCatalogHook` — injects the `=== AVAILABLE SKILLS ===` catalog as a
+//! frozen synthetic User message at session start.
 //!
 //! Why this exists: the v2 coding path registered the `use_skill` / `list_skills`
 //! tools but NEVER told the model which skills are installed — so a skill that
@@ -8,15 +8,16 @@
 //! daemon path already injected inline; this hook brings the coding path to parity
 //! (via the budget-gated, source-ranked [`super::render`]).
 //!
-//! Mirrors [`SessionContextHook`](crate::session::SessionContextHook): identified by
-//! [`super::render::CATALOG_HEADER`] so `--resume` reconciles it in place; lands
-//! after the leading-system run (persona + session context). The catalog is frozen
-//! at session start (skills don't change mid-session; `/cd` is a new session).
+//! Identified by [`super::render::CATALOG_HEADER`] so `--resume` reconciles it
+//! in place; lands in the frozen user prefix after persona + session context +
+//! memory. User-owned skills sit inside `sacred_floor`, so compaction cannot
+//! drain them. The catalog is frozen at session start (skills don't change
+//! mid-session; `/cd` is a new session).
 
 use super::render::CATALOG_HEADER;
 use async_trait::async_trait;
 use atomcode_kernel::hook::LifecycleHooks;
-use atomcode_kernel::message::{Conversation, Message, Role};
+use atomcode_kernel::message::Conversation;
 
 /// Injects the pre-rendered skill catalog. `None` catalog (no skills installed) →
 /// the hook is a no-op on a fresh session and prunes a stale block on resume.
@@ -31,43 +32,17 @@ impl SkillCatalogHook {
     }
 }
 
-/// Count of the leading run of `Role::System` messages — the insert point that
-/// lands the catalog right after persona + any context block already injected.
-fn leading_system_count(convo: &Conversation) -> usize {
-    convo
-        .messages
-        .iter()
-        .take_while(|m| m.role == Role::System)
-        .count()
-}
-
 #[async_trait]
 impl LifecycleHooks for SkillCatalogHook {
     async fn session_start(&self, convo: &mut Conversation, _resumed: bool) {
-        // Position-based reconcile handles fresh (absent → insert) and resume
-        // (present → replace in place, byte-identical when unchanged) uniformly.
-        let existing = convo
-            .messages
-            .iter()
-            .position(|m| m.role == Role::System && m.text.starts_with(CATALOG_HEADER));
-        match (&self.catalog, existing) {
-            (Some(block), Some(i)) => convo.messages[i] = Message::system(block.clone()),
-            (Some(block), None) => {
-                let at = leading_system_count(convo);
-                convo.messages.insert(at, Message::system(block.clone()));
-            }
-            // No skills now but a stale catalog survives a resume → drop it.
-            (None, Some(i)) => {
-                convo.messages.remove(i);
-            }
-            (None, None) => {}
-        }
+        convo.reconcile_frozen_user_block(CATALOG_HEADER, self.catalog.clone());
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use atomcode_kernel::message::{Message, Role};
 
     fn convo_with_persona() -> Conversation {
         let mut c = Conversation::default();
@@ -82,11 +57,14 @@ mod tests {
         let mut c = convo_with_persona();
         hook.session_start(&mut c, false).await;
         assert_eq!(c.messages[0].text, "PERSONA");
+        assert_eq!(c.messages[1].role, Role::User);
+        assert!(c.messages[1].synthetic, "catalog is a frozen user prefix");
         assert!(
             c.messages[1].text.starts_with(CATALOG_HEADER),
             "catalog after persona"
         );
         assert_eq!(c.messages[2].role, Role::User, "before the user message");
+        assert!(!c.messages[2].synthetic);
     }
 
     #[tokio::test]
@@ -107,6 +85,8 @@ mod tests {
         c.push(Message::user("hi"));
         hook.session_start(&mut c, true).await;
         assert_eq!(c.messages.len(), 3, "reconciled in place, no growth");
+        assert_eq!(c.messages[1].role, Role::User);
+        assert!(c.messages[1].synthetic);
         assert!(c.messages[1].text.contains("- fresh: v"));
         assert!(!c.messages[1].text.contains("stale"));
     }

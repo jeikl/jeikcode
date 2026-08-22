@@ -1941,7 +1941,7 @@ pub(crate) struct LiveReasoningEffortReq {
 /// 与 /live/provider 同源：持久化进目标 provider 的 `config.reasoning_effort`，
 /// 下一轮 turn 经 `build_turn_parts` → `create_provider` 自动生效——live 与
 /// /chat 两条路径都现读 config，故两端都会跟随。只有 deepseek-v4 系模型真正
-/// 消费该字段（见 OpenAiProvider::reason_effort_applicable），webui 已据此门控
+/// 消费该字段（见 effort_control_applicable：模型自定义档位或名称启发），webui 已据此门控
 /// UI；服务端仅校验取值合法。
 pub(crate) async fn live_reasoning_effort(
     State(state): State<AppState>,

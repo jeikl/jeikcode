@@ -175,7 +175,7 @@ impl SkillRegistry {
         self.skills.values().map(|s| s.as_ref())
     }
 
-    /// Render the `=== AVAILABLE SKILLS ===` system-prompt section (budget-gated,
+    /// Render the `=== AVAILABLE SKILLS ===` frozen user-prefix section (budget-gated,
     /// source-ranked), or `None` when no skills are installed. See
     /// [`super::render`].
     pub fn render_catalog(&self) -> Option<String> {

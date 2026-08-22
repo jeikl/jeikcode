@@ -343,6 +343,7 @@ fn legacy_message_to_kernel(message: &LegacyMessage) -> KernelMessage {
                     // Legacy files did not persist provider identity. The signature
                     // is lossless, but attributing it to Anthropic would be a guess.
                     provider: None,
+                    id: None,
                 })
                 .collect();
             converted

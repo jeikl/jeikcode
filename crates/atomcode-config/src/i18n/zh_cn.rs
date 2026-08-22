@@ -370,7 +370,7 @@ pub(super) fn zh_cn(msg: Msg<'_>) -> Cow<'static, str> {
             "Tab 下一项  ←→ 切厂商  空格 勾选  ↵ 保存  Esc 返回".into(),
         Msg::ProviderPanelAccountFormHint => "Tab 切换  ↵ 保存  Esc 返回".into(),
         Msg::ProviderPanelModelFormHint =>
-            "Tab 下一项  ←→ 切账号  空格 切换图片/思考/默认  ↵ 保存  Esc 返回".into(),
+            "输入筛选上游列表  ↑↓ 选择  Tab 填入  ←→ 切账号  空格 切换  ↵ 填入/保存  Esc 返回".into(),
         // ── Model 选择器 ──
         Msg::ModelSwitched { provider, model } =>
             format!("  当前会话已切换到 {provider} · {model}\n").into(),

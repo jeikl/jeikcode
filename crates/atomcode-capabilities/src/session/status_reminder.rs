@@ -4,16 +4,11 @@
 //! wall-clock time) and with NO context-usage gauge — context pressure is handled silently by
 //! auto-compaction, never pushed to the model (see `render`).
 //!
-//! Two cache-safety disciplines:
-//!   1. **APPEND-ONLY at the tail** — it never mutates the cached prefix (the changing status
-//!      sits AFTER the prefix), so prefix caching is unaffected.
-//!   2. **SKIPPED on a turn's FIRST round** (`round < 2`). On round 1 the tail would sit
-//!      directly after the real user message → a user-after-user pair (rejected by strict
-//!      providers like Anthropic; read as the user's own words by others). Merging it away
-//!      would instead rewrite the (cacheable) user message. From round 2 the tail follows an
-//!      assistant/tool message, so it neither pairs with a user message nor disturbs the
-//!      prefix. Round 1 also has no usage data yet (`used_tokens`/window are 0), so the only
-//!      thing skipped is the date — which the model just received fresh in the user turn.
+//! Cache-safety: injected once per user turn in [`LifecycleHooks::turn_start`], as a
+//! synthetic user message **immediately ABOVE** the real query (Grok Build order).
+//! Tool-loop rounds do not re-inject, so the previous request remains a prefix of the
+//! next. Consecutive user messages are intentional; Anthropic merges them with the
+//! query last.
 //!
 //! The body is wrapped in `<system-reminder>…</system-reminder>` so the model reads it as
 //! INJECTED CONTEXT, not the user's own words (matching `PlanModeReminderHook`'s convention).
@@ -21,7 +16,7 @@
 
 use async_trait::async_trait;
 use atomcode_kernel::hook::{LifecycleHooks, TurnCtx};
-use atomcode_kernel::message::Message;
+use atomcode_kernel::message::{Conversation, Message};
 use chrono::{DateTime, Local};
 
 /// Injects a `<system-reminder>` status tail from round 2 of each turn onward.
@@ -67,6 +62,14 @@ impl StatusReminderHook {
         lines.push(format!("Turn round: {}", ctx.round));
         crate::reminder::system_reminder(&lines.join("\n"))
     }
+
+    fn render_turn_start(now: DateTime<Local>) -> String {
+        crate::reminder::system_reminder(&format!(
+            "Current date: {} ({})",
+            now.format("%Y-%m-%d"),
+            now.format("%a")
+        ))
+    }
 }
 
 impl Default for StatusReminderHook {
@@ -77,8 +80,23 @@ impl Default for StatusReminderHook {
 
 #[async_trait]
 impl LifecycleHooks for StatusReminderHook {
-    async fn pre_request(&self, _messages: &mut Vec<Message>, _ctx: &TurnCtx) {
-        // 彻底禁用每轮动态注入 <system-reminder>，保持消息流纯净
+    async fn turn_start(&self, convo: &mut Conversation) {
+        if !convo
+            .messages
+            .iter()
+            .any(|m| m.role == atomcode_kernel::message::Role::User && !m.synthetic)
+        {
+            return;
+        }
+        if crate::reminder::reminder_already_before_last_real_user(&convo.messages, |t| {
+            t.contains("Current date:")
+        }) {
+            return;
+        }
+        crate::reminder::insert_before_last_real_user(
+            &mut convo.messages,
+            Message::synthetic_user(Self::render_turn_start(Local::now())),
+        );
     }
 }
 
@@ -157,25 +175,27 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn skips_round_1_injects_from_round_2() {
+    async fn turn_start_injects_date_above_the_query() {
         let hook = StatusReminderHook::new();
-        // Round 1: nothing injected (avoids user-after-user + keeps the user msg cacheable).
-        let mut r1 = vec![Message::system("s"), Message::user("hi")];
-        let before = r1.clone();
-        hook.pre_request(&mut r1, &ctx(1, 128_000, 0)).await;
-        assert_eq!(r1, before, "round 1 must not inject a reminder");
-        // Round 2: exactly one wrapped tail appended.
-        let mut r2 = vec![
-            Message::system("s"),
-            Message::user("hi"),
-            Message::assistant("a", vec![]),
-        ];
-        hook.pre_request(&mut r2, &ctx(2, 128_000, 1_000)).await;
-        assert_eq!(r2.len(), 4, "round 2 appends exactly one tail");
+        let mut convo = Conversation::default();
+        convo.messages = vec![Message::system("s"), Message::user("hi")];
+        hook.turn_start(&mut convo).await;
+        assert_eq!(convo.messages.len(), 3);
+        assert!(convo.messages[1].synthetic);
         assert!(
-            r2[3].text.contains("<system-reminder>") && r2[3].text.contains("Current date"),
-            "tail carries the wrapped status: {:?}",
-            r2[3].text
+            convo.messages[1].text.contains("<system-reminder>")
+                && convo.messages[1].text.contains("Current date"),
+            "date reminder sits above the query: {:?}",
+            convo.messages[1].text
+        );
+        assert!(!convo.messages[1].text.contains("Turn round"));
+        assert_eq!(convo.messages[2].text, "hi");
+        assert!(!convo.messages[2].synthetic);
+        let before = convo.messages.clone();
+        hook.turn_start(&mut convo).await;
+        assert_eq!(
+            convo.messages, before,
+            "second turn_start on the same query is idempotent"
         );
     }
 }

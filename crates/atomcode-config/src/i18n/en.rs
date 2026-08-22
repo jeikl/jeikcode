@@ -388,7 +388,7 @@ pub(super) fn en(msg: Msg<'_>) -> Cow<'static, str> {
             "Tab Next  ←→ Switch provider  Space Toggle  ↵ Save  Esc Back".into(),
         Msg::ProviderPanelAccountFormHint => "Tab Switch  ↵ Save  Esc Back".into(),
         Msg::ProviderPanelModelFormHint =>
-            "Tab Next  ←→ Switch account  Space Toggle image/reasoning/default  ↵ Save  Esc Back".into(),
+            "Type to filter upstream list  ↑↓ select  Tab fill  ←→ account  Space toggle  ↵ fill/save  Esc back".into(),
         // ── Model picker ──
         Msg::ModelSwitched { provider, model } =>
             format!("  Switched to {provider} · {model} for this session\n").into(),

@@ -110,6 +110,8 @@ pub enum StreamEvent {
     ReasoningSignature {
         opaque: String,
         provider: String,
+        /// Responses `reasoning.id` (`rs_…`). `None` for Anthropic signatures.
+        id: Option<String>,
     },
     ToolCall(ToolCall),
     /// A STREAMING fragment of a tool call the model is still emitting. `index` groups

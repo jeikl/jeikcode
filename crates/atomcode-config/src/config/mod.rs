@@ -1019,7 +1019,9 @@ fn resolve_account_api_key(
     let wire_env = match preset.provider_type {
         provider_preset::ProviderType::Anthropic => "ANTHROPIC_API_KEY",
         provider_preset::ProviderType::Ollama => "OLLAMA_API_KEY",
-        provider_preset::ProviderType::OpenAi => "OPENAI_API_KEY",
+        provider_preset::ProviderType::OpenAi | provider_preset::ProviderType::Responses => {
+            "OPENAI_API_KEY"
+        }
     };
     for env in [preset.api_key_env, Some(wire_env), Some("ATOMCODE_API_KEY")]
         .into_iter()
@@ -1043,6 +1045,7 @@ fn legacy_provider_to_preset_id(provider_type: &str) -> &'static str {
     match provider_type {
         "claude" | "anthropic" => "anthropic",
         "ollama" => "ollama",
+        "responses" | "openai-responses" => "responses-compatible",
         _ => "openai",
     }
 }

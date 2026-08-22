@@ -417,8 +417,8 @@ fn build_request_body(
     // Thinking: a per-call effort level wins (`think:"high"`), else the cfg flag
     // (`think:true`). `tool_choice` has no Ollama equivalent — ignored.
     let _ = ToolChoice::Auto;
-    if let Some(effort) = &options.reasoning_effort {
-        body.insert("think".into(), json!(effort.as_str()));
+    if let Some(effort) = super::openai_compat::resolve_wire_effort(model, options) {
+        body.insert("think".into(), json!(effort));
     } else if cfg.think {
         body.insert("think".into(), json!(true));
     }

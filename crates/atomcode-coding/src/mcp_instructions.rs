@@ -4,15 +4,17 @@ use async_trait::async_trait;
 use atomcode_capabilities::mcp::registry::MCP_SERVER_INSTRUCTIONS_TAG;
 use atomcode_capabilities::mcp::McpRegistry;
 use atomcode_kernel::hook::LifecycleHooks;
-use atomcode_kernel::message::{Conversation, Message, Role};
+use atomcode_kernel::message::Conversation;
 
 pub const MCP_INSTRUCTIONS_HEADER: &str = "<mcp-server-instructions>";
 
-/// Injects the connected servers' current instructions into the session's leading
-/// system block at `session_start` and `turn_start`.
+/// Injects the connected servers' current instructions into the session's frozen
+/// user prefix at `session_start` and `turn_start`.
 ///
-/// Lands right after the skill catalog, before user messages, keeping prompt caching
-/// intact and ensuring the user's latest query is always the final message.
+/// Lands after the skill catalog, before the first real query. User-owned MCP
+/// guidance sits inside `sacred_floor`, so compaction cannot drain it.
+/// Unchanged bytes keep the prompt-cache prefix intact; the user's latest query
+/// stays the final message.
 pub(crate) struct McpInstructionsHook {
     registry: Arc<McpRegistry>,
     mounted_tools: Arc<RwLock<Vec<String>>>,
@@ -39,27 +41,7 @@ impl McpInstructionsHook {
     }
 
     fn refresh_in_place(&self, convo: &mut Conversation) {
-        let rendered = self.render_instructions();
-        let existing = convo
-            .messages
-            .iter()
-            .position(|m| m.role == Role::System && m.text.starts_with(MCP_INSTRUCTIONS_HEADER));
-
-        match (rendered, existing) {
-            (Some(block), Some(i)) => convo.messages[i] = Message::system(block),
-            (Some(block), None) => {
-                let at = convo
-                    .messages
-                    .iter()
-                    .take_while(|m| m.role == Role::System)
-                    .count();
-                convo.messages.insert(at, Message::system(block));
-            }
-            (None, Some(i)) => {
-                convo.messages.remove(i);
-            }
-            (None, None) => {}
-        }
+        convo.reconcile_frozen_user_block(MCP_INSTRUCTIONS_HEADER, self.render_instructions());
     }
 }
 
@@ -77,6 +59,7 @@ impl LifecycleHooks for McpInstructionsHook {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use atomcode_kernel::message::Message;
 
     fn convo_with_persona() -> Conversation {
         let mut c = Conversation::default();

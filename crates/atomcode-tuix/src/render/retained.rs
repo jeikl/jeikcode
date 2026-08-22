@@ -8482,6 +8482,14 @@ impl<W: Write + Send> Renderer for RetainedRenderer<W> {
     }
 
     fn resume_from_external(&mut self) {
+        // A child (OAuth browser, `/shell`, git credential helper) may have
+        // stolen the foreground pgrp. Reclaim it before flipping raw mode or
+        // the next stdin read delivers SIGTTIN and bash prints `[Stopped]`.
+        #[cfg(unix)]
+        {
+            crate::signal_restore::ignore_job_control_signals();
+            crate::signal_restore::claim_foreground_tty();
+        }
         if self.caps.raw_mode {
             let _ = crossterm::terminal::enable_raw_mode();
         }

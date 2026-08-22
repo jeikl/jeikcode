@@ -1,24 +1,22 @@
 //! `MemoryHook` — injects (and on resume REFRESHES) the merged `memory.md` entries.
 //!
-//! FRESH session: the kernel pushes the persona first, then fires `session_start`,
-//! so the memory lands as the second system message — a stable, session-frozen
-//! prefix (cache-safe).
+//! Lands as a **synthetic User** in the frozen prefix (after the leading System
+//! run, before the first real query). User-owned memory is more important than
+//! the persona, so it sits inside `sacred_floor` and compaction cannot drain it.
+//! `synthetic = true` so the floor still anchors on the real task prompt.
 //!
-//! RESUME: production rebuilds its system prompt from the CURRENT `memory.md` in
-//! every new process, so a `--resume` after `/remember`/`/forget` sees the updated
-//! memory. The snapshot, however, carries the OLD injected message (seeding
-//! contract). To match production the hook RECONCILES at the resume boundary:
-//! refresh the existing `=== MEMORY ===` message in place, inject one if the
-//! snapshot has none (the session started with empty stores), or remove it if the
-//! memory is now empty. A resume is a NEW wire session — there is no in-flight
-//! request prefix yet — so this rewrite cannot break the within-session append-only
-//! cache red-line, and when `memory.md` is unchanged the refresh is byte-identical.
+//! RESUME: reconcile the snapshot's copy with the CURRENT `memory.md` — refresh
+//! in place, inject if the snapshot has none, or remove if empty. A leftover
+//! `Role::System` copy from older sessions is converted to a synthetic user.
+//! A resume is a NEW wire session, so this rewrite cannot break the within-session
+//! append-only cache red-line; when `memory.md` is unchanged the refresh is
+//! byte-identical.
 
 use std::path::Path;
 
 use async_trait::async_trait;
 use atomcode_kernel::hook::LifecycleHooks;
-use atomcode_kernel::message::{Conversation, Message, Role};
+use atomcode_kernel::message::Conversation;
 
 use super::MemoryStore;
 
@@ -26,9 +24,10 @@ use super::MemoryStore;
 /// recognizes ITS message in a resumed snapshot. Guarded against drift by a test.
 const MEMORY_HEADER: &str = "=== MEMORY ===";
 
-/// Pushes/refreshes `MemoryStore::merged_for_prompt(global, project, …)` as a system
-/// message at session start; silent when both stores are empty. Read-only and
-/// infallible — a missing/unreadable `memory.md` is an empty store, never an error.
+/// Pushes/refreshes `MemoryStore::merged_for_prompt(global, project, …)` as a
+/// frozen synthetic-user prefix message at session start; silent when both
+/// stores are empty. Read-only and infallible — a missing/unreadable `memory.md`
+/// is an empty store, never an error.
 pub struct MemoryHook {
     global: MemoryStore,
     project: MemoryStore,
@@ -67,51 +66,22 @@ impl MemoryHook {
 
 #[async_trait]
 impl LifecycleHooks for MemoryHook {
-    async fn session_start(&self, convo: &mut Conversation, resumed: bool) {
+    async fn session_start(&self, convo: &mut Conversation, _resumed: bool) {
         let merged =
             MemoryStore::merged_for_prompt(&self.global, &self.project, &self.project_name);
-
-        if !resumed {
-            if !merged.is_empty() {
-                convo.push(Message::system(merged));
-            }
-            return;
-        }
-
-        // RESUME: reconcile the snapshot's frozen copy with the CURRENT memory.md.
-        let existing = convo
-            .messages
-            .iter()
-            .position(|m| m.role == Role::System && m.text.starts_with(MEMORY_HEADER));
-        match existing {
-            Some(i) if merged.is_empty() => {
-                // Everything was /forget-gotten since the snapshot — drop the block,
-                // exactly as production's rebuilt prompt would.
-                convo.messages.remove(i);
-            }
-            Some(i) => {
-                // Byte-identical when memory.md is unchanged (the common case).
-                convo.messages[i] = Message::system(merged);
-            }
-            None if !merged.is_empty() => {
-                // The session started with empty stores; /remember happened since.
-                // Land it where a fresh session would have: after the leading run
-                // of system messages (persona first).
-                let at = convo
-                    .messages
-                    .iter()
-                    .take_while(|m| m.role == Role::System)
-                    .count();
-                convo.messages.insert(at, Message::system(merged));
-            }
-            None => {}
-        }
+        let block = if merged.is_empty() {
+            None
+        } else {
+            Some(merged)
+        };
+        convo.reconcile_frozen_user_block(MEMORY_HEADER, block);
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use atomcode_kernel::message::{Message, Role};
     use std::path::PathBuf;
 
     fn stores(dir: &Path, global: &str, project: &str) -> (MemoryStore, MemoryStore) {
@@ -151,7 +121,8 @@ mod tests {
 
         assert_eq!(convo.messages.len(), 2);
         let mem = &convo.messages[1];
-        assert_eq!(mem.role, Role::System);
+        assert_eq!(mem.role, Role::User);
+        assert!(mem.synthetic);
         assert!(mem.text.starts_with(MEMORY_HEADER));
         assert!(mem.text.contains("[Global]\n- prefers tabs"));
         assert!(mem.text.contains("[Project: myproj]\n- pnpm only"));
@@ -192,6 +163,8 @@ mod tests {
             "refresh replaces in place, no growth"
         );
         let mem = &convo.messages[1];
+        assert_eq!(mem.role, Role::User);
+        assert!(mem.synthetic, "legacy system memory converts to frozen user");
         assert!(mem.text.contains("- old fact") && mem.text.contains("- new fact"));
         assert!(!mem.text.contains("stale copy"));
         assert_eq!(convo.messages[2].text, "earlier turn", "history untouched");
@@ -231,9 +204,10 @@ mod tests {
         assert_eq!(convo.messages.len(), 3);
         assert_eq!(
             convo.messages[1].role,
-            Role::System,
-            "lands after the persona run"
+            Role::User,
+            "lands after the persona run as a frozen user prefix"
         );
+        assert!(convo.messages[1].synthetic);
         assert!(convo.messages[1].text.contains("- learned later"));
         assert_eq!(convo.messages[2].text, "earlier turn");
     }

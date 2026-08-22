@@ -414,6 +414,22 @@ pub enum Msg<'a> {
     ProviderPanelProviderFormHint,
     ProviderPanelAccountFormHint,
     ProviderPanelModelFormHint,
+    /// Empty model-id field placeholder while the upstream catalog loads/filters.
+    ProviderPanelModelPlaceholder,
+    /// Header for the fetched `/models` candidate list.
+    ProviderPanelUpstreamListLabel,
+    /// How to pick from the candidate list.
+    ProviderPanelUpstreamPickHint,
+    /// Candidate list is still loading.
+    ProviderPanelUpstreamLoading,
+    ProviderPanelUpstreamLoaded {
+        n: usize,
+    },
+    ProviderPanelUpstreamEmpty,
+    ProviderPanelUpstreamFailed {
+        error: &'a str,
+    },
+    ProviderPanelUpstreamNoUrl,
     // ── Model picker ──
     ModelSwitched {
         provider: &'a str,

@@ -345,7 +345,7 @@ pub(super) fn en(msg: Msg<'_>) -> Cow<'static, str> {
             "(No provider accounts yet — press Ctrl+A to add one)".into(),
         Msg::ProviderPanelNoMatchingAccounts => "(No matching provider accounts)".into(),
         Msg::ProviderPanelEmptyModels =>
-            "(No models yet — press Ctrl+A to add one)".into(),
+            "(No models yet — press Ctrl+A to add one; fetches upstream /models)".into(),
         Msg::ProviderPanelNoMatchingModels => "(No matching models)".into(),
         Msg::ProviderPanelLegacyBadge => "legacy".into(),
         Msg::ProviderPanelDefaultBadge => "default".into(),
@@ -355,9 +355,9 @@ pub(super) fn en(msg: Msg<'_>) -> Cow<'static, str> {
         Msg::ProviderPanelAccountsHint =>
             "Filter · ↑↓ select · ↵ models · Ctrl+A add · Ctrl+E edit · Ctrl+Dx2 delete · Tab switch · Esc close".into(),
         Msg::ProviderPanelModelsHint =>
-            "Filter · ↑↓ select · ↵ default/add · Ctrl+A add · Ctrl+E edit · Ctrl+Dx2 delete · Tab switch · Esc close".into(),
+            "Filter · ↑↓ select · ↵ default/add · Ctrl+A add + fetch upstream list · Ctrl+E edit · Ctrl+Dx2 delete · Tab switch · Esc close".into(),
         Msg::ProviderPanelFilteredModelsHint { account } =>
-            format!("[{account}] · ↑↓ select · ↵ default/add · Ctrl+A add model · Ctrl+E edit · Ctrl+Dx2 delete · Tab all · Esc close").into(),
+            format!("[{account}] · ↑↓ select · ↵ default/add · Ctrl+A add + fetch upstream list · Ctrl+E edit · Ctrl+Dx2 delete · Tab all · Esc close").into(),
         Msg::ProviderPanelModelSaved { model } => format!("Saved model \"{model}\".").into(),
         Msg::ProviderPanelImageDirectWhileVlSet => {
             "Images go to this model; turn off image input to use VL.".into()
@@ -388,7 +388,19 @@ pub(super) fn en(msg: Msg<'_>) -> Cow<'static, str> {
             "Tab Next  ←→ Switch provider  Space Toggle  ↵ Save  Esc Back".into(),
         Msg::ProviderPanelAccountFormHint => "Tab Switch  ↵ Save  Esc Back".into(),
         Msg::ProviderPanelModelFormHint =>
-            "Type to filter upstream list  ↑↓ select  Tab fill  ←→ account  Space toggle  ↵ fill/save  Esc back".into(),
+            "Opens with upstream list  Type to filter  ↑↓ select  Tab/↵ fill  ←→ account (empty model)  Space toggle  Esc back".into(),
+        Msg::ProviderPanelModelPlaceholder => "(type to filter upstream list)".into(),
+        Msg::ProviderPanelUpstreamListLabel => "Upstream models".into(),
+        Msg::ProviderPanelUpstreamPickHint => "↑↓ select · Tab/↵ fill".into(),
+        Msg::ProviderPanelUpstreamLoading => "loading…".into(),
+        Msg::ProviderPanelUpstreamLoaded { n } =>
+            format!("Loaded {n} upstream models · type to filter · ↑↓ select · Tab/↵ fill").into(),
+        Msg::ProviderPanelUpstreamEmpty =>
+            "Upstream catalog empty — type a model id".into(),
+        Msg::ProviderPanelUpstreamFailed { error } =>
+            format!("Upstream list failed ({error}) — type a model id").into(),
+        Msg::ProviderPanelUpstreamNoUrl =>
+            "No upstream URL — type a model id".into(),
         // ── Model picker ──
         Msg::ModelSwitched { provider, model } =>
             format!("  Switched to {provider} · {model} for this session\n").into(),
@@ -982,7 +994,7 @@ Msg::CmdDescSetup =>
         Msg::CmdDescModel =>
             "Set the default provider / model and switch this session".into(),
         Msg::CmdDescModelAdd =>
-            "Quickly add a model to an existing provider account".into(),
+            "Add a model to an existing account (fetches upstream /models)".into(),
         Msg::CmdDescProvider =>
             "Manage providers (add / edit / delete / set global default)".into(),
         Msg::CmdDescStatus => "Show session status".into(),

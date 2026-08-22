@@ -632,11 +632,11 @@ mod tests {
 
         assert_eq!(
             t_with(Locale::En, Msg::ProviderPanelEmptyModels),
-            "(No models yet — press Ctrl+A to add one)"
+            "(No models yet — press Ctrl+A to add one; fetches upstream /models)"
         );
         assert_eq!(
             t_with(Locale::ZhCn, Msg::ProviderPanelEmptyModels),
-            "（尚无模型 — 按 Ctrl+A 添加）"
+            "（尚无模型 — 按 Ctrl+A 添加，将拉取上游 /models）"
         );
 
         assert_eq!(
@@ -670,6 +670,21 @@ mod tests {
         let zh_row = t_with(Locale::ZhCn, Msg::ProviderPanelModelCount { count: 3 });
         assert_eq!(en_row, "3 models");
         assert_eq!(zh_row, "3 个模型");
+
+        assert!(!t_with(Locale::En, Msg::ProviderPanelModelPlaceholder).is_empty());
+        assert!(!t_with(Locale::ZhCn, Msg::ProviderPanelModelPlaceholder).is_empty());
+        assert!(!t_with(Locale::En, Msg::ProviderPanelUpstreamListLabel).is_empty());
+        assert!(!t_with(Locale::ZhCn, Msg::ProviderPanelUpstreamListLabel).is_empty());
+        assert!(t_with(
+            Locale::En,
+            Msg::ProviderPanelUpstreamLoaded { n: 4 }
+        )
+        .contains("4"));
+        assert!(t_with(
+            Locale::ZhCn,
+            Msg::ProviderPanelUpstreamFailed { error: "HTTP 401" }
+        )
+        .contains("401"));
     }
 
     #[test]

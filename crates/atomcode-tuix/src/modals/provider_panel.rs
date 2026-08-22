@@ -314,7 +314,7 @@ impl ModelForm {
             .iter()
             .map(|id| account_needs_key(config, id))
             .collect();
-        Some(Self {
+        let mut form = Self {
             account_ids,
             needs_key,
             account_idx,
@@ -332,7 +332,9 @@ impl ModelForm {
             candidate_idx: 0,
             fetch_status: None,
             fetch_rx: Arc::new(Mutex::new(None)),
-        })
+        };
+        form.focus_for_add();
+        Some(form)
     }
 
     fn new_edit(config: &Config, id: &str) -> Option<Self> {
@@ -377,6 +379,45 @@ impl ModelForm {
                 .map(|s| s.as_str())
                 .collect()
         }
+    }
+
+    /// Slice of the filtered catalog to draw, plus the absolute start index and
+    /// the unclipped match count. Keeps a 10-row window centered on the highlight.
+    fn visible_candidates(&self) -> (usize, Vec<&str>, usize) {
+        const WINDOW: usize = 10;
+        let all = self.filtered_candidates();
+        let total = all.len();
+        if total == 0 {
+            return (0, Vec::new(), 0);
+        }
+        let idx = self.candidate_idx.min(total - 1);
+        let start = if total <= WINDOW {
+            0
+        } else {
+            idx.saturating_sub(WINDOW / 2).min(total - WINDOW)
+        };
+        let end = (start + WINDOW).min(total);
+        (start, all[start..end].to_vec(), total)
+    }
+
+    /// Land on the model id field unless this account still needs a key.
+    fn focus_for_add(&mut self) {
+        if self.edit_id.is_some() {
+            self.focus = ModelField::Model;
+            return;
+        }
+        if self.account_needs_key() && self.api_key.trim().is_empty() {
+            self.focus = ModelField::ApiKey;
+        } else {
+            self.focus = ModelField::Model;
+        }
+    }
+
+    fn can_cycle_account_from_model(&self) -> bool {
+        self.edit_id.is_none()
+            && self.focus == ModelField::Model
+            && self.model.trim().is_empty()
+            && self.account_ids.len() > 1
     }
 
     fn clamp_candidate_idx(&mut self) {
@@ -427,17 +468,30 @@ impl ModelForm {
         };
         match result {
             Ok(ids) if !ids.is_empty() => {
-                self.fetch_status = Some(format!("已加载 {} 个上游模型 · 输入即筛选 · ↑↓ 选择 · Tab/↵ 填入", ids.len()));
+                self.fetch_status = Some(
+                    crate::i18n::t(crate::i18n::Msg::ProviderPanelUpstreamLoaded { n: ids.len() })
+                        .into_owned(),
+                );
                 self.candidates = ids;
                 self.candidate_idx = 0;
+                // Account was only a picker; once the catalog arrives, put the
+                // caret on the model field so ↑↓ actually moves the highlight.
+                if self.focus == ModelField::Account {
+                    self.focus = ModelField::Model;
+                }
             }
             Ok(_) => {
                 self.candidates.clear();
-                self.fetch_status = Some("上游无模型列表，可直接输入模型 id".into());
+                self.fetch_status = Some(
+                    crate::i18n::t(crate::i18n::Msg::ProviderPanelUpstreamEmpty).into_owned(),
+                );
             }
-            Err(_) => {
+            Err(e) => {
                 self.candidates.clear();
-                self.fetch_status = Some("上游列表请求失败，可直接输入模型 id".into());
+                self.fetch_status = Some(
+                    crate::i18n::t(crate::i18n::Msg::ProviderPanelUpstreamFailed { error: &e })
+                        .into_owned(),
+                );
             }
         }
         true
@@ -446,13 +500,17 @@ impl ModelForm {
     fn start_fetch(&mut self, config: &Config, wake_tx: WakeSender<()>) {
         let Some(spec) = upstream_spec_for_account(config, self.account_id(), &self.api_key) else {
             self.candidates.clear();
-            self.fetch_status = Some("无可用上游地址，可直接输入模型 id".into());
+            self.fetch_status = Some(
+                crate::i18n::t(crate::i18n::Msg::ProviderPanelUpstreamNoUrl).into_owned(),
+            );
             if let Ok(mut g) = self.fetch_rx.lock() {
                 *g = None;
             }
             return;
         };
-        self.fetch_status = Some("正在请求上游 /models …".into());
+        self.fetch_status = Some(
+            crate::i18n::t(crate::i18n::Msg::ProviderPanelUpstreamLoading).into_owned(),
+        );
         self.candidates.clear();
         self.candidate_idx = 0;
         let (tx, rx) = mpsc::channel();
@@ -468,7 +526,12 @@ impl ModelForm {
                 });
             }
             Err(_) => {
-                self.fetch_status = Some("上游列表请求失败，可直接输入模型 id".into());
+                self.fetch_status = Some(
+                    crate::i18n::t(crate::i18n::Msg::ProviderPanelUpstreamFailed {
+                        error: "no runtime",
+                    })
+                    .into_owned(),
+                );
                 if let Ok(mut g) = self.fetch_rx.lock() {
                     *g = None;
                 }
@@ -476,13 +539,12 @@ impl ModelForm {
         }
     }
 
+    fn fetch_in_flight(&self) -> bool {
+        self.fetch_rx.lock().ok().is_some_and(|g| g.is_some())
+    }
+
     fn start_fetch_if_idle(&mut self, config: &Config, wake_tx: WakeSender<()>) {
-        let inflight = self
-            .fetch_rx
-            .lock()
-            .ok()
-            .is_some_and(|g| g.is_some());
-        if inflight || !self.candidates.is_empty() {
+        if self.fetch_in_flight() || !self.candidates.is_empty() {
             return;
         }
         self.start_fetch(config, wake_tx);
@@ -540,6 +602,9 @@ impl ModelForm {
         // The ApiKey field appears/disappears with the account.
         if !self.fields().contains(&self.focus) {
             self.focus = ModelField::Account;
+        }
+        if self.account_needs_key() && self.api_key.trim().is_empty() {
+            self.focus = ModelField::ApiKey;
         }
     }
 }
@@ -1466,12 +1531,18 @@ impl Modal for ProviderPanel {
                     }
                 }
                 KeyCode::Tab => {
+                    let leaving_key = form.focus == ModelField::ApiKey;
                     if form.focus == ModelField::Model {
                         let _ = form.accept_highlighted_candidate();
                     }
                     form.advance_focus(true);
                     if form.focus == ModelField::Model {
-                        form.start_fetch_if_idle(&ctx.config, ctx.wake_tx.clone());
+                        if leaving_key {
+                            // Key was just typed — always refetch with the new credential.
+                            form.start_fetch(&ctx.config, ctx.wake_tx.clone());
+                        } else {
+                            form.start_fetch_if_idle(&ctx.config, ctx.wake_tx.clone());
+                        }
                     }
                 }
                 KeyCode::BackTab => form.advance_focus(false),
@@ -1482,6 +1553,14 @@ impl Modal for ProviderPanel {
                     form.start_fetch(&ctx.config, ctx.wake_tx.clone());
                 }
                 KeyCode::Right if form.focus == ModelField::Account => {
+                    form.cycle_account(true);
+                    form.start_fetch(&ctx.config, ctx.wake_tx.clone());
+                }
+                KeyCode::Left if form.can_cycle_account_from_model() => {
+                    form.cycle_account(false);
+                    form.start_fetch(&ctx.config, ctx.wake_tx.clone());
+                }
+                KeyCode::Right if form.can_cycle_account_from_model() => {
                     form.cycle_account(true);
                     form.start_fetch(&ctx.config, ctx.wake_tx.clone());
                 }
@@ -1930,39 +2009,46 @@ impl Modal for ProviderPanel {
                         ));
                     }
                 }
+                let model_display = if form.model.is_empty() {
+                    crate::i18n::t(crate::i18n::Msg::ProviderPanelModelPlaceholder).into_owned()
+                } else {
+                    form.model.clone()
+                };
                 items.push(field_row(
                     &crate::i18n::t(crate::i18n::Msg::ProviderPanelFieldModel),
-                    form.model.clone(),
+                    model_display,
                     form.focus == ModelField::Model,
                 ));
                 if let Some(status) = &form.fetch_status {
                     items.push((format!("    {status}"), String::new()));
                 }
-                if form.focus == ModelField::Model {
-                    let candidates = form.filtered_candidates();
-                    if !candidates.is_empty() {
-                        let preview: Vec<String> = candidates
-                            .iter()
-                            .take(6)
-                            .enumerate()
-                            .map(|(idx, s)| {
-                                let marker = if idx == form.candidate_idx.min(candidates.len().saturating_sub(1)) {
-                                    "▸ "
-                                } else {
-                                    "  "
-                                };
-                                format!("{marker}{s}")
-                            })
-                            .collect();
-                        let count_hint = if candidates.len() > 6 {
-                            format!("   (共 {} 个匹配, 按 ↓ 选择, ↵ 填入)", candidates.len())
-                        } else {
-                            "   (按 ↓ 选择, ↵ 填入)".to_string()
-                        };
-                        items.push((format!("    [可选模型]{count_hint}"), String::new()));
-                        for line in preview {
-                            items.push((format!("      {line}"), String::new()));
-                        }
+                let (start, window, total) = form.visible_candidates();
+                if total > 0 {
+                    let highlight = form.candidate_idx.min(total - 1);
+                    let count_hint = if total > window.len() {
+                        format!(
+                            "   ({}/{} · {} )",
+                            highlight + 1,
+                            total,
+                            crate::i18n::t(crate::i18n::Msg::ProviderPanelUpstreamPickHint)
+                        )
+                    } else {
+                        format!(
+                            "   ({})",
+                            crate::i18n::t(crate::i18n::Msg::ProviderPanelUpstreamPickHint)
+                        )
+                    };
+                    items.push((
+                        format!(
+                            "    [{}]{count_hint}",
+                            crate::i18n::t(crate::i18n::Msg::ProviderPanelUpstreamListLabel)
+                        ),
+                        String::new(),
+                    ));
+                    for (i, s) in window.iter().enumerate() {
+                        let abs = start + i;
+                        let marker = if abs == highlight { "▸ " } else { "  " };
+                        items.push((format!("      {marker}{s}"), String::new()));
                     }
                 }
                 let win = if form.window.is_empty() {
@@ -2032,6 +2118,11 @@ impl Modal for ProviderPanel {
         renderer: &mut dyn Renderer,
     ) -> Result<ModalAction> {
         self.apply_paste_text(text);
+        if let Mode::Model(form) = &mut self.mode {
+            if form.focus == ModelField::ApiKey && !form.api_key.trim().is_empty() {
+                form.start_fetch(&ctx.config, ctx.wake_tx.clone());
+            }
+        }
         self.draw(buf, state, ctx, renderer);
         Ok(ModalAction::Continue)
     }
@@ -2098,6 +2189,113 @@ mod tests {
             panic!("model add row should open the model form");
         };
         assert_eq!(form.account_id(), "acc");
+        // No api_key on the account → land on the key field first.
+        assert_eq!(form.focus, ModelField::ApiKey);
+    }
+
+    #[test]
+    fn add_model_form_focuses_model_when_account_already_has_a_key() {
+        let cfg: Config = serde_json::from_value(serde_json::json!({
+            "provider_accounts": { "acc": { "provider": "openai", "api_key": "sk-test" } }
+        }))
+        .unwrap();
+        let form = ModelForm::new_add(&cfg, None).unwrap();
+        assert_eq!(form.focus, ModelField::Model);
+    }
+
+    #[test]
+    fn apply_fetch_result_fills_candidates_and_jumps_to_model_field() {
+        let mut form = ModelForm {
+            account_ids: vec!["acc".into()],
+            needs_key: vec![false],
+            account_idx: 0,
+            api_key: String::new(),
+            model: String::new(),
+            window: String::new(),
+            supports_vision: false,
+            reasoning_model: false,
+            make_default: true,
+            focus: ModelField::Account,
+            edit_id: None,
+            candidates: Vec::new(),
+            candidate_idx: 0,
+            fetch_status: None,
+            fetch_rx: Arc::new(Mutex::new(None)),
+        };
+        let (tx, rx) = std::sync::mpsc::channel();
+        *form.fetch_rx.lock().unwrap() = Some(rx);
+        tx.send(Ok(vec!["grok-4.6".into(), "grok-4.5".into()]))
+            .unwrap();
+        assert!(form.apply_fetch_result());
+        assert_eq!(form.candidates, vec!["grok-4.6", "grok-4.5"]);
+        assert_eq!(form.focus, ModelField::Model);
+        assert!(form
+            .fetch_status
+            .as_deref()
+            .unwrap()
+            .contains("2"));
+    }
+
+    #[test]
+    fn apply_fetch_result_failure_keeps_list_empty_and_shows_error() {
+        let mut form = ModelForm {
+            account_ids: vec!["acc".into()],
+            needs_key: vec![false],
+            account_idx: 0,
+            api_key: String::new(),
+            model: String::new(),
+            window: String::new(),
+            supports_vision: false,
+            reasoning_model: false,
+            make_default: true,
+            focus: ModelField::Model,
+            edit_id: None,
+            candidates: vec!["stale".into()],
+            candidate_idx: 0,
+            fetch_status: None,
+            fetch_rx: Arc::new(Mutex::new(None)),
+        };
+        let (tx, rx) = std::sync::mpsc::channel();
+        *form.fetch_rx.lock().unwrap() = Some(rx);
+        tx.send(Err("HTTP 401".into())).unwrap();
+        assert!(form.apply_fetch_result());
+        assert!(form.candidates.is_empty());
+        assert!(form
+            .fetch_status
+            .as_deref()
+            .unwrap()
+            .contains("401"));
+    }
+
+    #[test]
+    fn visible_candidates_window_follows_the_highlight() {
+        let mut form = ModelForm {
+            account_ids: vec!["acc".into()],
+            needs_key: vec![false],
+            account_idx: 0,
+            api_key: String::new(),
+            model: String::new(),
+            window: String::new(),
+            supports_vision: false,
+            reasoning_model: false,
+            make_default: false,
+            focus: ModelField::Model,
+            edit_id: None,
+            candidates: (0..20).map(|i| format!("m{i:02}")).collect(),
+            candidate_idx: 15,
+            fetch_status: None,
+            fetch_rx: Arc::new(Mutex::new(None)),
+        };
+        let (start, view, total) = form.visible_candidates();
+        assert_eq!(total, 20);
+        assert_eq!(view.len(), 10);
+        assert!(view.contains(&"m15"));
+        assert!(start <= 15 && start + view.len() > 15);
+        form.model = "m1".into();
+        form.candidate_idx = 0;
+        let (_, filtered, n) = form.visible_candidates();
+        assert!(n < 20);
+        assert!(filtered.iter().all(|s| s.contains("m1")));
     }
 
     #[test]

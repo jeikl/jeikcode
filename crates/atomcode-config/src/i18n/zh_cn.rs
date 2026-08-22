@@ -328,7 +328,7 @@ pub(super) fn zh_cn(msg: Msg<'_>) -> Cow<'static, str> {
             "（尚无 Provider 账号 — 按 Ctrl+A 添加）".into(),
         Msg::ProviderPanelNoMatchingAccounts => "（无匹配的 Provider 账号）".into(),
         Msg::ProviderPanelEmptyModels =>
-            "（尚无模型 — 按 Ctrl+A 添加）".into(),
+            "（尚无模型 — 按 Ctrl+A 添加，将拉取上游 /models）".into(),
         Msg::ProviderPanelNoMatchingModels => "（无匹配的模型）".into(),
         Msg::ProviderPanelLegacyBadge => "旧".into(),
         Msg::ProviderPanelDefaultBadge => "默认".into(),
@@ -337,9 +337,9 @@ pub(super) fn zh_cn(msg: Msg<'_>) -> Cow<'static, str> {
         Msg::ProviderPanelAccountsHint =>
             "筛选 · ↑↓选择 · ↵模型 · Ctrl+A添加 · Ctrl+E编辑 · Ctrl+Dx2 删除 · Tab切换 · Esc关闭".into(),
         Msg::ProviderPanelModelsHint =>
-            "筛选 · ↑↓选择 · ↵默认/添加 · Ctrl+A添加 · Ctrl+E编辑 · Ctrl+Dx2 删除 · Tab切换 · Esc关闭".into(),
+            "筛选 · ↑↓选择 · ↵默认/添加 · Ctrl+A添加并拉取上游列表 · Ctrl+E编辑 · Ctrl+Dx2 删除 · Tab切换 · Esc关闭".into(),
         Msg::ProviderPanelFilteredModelsHint { account } =>
-            format!("〔{account}〕· ↑↓选择 · ↵默认/添加 · Ctrl+A加模型 · Ctrl+E编辑 · Ctrl+Dx2 删除 · Tab全部 · Esc关闭").into(),
+            format!("〔{account}〕· ↑↓选择 · ↵默认/添加 · Ctrl+A加模型并拉取上游列表 · Ctrl+E编辑 · Ctrl+Dx2 删除 · Tab全部 · Esc关闭").into(),
         Msg::ProviderPanelModelSaved { model } => format!("已保存模型“{model}”。").into(),
         Msg::ProviderPanelImageDirectWhileVlSet => {
             "贴图将直发本模型；要用 VL 请关闭「支持图片输入」。".into()
@@ -370,7 +370,17 @@ pub(super) fn zh_cn(msg: Msg<'_>) -> Cow<'static, str> {
             "Tab 下一项  ←→ 切厂商  空格 勾选  ↵ 保存  Esc 返回".into(),
         Msg::ProviderPanelAccountFormHint => "Tab 切换  ↵ 保存  Esc 返回".into(),
         Msg::ProviderPanelModelFormHint =>
-            "输入筛选上游列表  ↑↓ 选择  Tab 填入  ←→ 切账号  空格 切换  ↵ 填入/保存  Esc 返回".into(),
+            "打开即拉取上游列表  输入筛选  ↑↓选择  Tab/↵填入  ←→切账号（模型框为空时）  空格切换  Esc返回".into(),
+        Msg::ProviderPanelModelPlaceholder => "(输入筛选上游列表)".into(),
+        Msg::ProviderPanelUpstreamListLabel => "上游模型列表".into(),
+        Msg::ProviderPanelUpstreamPickHint => "↑↓ 选择 · Tab/↵ 填入".into(),
+        Msg::ProviderPanelUpstreamLoading => "加载中…".into(),
+        Msg::ProviderPanelUpstreamLoaded { n } =>
+            format!("已加载 {n} 个上游模型 · 输入即筛选 · ↑↓ 选择 · Tab/↵ 填入").into(),
+        Msg::ProviderPanelUpstreamEmpty => "上游无模型列表，可直接输入模型 id".into(),
+        Msg::ProviderPanelUpstreamFailed { error } =>
+            format!("上游列表请求失败（{error}），可直接输入模型 id").into(),
+        Msg::ProviderPanelUpstreamNoUrl => "无可用上游地址，可直接输入模型 id".into(),
         // ── Model 选择器 ──
         Msg::ModelSwitched { provider, model } =>
             format!("  当前会话已切换到 {provider} · {model}\n").into(),
@@ -956,7 +966,7 @@ Msg::CmdDescSetup =>
         Msg::CmdDescLogout => "退出 AtomGit 登录".into(),
         Msg::CmdDescWhoami => "显示当前登录用户".into(),
         Msg::CmdDescModel => "设置默认 Provider / 模型，并切换当前会话".into(),
-        Msg::CmdDescModelAdd => "向现有 Provider 账户快速添加新模型".into(),
+        Msg::CmdDescModelAdd => "向现有账户添加模型（打开时自动拉取上游 /models 列表）".into(),
         Msg::CmdDescProvider => "管理 Provider（添加、编辑、删除、设为全局默认）".into(),
         Msg::CmdDescStatus => "显示会话状态".into(),
         Msg::CmdDescConfig => "显示配置文件路径".into(),

@@ -1,2 +1,4 @@
 ﻿[target.x86_64-unknown-linux-musl]
 linker = "E:/code/agents/atomcode/tools/zig-cc.cmd"
+# rustc's musl self-contained rcrt1.o + zig's crt1.o both define _start.
+rustflags = ["-C", "link-self-contained=no"]

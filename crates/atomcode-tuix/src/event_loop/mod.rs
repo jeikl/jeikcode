@@ -7821,6 +7821,9 @@ pub struct App {
     /// of this, a bare Esc neither arms nor triggers undo — so a rapid Esc mash
     /// undoes at most once per burst.
     pub esc_undo_last_at: Option<std::time::Instant>,
+    /// Timestamp of the first Esc press while streaming / executing.
+    /// A second Esc within `DOUBLE_ESC_UNDO_WINDOW` forces cancellation and immediate return to Idle.
+    pub streaming_esc_pending: Option<std::time::Instant>,
     /// True while a setup skill turn is in flight. On `TurnComplete`,
     /// skill/command registries are reloaded so newly-created skills
     /// become visible to the LLM immediately. Cleared on
@@ -7940,6 +7943,7 @@ impl App {
             exit_pending: None,
             esc_undo_pending: None,
             esc_undo_last_at: None,
+            streaming_esc_pending: None,
             setup_pending: false,
             reasoning_buffer: String::new(),
         }
@@ -8726,6 +8730,7 @@ pub async fn run_loop(mut ctx: LoopCtx, renderer: &mut dyn Renderer) -> Result<E
             // ── Resume ──
             _ = sigcont.recv() => {
                 let _ = crossterm::terminal::enable_raw_mode();
+                renderer.reset();
                 app.state.on_resume();
                 match app.state.phase {
                     UiPhase::Streaming => {
@@ -8735,6 +8740,7 @@ pub async fn run_loop(mut ctx: LoopCtx, renderer: &mut dyn Renderer) -> Result<E
                         redraw_idle_plain(&app.buf, &app.state, &ctx, renderer);
                     }
                 }
+                renderer.flush();
             }
         }
 
@@ -14232,9 +14238,12 @@ fn handle_streaming_key(
 
     // Esc interrupts the running turn. For an active goal it preserves the
     // controller in Paused; ordinary turns keep the existing cancel behavior.
-    // Placed before menu navigation because stopping the stream is the higher
-    // value action mid-turn (Ctrl+U remains available for clearing input).
+    // Double Esc forces cancellation and returns immediately to the Idle input box.
     if code == KeyCode::Esc {
+        let now = std::time::Instant::now();
+        let is_double_esc = app.streaming_esc_pending.is_some_and(|t| now.duration_since(t) <= DOUBLE_ESC_UNDO_WINDOW);
+        app.streaming_esc_pending = Some(now);
+
         let send_ok = if app.state.goal_condition.is_some()
             && app.state.goal_phase == atomcode_coding::GoalPhase::Pursuing
         {
@@ -14253,7 +14262,7 @@ fn handle_streaming_key(
         clear_capturing_modal_on_cancel(app);
         crate::tuix_trace!(
             "KEY",
-            "streaming Esc -> {} send_ok={} interrupt_and_send={} spinner={:?}",
+            "streaming Esc -> {} send_ok={} is_double_esc={} interrupt_and_send={} spinner={:?}",
             if app.state.goal_condition.is_some()
                 && app.state.goal_phase == atomcode_coding::GoalPhase::Pursuing
             {
@@ -14262,9 +14271,23 @@ fn handle_streaming_key(
                 "Cancel"
             },
             send_ok,
+            is_double_esc,
             interrupt_and_send,
             app.state.spinner_label
         );
+
+        if is_double_esc {
+            // Second Esc: Force cancel, clear message queue, transition back to Idle
+            app.message_queue.clear();
+            app.queue_drain_authorized = false;
+            app.state.phase = UiPhase::Idle;
+            app.streaming_esc_pending = None;
+            renderer.render(UiLine::ClearTransient);
+            redraw_idle_plain(&app.buf, &app.state, ctx, renderer);
+            renderer.flush();
+            return Ok(());
+        }
+
         if interrupt_and_send {
             draw_spinner_now(
                 &mut app.state,

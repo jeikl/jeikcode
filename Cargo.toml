@@ -27,7 +27,7 @@ strip = true
 debug = "line-tables-only" # Smaller binaries, faster linker
 
 [workspace.package]
-version = "6.0.17"
+version = "6.0.18"
 edition = "2021"
 license = "MIT"
 repository = "https://atomgit.com/atomgit_atomcode/atomcode"

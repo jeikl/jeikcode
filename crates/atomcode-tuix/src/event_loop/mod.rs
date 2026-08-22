@@ -16581,6 +16581,15 @@ fn flush_deferred_background_notices(
 
 fn complete_turn_presentation(state: &mut crate::state::UiState, renderer: &mut dyn Renderer) {
     state.on_turn_complete();
+    // A bash/git child that stole the foreground pgrp dies with the turn and
+    // leaves a dead TTY pgrp. The next stdin read then returns EIO (SIGTTIN
+    // is ignored so we are not `[Stopped]`). In raw mode Ctrl+C is just a
+    // key, not SIGINT — reclaim here so the composer is live immediately.
+    // `claim_foreground_tty` is a no-op without a TTY (unit tests stay safe);
+    // do not `recover_tty()` here because that `enable_raw_mode`s the test
+    // runner.
+    #[cfg(unix)]
+    crate::signal_restore::claim_foreground_tty();
     flush_deferred_background_notices(state, renderer);
 }
 

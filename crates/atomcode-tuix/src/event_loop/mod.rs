@@ -14243,59 +14243,14 @@ fn handle_streaming_key(
         return Ok(());
     }
 
-    // Esc interrupts the running turn. For an active goal it preserves the
-    // controller in Paused; ordinary turns keep the existing cancel behavior.
-    // Double Esc forces cancellation and returns immediately to the Idle input box.
+    // Esc handling: require double Esc to interrupt the running turn to prevent
+    // stray ANSI escape fragments or accidental keypresses from stopping the task.
+    // If there is text in the buffer or menu open, single Esc clears that first.
     if code == KeyCode::Esc {
-        let now = std::time::Instant::now();
-        let is_double_esc = app.streaming_esc_pending.is_some_and(|t| now.duration_since(t) <= DOUBLE_ESC_UNDO_WINDOW);
-        app.streaming_esc_pending = Some(now);
-
-        let send_ok = if app.state.goal_condition.is_some()
-            && app.state.goal_phase == atomcode_coding::GoalPhase::Pursuing
-        {
-            pause_active_goal(ctx)
-        } else {
-            cancel_active_turn(ctx)
-        };
-        let interrupt_and_send = should_stage_interrupt(
-            send_ok,
-            modifiers.is_empty(),
-            !app.state.pending_steers.is_empty(),
-        ) && stage_pending_steers_for_interrupt(app);
-        if send_ok {
-            app.interrupt_drain_pending = true;
-        }
-        clear_capturing_modal_on_cancel(app);
-        crate::tuix_trace!(
-            "KEY",
-            "streaming Esc -> {} send_ok={} is_double_esc={} interrupt_and_send={} spinner={:?}",
-            if app.state.goal_condition.is_some()
-                && app.state.goal_phase == atomcode_coding::GoalPhase::Pursuing
-            {
-                "PauseGoal"
-            } else {
-                "Cancel"
-            },
-            send_ok,
-            is_double_esc,
-            interrupt_and_send,
-            app.state.spinner_label
-        );
-
-        if is_double_esc {
-            // Second Esc: Force cancel, clear message queue, transition back to Idle
-            app.message_queue.clear();
-            app.queue_drain_authorized = false;
-            app.state.phase = UiPhase::Idle;
-            app.streaming_esc_pending = None;
-            renderer.render(UiLine::ClearTransient);
-            redraw_idle_plain(&app.buf, &app.state, ctx, renderer);
-            renderer.flush();
-            return Ok(());
-        }
-
-        if interrupt_and_send {
+        if !app.buf.text.is_empty() {
+            app.buf.text.clear();
+            app.buf.cursor = 0;
+            app.menu.selected = 0;
             draw_spinner_now(
                 &mut app.state,
                 &app.buf,
@@ -14304,10 +14259,52 @@ fn handle_streaming_key(
                 app.message_queue.len(),
                 app.menu.selected,
             );
-        } else {
-            restore_cancelled_message_to_buf(app, renderer, ctx);
+            return Ok(());
         }
-        return Ok(());
+
+        let now = std::time::Instant::now();
+        let is_double_esc = app
+            .streaming_esc_pending
+            .is_some_and(|t| now.duration_since(t) <= DOUBLE_ESC_UNDO_WINDOW);
+
+        if is_double_esc {
+            // Second Esc: Confirmed cancellation. Force cancel and return to Idle.
+            app.streaming_esc_pending = None;
+            let send_ok = if app.state.goal_condition.is_some()
+                && app.state.goal_phase == atomcode_coding::GoalPhase::Pursuing
+            {
+                pause_active_goal(ctx)
+            } else {
+                cancel_active_turn(ctx)
+            };
+            if send_ok {
+                app.interrupt_drain_pending = true;
+            }
+            clear_capturing_modal_on_cancel(app);
+            app.message_queue.clear();
+            app.queue_drain_authorized = false;
+            app.state.phase = UiPhase::Idle;
+            renderer.render(UiLine::ClearTransient);
+            redraw_idle_plain(&app.buf, &app.state, ctx, renderer);
+            renderer.flush();
+            return Ok(());
+        } else {
+            // First Esc: Record timestamp and show a gentle hint, do NOT stop turn.
+            app.streaming_esc_pending = Some(now);
+            renderer.render(UiLine::CommandOutput(
+                "  (按两次 Esc 或按 Ctrl+C 取消任务)\n".into(),
+            ));
+            renderer.flush();
+            draw_spinner_now(
+                &mut app.state,
+                &app.buf,
+                ctx,
+                renderer,
+                app.message_queue.len(),
+                app.menu.selected,
+            );
+            return Ok(());
+        }
     }
 
     // When the menu is active (buf starts with `/`), intercept nav keys

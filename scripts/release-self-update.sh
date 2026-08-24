@@ -28,21 +28,27 @@ REPO_NAME="<repo>"
 mkdir -p dist
 echo "==> 交叉编译 release 二进制(按需启用 target; 先 rustup target add <target>)"
 
-build_target() { # <rust-target> <asset-name>
+build_target() { # <rust-target> <versioned-asset>
   local rt="$1" asset="$2"
   echo "    building ${rt} -> ${asset}"
-  cargo build --release --target "$rt" >/dev/null 2>&1 || {
-    echo "    !! 跳过 ${rt}(缺 target: rustup target add ${rt})"; return; }
+  cargo build --release --target "$rt" --bin atomcode || {
+    echo "    !! 跳过 ${rt}(缺 target 或链接失败: rustup target add ${rt})"; return; }
   local src="target/${rt}/release/atomcode"
   [ -f "${src}.exe" ] && src="${src}.exe"
   cp "$src" "dist/${asset}"
+  # Unversioned alias (same bytes) so older install scripts still resolve.
+  local alias="${asset/${VERSION}-/}"
+  if [ "$alias" != "$asset" ]; then
+    cp "dist/${asset}" "dist/${alias}"
+  fi
 }
 
-# target key 与 updater detect_target() 完全一致; 本 fork 仅发布两个平台:
-# linux-x64 + windows-x64(其余 target 行已按需移除)。
-build_target x86_64-unknown-linux-gnu      atomcode-linux-x64
-build_target x86_64-pc-windows-gnu        atomcode-windows-x64.exe
-build_target x86_64-pc-windows-msvc       atomcode-windows-x64.exe
+# target key 与 updater detect_target() 完全一致; 本 fork 仅发布两个平台.
+# Linux: musl+zig（本机 .cargo/config.toml 已配），静态链到 linux-x64 资产名.
+# Windows: gnu（WinLibs）；若本机还有 msvc target 则后写覆盖.
+build_target x86_64-unknown-linux-musl     "atomcode-${VERSION}-linux-x64"
+build_target x86_64-pc-windows-gnu         "atomcode-${VERSION}-windows-x64.exe"
+build_target x86_64-pc-windows-msvc        "atomcode-${VERSION}-windows-x64.exe"
 
 echo "==> 生成 latest.json"
 PYTHON_BIN="python3"
@@ -52,8 +58,8 @@ command -v python3 >/dev/null 2>&1 || PYTHON_BIN="python"
 import hashlib, json, os, sys, datetime
 version = sys.argv[1]
 target_map = {
-    "atomcode-linux-x64": "linux-x64",
-    "atomcode-windows-x64.exe": "windows-x64",
+    f"atomcode-{version}-linux-x64": "linux-x64",
+    f"atomcode-{version}-windows-x64.exe": "windows-x64",
 }
 binaries = {}
 for asset, key in target_map.items():

@@ -25,6 +25,14 @@ REPO_OWNER="<you>"
 REPO_NAME="<repo>"
 # -------------------------------------
 
+ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+# C crates (ring / sqlite / zstd / tree-sitter) look up a target CC, not rustc's linker.
+if [ -f "$ROOT/tools/zig-cc.cmd" ]; then
+  export CC_x86_64_unknown_linux_musl="$ROOT/tools/zig-cc.cmd"
+  export CFLAGS_x86_64_unknown_linux_musl="-fPIC"
+  export AR_x86_64_unknown_linux_musl="$ROOT/tools/zig-ar.cmd"
+fi
+
 mkdir -p dist
 echo "==> 交叉编译 release 二进制(按需启用 target; 先 rustup target add <target>)"
 

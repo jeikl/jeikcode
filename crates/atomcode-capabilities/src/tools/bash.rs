@@ -67,7 +67,20 @@ impl Tool for BashTool {
         json!({
             "type": "object",
             "properties": {
-                "command": { "type": "string", "description": "The shell command to run" }
+                "command": { "type": "string", "description": "The shell command to run" },
+                "timeout": {
+                    "type": "integer",
+                    "description": "REQUIRED seconds before the command is killed. Pick by job kind — do NOT omit.\n\
+Compile / test / install / link: ALWAYS 900 (they can print nothing for minutes while linking or compiling):\n\
+  cargo build|test|check|clippy|run, npm/pnpm/yarn test|install|ci, make, mvn, gradle, pytest, go test, tsc.\n\
+  GOOD: {\"command\":\"cargo test --offline\",\"timeout\":900}\n\
+  GOOD: {\"command\":\"npm test\",\"timeout\":900}\n\
+Short commands: 30 (git status, ls, echo, pwd, which).\n\
+  GOOD: {\"command\":\"git status\",\"timeout\":30}\n\
+Medium (git fetch/clone, one-off scripts): 120.\n\
+BAD: omit timeout on cargo test / npm install / make\n\
+BAD: timeout=900 on git status or ls"
+                }
             },
             "required": ["command"]
         })
@@ -117,9 +130,16 @@ impl Tool for BashTool {
         let bash_cfg = resolve_bash_timeout_config();
         let default_timeout = bash_cfg.default_timeout_secs.max(1);
         let max_timeout = bash_cfg.max_timeout_secs.max(default_timeout);
+        // Schema tells the model to pass timeout (900 compile/test, 30 short). If omitted:
+        // compile/test/install still get 900 so a silent link is not killed; short cmds keep default.
+        const LONG_JOB_TIMEOUT_SECS: u64 = 900;
         let secs = a
             .timeout
-            .unwrap_or(default_timeout)
+            .unwrap_or(if looks_like_long_job(&a.command) {
+                LONG_JOB_TIMEOUT_SECS.min(max_timeout).max(default_timeout)
+            } else {
+                default_timeout
+            })
             .clamp(1, max_timeout);
         let dur = Duration::from_secs(secs);
 
@@ -316,7 +336,14 @@ fn shell_tool_description(
     macro_rules! base {
         () => {
             "Run a shell command in the working directory and return its combined \
-             stdout/stderr and exit code. Destructive \
+             stdout/stderr and exit code. ALWAYS pass `timeout` (seconds):\n\
+             compile/test/install (cargo build|test|check|clippy, npm test|install, make, \
+             mvn, pytest, go test) → timeout=900 — they can print nothing for minutes;\n\
+             short (git status, ls, echo, pwd) → timeout=30; medium (git fetch/clone) → 120.\n\
+             GOOD: {\"command\":\"cargo test\",\"timeout\":900}\n\
+             GOOD: {\"command\":\"git status\",\"timeout\":30}\n\
+             BAD: omit timeout on cargo/npm; BAD: timeout=900 on git status.\n\
+             Destructive \
              commands (recursive force delete, sudo, dd, history rewrites, …) are flagged \
              risky and may require approval.\n\
              Prefer the dedicated tools over bash for file operations — they are \
@@ -2054,6 +2081,60 @@ pub fn bash_invocations(source: &str) -> Option<Vec<BashInvocation>> {
     Some(invocations)
 }
 
+/// Binaries that routinely run for minutes with little or no stdout (link, LLVM, package
+/// download). Schema asks the model for timeout=900; if omitted they still get 900s and skip idle-kill.
+const LONG_JOB_BINS: &[&str] = &[
+    "cargo", "rustc", "rustdoc", "npm", "npx", "pnpm", "yarn", "bun", "bunx", "mvn", "mvnw",
+    "gradle", "gradlew", "make", "gmake", "cmake", "ninja", "meson", "go", "dotnet", "msbuild",
+    "gcc", "g++", "clang", "clang++", "cl", "pip", "pip3", "poetry", "uv", "pipenv", "composer",
+    "docker", "docker-compose", "podman", "webpack", "vite", "tsc", "esbuild", "pytest", "ctest",
+    "xcodebuild", "javac", "ant",
+];
+
+fn command_basename(name: &str) -> String {
+    let t = name.trim_matches(|c| c == '"' || c == '\'');
+    let t = t.rsplit(['/', '\\']).next().unwrap_or(t);
+    let lower = t.to_ascii_lowercase();
+    for suffix in [".exe", ".cmd", ".bat", ".ps1"] {
+        if let Some(stripped) = lower.strip_suffix(suffix) {
+            return stripped.to_string();
+        }
+    }
+    lower
+}
+
+fn invocation_is_long_job(inv: &BashInvocation) -> bool {
+    let bin = command_basename(&inv.command);
+    if LONG_JOB_BINS.contains(&bin.as_str()) {
+        return true;
+    }
+    if bin == "git" {
+        return inv.arguments.iter().any(|a| {
+            matches!(
+                a.as_str(),
+                "clone" | "fetch" | "pull" | "push" | "submodule"
+            )
+        });
+    }
+    if matches!(bin.as_str(), "python" | "python3" | "py") {
+        let args: Vec<&str> = inv.arguments.iter().map(|s| s.as_str()).collect();
+        return args.windows(2).any(|w| {
+            w[0] == "-m" && matches!(w[1], "pytest" | "pip" | "http.server" | "unittest")
+        });
+    }
+    false
+}
+
+/// Compile / test / package-install families that may produce no output for a long time.
+pub(crate) fn looks_like_long_job(command: &str) -> bool {
+    if let Some(invs) = bash_invocations(command) {
+        return invs.iter().any(invocation_is_long_job);
+    }
+    command.split_whitespace().any(|tok| {
+        LONG_JOB_BINS.contains(&command_basename(tok).as_str())
+    })
+}
+
 /// Whether `command` is PROVABLY read-only, so it may run CONCURRENTLY without a
 /// sandbox. AST-based (tree-sitter-bash): only a fixed set of STRUCTURAL node kinds is
 /// allowed; any other NAMED kind (command substitution, subshell, expansion, …) means
@@ -2485,7 +2566,13 @@ pub async fn run_shell(
     let mut stderr_buf = Vec::new();
 
     let bash_cfg = resolve_bash_timeout_config();
-    let idle_timeout = Duration::from_secs(bash_cfg.silent_kill_secs.max(1));
+    // Compile/link can go silent for minutes after the last "Compiling …" line.
+    // Idle-kill is only for short hung commands; long jobs wait on the wall clock.
+    let idle_timeout = if looks_like_long_job(command) {
+        Duration::from_secs(timeout_secs.saturating_add(1).max(1))
+    } else {
+        Duration::from_secs(bash_cfg.silent_kill_secs.max(1))
+    };
     let has_any_output = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
     let has_out_1 = has_any_output.clone();
     let has_out_2 = has_any_output.clone();
@@ -2860,6 +2947,42 @@ mod tests {
             ])
         );
         assert!(super::bash_invocations("cargo test |").is_none());
+    }
+
+    #[test]
+    fn looks_like_long_job_detects_compile_and_skips_short_reads() {
+        assert!(super::looks_like_long_job("cargo build"));
+        assert!(super::looks_like_long_job("cd crates/foo && cargo test --offline"));
+        assert!(super::looks_like_long_job("npm install"));
+        assert!(super::looks_like_long_job(r"C:\Users\me\.cargo\bin\cargo.exe check"));
+        assert!(super::looks_like_long_job("git clone https://example.com/repo.git"));
+        assert!(!super::looks_like_long_job("ls -la"));
+        assert!(!super::looks_like_long_job("git status"));
+        assert!(!super::looks_like_long_job("echo cargo"));
+        assert!(!super::looks_like_long_job("grep cargo src/main.rs"));
+    }
+
+    #[test]
+    fn bash_schema_requires_timeout_900_for_compile_30_for_short() {
+        let schema = BashTool.parameters_schema().to_string();
+        assert!(schema.contains("timeout"), "{schema}");
+        assert!(
+            schema.contains("900") && schema.contains("cargo"),
+            "schema must tell the agent compile/test uses timeout=900: {schema}"
+        );
+        assert!(
+            schema.contains("30") && schema.contains("git status"),
+            "schema must tell the agent short cmds use timeout=30: {schema}"
+        );
+        assert!(
+            schema.contains("BAD") && schema.contains("omit timeout"),
+            "schema must show omit-timeout as BAD: {schema}"
+        );
+        let desc = shell_tool_description(false, false, false);
+        assert!(
+            desc.contains("timeout=900") && desc.contains("timeout=30"),
+            "tool description must repeat the timeout routing: {desc}"
+        );
     }
 
     #[test]

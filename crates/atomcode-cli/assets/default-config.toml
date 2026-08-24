@@ -33,9 +33,11 @@ enabled = true
 eager = "auto"
 
 [tools.bash]
-default_timeout_secs = 900
+# Short hung commands (ls/git status) use default. cargo/npm/make auto-use max
+# (linking can print nothing for minutes). Do not raise default to save compiles.
+default_timeout_secs = 120
 max_timeout_secs = 1800
-silent_kill_secs = 900
+silent_kill_secs = 60
 
 [tools.tool_output]
 max_bytes = 65536

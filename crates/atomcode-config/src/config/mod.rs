@@ -114,20 +114,21 @@ pub struct ToolsConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct BashToolConfig {
-    /// Default timeout in seconds if not specified in the tool call arguments.
+    /// Default wall-clock seconds for short/unknown commands when the call omits `timeout`.
     pub default_timeout_secs: u64,
-    /// Maximum allowed timeout ceiling in seconds that can be passed by the model or user.
+    /// Ceiling, and the default wall-clock for compile/test/install families (cargo, npm, make, …).
     pub max_timeout_secs: u64,
-    /// Silent timeout in seconds (killed if no output is produced for this duration).
+    /// Idle kill for SHORT commands: no new stdout/stderr for this long.
+    /// Compile/test/install families ignore this (they may go silent while linking).
     pub silent_kill_secs: u64,
 }
 
 impl Default for BashToolConfig {
     fn default() -> Self {
         Self {
-            default_timeout_secs: 900,
+            default_timeout_secs: 120,
             max_timeout_secs: 1800,
-            silent_kill_secs: 900,
+            silent_kill_secs: 60,
         }
     }
 }
@@ -3676,9 +3677,9 @@ context_window = 131072
     #[test]
     fn bash_tool_config_defaults_and_parses() {
         let defaulted: Config = toml::from_str("").unwrap();
-        assert_eq!(defaulted.tools.bash.default_timeout_secs, 900);
+        assert_eq!(defaulted.tools.bash.default_timeout_secs, 120);
         assert_eq!(defaulted.tools.bash.max_timeout_secs, 1800);
-        assert_eq!(defaulted.tools.bash.silent_kill_secs, 900);
+        assert_eq!(defaulted.tools.bash.silent_kill_secs, 60);
 
         let configured: Config = toml::from_str(
             "[tools.bash]\ndefault_timeout_secs = 300\nmax_timeout_secs = 3600\nsilent_kill_secs = 600\n",

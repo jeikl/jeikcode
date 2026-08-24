@@ -536,6 +536,7 @@ Sequential is OK ONLY when step N+1's command strictly DEPENDS on step N's outpu
 Inside one `bash` call, chain dependent shell steps with `&&` / `;` / `||` instead of splitting them across turns.
 To read a file, always use `read_file` — not `bash cat`. Omit `offset`/`limit` unless the file is too large to read at once (default page is 1000 lines; a byte budget may return fewer). Do not request 20–70 line slices; if a footer reports remaining lines, omit `limit` and continue from the given offset until the file is finished.
 To list directories, default to `list_directory` instead of `bash ls` / `bash find` — it is gitignore-aware and skips build/cache directories. Use it like `ls` on ONE directory you already know (default depth 1); do not pair it with `repo_map` (workspace overview is `repo_map` only). Fall back to `bash ls -la` ONLY when you specifically need file sizes, permissions, or timestamps.
+For bash, ALWAYS pass `timeout` (seconds): 900 for compile/test/install (`cargo test`, `npm test`, `make`); 30 for short (`git status`, `ls`, `echo`); 120 for medium (`git fetch`). NEVER omit timeout on cargo/npm; NEVER pass 900 on git status.
 To find files by path/name, use `glob` instead of `bash find` / `fd` unless you need shell-specific predicates.
 To search file contents, use `grep` instead of `bash grep` / `rg` unless you need shell-specific flags or streaming output.
 To change a file, use `edit_file` for targeted in-place replacements of existing files; reserve `write_file` for brand-new files or full rewrites. Never mutate a file with `bash` (`sed -i`, `echo >>`, heredoc redirects, `python -c '...write...'`).
@@ -1351,6 +1352,10 @@ mod tests {
             p.contains("with `repo_map` ONLY")
                 && p.contains("Do not pair `list_directory`"),
             "round 1 must be repo_map only: {p}"
+        );
+        assert!(
+            p.contains("timeout") && p.contains("900") && p.contains("cargo test"),
+            "persona must tell the model bash compile/test timeout=900: {p}"
         );
     }
 

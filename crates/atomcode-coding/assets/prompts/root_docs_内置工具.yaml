@@ -164,14 +164,19 @@ tools:
 
   - name: "bash"
     category: "system"
-    # 【中文】：在终端环境中执行 shell 命令行。
-    description: "Execute a shell command in the workspace."
+    # 【中文】：在终端执行命令。必须带 timeout：编译/测试/安装 900 秒，短命令 30 秒。
+    description: "Run a shell command. ALWAYS pass timeout: 900 for compile/test/install (cargo/npm/make), 30 for short (git status, ls)."
     parameters:
       command:
         type: "string"
         required: true
         # 【中文】：命令行指令
         description: "Command string to run."
+      timeout:
+        type: "integer"
+        required: true
+        # 【中文】：秒。编译/测试/安装（cargo test、npm test、make）一律 900——链接可能几分钟无输出。短命令（git status、ls）30。禁止给 git status 传 900，禁止漏掉 cargo 的 timeout。
+        description: "REQUIRED seconds. Compile/test/install: 900. Short (git status, ls): 30. Medium (git fetch): 120. GOOD: cargo test timeout=900. BAD: omit on cargo; BAD: 900 on git status."
 
   # ============================================================================
   # 二、代码智能核心 (Code Intelligence - 默认挂载)

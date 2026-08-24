@@ -167,9 +167,9 @@ no_fold_tools = ["fetch_output", "repo_map", "code_explore", "find_symbol",
                  "trace_chain", "blast_radius", "web_fetch", "web_search"]
 
 [tools.bash]
-default_timeout_secs = 60
-max_timeout_secs = 1800
-silent_kill_secs = 90
+default_timeout_secs = 120   # 短命令墙钟；不要为了编译把它抬到 900
+max_timeout_secs = 1800      # 上限；cargo/npm/make 自动用这个（链接可长时间无输出）
+silent_kill_secs = 60        # 只杀短命令静默卡死；长任务忽略
 
 # ── 官方字段但默认值常被自定义(保持手写以便新机可调) ──────────
 [tools.todo]

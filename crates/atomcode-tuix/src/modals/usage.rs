@@ -742,7 +742,7 @@ impl Modal for UsageModal {
         renderer: &mut dyn Renderer,
     ) -> Result<ModalAction> {
         // Ctrl+S — copy active tab as plain text to clipboard
-        if code == KeyCode::Char('s') && mods.contains(KeyModifiers::CONTROL) {
+        if crate::input::key_action::is_ctrl_letter(code, mods, 's') {
             let text = self.active_tab_text(ctx.caps.colors, ctx.caps.unicode_symbols);
             crate::event_loop::commands::copy_text_to_clipboard_osc52(&text);
             self.copy_notice = Some(t(Msg::UsageCopied).into_owned());

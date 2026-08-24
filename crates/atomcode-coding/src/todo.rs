@@ -56,6 +56,11 @@ impl TodoHook {
 
 /// High-recency todo activation policy. Unlike `TodoHook`, this only acts on
 /// round one of a real user turn and only while no structured list exists.
+///
+/// The nudge is stored in [`LifecycleHooks::turn_start`] immediately ABOVE the
+/// real query (same placement as `StatusReminderHook` / `SkillFirstHook`). It
+/// must NOT land in `pre_request`: inserting above the last user there rewrites
+/// the outgoing prefix and trips the kernel's append-only cache-prefix guard.
 pub struct TodoEagerHook {
     eagerness: TodoEagerness,
 }
@@ -83,30 +88,43 @@ impl TodoEagerHook {
         Self { eagerness }
     }
 
-    fn should_activate(&self, messages: &[Message], ctx: &TurnCtx) -> bool {
-        let todos = derive_current_todos(messages);
-        ctx.round == 1
-            && self.eagerness != TodoEagerness::Auto
-            && todos
+    fn should_nudge(&self, messages: &[Message]) -> bool {
+        self.eagerness != TodoEagerness::Auto
+            && derive_current_todos(messages)
                 .iter()
                 .all(|todo| todo.status == TodoStatus::Completed)
     }
+
+    fn should_activate(&self, messages: &[Message], ctx: &TurnCtx) -> bool {
+        ctx.round == 1 && self.should_nudge(messages)
+    }
+
+    fn body(&self) -> &'static str {
+        if self.eagerness == TodoEagerness::Always {
+            "You MUST call `todowrite` now, before any other tool or prose, to create the task list."
+        } else {
+            "Before acting, decide whether this task benefits from a todo list. If it has multiple requests, phases, files, dependencies, ambiguity, or requires investigation plus changes, call `todowrite` now. Skip it only for a genuinely simple one-step or purely informational request."
+        }
+    }
+}
+
+fn is_eager_todo_reminder(text: &str) -> bool {
+    text.contains("You MUST call `todowrite` now")
+        || text.contains("whether this task benefits from a todo list")
 }
 
 #[async_trait]
 impl LifecycleHooks for TodoEagerHook {
-    async fn pre_request(&self, messages: &mut Vec<Message>, ctx: &TurnCtx) {
-        if !self.should_activate(messages, ctx) {
+    async fn turn_start(&self, convo: &mut Conversation) {
+        if !self.should_nudge(&convo.messages) {
             return;
         }
-        let lead = if self.eagerness == TodoEagerness::Always {
-            "You MUST call `todowrite` now, before any other tool or prose, to create the task list."
-        } else {
-            "Before acting, decide whether this task benefits from a todo list. If it has multiple requests, phases, files, dependencies, ambiguity, or requires investigation plus changes, call `todowrite` now. Skip it only for a genuinely simple one-step or purely informational request."
-        };
+        if reminder_already_before_last_real_user(&convo.messages, is_eager_todo_reminder) {
+            return;
+        }
         insert_before_last_real_user(
-            messages,
-            Message::synthetic_user(system_reminder(lead)),
+            &mut convo.messages,
+            Message::synthetic_user(system_reminder(self.body())),
         );
     }
 
@@ -351,7 +369,9 @@ mod tests {
             reminder.text
         );
         assert!(
-            reminder.text.contains("Skip `todowrite` this turn if the list already matches"),
+            reminder
+                .text
+                .contains("Skip `todowrite` this turn if the list already matches"),
             "must discourage no-op updates: {}",
             reminder.text
         );
@@ -377,7 +397,11 @@ mod tests {
         let reminder = reminder_before_query(&convo);
         assert_eq!(reminder.role, Role::User);
         assert!(reminder.synthetic);
-        assert!(reminder.text.contains("system-reminder"), "{}", reminder.text);
+        assert!(
+            reminder.text.contains("system-reminder"),
+            "{}",
+            reminder.text
+        );
         assert!(reminder.text.contains("step one"), "{}", reminder.text);
         assert_eq!(convo.messages[1].text, "do the thing");
     }
@@ -390,7 +414,7 @@ mod tests {
 
         let tool = TodoTool::new();
         let hook = TodoHook::with_live(tool.live());
-        let mut msgs = vec![
+        let msgs = vec![
             Message::user("do it"),
             todowrite_msg(r#"{"todos":[{"content":"only","status":"pending"}]}"#),
         ];
@@ -413,7 +437,10 @@ mod tests {
 
     #[tokio::test]
     async fn no_injection_when_no_list() {
-        let mut convo = convo_with(vec![Message::user("hi"), Message::assistant("hello", vec![])]);
+        let mut convo = convo_with(vec![
+            Message::user("hi"),
+            Message::assistant("hello", vec![]),
+        ]);
         let before = convo.messages.len();
         TodoHook::new().turn_start(&mut convo).await;
         assert_eq!(convo.messages.len(), before, "empty list → no injection");
@@ -422,45 +449,75 @@ mod tests {
     #[tokio::test]
     async fn auto_prefers_deepseek_v4_flash_on_each_new_task() {
         let hook = TodoEagerHook::new("deepseek-v4-flash", "openai", TodoEagerness::Auto);
-        let mut msgs = vec![Message::user("analyze and fix this")];
+        let mut convo = convo_with(vec![Message::user("analyze and fix this")]);
+        hook.turn_start(&mut convo).await;
+        assert!(
+            convo
+                .messages
+                .iter()
+                .any(|m| m.synthetic && m.text.contains("todowrite")),
+            "eager nudge must sit above the query: {:?}",
+            convo
+                .messages
+                .iter()
+                .map(|m| m.text.as_str())
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(convo.messages.last().unwrap().text, "analyze and fix this");
+    }
+
+    #[tokio::test]
+    async fn auto_policy_is_resolved_again_for_a_model_generation() {
+        let mut ordinary = convo_with(vec![Message::user("analyze and fix this")]);
+        TodoEagerHook::new("ordinary-model", "openai", TodoEagerness::Auto)
+            .turn_start(&mut ordinary)
+            .await;
+        assert_eq!(ordinary.messages.len(), 1, "ordinary Auto stays quiet");
+
+        let mut deepseek = convo_with(vec![Message::user("analyze and fix this")]);
+        TodoEagerHook::new("deepseek-v4-flash", "openai", TodoEagerness::Auto)
+            .turn_start(&mut deepseek)
+            .await;
+        assert_eq!(
+            deepseek.messages.len(),
+            2,
+            "new DeepSeek generation gets the nudge"
+        );
+        assert_eq!(
+            deepseek.messages.last().unwrap().text,
+            "analyze and fix this"
+        );
+    }
+
+    #[tokio::test]
+    async fn eager_nudge_is_stored_on_turn_start_and_pre_request_stays_append_only() {
+        let hook = TodoEagerHook::new("deepseek-v4-flash", "openai", TodoEagerness::Auto);
+        let mut convo = convo_with(vec![Message::user("analyze and fix this")]);
+        hook.turn_start(&mut convo).await;
+        let stored = convo.messages.clone();
+        assert!(
+            stored.len() > 1,
+            "turn_start must persist the nudge so tool-loop rounds stay a prefix"
+        );
+        hook.turn_start(&mut convo).await;
+        assert_eq!(
+            convo.messages, stored,
+            "second turn_start on the same query is idempotent"
+        );
+
+        let mut outgoing = stored.clone();
         hook.pre_request(
-            &mut msgs,
+            &mut outgoing,
             &TurnCtx {
                 round: 1,
                 ..Default::default()
             },
         )
         .await;
-        assert!(
-            msgs.iter().any(|m| m.synthetic && m.text.contains("todowrite")),
-            "eager nudge must sit above the query: {:?}",
-            msgs.iter().map(|m| m.text.as_str()).collect::<Vec<_>>()
-        );
-        assert_eq!(msgs.last().unwrap().text, "analyze and fix this");
-    }
-
-    #[tokio::test]
-    async fn auto_policy_is_resolved_again_for_a_model_generation() {
-        let ctx = TurnCtx {
-            round: 1,
-            ..Default::default()
-        };
-        let mut ordinary = vec![Message::user("analyze and fix this")];
-        TodoEagerHook::new("ordinary-model", "openai", TodoEagerness::Auto)
-            .pre_request(&mut ordinary, &ctx)
-            .await;
-        assert_eq!(ordinary.len(), 1, "ordinary Auto stays quiet");
-
-        let mut deepseek = vec![Message::user("analyze and fix this")];
-        TodoEagerHook::new("deepseek-v4-flash", "openai", TodoEagerness::Auto)
-            .pre_request(&mut deepseek, &ctx)
-            .await;
         assert_eq!(
-            deepseek.len(),
-            2,
-            "new DeepSeek generation gets the nudge"
+            outgoing, stored,
+            "pre_request must not rewrite history — inserting above the query poisons the prefix cache"
         );
-        assert_eq!(deepseek.last().unwrap().text, "analyze and fix this");
     }
 
     #[tokio::test]

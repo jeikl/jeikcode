@@ -163,7 +163,8 @@ impl Modal for DirPicker {
             // Free-text path entry: plain printable chars build the `query` (Ctrl/Alt
             // combos are left for shortcuts, not captured as text).
             KeyCode::Char(c)
-                if !mods.contains(KeyModifiers::CONTROL) && !mods.contains(KeyModifiers::ALT) =>
+                if crate::input::key_action::typable_char(code, mods) == Some(c)
+                    && !mods.contains(KeyModifiers::ALT) =>
             {
                 self.on_char(c);
                 self.draw(buf, state, ctx, renderer);
@@ -290,8 +291,7 @@ fn build_menu_payload(p: &DirPicker) -> MenuPayload {
         let mut current_labeled = false;
         items.extend(filtered.iter().map(|d| {
             let name = crate::platform::collapse_home(&d.to_string_lossy());
-            let desc = if !current_labeled
-                && crate::event_loop::commands::paths_same(d, &p.current)
+            let desc = if !current_labeled && crate::event_loop::commands::paths_same(d, &p.current)
             {
                 current_labeled = true;
                 crate::i18n::t(crate::i18n::Msg::DirCurrent).into_owned()
@@ -648,7 +648,10 @@ mod tests {
         // carry the "current" label — two "current" markers is a bug.
         let p = DirPicker::open(vec![pb("/proj"), pb("/proj")], pb("/proj"));
         let payload = build_menu_payload(&p);
-        assert_eq!(payload.items[DIR_HEADER_ROWS].1, "current", "first match labeled");
+        assert_eq!(
+            payload.items[DIR_HEADER_ROWS].1, "current",
+            "first match labeled"
+        );
         assert_eq!(
             payload.items[DIR_HEADER_ROWS + 1].1,
             "",

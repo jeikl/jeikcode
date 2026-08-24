@@ -55,7 +55,10 @@ impl PasswordModal {
 
     fn apply_key(&mut self, code: KeyCode, mods: KeyModifiers) -> KeyOutcome {
         match code {
-            KeyCode::Char(c) if !mods.contains(KeyModifiers::CONTROL) => {
+            // Ctrl+C first: Unix raw mode sends `\u{3}` without CONTROL, which
+            // would otherwise be inserted into the password.
+            _ if crate::input::key_action::is_ctrl_letter(code, mods, 'c') => KeyOutcome::Cancel,
+            KeyCode::Char(c) if crate::input::key_action::typable_char(code, mods) == Some(c) => {
                 self.pw.push(c);
                 KeyOutcome::Continue
             }
@@ -67,7 +70,6 @@ impl PasswordModal {
             // Esc and Ctrl+C both dismiss the prompt (send None). Ctrl+C is the
             // universal escape hatch, so an orphaned modal can always be cleared.
             KeyCode::Esc => KeyOutcome::Cancel,
-            KeyCode::Char('c') if mods.contains(KeyModifiers::CONTROL) => KeyOutcome::Cancel,
             _ => KeyOutcome::Continue,
         }
     }
@@ -217,6 +219,17 @@ mod tests {
         m.feed_for_test(KeyCode::Char('x'), KeyModifiers::NONE);
         assert_eq!(
             m.feed_for_test(KeyCode::Char('c'), KeyModifiers::CONTROL),
+            ModalActionTest::Close
+        );
+        assert_eq!(rx.blocking_recv().unwrap(), None);
+    }
+
+    #[test]
+    fn unix_raw_ctrl_c_cancels_instead_of_typing_eot() {
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        let mut m = PasswordModal::new("p".into(), tx);
+        assert_eq!(
+            m.feed_for_test(KeyCode::Char('\u{3}'), KeyModifiers::NONE),
             ModalActionTest::Close
         );
         assert_eq!(rx.blocking_recv().unwrap(), None);

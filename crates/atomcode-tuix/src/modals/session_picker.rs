@@ -198,16 +198,10 @@ impl Modal for SessionPicker {
                 self.draw(buf, state, ctx, renderer);
                 Ok(ModalAction::Continue)
             }
-            KeyCode::Char(c) if !mods.contains(KeyModifiers::CONTROL) => {
-                self.query.push(c);
-                self.update_filter();
-                self.search_focused = true;
-                self.confirm_delete = None;
-                self.delete_status = None;
-                self.draw(buf, state, ctx, renderer);
-                Ok(ModalAction::Continue)
-            }
-            KeyCode::Char(c) if mods.contains(KeyModifiers::CONTROL) && c == 'd' => {
+            // Ctrl+D BEFORE the type-to-filter arm: Unix raw mode delivers this
+            // as `\u{4}` with no CONTROL flag, which would otherwise land in the
+            // search box, set `search_focused`, and make the second press a no-op.
+            code if crate::input::key_action::is_ctrl_letter(code, mods, 'd') => {
                 // Ctrl+D: delete selected session (with confirmation). Ignored
                 // while the search box holds focus — no session row is marked, so
                 // there is nothing unambiguous to delete.
@@ -271,6 +265,15 @@ impl Modal for SessionPicker {
                         );
                     }
                 }
+                self.draw(buf, state, ctx, renderer);
+                Ok(ModalAction::Continue)
+            }
+            KeyCode::Char(c) if crate::input::key_action::typable_char(code, mods) == Some(c) => {
+                self.query.push(c);
+                self.update_filter();
+                self.search_focused = true;
+                self.confirm_delete = None;
+                self.delete_status = None;
                 self.draw(buf, state, ctx, renderer);
                 Ok(ModalAction::Continue)
             }
@@ -983,6 +986,33 @@ mod tests {
         assert!(
             !h.contains("F2"),
             "rename is removed — F2 must not be advertised: {h:?}"
+        );
+    }
+
+    #[test]
+    fn ctrl_d_is_recognized_in_unix_raw_encoding() {
+        // Linux raw mode delivers Ctrl+D as `\u{4}` with no CONTROL flag.
+        // If that byte is treated as a filter char, `search_focused` latches
+        // and the advertised Ctrl+D×2 delete becomes a no-op.
+        use crate::input::key_action::{is_ctrl_letter, typable_char};
+        assert!(is_ctrl_letter(
+            KeyCode::Char('\u{4}'),
+            KeyModifiers::NONE,
+            'd'
+        ));
+        assert!(is_ctrl_letter(
+            KeyCode::Char('d'),
+            KeyModifiers::CONTROL,
+            'd'
+        ));
+        assert!(is_ctrl_letter(
+            KeyCode::Char('D'),
+            KeyModifiers::CONTROL,
+            'd'
+        ));
+        assert_eq!(
+            typable_char(KeyCode::Char('\u{4}'), KeyModifiers::NONE),
+            None
         );
     }
 

@@ -1085,7 +1085,9 @@ impl Modal for PluginManager {
                         self.url_input = chars.into_iter().collect();
                     }
                 }
-                KeyCode::Char(c) if !mods.contains(KeyModifiers::CONTROL) => {
+                KeyCode::Char(c)
+                    if crate::input::key_action::typable_char(code, mods) == Some(c) =>
+                {
                     let mut chars: Vec<char> = self.url_input.chars().collect();
                     if self.url_cursor <= chars.len() {
                         chars.insert(self.url_cursor, c);
@@ -1219,7 +1221,7 @@ impl Modal for PluginManager {
                     }
                 }
             }
-            KeyCode::Char(c) if !mods.contains(KeyModifiers::CONTROL) => {
+            KeyCode::Char(c) if crate::input::key_action::typable_char(code, mods) == Some(c) => {
                 self.search_query.push(c);
                 self.selected = 0;
             }
@@ -1815,7 +1817,10 @@ mod tests {
         // ellipsis, never exceeding the budget and never splitting a CJK char.
         let wide = "描".repeat(40); // 80 display columns
         let out = truncate_plugin_desc(&wide);
-        assert!(out.ends_with('…'), "over-budget description must be marked truncated");
+        assert!(
+            out.ends_with('…'),
+            "over-budget description must be marked truncated"
+        );
         assert!(crate::width::display_width(&out) <= PLUGIN_DESC_DISPLAY_COLS);
         assert!(
             out.chars().all(|c| c == '描' || c == '…'),

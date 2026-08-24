@@ -227,7 +227,7 @@ impl Modal for ModelPicker {
                 self.draw(buf, state, ctx, renderer);
                 Ok(ModalAction::Continue)
             }
-            KeyCode::Char(c) if !_mods.contains(KeyModifiers::CONTROL) => {
+            KeyCode::Char(c) if crate::input::key_action::typable_char(code, _mods) == Some(c) => {
                 self.query.push(c);
                 self.update_filter(&ctx.config);
                 self.draw(buf, state, ctx, renderer);

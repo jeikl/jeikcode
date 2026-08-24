@@ -2071,6 +2071,11 @@ mod tests {
             w.handle_key_pure(KeyCode::Char('c'), KeyModifiers::CONTROL),
             PureOutcome::Noop
         );
+        assert_eq!(
+            w.handle_key_pure(KeyCode::Char('\u{3}'), KeyModifiers::NONE),
+            PureOutcome::Noop,
+            "raw Ctrl+C must not copy the QR URL"
+        );
     }
 
     #[test]

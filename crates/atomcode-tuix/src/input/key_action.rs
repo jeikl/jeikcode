@@ -27,7 +27,67 @@ pub enum Action {
     NoOp,
 }
 
+/// Ctrl+`letter` across the encodings terminals actually emit:
+///
+/// - Kitty / crossterm keyboard protocol: `Char('d')` + CONTROL (any case)
+/// - Unix raw mode without that protocol (common on Linux): the ASCII
+///   control byte with **no** CONTROL modifier (`Ctrl+A` = `\u{1}`,
+///   `Ctrl+D` = `\u{4}`, … `Ctrl+Z` = `\u{1a}`)
+///
+/// Modal handlers that special-case Ctrl+letter **must** use this instead of
+/// `mods.contains(CONTROL) && c == 'd'`. The second encoding is why
+/// `/resume` Ctrl+D×2 and `/model` Ctrl+D×2 were silent on Linux.
+pub fn is_ctrl_letter(code: KeyCode, mods: KeyModifiers, letter: char) -> bool {
+    let letter = letter.to_ascii_lowercase();
+    if !letter.is_ascii_lowercase() {
+        return false;
+    }
+    match code {
+        KeyCode::Char(c) => {
+            (mods.contains(KeyModifiers::CONTROL) && c.eq_ignore_ascii_case(&letter))
+                || ascii_ctrl_letter(c) == Some(letter)
+        }
+        _ => false,
+    }
+}
+
+/// A character that belongs in a search/filter/password field. ASCII control
+/// bytes — including Unix-raw Ctrl+letter encodings — are never typable, so
+/// they cannot steal focus into a search box or poison the query.
+pub fn typable_char(code: KeyCode, mods: KeyModifiers) -> Option<char> {
+    match code {
+        KeyCode::Char(c) if !c.is_control() && !mods.contains(KeyModifiers::CONTROL) => Some(c),
+        _ => None,
+    }
+}
+
+fn ascii_ctrl_letter(c: char) -> Option<char> {
+    let b = c as u32;
+    if (1..=26).contains(&b) {
+        Some(char::from((b as u8 - 1) + b'a'))
+    } else {
+        None
+    }
+}
+
+/// Unix raw mode often delivers Ctrl+X as ASCII 0x01–0x1A with no CONTROL
+/// flag. Fold that encoding into the CONTROL+letter shape the match arms
+/// below already understand, so the composer (Ctrl+A/E/U/W/K/R/O/C/H/J)
+/// keeps working on Linux.
+fn decode_ascii_ctrl(code: KeyCode, mods: KeyModifiers) -> (KeyCode, KeyModifiers) {
+    if mods.contains(KeyModifiers::CONTROL) {
+        return (code, mods);
+    }
+    if let KeyCode::Char(c) = code {
+        if let Some(letter) = ascii_ctrl_letter(c) {
+            return (KeyCode::Char(letter), mods | KeyModifiers::CONTROL);
+        }
+    }
+    (code, mods)
+}
+
 pub fn classify(code: KeyCode, modifiers: KeyModifiers) -> Action {
+    let (code, modifiers) = decode_ascii_ctrl(code, modifiers);
     let ctrl = modifiers.contains(KeyModifiers::CONTROL);
     let shift = modifiers.contains(KeyModifiers::SHIFT);
     let alt = modifiers.contains(KeyModifiers::ALT);
@@ -196,7 +256,10 @@ mod tests {
             Action::HistorySearch
         );
         // Bare r still inserts a character.
-        assert_eq!(k(KeyCode::Char('r'), KeyModifiers::NONE), Action::Insert('r'));
+        assert_eq!(
+            k(KeyCode::Char('r'), KeyModifiers::NONE),
+            Action::Insert('r')
+        );
     }
 
     #[test]
@@ -260,5 +323,127 @@ mod tests {
     #[test]
     fn unknown_key_is_noop() {
         assert_eq!(k(KeyCode::F(5), KeyModifiers::NONE), Action::NoOp);
+    }
+
+    #[test]
+    fn unix_raw_ctrl_letters_decode_without_control_modifier() {
+        // Linux / raw-mode: Ctrl+A = \u{1}, Ctrl+C = \u{3}, Ctrl+D = \u{4},
+        // Ctrl+E = \u{5}. These must NOT fall through to Insert.
+        assert_eq!(
+            k(KeyCode::Char('\u{1}'), KeyModifiers::NONE),
+            Action::LineStart
+        );
+        assert_eq!(
+            k(KeyCode::Char('\u{3}'), KeyModifiers::NONE),
+            Action::Cancel
+        );
+        assert_eq!(
+            k(KeyCode::Char('\u{5}'), KeyModifiers::NONE),
+            Action::LineEnd
+        );
+        assert_eq!(
+            k(KeyCode::Char('\u{b}'), KeyModifiers::NONE),
+            Action::DeleteToEnd
+        );
+        assert_eq!(
+            k(KeyCode::Char('\u{15}'), KeyModifiers::NONE),
+            Action::ClearLine
+        );
+        assert_eq!(
+            k(KeyCode::Char('\u{17}'), KeyModifiers::NONE),
+            Action::DeleteWordBackward
+        );
+        assert_eq!(
+            k(KeyCode::Char('\u{12}'), KeyModifiers::NONE),
+            Action::HistorySearch
+        );
+        assert_eq!(
+            k(KeyCode::Char('\u{f}'), KeyModifiers::NONE),
+            Action::ToggleToolOutput
+        );
+        assert_eq!(
+            k(KeyCode::Char('\u{8}'), KeyModifiers::NONE),
+            Action::Backspace
+        );
+        assert_eq!(
+            k(KeyCode::Char('\u{a}'), KeyModifiers::NONE),
+            Action::InsertNewline
+        );
+        assert_eq!(
+            k(KeyCode::Char('\u{4}'), KeyModifiers::NONE),
+            Action::NoOp,
+            "Ctrl+D is a modal delete chord, not a composer insert"
+        );
+    }
+
+    #[test]
+    fn is_ctrl_letter_accepts_protocol_and_raw_encodings() {
+        assert!(is_ctrl_letter(
+            KeyCode::Char('d'),
+            KeyModifiers::CONTROL,
+            'd'
+        ));
+        assert!(is_ctrl_letter(
+            KeyCode::Char('D'),
+            KeyModifiers::CONTROL,
+            'd'
+        ));
+        assert!(is_ctrl_letter(
+            KeyCode::Char('\u{4}'),
+            KeyModifiers::NONE,
+            'd'
+        ));
+        assert!(is_ctrl_letter(
+            KeyCode::Char('\u{4}'),
+            KeyModifiers::CONTROL,
+            'd'
+        ));
+        assert!(!is_ctrl_letter(KeyCode::Char('d'), KeyModifiers::NONE, 'd'));
+        assert!(!is_ctrl_letter(
+            KeyCode::Char('\u{1}'),
+            KeyModifiers::NONE,
+            'd'
+        ));
+        assert!(is_ctrl_letter(
+            KeyCode::Char('\u{1}'),
+            KeyModifiers::NONE,
+            'a'
+        ));
+        assert!(is_ctrl_letter(
+            KeyCode::Char('\u{5}'),
+            KeyModifiers::NONE,
+            'e'
+        ));
+        assert!(is_ctrl_letter(
+            KeyCode::Char('\u{3}'),
+            KeyModifiers::NONE,
+            'c'
+        ));
+        assert!(is_ctrl_letter(
+            KeyCode::Char('\u{16}'),
+            KeyModifiers::NONE,
+            'v'
+        ));
+    }
+
+    #[test]
+    fn typable_char_rejects_control_bytes() {
+        assert_eq!(
+            typable_char(KeyCode::Char('d'), KeyModifiers::NONE),
+            Some('d')
+        );
+        assert_eq!(
+            typable_char(KeyCode::Char('d'), KeyModifiers::CONTROL),
+            None
+        );
+        assert_eq!(
+            typable_char(KeyCode::Char('\u{4}'), KeyModifiers::NONE),
+            None,
+            "raw Ctrl+D must not enter a search/filter box"
+        );
+        assert_eq!(
+            typable_char(KeyCode::Char('\u{1}'), KeyModifiers::NONE),
+            None
+        );
     }
 }

@@ -374,7 +374,7 @@ impl FileViewer {
                 picker.error = None;
                 picker.refresh();
             }
-            KeyCode::Char(c) if !mods.contains(KeyModifiers::CONTROL) => {
+            KeyCode::Char(c) if crate::input::key_action::typable_char(code, mods) == Some(c) => {
                 picker.query.push(c);
                 picker.selected = 0;
                 picker.error = None;

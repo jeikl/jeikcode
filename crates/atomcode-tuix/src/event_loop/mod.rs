@@ -46,7 +46,7 @@ use base64::Engine;
 use crate::commands::{parse_bash_command, parse_slash_line, CommandRegistry};
 use crate::custom_commands::ArgsRequirement;
 use crate::input::history::History;
-use crate::input::key_action::{classify, Action};
+use crate::input::key_action::{classify, is_ctrl_letter, Action};
 use crate::input::InputEvent;
 use crate::render::{Renderer, UiLine};
 use crate::state::{UiPhase, UiState};
@@ -282,17 +282,19 @@ fn is_paste_image_chord(
     code: crossterm::event::KeyCode,
     modifiers: crossterm::event::KeyModifiers,
 ) -> bool {
+    if modifiers.contains(crossterm::event::KeyModifiers::SHIFT) {
+        return false;
+    }
+    // Unix raw mode delivers Ctrl+V as `\u{16}` with no CONTROL flag.
+    if is_ctrl_letter(code, modifiers, 'v') {
+        return true;
+    }
     let is_v = matches!(
         code,
         crossterm::event::KeyCode::Char('v') | crossterm::event::KeyCode::Char('V')
     );
-    if !is_v || modifiers.contains(crossterm::event::KeyModifiers::SHIFT) {
-        return false;
-    }
-    let ctrl = modifiers.contains(crossterm::event::KeyModifiers::CONTROL);
-    let alt = modifiers.contains(crossterm::event::KeyModifiers::ALT);
-    // Ctrl+V | Alt+V | Ctrl+Alt+V
-    ctrl || alt
+    // Alt+V | Ctrl+Alt+V (the latter is also covered by is_ctrl_letter).
+    is_v && modifiers.contains(crossterm::event::KeyModifiers::ALT)
 }
 
 /// Returns the image data and a fingerprint hash.
@@ -802,11 +804,7 @@ fn try_attach_at_image_from_path(
     token: &str,
     working_dir: &std::path::Path,
 ) -> Option<(ImageContent, u64)> {
-    let path = resolve_at_image_path(
-        token,
-        working_dir,
-        crate::platform::home_dir().as_deref(),
-    )?;
+    let path = resolve_at_image_path(token, working_dir, crate::platform::home_dir().as_deref())?;
     try_attach_image_from_path(path.to_str()?)
 }
 
@@ -974,10 +972,7 @@ mod image_path_tests {
             KeyModifiers::CONTROL | KeyModifiers::ALT
         ));
         // Uppercase V without Shift modifier still counts (some hosts).
-        assert!(is_paste_image_chord(
-            KeyCode::Char('V'),
-            KeyModifiers::ALT
-        ));
+        assert!(is_paste_image_chord(KeyCode::Char('V'), KeyModifiers::ALT));
         // Ctrl+Shift+V stays a terminal "paste as plain text" passthrough.
         assert!(!is_paste_image_chord(
             v,
@@ -994,6 +989,11 @@ mod image_path_tests {
             KeyModifiers::CONTROL
         ));
         assert!(!is_paste_image_chord(KeyCode::Char('b'), KeyModifiers::ALT));
+        // Linux raw mode: Ctrl+V arrives as ASCII SYN with no CONTROL flag.
+        assert!(is_paste_image_chord(
+            KeyCode::Char('\u{16}'),
+            KeyModifiers::NONE
+        ));
     }
 
     /// Materialise a small file at `<dir>/<name>` whose contents are
@@ -9623,7 +9623,11 @@ mod external_config_tests {
         let mut current = config("grok-4.6", false);
         current.providers.get_mut("main").unwrap().reasoning_effort = Some("high".into());
         let mut persisted = config("grok-4.6", false);
-        persisted.providers.get_mut("main").unwrap().reasoning_effort = Some("medium".into());
+        persisted
+            .providers
+            .get_mut("main")
+            .unwrap()
+            .reasoning_effort = Some("medium".into());
         persisted.providers.get_mut("main").unwrap().context_window = 32_000;
 
         let merged = merge_persisted_config_preserving_active(&current, persisted, false);
@@ -9700,7 +9704,11 @@ mod external_config_tests {
         let mut current = config("oauth-model", true);
         current.providers.get_mut("main").unwrap().reasoning_effort = Some("high".into());
         let mut persisted = config("oauth-model", false);
-        persisted.providers.get_mut("main").unwrap().reasoning_effort = Some("medium".into());
+        persisted
+            .providers
+            .get_mut("main")
+            .unwrap()
+            .reasoning_effort = Some("medium".into());
 
         let merged = merge_persisted_config_preserving_active(&current, persisted, false);
 
@@ -11146,9 +11154,7 @@ fn handle_input(
                 // prompt captures mid-turn (Streaming) and legitimately needs
                 // Ctrl+C to cancel the turn, not quit; the Idle gate excludes it.
                 // Mirrors the non-capturing Ctrl+C guard just below.
-                if matches!(app.state.phase, UiPhase::Idle)
-                    && (code == KeyCode::Char('c') || code == KeyCode::Char('C'))
-                    && modifiers.contains(crossterm::event::KeyModifiers::CONTROL)
+                if matches!(app.state.phase, UiPhase::Idle) && is_ctrl_letter(code, modifiers, 'c')
                 {
                     app.active_modal = None;
                     arm_shutdown_watchdog(ctx);
@@ -11194,8 +11200,7 @@ fn handle_input(
             // forwarding it. Dismiss the modal and send Shutdown so
             // the run-loop tears down cleanly.
             if matches!(app.state.phase, UiPhase::Idle)
-                && (code == KeyCode::Char('c') || code == KeyCode::Char('C'))
-                && modifiers.contains(crossterm::event::KeyModifiers::CONTROL)
+                && is_ctrl_letter(code, modifiers, 'c')
                 && app.active_modal.is_some()
             {
                 app.active_modal = None;
@@ -11281,8 +11286,7 @@ fn handle_input(
                 // No image — fall back to clipboard text ONLY for plain Ctrl+V
                 // (not Alt+V / Ctrl+Alt+V), so the Windows-safe image chords
                 // never inject a stray text paste or a literal `v`.
-                let plain_ctrl_v = modifiers
-                    .contains(crossterm::event::KeyModifiers::CONTROL)
+                let plain_ctrl_v = is_ctrl_letter(code, modifiers, 'v')
                     && !modifiers.contains(crossterm::event::KeyModifiers::ALT);
                 if plain_ctrl_v {
                     // Host forwarded Ctrl+V as a real key event rather than
@@ -11757,11 +11761,10 @@ fn handle_idle_key(
     // The runtime owns both transitions so pending requests, snapshots, and the
     // next-submit resume stay synchronized.
     if app.state.goal_condition.is_some() {
-        let is_ctrl_c = (code == KeyCode::Char('c') || code == KeyCode::Char('C'))
-            && modifiers.contains(crossterm::event::KeyModifiers::CONTROL);
+        let is_ctrl_c = is_ctrl_letter(code, modifiers, 'c');
         let is_bare_esc = code == KeyCode::Esc && app.buf.text.is_empty();
-        let should_pause = is_bare_esc
-            && app.state.goal_phase == atomcode_coding::GoalPhase::Pursuing;
+        let should_pause =
+            is_bare_esc && app.state.goal_phase == atomcode_coding::GoalPhase::Pursuing;
         if is_ctrl_c || should_pause {
             let has_active_turn = ctx.runtime.has_active_turn();
             let sent = if is_ctrl_c {
@@ -12223,7 +12226,7 @@ fn handle_idle_key(
     // left Alt+V falling through to insert a literal `v`.
 
     // Ctrl+T cycles reasoning_effort
-    if code == KeyCode::Char('t') && modifiers.contains(crossterm::event::KeyModifiers::CONTROL) {
+    if is_ctrl_letter(code, modifiers, 't') {
         if !reasoning_effort_applicable_on_provider(ctx) {
             renderer.render(UiLine::CommandOutput(
                 crate::i18n::t(crate::i18n::Msg::ReasoningEffortNoEffect).into_owned(),
@@ -14144,9 +14147,7 @@ fn handle_streaming_key(
     modifiers: crossterm::event::KeyModifiers,
 ) -> Result<()> {
     // Ctrl+O toggles verbose mode (real-time tool output + reasoning visibility)
-    if (code == KeyCode::Char('o') || code == KeyCode::Char('O'))
-        && modifiers.contains(crossterm::event::KeyModifiers::CONTROL)
-    {
+    if is_ctrl_letter(code, modifiers, 'o') {
         app.state.toggle_tool_output();
         // Show feedback to the user about the current state
         // Use muted style matching ToolResult's summary_style:
@@ -14181,9 +14182,7 @@ fn handle_streaming_key(
     // users have a reliable escape hatch even mid-edit. Also drops
     // the type-ahead queue: a user yanking the escape cord doesn't
     // want queued messages to auto-fire after the current one dies.
-    if (code == KeyCode::Char('c') || code == KeyCode::Char('C'))
-        && modifiers.contains(crossterm::event::KeyModifiers::CONTROL)
-    {
+    if is_ctrl_letter(code, modifiers, 'c') {
         let send_ok = cancel_active_turn(ctx);
         if send_ok {
             app.interrupt_drain_pending = true;
@@ -15599,7 +15598,7 @@ fn handle_approval_key(
 ) -> Result<()> {
     // Ctrl+C: first press denies the tool and arms exit confirmation;
     // second press within the window actually exits.
-    if code == KeyCode::Char('c') && modifiers.contains(crossterm::event::KeyModifiers::CONTROL) {
+    if is_ctrl_letter(code, modifiers, 'c') {
         let now = std::time::Instant::now();
         let armed = app
             .exit_pending
@@ -15761,7 +15760,6 @@ fn handle_round_cap_key(
     code: KeyCode,
     modifiers: crossterm::event::KeyModifiers,
 ) -> Result<()> {
-    use crossterm::event::KeyModifiers;
     let Some(panel) = app.state.round_cap_panel.as_ref() else {
         return Ok(());
     };
@@ -15774,7 +15772,7 @@ fn handle_round_cap_key(
     // the pending Request to Null, so `run_turn` observes `cancel.is_cancelled()`
     // and ends the turn as Cancelled (not MaxRounds) with no hang. Checked BEFORE
     // the Char('k')/('j') arms so Ctrl+C never toggles the cursor.
-    if code == KeyCode::Char('c') && modifiers.contains(KeyModifiers::CONTROL) {
+    if is_ctrl_letter(code, modifiers, 'c') {
         app.state.on_round_cap_resolved();
         cancel_active_turn(ctx);
         redraw_idle_plain(&app.buf, &app.state, ctx, renderer);
@@ -15838,8 +15836,7 @@ fn handle_user_input_key(
     // not left hanging) and then cancel the running turn — exactly like Ctrl+C
     // during Streaming stops generation.  Checked BEFORE the Char(c) arm so
     // Ctrl+C does not type 'c' into a text-mode buffer.
-    use crossterm::event::KeyModifiers;
-    if code == KeyCode::Char('c') && modifiers.contains(KeyModifiers::CONTROL) {
+    if is_ctrl_letter(code, modifiers, 'c') {
         use atomcode_capabilities::tools::request_user_input::UserInputResponse;
         app.state.on_user_input_resolved();
         deliver_user_input(ctx, id, UserInputResponse::declined());
@@ -15875,7 +15872,9 @@ fn handle_user_input_key(
 
     // Non-resolving keys: mutate the panel in place, then repaint.
     match (mode, code) {
-        (UserInputMode::Text, KeyCode::Char(c)) => {
+        (UserInputMode::Text, KeyCode::Char(c))
+            if crate::input::key_action::typable_char(code, modifiers) == Some(c) =>
+        {
             if let Some(p) = app.state.user_input_panel.as_mut() {
                 p.text.push(c);
             }
@@ -15988,7 +15987,9 @@ fn handle_user_input_key(
         }
         // Any other printable char types into the "Other" row (only when the
         // cursor is on it); ignored on concrete option rows and the Submit row.
-        (UserInputMode::Single | UserInputMode::Multiple, KeyCode::Char(c)) => {
+        (UserInputMode::Single | UserInputMode::Multiple, KeyCode::Char(c))
+            if crate::input::key_action::typable_char(code, modifiers) == Some(c) =>
+        {
             if let Some(p) = app.state.user_input_panel.as_mut() {
                 if p.is_other_row() {
                     p.push_custom(c);
@@ -16016,7 +16017,6 @@ fn handle_user_input_batch_key(
     modifiers: crossterm::event::KeyModifiers,
 ) -> Result<()> {
     use atomcode_capabilities::tools::request_user_input::{UserInputMode, UserInputResponse};
-    use crossterm::event::KeyModifiers;
     let Some(batch) = app.state.user_input_batch.as_ref() else {
         return Ok(());
     };
@@ -16024,7 +16024,7 @@ fn handle_user_input_batch_key(
     let n = batch.questions.len();
 
     // Ctrl+C: decline the whole batch, then cancel the running turn.
-    if code == KeyCode::Char('c') && modifiers.contains(KeyModifiers::CONTROL) {
+    if is_ctrl_letter(code, modifiers, 'c') {
         app.state.on_user_input_resolved();
         deliver_user_input_batch(ctx, id, vec![UserInputResponse::declined(); n]);
         cancel_active_turn(ctx);
@@ -16084,7 +16084,9 @@ fn handle_user_input_batch_key(
     }
 
     match (mode, code) {
-        (UserInputMode::Text, KeyCode::Char(c)) => {
+        (UserInputMode::Text, KeyCode::Char(c))
+            if crate::input::key_action::typable_char(code, modifiers) == Some(c) =>
+        {
             app.state.user_input_batch.as_mut().unwrap().questions[cur]
                 .text
                 .push(c);
@@ -16153,7 +16155,9 @@ fn handle_user_input_batch_key(
                 p.toggle();
             }
         }
-        (UserInputMode::Single | UserInputMode::Multiple, KeyCode::Char(c)) => {
+        (UserInputMode::Single | UserInputMode::Multiple, KeyCode::Char(c))
+            if crate::input::key_action::typable_char(code, modifiers) == Some(c) =>
+        {
             let p = &mut app.state.user_input_batch.as_mut().unwrap().questions[cur];
             if p.is_other_row() {
                 p.push_custom(c);
@@ -20232,15 +20236,14 @@ fn handle_agent_event(
             // the incremental `{action}` / `{actions:[…]}` shape; a resumed session may also
             // carry legacy `todo` calls. Distinguish by ARG SHAPE, not tool name.
             let is_todo_call = name == "todowrite" || name == "todo";
-            let todo_plan = if is_todo_call
-                && atomcode_capabilities::tools::todo::is_todo_plan(&arguments)
-            {
-                todo_progress_from_args(&arguments)
-            } else {
-                None
-            };
-            let is_todo_action = is_todo_call
-                && atomcode_capabilities::tools::todo::is_todo_action_args(&arguments);
+            let todo_plan =
+                if is_todo_call && atomcode_capabilities::tools::todo::is_todo_plan(&arguments) {
+                    todo_progress_from_args(&arguments)
+                } else {
+                    None
+                };
+            let is_todo_action =
+                is_todo_call && atomcode_capabilities::tools::todo::is_todo_action_args(&arguments);
 
             // Incremental action (add / update id=N status): fold it into the live footer panel
             // + title cache HERE — ABOVE the batch / approval early-returns below — so batched
@@ -21465,7 +21468,8 @@ fn handle_agent_event(
                 // goal) so the badge reads `round 1 · <fresh time>` — NOT on mid-Pursuing
                 // updates that also carry round==0 (e.g. AdjustGoalRounds), which would
                 // otherwise rewind a fresh goal's clock mid-first-turn.
-                if goal_clock_should_reset(entering_from_pursuing, state.goal_started_at.is_none()) {
+                if goal_clock_should_reset(entering_from_pursuing, state.goal_started_at.is_none())
+                {
                     state.goal_started_at = Some(std::time::Instant::now());
                 }
             } else {
@@ -22180,8 +22184,7 @@ fn handle_oauth_poll_event(
                 )));
                 renderer.flush();
             }
-            let dir_display =
-                crate::platform::collapse_home(&ctx.working_dir.to_string_lossy());
+            let dir_display = crate::platform::collapse_home(&ctx.working_dir.to_string_lossy());
             renderer.refresh_welcome_banner(&ctx.model_name, &dir_display);
         }
         OauthEvent::Failed(reason) => {
@@ -23273,9 +23276,10 @@ fn format_todo_action_detail(v: &serde_json::Value) -> String {
         .get("content")
         .and_then(|c| c.as_str())
         .map(|c| crate::width::truncate_with_ellipsis(c, 100));
-    let id = v
-        .get("id")
-        .and_then(|x| x.as_u64().or_else(|| x.as_str().and_then(|s| s.parse().ok())));
+    let id = v.get("id").and_then(|x| {
+        x.as_u64()
+            .or_else(|| x.as_str().and_then(|s| s.parse().ok()))
+    });
     let status = v.get("status").and_then(|s| s.as_str()).unwrap_or("");
     match action {
         "add" => content.unwrap_or_default(),
@@ -23295,9 +23299,7 @@ fn format_todo_action_detail(v: &serde_json::Value) -> String {
             (None, s) if !s.is_empty() => s.to_string(),
             _ => String::new(),
         },
-        "delete" | "remove" => id
-            .map(|i| format!("#{i} removed"))
-            .unwrap_or_default(),
+        "delete" | "remove" => id.map(|i| format!("#{i} removed")).unwrap_or_default(),
         "clear" => "clear all".to_string(),
         "list" => "list all".to_string(),
         _ => String::new(),
@@ -24209,7 +24211,8 @@ fn sync_reasoning_effort_from_provider(ctx: &mut LoopCtx) {
     let applicable = reasoning_effort_applicable_on_provider(ctx);
     ctx.reasoning_effort = if applicable {
         let sel = ctx.config.effective_model_selection().unwrap_or_default();
-        let configured = ctx.config
+        let configured = ctx
+            .config
             .provider_config_for_selection(&sel)
             .and_then(|p| p.reasoning_effort);
         if let Some(effort) = configured {
@@ -24263,8 +24266,7 @@ pub(crate) fn reasoning_effort_applicable_on_provider(ctx: &LoopCtx) -> bool {
         &ctx.model_name,
         p.as_ref().and_then(|p| p.reasoning_model),
         p.as_ref().and_then(|p| p.reasoning_effort.as_deref()),
-        p.as_ref()
-            .and_then(|p| p.reasoning_levels.as_deref()),
+        p.as_ref().and_then(|p| p.reasoning_levels.as_deref()),
     )
 }
 
@@ -24521,7 +24523,9 @@ mod todo_block_tests {
         };
         let msgs = vec![
             mk(r#"{"actions":[{"action":"add","content":"a"},{"action":"add","content":"b"}]}"#),
-            mk(r#"{"actions":[{"action":"update","id":1,"status":"completed"},{"action":"update","id":2,"status":"in_progress"}]}"#),
+            mk(
+                r#"{"actions":[{"action":"update","id":1,"status":"completed"},{"action":"update","id":2,"status":"in_progress"}]}"#,
+            ),
         ];
         let p = todo_progress_from_messages(&msgs).expect("actions fold");
         assert_eq!((p.completed, p.total), (1, 2));

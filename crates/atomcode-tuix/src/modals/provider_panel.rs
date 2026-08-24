@@ -482,9 +482,8 @@ impl ModelForm {
             }
             Ok(_) => {
                 self.candidates.clear();
-                self.fetch_status = Some(
-                    crate::i18n::t(crate::i18n::Msg::ProviderPanelUpstreamEmpty).into_owned(),
-                );
+                self.fetch_status =
+                    Some(crate::i18n::t(crate::i18n::Msg::ProviderPanelUpstreamEmpty).into_owned());
             }
             Err(e) => {
                 self.candidates.clear();
@@ -500,17 +499,15 @@ impl ModelForm {
     fn start_fetch(&mut self, config: &Config, wake_tx: WakeSender<()>) {
         let Some(spec) = upstream_spec_for_account(config, self.account_id(), &self.api_key) else {
             self.candidates.clear();
-            self.fetch_status = Some(
-                crate::i18n::t(crate::i18n::Msg::ProviderPanelUpstreamNoUrl).into_owned(),
-            );
+            self.fetch_status =
+                Some(crate::i18n::t(crate::i18n::Msg::ProviderPanelUpstreamNoUrl).into_owned());
             if let Ok(mut g) = self.fetch_rx.lock() {
                 *g = None;
             }
             return;
         };
-        self.fetch_status = Some(
-            crate::i18n::t(crate::i18n::Msg::ProviderPanelUpstreamLoading).into_owned(),
-        );
+        self.fetch_status =
+            Some(crate::i18n::t(crate::i18n::Msg::ProviderPanelUpstreamLoading).into_owned());
         self.candidates.clear();
         self.candidate_idx = 0;
         let (tx, rx) = mpsc::channel();
@@ -681,10 +678,7 @@ fn upstream_spec_for_account(
 }
 
 fn is_add_shortcut(code: &KeyCode, mods: KeyModifiers) -> bool {
-    matches!(
-        code,
-        KeyCode::Char('a' | 'A') if mods.contains(KeyModifiers::CONTROL)
-    ) || matches!(code, KeyCode::Char('\u{1}'))
+    crate::input::key_action::is_ctrl_letter(*code, mods, 'a')
 }
 
 impl ProviderPanel {
@@ -1266,12 +1260,17 @@ impl ProviderPanel {
                         provider.supports_vision = Some(supports_vision);
                         provider.reasoning_model = Some(grok || reasoning_model);
                         if grok {
-                            if provider.reasoning_levels.as_ref().is_none_or(|l| l.is_empty()) {
+                            if provider
+                                .reasoning_levels
+                                .as_ref()
+                                .is_none_or(|l| l.is_empty())
+                            {
                                 provider.reasoning_levels =
                                     Some(default_reasoning_levels_for(&model_name));
                             }
                             if provider.reasoning_effort.is_none() {
-                                provider.reasoning_effort = default_reasoning_effort_for(&model_name);
+                                provider.reasoning_effort =
+                                    default_reasoning_effort_for(&model_name);
                             }
                             if provider.reasoning_history.is_none() {
                                 provider.reasoning_history = Some("include".into());
@@ -1620,7 +1619,6 @@ impl Modal for ProviderPanel {
 
         // ── List mode (plugin-style: type filters, Ctrl+key acts) ──
         let len = self.current_len(&ctx.config);
-        let ctrl = mods.contains(KeyModifiers::CONTROL);
         match code {
             // Esc closes the panel outright. Clearing a filter is done with
             // ←→ / Tab (which also switch tabs and reset both filters).
@@ -1652,7 +1650,7 @@ impl Modal for ProviderPanel {
                 self.begin_add_for_current_tab(&ctx.config, ctx.wake_tx.clone());
             }
             // Ctrl+E: edit the selected row.
-            KeyCode::Char('e') if ctrl => {
+            code if crate::input::key_action::is_ctrl_letter(code, mods, 'e') => {
                 self.pending_delete = None;
                 if let Some(id) = self
                     .selected_id(&ctx.config)
@@ -1672,7 +1670,9 @@ impl Modal for ProviderPanel {
             }
             // Ctrl+D twice: the first press arms the selected logical row; the
             // second deletes it without leaving the list for a confirmation UI.
-            KeyCode::Char('d') if ctrl => {
+            // Match Unix-raw `\u{4}` as well as CONTROL+'d' — otherwise Linux
+            // arms nothing and the byte falls through into the search filter.
+            code if crate::input::key_action::is_ctrl_letter(code, mods, 'd') => {
                 if let Some(id) = self
                     .selected_id(&ctx.config)
                     .filter(|i| i != ADD_PROVIDER_ROW && i != ADD_MODEL_ROW)
@@ -1696,8 +1696,9 @@ impl Modal for ProviderPanel {
                     self.pending_delete = None;
                 }
             }
-            // Type to filter.
-            KeyCode::Char(c) if !ctrl => {
+            // Type to filter. Control bytes (raw Ctrl+letter) must not enter
+            // the query — that used to focus-steal and disarm Ctrl+D×2.
+            KeyCode::Char(c) if crate::input::key_action::typable_char(code, mods) == Some(c) => {
                 self.query.push(c);
                 self.selected = 0;
                 self.pending_delete = None;
@@ -2148,6 +2149,31 @@ mod tests {
     }
 
     #[test]
+    fn delete_and_edit_shortcuts_accept_unix_raw_ctrl_bytes() {
+        use crate::input::key_action::is_ctrl_letter;
+        assert!(is_ctrl_letter(
+            KeyCode::Char('\u{4}'),
+            KeyModifiers::NONE,
+            'd'
+        ));
+        assert!(is_ctrl_letter(
+            KeyCode::Char('D'),
+            KeyModifiers::CONTROL,
+            'd'
+        ));
+        assert!(is_ctrl_letter(
+            KeyCode::Char('\u{5}'),
+            KeyModifiers::NONE,
+            'e'
+        ));
+        assert!(!is_ctrl_letter(
+            KeyCode::Char('\u{4}'),
+            KeyModifiers::NONE,
+            'e'
+        ));
+    }
+
+    #[test]
     fn both_provider_tabs_expose_a_selectable_add_row() {
         let cfg: Config = serde_json::from_value(serde_json::json!({
             "provider_accounts": { "acc": { "provider": "deepseek" } },
@@ -2229,11 +2255,7 @@ mod tests {
         assert!(form.apply_fetch_result());
         assert_eq!(form.candidates, vec!["grok-4.6", "grok-4.5"]);
         assert_eq!(form.focus, ModelField::Model);
-        assert!(form
-            .fetch_status
-            .as_deref()
-            .unwrap()
-            .contains("2"));
+        assert!(form.fetch_status.as_deref().unwrap().contains("2"));
     }
 
     #[test]
@@ -2260,11 +2282,7 @@ mod tests {
         tx.send(Err("HTTP 401".into())).unwrap();
         assert!(form.apply_fetch_result());
         assert!(form.candidates.is_empty());
-        assert!(form
-            .fetch_status
-            .as_deref()
-            .unwrap()
-            .contains("401"));
+        assert!(form.fetch_status.as_deref().unwrap().contains("401"));
     }
 
     #[test]
@@ -2312,11 +2330,7 @@ mod tests {
             make_default: false,
             focus: ModelField::Model,
             edit_id: None,
-            candidates: vec![
-                "grok-4.5".into(),
-                "grok-4.6".into(),
-                "gpt-4o".into(),
-            ],
+            candidates: vec!["grok-4.5".into(), "grok-4.6".into(), "gpt-4o".into()],
             candidate_idx: 0,
             fetch_status: None,
             fetch_rx: Arc::new(Mutex::new(None)),
@@ -2607,10 +2621,7 @@ mod tests {
             ids.first() == Some(&"AtomGit".to_string()),
             "configured first"
         );
-        assert!(
-            ids.contains(&"taotoken".to_string()),
-            "TaoToken is listed"
-        );
+        assert!(ids.contains(&"taotoken".to_string()), "TaoToken is listed");
         assert!(
             ids.contains(&"deepseek".to_string()),
             "unconfigured vendor listed"

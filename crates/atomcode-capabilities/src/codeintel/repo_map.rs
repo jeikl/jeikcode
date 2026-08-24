@@ -38,8 +38,10 @@ NOTE: top-level files are listed in full; subdirectories are recursed to the \
 deepest level but files inside them are only counted, not named — nothing is \
 elided. To explore deeper files, pick a concrete subdirectory from this tree \
 and call `code_explore` with that `path` (e.g. `crates/atomcode-coding`, \
-`backend`) — do NOT pass `.` / the workspace root; that is reserved for \
-`repo_map`. If hits miss a subdirectory shown here, re-explore that directory.";
+`src/auth`, `backend`) — `path` is a directory/module, NEVER a single file \
+(`.rs`/`.ts`/… that is `read_file`). do NOT pass `.` / the workspace root; \
+that is reserved for `repo_map`. If hits miss a subdirectory shown here, \
+re-explore that directory.";
 
 pub struct RepoMapTool {
     index: Arc<CodeIndex>,
@@ -78,10 +80,11 @@ impl Tool for RepoMapTool {
          layout in one round instead of wandering with list_directory. Always pair it with \
          list_directory in the same round (they are cheap and complementary).\n\
          \n\
-         HOW IT FITS THE FLOW — structure first, then hunt:\n\
+         HOW IT FITS THE FLOW — structure first, then dive:\n\
          1. Round 1: repo_map (full layout) + list_directory — never skip on an unfamiliar repo.\n\
-         2. Hunt with several parallel greps → panorama with several parallel code_explore calls → \
-         read_file only the hot spans. Alternate grep-batches and code-batches until covered.\n\
+         2. Dive with several parallel `code_explore` calls (one per DIRECTORY/module + question \
+         or symbol; never a file as `path`). `grep` only for exact literals. `read_file` only the \
+         hot spans Coverage/CATALOG already named.\n\
          3. Only if you need actual file names under a specific dir, use list_directory; only to \
          read a specific file's full body, use read_file.\n\
          \n\
@@ -90,12 +93,13 @@ impl Tool for RepoMapTool {
          layout and need types/functions. In a multi-project workspace, pass `path:` to map ONE repo \
          at a time (the default spans ALL repos as separate subtrees; `.` is allowed here). To see \
          files under deeper directories, call `code_explore` with a concrete subdirectory from this \
-         tree — never `path: '.'`. If hits miss a subdirectory shown here, re-explore that directory.\n\
+         tree (directory/module, never a `.rs`/`.ts` file) — never `path: '.'`. If hits miss a \
+         subdirectory shown here, re-explore that directory.\n\
          \n\
          CAUTION — a directory tree is NOT proof a mechanism is absent: it shows WHERE things live, \
          not WHAT exists. Empty-looking trees can hide code in sibling crates/layers (interface here, \
          impl elsewhere). Do not conclude 'project lacks X' from the tree alone — follow up with \
-         grep/code_explore."
+         `code_explore` on a concrete subdirectory."
     }
 
     fn parameters_schema(&self) -> serde_json::Value {

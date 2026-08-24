@@ -52,6 +52,8 @@ pub mod telemetry;
 pub mod vision;
 
 mod assemble;
+mod code_tools;
+mod code_tools_first;
 mod execution_policy;
 mod init_prompt;
 mod mcp_instructions;

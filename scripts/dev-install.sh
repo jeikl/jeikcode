@@ -46,7 +46,7 @@ fi
 mkdir -p "$PREFIX"
 
 if [ "$UNINSTALL" = "1" ]; then
-    rm -f "$PREFIX/atomcode" "$PREFIX/atomcode-self-dev"
+    rm -f "$PREFIX/atomcode" "$PREFIX/jeikcode" "$PREFIX/atomcode-self-dev"
     echo "==> removed dev wrapper from $PREFIX"
     exit 0
 fi
@@ -54,7 +54,7 @@ fi
 # --- build ---
 if [ "$SKIP_BUILD" = "0" ]; then
     echo "==> cargo build --release (首次较慢, 之后增量)"
-    (cd "$REPO_ROOT" && cargo build --release --bin atomcode)
+    (cd "$REPO_ROOT" && cargo build --release --bin atomcode --bin jeikcode)
     [ -f "$EXE_ABS" ] || { echo "Error: build output missing: $EXE_ABS"; exit 1; }
 else
     [ -f "$EXE_ABS" ] || { echo "Error: no existing build at $EXE_ABS (run without --skip-build first)"; exit 1; }
@@ -71,8 +71,11 @@ export ATOMCODE_NO_UPDATE=1
 exec "$EXE_ABS" "\$@"
 EOF
 chmod +x "$WRAPPER"
+cp -f "$WRAPPER" "$PREFIX/jeikcode"
+chmod +x "$PREFIX/jeikcode"
 
 echo "==> installed dev wrapper: $WRAPPER"
+echo "    alias: $PREFIX/jeikcode"
 echo "    -> $EXE_ABS"
 
 # --- PATH ---

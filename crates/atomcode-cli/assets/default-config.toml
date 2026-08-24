@@ -1,0 +1,81 @@
+# JeikCode default config (new-install template).
+# Model / provider / account tables are empty here — fill them via /provider
+# or keep your own [models] / [provider_accounts] on upgrade merge.
+
+auto_update = false
+auto_commit = false
+keep_interrupted_context = true
+offline_mode = "off"
+
+[lsp]
+enabled = false
+auto_detect = false
+diagnostics_settle_delay_ms = 150
+
+[subagent]
+enabled = true
+initial_turns = 4
+max_turns = 12
+max_concurrent = 3
+timeout_secs = 900
+max_rounds = 200
+
+[loop_config]
+max_rounds = 100
+
+[coding]
+max_rounds = 200
+first_token_timeout_secs = 60
+first_token_timeout_retries = 3
+
+[tools.todo]
+enabled = true
+eager = "auto"
+
+[tools.bash]
+default_timeout_secs = 900
+max_timeout_secs = 1800
+silent_kill_secs = 900
+
+[tools.tool_output]
+max_bytes = 65536
+no_fold_tools = [
+    "fetch_output",
+    "repo_map",
+    "code_explore",
+    "find_symbol",
+    "trace_chain",
+    "blast_radius",
+    "web_fetch",
+    "web_search",
+]
+
+[ui]
+theme = "auto"
+auto_copy_on_select = false
+auto_copy_code_blocks = false
+ai_session_naming = true
+terminal_status_glyph = true
+truncate_resumed_history = true
+
+[plugin]
+auto_install_default_skills = true
+auto_update_marketplaces = true
+
+[web_search]
+provider = "exa"
+
+[datalog]
+enabled = true
+dir = "~/.atomcode/datalog"
+
+[notifications]
+enabled = true
+min_duration_secs = 8
+terminal = true
+system = true
+bell = true
+background_only = true
+
+[network.proxy]
+mode = "follow_system"

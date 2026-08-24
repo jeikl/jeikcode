@@ -577,6 +577,29 @@ fn copy_across_devices(from: &Path, to: &Path) -> std::io::Result<()> {
 /// On Unix, `rename(2)` within a directory is atomic; on Windows, an
 /// exe currently being executed can be renamed (but not deleted), so
 /// the same sequence works.
+/// Keep `atomcode` and `jeikcode` as the same binary. After replacing one,
+/// copy it to the sibling name in the same directory (best-effort).
+fn sync_cli_alias(exe: &Path) {
+    let Some(stem) = exe.file_stem().and_then(|s| s.to_str()) else {
+        return;
+    };
+    let other = if stem.eq_ignore_ascii_case("atomcode") {
+        "jeikcode"
+    } else if stem.eq_ignore_ascii_case("jeikcode") {
+        "atomcode"
+    } else {
+        return;
+    };
+    let Some(dir) = exe.parent() else {
+        return;
+    };
+    let mut dest = dir.join(other);
+    if let Some(ext) = exe.extension() {
+        dest.set_extension(ext);
+    }
+    let _ = std::fs::copy(exe, &dest);
+}
+
 fn replace_binary(new_bin: &Path, exe: &Path) -> Result<()> {
     #[cfg(unix)]
     {
@@ -701,6 +724,7 @@ pub async fn run_upgrade(
 
     let _ = tx.send(UpgradeEvent::Replacing);
     replace_binary(&download, &exe)?;
+    sync_cli_alias(&exe);
 
     // Manual `/upgrade` just installed whatever the current manifest
     // advertises. Any staged upgrade sitting in `staged_dir()` is now
@@ -1042,6 +1066,7 @@ pub fn apply_pending_upgrade() -> Result<Option<AppliedUpgrade>> {
     let exe = current_exe_path()?;
     ensure_writable(&exe)?;
     replace_binary(&pending.staged_path, &exe)?;
+    sync_cli_alias(&exe);
 
     // Success — pointer is done, file moved into place by replace_binary.
     clear_pending_pointer();

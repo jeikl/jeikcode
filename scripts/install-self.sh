@@ -110,8 +110,11 @@ else
     mv "$DEST" "$TARGET"
 fi
 
+ALIAS="$PREFIX/jeikcode${ext}"
+cp -f "$TARGET" "$ALIAS" 2>/dev/null || sudo cp -f "$TARGET" "$ALIAS" 2>/dev/null || true
 echo ""
 echo "Installed: $TARGET"
+echo "Alias:     $ALIAS"
 "$TARGET" --version 2>/dev/null || true
 
 if [ "$os" = "windows" ]; then

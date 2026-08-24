@@ -307,7 +307,72 @@ struct Args {
     path: Option<String>,
 }
 
-const WORKSPACE_ROOT_PATH_ERR: &str = "code_explore does not accept workspace-root `path` (`.`, `./`, `~`, or the working directory). Call `repo_map` first for the layout, then pass a concrete subdirectory (e.g. 'src/tools', 'crates/atomcode-coding', 'backend').";
+fn workspace_root_path_err(workspace: &Path) -> String {
+    let mut names = Vec::new();
+    if let Ok(rd) = std::fs::read_dir(workspace) {
+        for e in rd.flatten() {
+            let Ok(ft) = e.file_type() else { continue };
+            if !ft.is_dir() {
+                continue;
+            }
+            let name = e.file_name().to_string_lossy().into_owned();
+            if name.starts_with('.')
+                || name == "target"
+                || name == "node_modules"
+                || name == "dist"
+            {
+                continue;
+            }
+            names.push(name);
+            if names.len() >= 5 {
+                break;
+            }
+        }
+    }
+    let examples = if names.is_empty() {
+        "'src/tools', 'crates/atomcode-coding', 'backend'".to_string()
+    } else {
+        names
+            .iter()
+            .map(|n| format!("'{n}'"))
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    format!(
+        "code_explore does not accept workspace-root `path` (`.`, `./`, `~`, or the working directory). \
+         Call `repo_map` first, then pass a concrete subdirectory (e.g. {examples})."
+    )
+}
+
+fn looks_like_single_file(p: &str) -> bool {
+    let t = p.trim().trim_end_matches(['/', '\\']);
+    let Some(ext) = Path::new(t).extension().and_then(|e| e.to_str()) else {
+        return false;
+    };
+    matches!(
+        ext.to_ascii_lowercase().as_str(),
+        "rs" | "py" | "ts" | "tsx" | "js" | "jsx" | "go" | "java" | "kt" | "cs"
+            | "c" | "cc" | "cpp" | "h" | "hpp" | "php" | "rb" | "swift" | "scala"
+            | "vue" | "svelte" | "md" | "toml" | "json" | "yaml" | "yml" | "xml"
+            | "sql" | "html" | "css" | "sh" | "txt" | "lock"
+    )
+}
+
+fn file_scope_err(file: &Path, workspace: &Path) -> String {
+    let rel = crate::pathnorm::to_display(file.strip_prefix(workspace).unwrap_or(file));
+    let parent = file
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .map(|p| crate::pathnorm::to_display(p.strip_prefix(workspace).unwrap_or(p)))
+        .filter(|s| !s.is_empty() && s != ".")
+        .unwrap_or_else(|| "the parent module directory".to_string());
+    format!(
+        "code_explore `path` must be a directory or module, not a single file (`{rel}`). \
+         A file path is `read_file` and misses the call graph. \
+         Retry: path=`{parent}`  query=<precise symbol or Chinese/English question> \
+         — put the symbol in `query`, never in `path`."
+    )
+}
 
 /// Tokens that mean "the whole workspace" — reserved for `repo_map`, not explore.
 fn is_workspace_root_token(p: &str) -> bool {
@@ -372,23 +437,22 @@ impl Tool for CodeExploreTool {
     }
 
     fn description(&self) -> &str {
-        "WHEN TO USE — after a grep (or several parallel greps) surfaces promising symbol names, or \
-         directly for 'how does X work' / 'trace flow X→Y' / 'find the bug in Z' / 'what calls F'. \
-         One call returns the top-ranked files with verbatim line-numbered source (safe to edit from) \
-         plus each symbol's callers/callees — the full call-graph panorama around a symbol.\n\
+        "PRIMARY code-intelligence tool. Search INSIDE a directory/module — never a file.\n\
          \n\
-         ALTERNATE PARALLEL BATCHES — never a one-by-one crawl (several calls per phase, then advance):\n\
-         1. Structure first: list_directory + repo_map (never skip on an unfamiliar repo; only repo_map may use path '.').\n\
-         2. Hunt: fire SEVERAL greps IN PARALLEL for candidate symbols.\n\
-         3. Panorama: feed those names to SEVERAL code_explore calls IN PARALLEL (one per symbol).\n\
-         4. Zoom: read_file only the specific hot spans (folded/large bodies) you now know matter.\n\
-         5. If the panorama is incomplete (Coverage shows omissions, or a sibling layer is likely), \
-         loop back to step 2 with new greps — alternate grep-batches and code-batches until covered.\n\
+         path (required): MUST be a directory or module after repo_map.\n\
+           GOOD: crates/atomcode-coding   src/auth   backend/service\n\
+           BAD:  src/auth.rs   crates/foo/src/lib.rs   foo.go   (a file → use read_file)\n\
+           BAD:  .   ./   ~   (workspace root → use repo_map)\n\
+         query (required): the search term, either\n\
+           - a precise symbol: CodeExploreTool, assemble_parts, AuthService\n\
+           - natural Chinese or English: 鉴权怎么做, how does session compaction work\n\
+           Put the symbol/question HERE, not in path. This field is `query`, never `description`.\n\
          \n\
-         CAUTION: this is a ranked & budgeted view (max_files cap, per-file symbol cap, folded spans, \
-         session dedup) — NOT the complete file set. A 0-hit or thin result is INCONCLUSIVE: retry with \
-         synonyms / English terms / a broader path, or grep more — never conclude a feature is absent \
-         from one call alone."
+         Inside that directory the index finds the symbol or the feature and returns the call graph \
+         plus verbatim source. Narrowing path to one file misses callers/callees and is identical to \
+         read_file — do not do that. Prefer this over grep+read. Fire several scoped DIRECTORY calls \
+         in parallel. A thin result is INCONCLUSIVE: retry synonyms / a broader directory; CATALOG \
+         files are related, not absence. Reserve grep for exact literals."
     }
 
     fn parameters_schema(&self) -> serde_json::Value {
@@ -397,11 +461,11 @@ impl Tool for CodeExploreTool {
             "properties": {
                 "path": {
                     "type": "string",
-                    "description": "Target directory, subproject, or module to explore (e.g. 'src/tools', 'crates/atomcode-coding', 'backend'). Required. Do NOT pass '.' / './' / '~' / the workspace root — call repo_map first, then a concrete subdirectory from that tree."
+                    "description": "REQUIRED. Directory or module only — e.g. 'crates/atomcode-coding', 'src/auth', 'backend/service'. NEVER a file ('src/auth.rs', 'lib.rs', 'foo.go') — that is read_file and will error. NEVER '.' / workspace root — call repo_map first. Put the symbol or question in `query`, not here."
                 },
                 "query": {
                     "type": "string",
-                    "description": "Natural language question in Chinese or English (e.g. '扣减库存并加锁防超卖', 'how does auth middleware verify JWT') OR symbol/file names (e.g. 'OrderService verifyToken')."
+                    "description": "REQUIRED. Precise symbol name (CodeExploreTool, assemble_parts) OR natural language in Chinese or English (鉴权怎么做, how does X work). This is `query`, never `description` or `pattern`. Do not put the symbol in `path`."
                 },
                 "max_files": {
                     "type": "integer",
@@ -443,7 +507,15 @@ impl Tool for CodeExploreTool {
             }
         };
         if is_workspace_root_token(path_str) {
-            return err(WORKSPACE_ROOT_PATH_ERR.to_string());
+            return err(workspace_root_path_err(&ctx.working_dir));
+        }
+        if looks_like_single_file(path_str) {
+            let resolved = if Path::new(path_str).is_absolute() {
+                PathBuf::from(path_str)
+            } else {
+                ctx.working_dir.join(path_str)
+            };
+            return err(file_scope_err(&resolved, &ctx.working_dir));
         }
 
         let root = canonical(&ctx.working_dir);
@@ -482,7 +554,7 @@ impl Tool for CodeExploreTool {
         let t0 = std::time::Instant::now();
 
         if parsed_query.path_filters.iter().any(|p| is_workspace_root_token(p)) {
-            return err(WORKSPACE_ROOT_PATH_ERR.to_string());
+            return err(workspace_root_path_err(&root));
         }
 
         let scope_path = if !parsed_query.path_filters.is_empty() {
@@ -505,7 +577,10 @@ impl Tool for CodeExploreTool {
         };
         if let Some(sc) = scope_path.as_deref() {
             if is_workspace_root_scope(sc, &root) {
-                return err(WORKSPACE_ROOT_PATH_ERR.to_string());
+                return err(workspace_root_path_err(&root));
+            }
+            if sc.is_file() {
+                return err(file_scope_err(sc, &root));
             }
         }
 
@@ -2238,23 +2313,21 @@ fn render_explore_output(
             .map(|p| rel_disp(p, root))
             .unwrap_or_else(|| scope_disp.clone());
         next.push(format!(
-            "{n}. grep  pattern={grep_pat}  path={parent}"
-        ));
-        n += 1;
-        next.push(format!(
             "{n}. code_explore  path={parent}  query={}",
             first.sym.node.name
         ));
         n += 1;
         if first.sym.node.end_line.saturating_sub(first.sym.node.start_line) + 1 > FOLD_AFTER_LINES {
             next.push(format!(
-                "{n}. read_file  {rel}  offset={}",
+                "{n}. read_file  {rel}  offset={}  (omit limit; call again with the footer offset to finish the file)",
                 first.sym.node.start_line
             ));
             n += 1;
         }
     } else if !candidates.is_empty() {
-        next.push(format!("{n}. grep  pattern={grep_pat}  path={scope_disp}"));
+        next.push(format!(
+            "{n}. code_explore  path={scope_disp}  query={query}  (retry synonyms / broader path — CATALOG is not absence)"
+        ));
         n += 1;
     }
     if has_contract {
@@ -2267,7 +2340,9 @@ fn render_explore_output(
                 .then_some(s.node.name.as_str())
             })
         }) {
-            next.push(format!("{n}. grep  pattern=impl {name}  path={scope_disp}"));
+            next.push(format!(
+                "{n}. code_explore  path={scope_disp}  query=impl {name}"
+            ));
             n += 1;
         }
     }
@@ -2297,10 +2372,10 @@ fn render_explore_output(
     card.push("> **NEXT** (copy as tool calls, in order):".to_string());
     if next.is_empty() {
         card.push(format!(
-            "> 1. grep  pattern={grep_pat}  path={scope_disp}"
+            "> 1. code_explore  path={scope_disp}  query={query}  (retry synonyms / English / broader path)"
         ));
         card.push(format!(
-            "> 2. code_explore  path={scope_disp}  query={query}"
+            "> 2. grep  pattern={grep_pat}  path={scope_disp}  (literals only)"
         ));
     } else {
         for step in &next {
@@ -2433,7 +2508,7 @@ fn render_explore_output(
         .filter(|c| !evidence_file_set.contains(c.file.as_path()))
         .collect();
     if !catalog_rest.is_empty() {
-        out.push("\n**CATALOG (not rendered — copy path into read_file / code_explore):**".to_string());
+        out.push("\n**CATALOG (not rendered — `read_file` a listed FILE; `code_explore` the PARENT DIRECTORY with the symbol as query, never the file path):**".to_string());
         for (i, c) in catalog_rest.iter().take(MAX_CATALOG_REMAINING).enumerate() {
             let rel = rel_disp(&c.file, root);
             let layer = c
@@ -2708,6 +2783,10 @@ mod tests {
         let out = render_explore_output(&graph, &root, "q", &candidates, &flow_spine, true, 8, None, &SearchTokens::default(), None, None, None);
         assert!(out.contains("evidence 5/15 files"), "evidence auction cap:\n{out}");
         assert!(out.contains("CATALOG"), "catalog section missing:\n{out}");
+        assert!(
+            out.contains("PARENT DIRECTORY") && !out.contains("copy path into read_file / code_explore"),
+            "catalog must not tell the model to pass a file path to code_explore:\n{out}"
+        );
         assert!(
             out.contains("hidden_8.rs"),
             "remaining candidate listing missing:\n{out}"
@@ -3255,6 +3334,75 @@ mod tests {
             .execute(r#"{"query":"cached_symbol","path":"src"}"#, &ctx)
             .await;
         assert!(!ok.is_error, "concrete subdirectory must still work:\n{}", ok.content);
+    }
+
+    #[tokio::test]
+    async fn rejects_single_file_path() {
+        use atomcode_kernel::tool::{ProgressSink, Tool, ToolContext};
+        use tokio_util::sync::CancellationToken;
+
+        let d = tempfile::tempdir().unwrap();
+        std::fs::create_dir(d.path().join("src")).unwrap();
+        std::fs::write(d.path().join("src/hot.rs"), "pub fn cached_symbol() {}\n").unwrap();
+        let idx = Arc::new(CodeIndex::new());
+        let tool = CodeExploreTool::new(idx);
+        let ctx = ToolContext {
+            working_dir: d.path().to_path_buf(),
+            cancel: CancellationToken::new(),
+            progress: ProgressSink::noop(),
+            requester: None,
+        };
+        let r = tool
+            .execute(
+                r#"{"query":"cached_symbol","path":"src/hot.rs"}"#,
+                &ctx,
+            )
+            .await;
+        assert!(r.is_error, "{}", r.content);
+        assert!(
+            r.content.contains("not a single file") && r.content.contains("read_file"),
+            "{}",
+            r.content
+        );
+        assert!(r.content.contains("src"), "{}", r.content);
+        assert!(
+            r.content.contains("query=") || r.content.contains("query<") || r.content.contains("`query`"),
+            "error must tell the model to put the symbol in query:\n{}",
+            r.content
+        );
+        let toml = tool
+            .execute(r#"{"query":"name","path":"Cargo.toml"}"#, &ctx)
+            .await;
+        assert!(toml.is_error && toml.content.contains("not a single file"), "{}", toml.content);
+    }
+
+    #[test]
+    fn description_forbids_file_path_and_allows_nl_or_symbol() {
+        let tool = CodeExploreTool::new(Arc::new(CodeIndex::new()));
+        let d = tool.description();
+        assert!(
+            d.contains("crates/atomcode-coding") && d.contains("src/auth"),
+            "description must show directory examples:\n{d}"
+        );
+        assert!(
+            d.contains("src/auth.rs") && d.contains("read_file"),
+            "description must show a file as BAD before the first call:\n{d}"
+        );
+        assert!(
+            d.contains("CodeExploreTool") && (d.contains("鉴权") || d.contains("Chinese")),
+            "description must allow a precise symbol or natural Chinese/English:\n{d}"
+        );
+        let schema = tool.parameters_schema();
+        let path_d = schema["properties"]["path"]["description"].as_str().unwrap_or("");
+        let query_d = schema["properties"]["query"]["description"].as_str().unwrap_or("");
+        assert!(
+            path_d.contains("src/auth.rs") && path_d.contains("NEVER a file"),
+            "path schema must reject files up front:\n{path_d}"
+        );
+        assert!(
+            query_d.contains("CodeExploreTool") && query_d.contains("Chinese"),
+            "query schema must allow symbol or natural language:\n{query_d}"
+        );
     }
 
     fn scored(node: SymbolNode, score: f64) -> ScoredSymbol {

@@ -14,11 +14,12 @@ use grep::searcher::{BinaryDetection, Searcher, SearcherBuilder, Sink, SinkConte
 use globset::{GlobBuilder, GlobMatcher};
 use ignore::WalkBuilder;
 use serde::Deserialize;
-use serde_json::json;
+use serde_json::{json, Value};
 use std::path::Path;
+use std::time::{Duration, Instant};
 
 const DEFAULT_MAX_RESULTS: usize = 200;
-const DEFAULT_CONTEXT: usize = 3;
+const DEFAULT_CONTEXT: usize = 0;
 const MAX_CONTEXT: usize = 10;
 const MAX_DISPLAY_LINE: usize = 1000;
 /// Hard upper cap on `max_results` — bounds the in-memory result buffer even if a
@@ -30,6 +31,10 @@ const MAX_RESULTS_CAP: usize = 10_000;
 /// file's search errors and is skipped: the absolute memory guard, independent of the
 /// per-line default.
 const MAX_LINE_BUF_BYTES: usize = 10 * 1024 * 1024;
+/// Grok-style wall clock; stop the walk rather than hanging on a huge tree.
+const GREP_TIMEOUT: Duration = Duration::from_secs(20);
+/// Grok default tool-output budget (40 KB). Remainder: narrow path/glob or raise max_results.
+const MAX_OUTPUT_BYTES: usize = 40_000;
 
 pub struct GrepTool;
 
@@ -54,22 +59,24 @@ impl Tool for GrepTool {
         "grep"
     }
     fn description(&self) -> &str {
-        "Search file contents by regular expression under a directory (gitignore-aware; \
-         build/cache dirs and .log files are skipped). Smart-case: case-insensitive \
-         unless the pattern contains an uppercase letter. Escape regex metachars, e.g. \
-         `console\\.log\\(`. Use `glob` (e.g. `*.rs`) to restrict file types in one call \
-         instead of a separate glob+grep round. Relative paths resolve against the working \
-         directory. Default 200 matches; raise `max_results` if a page is capped."
+        "Search file contents by regular expression (literal / exact-string search). \
+         Pass `pattern` as a raw regex — no surrounding quotes, never in `description`. \
+         For a feature, design, or code-logic question, use `code_explore` \
+         (path = a directory/module, query = Chinese/English or a symbol) instead. \
+         Smart-case: case-insensitive unless the pattern contains an uppercase letter. \
+         Escape regex metachars, e.g. `console\\.log\\(`. Use `glob` (e.g. `*.rs`) to \
+         restrict file types. Default 200 matches and 0 context lines; raise `max_results` \
+         or add `context` if needed. Results are capped; truncated pages report remaining work."
     }
     fn parameters_schema(&self) -> serde_json::Value {
         json!({
             "type": "object",
             "properties": {
-                "pattern": { "type": "string", "description": "Regex to search for" },
+                "pattern": { "type": "string", "description": "Regex to search for (this field is required; do not put it in `description`)" },
                 "path": { "type": "string", "description": "Directory or file to search (default: the working directory)" },
                 "glob": { "type": "string", "description": "File-name glob to restrict which files are searched, e.g. `*.rs`, `*.{ts,tsx}` (ripgrep-style: no `/` matches at any depth)" },
                 "max_results": { "type": "integer", "description": "Max matching lines to return (default 200). Raise this instead of re-running a narrower crawl." },
-                "context": { "type": "integer", "description": "Lines of context around each match (default 3, max 10)" }
+                "context": { "type": "integer", "description": "Lines of context around each match (default 0, max 10)" }
             },
             "required": ["pattern"]
         })
@@ -81,12 +88,8 @@ impl Tool for GrepTool {
     }
     // read-only → risk() defaults to Safe.
     async fn execute(&self, args: &str, ctx: &ToolContext) -> ToolResult {
-        let a: Args = match parse_tool_args(
-            "grep",
-            args,
-            r#"{"pattern":"<regex>","path":"<dir>"}"#,
-        ) {
-            Ok(a) => a,
+        let (a, recovered) = match parse_grep_args(args) {
+            Ok(v) => v,
             Err(e) => return e.into_tool_result(),
         };
         let raw = a.path.clone().unwrap_or_else(|| ".".to_string());
@@ -130,29 +133,238 @@ impl Tool for GrepTool {
         let base = ctx.working_dir.clone();
         let pattern = a.pattern.clone();
         let display_path = raw.clone();
+        let deadline = Instant::now() + GREP_TIMEOUT;
         let res = tokio::task::spawn_blocking(move || {
-            search(&root, &matcher, max, context, &base, glob_filter.as_ref())
+            search(
+                &root,
+                &matcher,
+                max,
+                context,
+                &base,
+                glob_filter.as_ref(),
+                deadline,
+            )
         })
         .await;
         match res {
-            Ok((lines, _, files)) if lines.is_empty() => ok(format!(
-                "No matches found for '{pattern}' in {display_path} ({files} files searched)"
-            )),
-            Ok((lines, matches, _)) => {
-                // Cap on the real MATCH count — not total output rows, which also include
-                // context + `--` separators (that over-reported "capped" with any context).
+            Ok((lines, _, files, timed_out)) if lines.is_empty() => {
+                let mut msg = format!(
+                    "No matches found for '{pattern}' in {display_path} ({files} files searched)"
+                );
+                if timed_out {
+                    msg.push_str("\n[Search timed out; narrow `path` / `glob` or use code_explore]");
+                }
+                if let Some(note) = recovered {
+                    msg = format!("{note}\n{msg}");
+                }
+                ok(msg)
+            }
+            Ok((lines, matches, _, timed_out)) => {
                 let capped = matches >= max;
                 let mut out = lines.join("\n");
-                if capped {
+                if out.len() > MAX_OUTPUT_BYTES {
+                    let mut end = MAX_OUTPUT_BYTES.min(out.len());
+                    while end > 0 && !out.is_char_boundary(end) {
+                        end -= 1;
+                    }
+                    out.truncate(end);
+                    out.push_str(
+                        "\n\n[Output truncated to 40KB. Raise `max_results` is not enough — add `glob` / a more specific `path`, or use code_explore(path, query=pattern) for feature/design/logic.]",
+                    );
+                } else if capped {
                     out.push_str(&format!(
-                        "\n\n[Results capped at {max} matches; raise `max_results` or add `glob` / a more specific `path` to see the rest]"
+                        "\n\n[Results capped at {max} matches; raise `max_results` or add `glob` / a more specific `path`. For a feature/design/logic question, prefer code_explore(path, query='{pattern}').]"
                     ));
+                }
+                if timed_out {
+                    out.push_str(
+                        "\n[Search timed out after 20s; showing matches collected so far. Narrow `path`/`glob` or use code_explore.]",
+                    );
+                }
+                if let Some(note) = recovered {
+                    out = format!("{note}\n{out}");
                 }
                 ok(out)
             }
             Err(_) => err("grep: search task failed".to_string()),
         }
     }
+}
+
+const GREP_SHAPE: &str = r#"{"pattern":"<regex>","path":"<dir>"}"#;
+
+fn parse_grep_args(args: &str) -> Result<(Args, Option<String>), crate::tool_feedback::ParamError> {
+    if let Ok(a) = parse_tool_args::<Args>("grep", args, GREP_SHAPE) {
+        if !a.pattern.trim().is_empty() {
+            return Ok((a, None));
+        }
+    }
+    let mut v: Value = serde_json::from_str(args).unwrap_or_else(|_| json!({}));
+    let note = recover_pattern_into(&mut v);
+    let dumped = serde_json::to_string(&v).unwrap_or_else(|_| args.to_string());
+    match parse_tool_args::<Args>("grep", &dumped, GREP_SHAPE) {
+        Ok(a) if !a.pattern.trim().is_empty() => Ok((a, note)),
+        _ => parse_tool_args::<Args>("grep", args, GREP_SHAPE).map(|a| (a, None)),
+    }
+}
+
+/// Weak models put `pattern`/`path` inside `description` as
+/// `[Constraint: path: foo.cs, pattern: Bar]` (or only `pattern:`) instead of
+/// JSON fields. Recover both so grep does not bounce with `missing_field`.
+fn recover_pattern_into(v: &mut Value) -> Option<String> {
+    let obj = v.as_object_mut()?;
+    let constraint = obj
+        .get("description")
+        .and_then(|p| p.as_str())
+        .map(extract_constraint_fields)
+        .unwrap_or_default();
+
+    let mut recovered_from = Vec::new();
+    let has_pattern = obj
+        .get("pattern")
+        .and_then(|p| p.as_str())
+        .map(str::trim)
+        .is_some_and(|s| !s.is_empty());
+    if !has_pattern {
+        let mut found: Option<(String, String)> = None;
+        for key in ["query", "regex", "search", "q"] {
+            if let Some(s) = obj
+                .get(key)
+                .and_then(|p| p.as_str())
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+            {
+                found = Some((key.to_string(), s.to_string()));
+                break;
+            }
+        }
+        if found.is_none() {
+            if let Some(p) = constraint.pattern.clone() {
+                found = Some(("description".into(), p));
+            }
+        }
+        if let Some((src, pat)) = found {
+            obj.insert("pattern".into(), Value::String(pat.clone()));
+            recovered_from.push(format!("pattern←{src}({pat})"));
+        }
+    }
+
+    let has_path = obj
+        .get("path")
+        .and_then(|p| p.as_str())
+        .map(str::trim)
+        .is_some_and(|s| !s.is_empty());
+    if !has_path {
+        if let Some(p) = constraint.path.clone() {
+            obj.insert("path".into(), Value::String(p.clone()));
+            recovered_from.push(format!("path←description({p})"));
+        }
+    }
+
+    let has_glob = obj
+        .get("glob")
+        .and_then(|p| p.as_str())
+        .map(str::trim)
+        .is_some_and(|s| !s.is_empty());
+    if !has_glob {
+        if let Some(g) = constraint.glob.clone() {
+            obj.insert("glob".into(), Value::String(g));
+        }
+    }
+
+    if recovered_from.is_empty() {
+        return None;
+    }
+    let pat = obj
+        .get("pattern")
+        .and_then(|p| p.as_str())
+        .unwrap_or("<regex>");
+    let path = obj
+        .get("path")
+        .and_then(|p| p.as_str())
+        .unwrap_or("<dir>");
+    Some(format!(
+        "[grep: recovered {} — next call use {{\"pattern\":\"{pat}\",\"path\":\"{path}\"}}]",
+        recovered_from.join(", ")
+    ))
+}
+
+#[derive(Default)]
+struct ConstraintFields {
+    pattern: Option<String>,
+    path: Option<String>,
+    glob: Option<String>,
+}
+
+fn extract_constraint_fields(desc: &str) -> ConstraintFields {
+    let mut out = ConstraintFields::default();
+    for key in ["pattern", "query", "regex", "path", "glob"] {
+        if let Some(val) = extract_constraint_value(desc, key) {
+            match key {
+                "pattern" | "query" | "regex" if out.pattern.is_none() => {
+                    out.pattern = Some(val);
+                }
+                "path" if out.path.is_none() => out.path = Some(val),
+                "glob" if out.glob.is_none() => out.glob = Some(val),
+                _ => {}
+            }
+        }
+    }
+    out
+}
+
+fn extract_constraint_value(desc: &str, key: &str) -> Option<String> {
+    let lower = desc.to_ascii_lowercase();
+    let needle = format!("{key}:");
+    let mut search_from = 0usize;
+    while let Some(rel) = lower[search_from..].find(&needle) {
+        let abs = search_from + rel;
+        let boundary_ok = abs == 0
+            || desc.as_bytes()[abs - 1].is_ascii_whitespace()
+            || matches!(desc.as_bytes()[abs - 1], b'[' | b',' | b'{' | b'(');
+        if !boundary_ok {
+            search_from = abs + 1;
+            continue;
+        }
+        let rest = desc[abs + needle.len()..].trim_start();
+        let end = next_constraint_field_start(rest);
+        let raw = rest.get(..end).unwrap_or(rest);
+        let val = raw
+            .trim()
+            .trim_end_matches([']', '}', ')'])
+            .trim()
+            .trim_matches(|c| c == '"' || c == '\'')
+            .trim();
+        if !val.is_empty() {
+            return Some(val.to_string());
+        }
+        search_from = abs + 1;
+    }
+    None
+}
+
+/// End of a Constraint value: next `, <known-key>:` or closing bracket.
+fn next_constraint_field_start(rest: &str) -> usize {
+    const KEYS: &[&str] = &["pattern:", "query:", "regex:", "path:", "glob:", "search:"];
+    let mut cut = rest
+        .find(']')
+        .or_else(|| rest.find('}'))
+        .unwrap_or(rest.len());
+    for (i, ch) in rest.char_indices() {
+        if i >= cut {
+            break;
+        }
+        if ch != ',' {
+            continue;
+        }
+        let after = rest[i + 1..].trim_start();
+        let after_l = after.to_ascii_lowercase();
+        if KEYS.iter().any(|k| after_l.starts_with(k)) {
+            cut = i;
+            break;
+        }
+    }
+    cut
 }
 
 /// Returns (formatted match+context lines, match count, files searched). Stops once
@@ -179,10 +391,12 @@ fn search(
     context: usize,
     base: &std::path::Path,
     glob_filter: Option<&(GlobMatcher, String)>,
-) -> (Vec<String>, usize, usize) {
+    deadline: Instant,
+) -> (Vec<String>, usize, usize, bool) {
     let mut out: Vec<String> = Vec::new();
     let mut match_count = 0usize;
     let mut files_searched = 0usize;
+    let mut timed_out = false;
 
     let mut builder = WalkBuilder::new(root);
     builder
@@ -229,6 +443,10 @@ fn search(
         .build();
 
     for entry in walk.flatten() {
+        if Instant::now() >= deadline {
+            timed_out = true;
+            break;
+        }
         if match_count >= max {
             break;
         }
@@ -260,7 +478,7 @@ fn search(
         // io / binary / decode errors ⇒ skip the file (same as the old read failure).
         let _ = searcher.search_path(matcher, path, sink);
     }
-    (out, match_count, files_searched)
+    (out, match_count, files_searched, timed_out)
 }
 
 /// Render a raw line (bytes from the searcher) for display: strip the trailing line
@@ -593,5 +811,77 @@ mod tests {
             "*.rs must not match .txt: {}",
             r.content
         );
+    }
+
+    #[tokio::test]
+    async fn default_context_is_zero() {
+        let d = tempfile::tempdir().unwrap();
+        std::fs::write(
+            d.path().join("f.txt"),
+            "line 1\nNEEDLE two\nline 3\n",
+        )
+        .unwrap();
+        let r = GrepTool
+            .execute(r#"{"pattern":"NEEDLE"}"#, &ctx(d.path()))
+            .await;
+        assert!(r.content.contains("f.txt:2:NEEDLE two"), "{}", r.content);
+        assert!(
+            !r.content.contains("f.txt-1-") && !r.content.contains("f.txt-3-"),
+            "default context must be 0: {}",
+            r.content
+        );
+    }
+
+    #[tokio::test]
+    async fn recovers_pattern_from_query_alias_and_constraint_description() {
+        let d = tempfile::tempdir().unwrap();
+        std::fs::write(d.path().join("a.txt"), "首次运行 ok\n").unwrap();
+        let r = GrepTool
+            .execute(
+                r#"{"path":".","description":" [Constraint: pattern: 首次运行]"}"#,
+                &ctx(d.path()),
+            )
+            .await;
+        assert!(!r.is_error, "{}", r.content);
+        assert!(r.content.contains("recovered"), "{}", r.content);
+        assert!(r.content.contains("a.txt:1:"), "{}", r.content);
+
+        let r2 = GrepTool
+            .execute(r#"{"path":".","query":"首次运行"}"#, &ctx(d.path()))
+            .await;
+        assert!(!r2.is_error, "{}", r2.content);
+        assert!(r2.content.contains("query"), "{}", r2.content);
+
+        // Weak-model payload: path+pattern both stuffed into description.
+        std::fs::create_dir_all(d.path().join("Models/Service")).unwrap();
+        std::fs::write(
+            d.path().join("Models/Service/CustomerRelationService.cs"),
+            "GetSalePostSettingData() {}\n",
+        )
+        .unwrap();
+        let r3 = GrepTool
+            .execute(
+                r#"{"description":" [Constraint: path: Models/Service/CustomerRelationService.cs, pattern: GetSalePostSettingData]"}"#,
+                &ctx(d.path()),
+            )
+            .await;
+        assert!(!r3.is_error, "{}", r3.content);
+        assert!(r3.content.contains("GetSalePostSettingData"), "{}", r3.content);
+        assert!(
+            r3.content.contains("CustomerRelationService.cs"),
+            "{}",
+            r3.content
+        );
+
+        // Weak-model payload: pattern-only Constraint, no top-level pattern.
+        std::fs::write(d.path().join("track.txt"), "positionTracking here\n").unwrap();
+        let r4 = GrepTool
+            .execute(
+                r#"{"description":" [Constraint: pattern: positionTracking]"}"#,
+                &ctx(d.path()),
+            )
+            .await;
+        assert!(!r4.is_error, "{}", r4.content);
+        assert!(r4.content.contains("positionTracking"), "{}", r4.content);
     }
 }

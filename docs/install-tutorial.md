@@ -54,8 +54,9 @@ ATOMCODE_VERSION=0.0.0-dev.2 ATOMCODE_PREFIX=$HOME/bin \
 ### 安装后
 
 ```bash
-atomcode --version    # 验证
-atomcode             # 首次启动: 自动写入词林/mcp.json/.codegraphignore/builtin-tools/prompts
+atomcode --version    # 验证（等价命令: jeikcode --version）
+atomcode              # 首次启动: 自动写入词林/mcp.json/.codegraphignore/builtin-tools/prompts
+jeikcode              # 与 atomcode 同一二进制，命令完全等价
 ```
 
 **开启自动无感更新**(可选,推荐服务器):
@@ -122,7 +123,7 @@ powershell -ExecutionPolicy Bypass -File scripts\dev-install.ps1 -Uninstall   # 
 | 内置工具清单 | `ls ~/.atomcode/builtin-tools.txt` | 存在 |
 | MCP 默认接线 | `ls ~/.atomcode/mcp.json` | 存在(首次启动写入) |
 | 图谱忽略规则 | `ls ~/.atomcode/.codegraphignore` | 存在(首次启动写入) |
-| 提示词模板 | `ls ~/.atomcode/prompts/` | `init.yaml` / `rules.yaml` / `prompts.md` / `内置工具.yaml` / `内置技能.yaml` |
+| 提示词模板 | `ls ~/.atomcode/prompts/` | `init.yaml` / `rules.yaml`（进模型）+ `root_docs_prompts.md` / `root_docs_内置工具.yaml` / `root_docs_内置技能.yaml`（文档,不进模型） |
 | 更新渠道 | `atomcode upgrade` | 显示"already on latest"(或开始下载) |
 
 ---

@@ -239,13 +239,13 @@ mod tests {
     #[test]
     fn t_with_returns_english_for_en() {
         let s = t_with(Locale::En, Msg::WelcomeBannerLine1);
-        assert!(s.starts_with("Welcome to AtomCode"));
+        assert!(s.starts_with("Welcome to JeikCode"));
     }
 
     #[test]
     fn t_with_returns_chinese_for_zh_cn() {
         let s = t_with(Locale::ZhCn, Msg::WelcomeBannerLine1);
-        assert!(s.starts_with("欢迎使用 AtomCode"));
+        assert!(s.starts_with("欢迎使用 JeikCode"));
     }
 
     #[test]
@@ -259,7 +259,7 @@ mod tests {
         set_locale(Locale::En);
         assert_eq!(current_locale(), Locale::En);
         let s = t(Msg::WelcomeBannerLine1);
-        assert!(s.starts_with("Welcome to AtomCode"));
+        assert!(s.starts_with("Welcome to JeikCode"));
     }
 
     #[test]

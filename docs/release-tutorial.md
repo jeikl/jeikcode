@@ -92,9 +92,13 @@ git add latest.json && git commit -m "release: 0.0.0-dev.2" && git push origin l
 
 ### 5. 验证
 
+`atomcode` 与 `jeikcode` 是同一套 CLI（`jeikcode upgrade` = `atomcode upgrade`）。Release 资产名仍是 `atomcode-<version>-<target>`；安装/升级后会在同目录复制一份 `jeikcode` 别名。
+
 ```bash
 # 本机模拟升级(会下载刚发的版本并替换当前二进制)
 atomcode upgrade
+# 或
+jeikcode upgrade
 
 # 或检查清单可读
 curl -s https://raw.githubusercontent.com/jeikl/jeikcode/local-dev/latest.json | head -5

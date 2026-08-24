@@ -319,7 +319,7 @@ pub struct OnboardingWizard {
     pub(super) step: Step,
     /// 0=Auto-detect, 1=English, 2=ZhCn
     pub(super) language_idx: usize,
-    /// 0=CodingPlan, 1=Manual, 2=Skip
+    /// 0=Manual, 1=Skip
     pub(super) setup_idx: usize,
     /// Set when constructed via `/welcome` mid-session with non-empty
     /// body. Read by Task 8's slash command path to decide cleanup
@@ -400,8 +400,8 @@ impl OnboardingWizard {
         Self {
             step: Step::Intro,
             language_idx: 0,
-            // 0=CodingPlan, 1=Manual, 2=Skip — prefer Manual on source builds.
-            setup_idx: 1,
+            // 0=Manual, 1=Skip — first-run is always manual config.
+            setup_idx: 0,
             needs_confirm: false,
             qr_login_url: None,
             qr_login_error: None,
@@ -514,7 +514,7 @@ impl OnboardingWizard {
                 PureOutcome::Redraw
             }
             (Setup, KeyCode::Down) => {
-                if self.setup_idx < 2 {
+                if self.setup_idx < 1 {
                     self.setup_idx += 1;
                 }
                 PureOutcome::Redraw
@@ -525,10 +525,6 @@ impl OnboardingWizard {
             }
             (Setup, KeyCode::Char('2')) => {
                 self.setup_idx = 1;
-                PureOutcome::ApplySetupThenClose
-            }
-            (Setup, KeyCode::Char('3')) => {
-                self.setup_idx = 2;
                 PureOutcome::ApplySetupThenClose
             }
             (Setup, KeyCode::Enter) => PureOutcome::ApplySetupThenClose,
@@ -645,7 +641,7 @@ impl OnboardingWizard {
         } else {
             // Compact: no logo + no Ctrl+C hint. Just product line +
             // tagline + bullets + press-enter.
-            content.push(format!("AtomCode v{}", env!("CARGO_PKG_VERSION")));
+            content.push(format!("JeikCode v{}", env!("CARGO_PKG_VERSION")));
             content.push(t(Msg::OnboardingIntroCompactTagline).into_owned());
             content.push(String::new());
             content.push(t(Msg::OnboardingIntroBullet1).into_owned());
@@ -761,10 +757,6 @@ impl OnboardingWizard {
         out.push(String::new());
 
         let options = [
-            (
-                t(Msg::WelcomeOptionCodingPlan).into_owned(),
-                t(Msg::WelcomeOptionCodingPlanHint).into_owned(),
-            ),
             (
                 t(Msg::WelcomeOptionConfigureManually).into_owned(),
                 t(Msg::WelcomeOptionConfigureManuallyHint).into_owned(),
@@ -1055,8 +1047,7 @@ impl crate::modals::Modal for OnboardingWizard {
             }
             PureOutcome::ApplySetupThenClose => {
                 match self.setup_idx {
-                    0 => ctx.pending_run_login_setup = true,
-                    1 => ctx.pending_open_provider_wizard = true,
+                    0 => ctx.pending_open_provider_wizard = true,
                     _ => { /* Skip — no flag */ }
                 }
                 // Setup always runs on a wizard-owned screen
@@ -1071,7 +1062,7 @@ impl crate::modals::Modal for OnboardingWizard {
                 // takeovers paint their own UI, so we only emit
                 // Welcome for the Skip branch.
                 renderer.clear_screen();
-                if self.setup_idx == 2 {
+                if self.setup_idx != 0 {
                     paint_welcome(ctx, renderer);
                 }
                 Ok(ModalAction::Close)
@@ -1403,9 +1394,9 @@ mod tests {
         assert_eq!(w.setup_idx, 1);
         w.handle_key_for_test(KeyCode::Down);
         w.handle_key_for_test(KeyCode::Down);
-        assert_eq!(w.setup_idx, 2);
+        assert_eq!(w.setup_idx, 1);
         w.handle_key_for_test(KeyCode::Down);
-        assert_eq!(w.setup_idx, 2);
+        assert_eq!(w.setup_idx, 1);
     }
 
     #[test]
@@ -1510,7 +1501,7 @@ mod tests {
         assert!(joined.contains("Version "));
         assert!(joined.contains("Multi-step agent loop"));
         assert!(joined.contains("Connects to any OpenAI"));
-        assert!(joined.contains("Free tokens via CodingPlan"));
+        assert!(joined.contains("Configure your own API key"));
         assert!(joined.contains("Press Enter to continue"));
         assert!(joined.contains("Ctrl+C exits"));
         // Header above the box.
@@ -1536,10 +1527,10 @@ mod tests {
             "logo should be hidden in compact mode: {joined}"
         );
         // Compact replaces the version block with a compact product
-        // line `AtomCode vX.Y.Z` + tagline.
-        assert!(joined.contains("AtomCode v"));
+        // line `JeikCode vX.Y.Z` + tagline.
+        assert!(joined.contains("JeikCode v"));
         assert!(joined.contains("AI coding agent that lives in your terminal"));
-        assert!(joined.contains("Free tokens"));
+        assert!(joined.contains("Configure your own API key"));
         assert!(joined.contains("Press Enter to continue"));
     }
 
@@ -1662,9 +1653,7 @@ mod tests {
 
     // ── Step 3 (Setup) draw tests ──
 
-    /// Setup panel renders 3 numbered options with localised
-    /// CodingPlan / Manual / Skip labels (reusing WelcomeOption* Msg
-    /// variants), the SetupTitle, and the nav hint.
+    /// Setup panel renders Manual + Skip only (no CodingPlan claim).
     #[test]
     fn setup_layout_has_three_options() {
         let _g = crate::i18n::test_lock();
@@ -1677,14 +1666,10 @@ mod tests {
             .join("\n");
         assert!(joined.contains("Step 3/3 · Setup"));
         assert!(joined.contains("How would you like to set up?"));
-        assert!(joined.contains("[1] Set up CodingPlan"));
-        assert!(joined.contains("[2] Configure manually"));
-        assert!(joined.contains("[3] Skip for now"));
-        // Hints sit after each option.
-        assert!(joined.contains("Free tokens"));
+        assert!(!joined.contains("CodingPlan"));
+        assert!(joined.contains("[1] Configure manually"));
+        assert!(joined.contains("[2] Skip for now"));
         assert!(joined.contains("API key"));
-        // Nav hint.
-        assert!(joined.contains("1-3 select"));
     }
 
     /// ZhCn locale flips every label + hint to the Chinese strings
@@ -1700,17 +1685,13 @@ mod tests {
             .collect::<Vec<_>>()
             .join("\n");
         assert!(joined.contains("第 3/3 步 · 配置"));
-        assert!(joined.contains("配置 CodingPlan"));
+        assert!(!joined.contains("CodingPlan"));
         assert!(joined.contains("手动配置"));
         assert!(joined.contains("暂时跳过"));
     }
 
-    /// CodingPlan must come first in the rendered step-3 list, then
-    /// Manual, then Skip. Migrated from the deleted welcome_wizard.rs's
-    /// `options_put_codingplan_first` test; pins option order so a
-    /// reorder needs a deliberate test update.
     #[test]
-    fn setup_options_put_codingplan_first() {
+    fn setup_options_put_manual_first() {
         let _g = crate::i18n::test_lock();
         crate::i18n::set_locale(crate::i18n::Locale::En);
         let lines = OnboardingWizard::new().draw_setup_lines(80, true);
@@ -1719,14 +1700,10 @@ mod tests {
             .map(|s| strip_sgr(s))
             .collect::<Vec<_>>()
             .join("\n");
-        let pos_codingplan = joined
-            .find("Set up CodingPlan")
-            .expect("CodingPlan label missing");
         let pos_manual = joined
             .find("Configure manually")
             .expect("manual label missing");
         let pos_skip = joined.find("Skip for now").expect("skip label missing");
-        assert!(pos_codingplan < pos_manual);
         assert!(pos_manual < pos_skip);
     }
 
@@ -1746,7 +1723,7 @@ mod tests {
         // Selected: idx 1 → ●  [2]; others get ○.
         assert!(joined.contains("●  [2]"));
         assert!(joined.contains("○  [1]"));
-        assert!(joined.contains("○  [3]"));
+        assert!(!joined.contains("[3]"));
     }
 
     // ── VirtualTerminal snapshot tests ──
@@ -1787,7 +1764,7 @@ mod tests {
         assert!(screen.contains("┌─"), "top border missing: {screen}");
         assert!(screen.contains("└─"), "bottom border missing: {screen}");
         // Brand title, step header, key copy.
-        assert!(screen.contains("AtomCode"));
+        assert!(screen.contains("JeikCode"));
         assert!(screen.contains("Step 1/3 · Welcome"));
         assert!(screen.contains("Press Enter to continue"));
     }
@@ -1830,8 +1807,8 @@ mod tests {
             !screen.contains("█ █ █ █"),
             "ASCII logo present in compact mode: {screen}"
         );
-        // Compact substitutes `AtomCode vX.Y.Z`.
-        assert!(screen.contains("AtomCode v"));
+        // Compact substitutes `JeikCode vX.Y.Z`.
+        assert!(screen.contains("JeikCode v"));
         assert!(screen.contains("Press Enter to continue"));
     }
 
@@ -1906,7 +1883,7 @@ mod tests {
         assert!(joined.contains("按 Enter 继续"));
         assert!(joined.contains("Ctrl+C 可随时退出"));
         // Brand title stays English on purpose.
-        assert!(joined.contains("AtomCode"));
+        assert!(joined.contains("JeikCode"));
     }
 
     // ── ASCII fallback (Windows legacy conhost / LANG=C / TERM=dumb) ──
@@ -1992,8 +1969,9 @@ mod tests {
             );
         }
         // Visible content is still readable in ASCII.
-        assert!(joined.contains("Set up CodingPlan"));
-        assert!(joined.contains("[1]") && joined.contains("[2]") && joined.contains("[3]"));
+        assert!(joined.contains("Configure manually"));
+        assert!(joined.contains("[1]") && joined.contains("[2]"));
+        assert!(!joined.contains("[3]"));
     }
 
     /// Belt + braces: each row of an ASCII-fallback rendered Setup

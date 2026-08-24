@@ -8221,16 +8221,9 @@ pub async fn run_loop(mut ctx: LoopCtx, renderer: &mut dyn Renderer) -> Result<E
         // OnboardingWizard's Modal impl owns the per-step box drawing.
         use crate::modals::Modal;
         renderer.clear_screen();
-        // Official builds: first-launch QR fast path (scan → claim).
-        // Source/self-built binaries cannot sign AtomGit gateway requests,
-        // so QR → CodingPlan is a dead end that leaves auth.toml behind and
-        // used to strand the TUI in failed provider-reload loops. Use the
-        // multi-step wizard instead and pre-select Manual (/provider).
-        let mut wizard = if atomcode_capabilities::provider::signer_available() {
-            crate::modals::OnboardingWizard::new_qr_fast_path()
-        } else {
-            crate::modals::OnboardingWizard::new_source_build()
-        };
+        // First-launch is always the multi-step wizard with Manual setup.
+        // CodingPlan / AtomGit QR claim is a retired upstream product.
+        let mut wizard = crate::modals::OnboardingWizard::new_source_build();
         // Pull the LoginSession out of the wizard before boxing — the
         // background poll thread owns it from here. wizard.draw still
         // has access to `qr_login_url` so the QR keeps rendering.

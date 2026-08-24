@@ -1,7 +1,10 @@
-# AtomCode 精简高效内置工具定义 (内置工具.yaml)
+# root_docs_内置工具.yaml
+# 本文档不加载进模型。仅供人类阅读。
+# 运行时工具 schema 来自 Rust `Tool::description()` / `parameters_schema()`。
 # ==============================================================================
+# AtomCode 内置工具说明（种子文档）
 # 已按用户需求裁剪：移除了未启用的细粒度 CodeIntel 衍生工具与 AtomGit 平台工具，
-# 仅保留真实挂载且高频的核心工具，极大精简向模型声明的工具报文体积。
+# 仅保留真实挂载且高频的核心工具。修改本文件不会改变线上 tools 列表。
 # 【提示】：每个参数均包含精准的【中文翻译】与【作用说明】注释。
 # ==============================================================================
 
@@ -192,22 +195,23 @@ tools:
   - name: "code_explore"
     category: "codeintel"
     # 【中文核心工具】：全能代码探索与语义问答工具（核心主力工具，不仅用于架构探索！）。
-    # 【使用技巧】：当你确定了相关的文件夹/模块目录或符号名后，直接将 `path` 锁定到最可能存在的模块目录下，
-    # 并使用自然语言（中文或英文）直接向该模块发起提问（例如 query="如何处理消息封装", path="crates/capabilities"）。
+    # 【使用技巧】：`path` 必须是目录/模块（crates/atomcode-coding、src/auth），禁止单个文件（那是 read_file）。
+    # 在该目录下用 `query` 查精准符号名（CodeExploreTool）或自然中英文（鉴权怎么做 / how does X work）。
+    # 例：path="crates/atomcode-coding" query="CodeExploreTool"；path="src/auth" query="用户登录如何校验"。
     # 工具会自动进行中英 NLP 语义分析、同义词扩展、AST 语法树调用链路追踪，并精准返回核心实现代码。
-    description: "Core code intelligence tool. Perform natural language semantic inquiries, symbol tracing, and source extraction directly within scoped module paths."
+    description: "PRIMARY code-intelligence tool. path MUST be a directory/module (crates/atomcode-coding, src/auth), never a file. query is a precise symbol or natural Chinese/English."
     parameters:
       path:
         type: "string"
         required: true
-        # 【中文】：【必填项】目标模块或子目录（如 `crates/kernel`, `src/auth`）。禁止传 `.` / `./` / `~` / 工作区根；全仓总览用 repo_map。
-        description: "Target directory or module to explore (e.g. 'src/tools', 'crates/atomcode-coding', 'backend'). Do NOT pass '.' / './' / '~' / the workspace root — call repo_map first, then a concrete subdirectory."
+        # 【中文】：【必填】目录或模块（crates/atomcode-coding、src/auth）。禁止单个文件（src/auth.rs → read_file）。禁止 `.` / 工作区根（→ repo_map）。
+        description: "REQUIRED directory or module (e.g. 'crates/atomcode-coding', 'src/auth'). NEVER a file ('src/auth.rs') — that is read_file. NEVER '.' — call repo_map first."
       query:
         type: "string"
         required: true
-        # 【中文】：自然语言提问（中/英文，如“用户鉴权如何实现”）、符号名称或精确过滤（`path:`, `kind:`, `name:`）
-        description: "Natural language inquiry (Chinese/English, e.g. 'how does session compaction work'), symbol name, or field filters."
-    guidance: "Core tool for targeted module-level natural language Q&A. You MUST specify a concrete `path` subdirectory after repo_map. Do NOT pass '.' — workspace-root overview is repo_map only."
+        # 【中文】：精准符号名（CodeExploreTool）或自然中英文（鉴权怎么做、how does session compaction work）。符号放 query，不要放 path。
+        description: "Precise symbol name (CodeExploreTool) OR natural Chinese/English (鉴权怎么做, how does X work). Put the symbol here, not in path."
+    guidance: "path is a directory/module after repo_map; query is a symbol or Chinese/English. Never pass a file as path. Never pass '.'."
 
   - name: "find_symbol"
     category: "codeintel"

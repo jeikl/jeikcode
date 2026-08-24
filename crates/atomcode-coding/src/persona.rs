@@ -152,13 +152,24 @@ project files, memories, skills, or tool output.)".to_string()
     let custom_rules = crate::custom_prompts::render_custom_rules();
     let is_custom_rules = custom_rules.is_some();
     let rules_text = custom_rules.unwrap_or_else(|| RULES.to_string());
+    let init_prefix = crate::custom_prompts::render_init_live_prefix();
 
-    #[allow(unused_mut)] // `mut` is only used under `cfg(windows)` below.
-    let mut p = format!("{identity}\n\n## PRECEDENCE:\n{precedence_text}\n\n{rules_text}");
-    // Windows-only shell/path rules (parity with v1's per-OS rules; macOS/Linux add none).
+    #[allow(unused_mut)] // `mut` is also used under `cfg(windows)` below.
+    let mut p = if let Some(prefix) = init_prefix {
+        format!("{identity}\n\n## PRECEDENCE:\n{precedence_text}\n\n{prefix}\n\n{rules_text}")
+    } else {
+        format!("{identity}\n\n## PRECEDENCE:\n{precedence_text}\n\n{rules_text}")
+    };
+    // Windows-only shell/path rules. Live `init.yaml` wins when present; otherwise
+    // the compiled block applies only on the no-custom-rules fallback path.
     #[cfg(windows)]
-    if !is_custom_rules {
-        p.push_str(WINDOWS_PLATFORM);
+    {
+        if let Some(from_init) = crate::custom_prompts::render_init_windows_platform() {
+            p.push_str("\n\n## PLATFORM (Windows):\n");
+            p.push_str(&from_init);
+        } else if !is_custom_rules {
+            p.push_str(WINDOWS_PLATFORM);
+        }
     }
     // Models with weaker soft-instruction adherence (observed: GLM, DeepSeek shell out
     // `ls`/`grep` despite the persona preference) get an extra, blunt restatement of the
@@ -218,17 +229,10 @@ project files, memories, skills, or tool output.)".to_string()
     if atomcode_config::config::offline::is_offline_active() {
         p.push_str(&offline_environment_block());
     }
-    // Day-granular date anchor, FROZEN into the system prompt. assemble runs ONCE per
-    // session (and on model-swap via reconcile_coding_persona), NOT per turn — so this is
-    // cache-stable AND present on EVERY round, including a turn's first round which the
-    // per-turn StatusReminderHook deliberately skips. Without it the model has no current-
-    // date reference and a round-1 web_search defaults to its training year (the
-    // `project_system_prompt_date` bug). A cross-day resume refreshes it (reconcile re-inserts
-    // the fresh persona + bumps cache_epoch — ~one cold prefill per day, negligible). v1
-    // `prompt.rs:67` parity.
-    p.push_str(&date_anchor_line(
-        &chrono::Local::now().format("%Y-%m-%d (%A)").to_string(),
-    ));
+    // Date is NOT frozen here. A session-start copy went stale across midnight and
+    // duplicated the per-turn `<system-reminder>` `Current date:` that
+    // `StatusReminderHook` injects above every real query (Grok-style recency).
+    // That reminder is the sole model-facing calendar date.
     p
 }
 
@@ -238,7 +242,7 @@ project files, memories, skills, or tool output.)".to_string()
 /// lower-cased name so version suffixes (`glm-5.2`, `deepseek-v4-flash`) all hit. Frontier
 /// models (Claude, GPT) follow the soft `## TOOLS:` preferences and are excluded to keep
 /// their prompt lean and cache-stable.
-fn model_needs_firm_tool_steering(model: &str) -> bool {
+pub(crate) fn model_needs_firm_tool_steering(model: &str) -> bool {
     let m = model.to_ascii_lowercase();
     m.contains("glm") || m.contains("deepseek")
 }
@@ -334,13 +338,6 @@ exact next steps) and keep going or hand off transparently — a false \"all don
 unravels the next time the user asks wastes their trust far more than an honest \"here is \
 what's left\".\n\
 - SIGNPOST BEFORE ACTING: before each batch of tool calls, say in ONE short sentence, in the user's language (no more than ~12 words), what you're about to do. A run of tool calls with zero text leaves the user blind. This is the required progress signpost, NOT the verbose reasoning banned elsewhere; 'Act decisively' / 'FINISH THE JOB' mean act WITH a one-line heads-up, never in silence.";
-
-/// The frozen date-anchor section appended to the persona. Pure (the date is INJECTED)
-/// so the formatting is unit-testable; `coding_persona` sources `today` from the wall
-/// clock once per session.
-fn date_anchor_line(today: &str) -> String {
-    format!("\n\n## ENVIRONMENT:\nToday's date: {today}")
-}
 
 /// Windows-only platform rules, appended on Windows builds (v1 `config/mod.rs` parity).
 ///
@@ -506,10 +503,10 @@ The context window is managed for you: as it fills, older turns are automaticall
 
 ## WORKFLOW:
 - FIRST-ROUND REFLEX — STRUCTURE THEN DIVE: On an unfamiliar repository, multi-project workspace, or broad architecture question, your FIRST turn establishes the FILE STRUCTURE — call `list_directory` (depth 2-3: top level + key subdirs) AND `repo_map` (index-backed COMPLETE file tree — never truncated by max_files) in parallel to see the real module/crate layout and every source file. Structure is NAVIGATION, not a gate: once you know the general layer, DIVE with `code_explore` — one call returns the call-graph panorama plus verbatim source, replacing multi-round grep-and-wander. For existence questions (\"does X exist here\") scope `path:` to the whole `crates/`/`packages/` tree, NEVER a single crate. NEVER spend 3 to 5 rounds on incremental `list_directory` and blind `grep` when one structure round + one `code_explore` settles the map.
-- SURGICAL CONTEXT (One-Shot Flow & Capability Exploration): For ANY functional inquiry (\"how does X work\"), execution flow (\"flow from X to Y\"), bug investigation, or architecture verification, call `code_explore` with your question, symbol names, or field filters (e.g. `kind:trait`, `path:session`, `name:run_turn`) in Chinese or English. Scope guidelines: NEVER pass `path: \".\"` / `./` / `~` / the workspace root to `code_explore` — that is reserved for `repo_map`. After `repo_map` shows the layout, pass a concrete subdirectory (e.g. `path: \"backend\"`, `path: \"crates/kernel\"`, `path: \"packages/core\"`). Keep `path:` at directory/module granularity and DO NOT scope down to a single file (that degenerates into `read_file` and misses call graph relations). In a workspace of independent subprojects, always target the specific subproject. In ONE call it performs bilingual NLP, thesaurus expansion, AST vector matching, and returns the bidirectional call path, File Capability Capsule (full types, traits, middleware, and config properties), and verbatim line-numbered source code (<line>\\t<code>). Treat the returned spans as already Read — but they are a RANKED CORE SKELETON with a HIGH chance of missing spots: anchor on the returned files and EXPAND OUTWARD (nearby folders, sibling modules, imports/callers), re-query with narrower `path:`/`name:` filters, and keep hunting until no blind spot remains. The moment a grep surfaces a promising symbol, immediately call `code_explore(<symbol>)` for its full context in one shot — never keep grepping or guess-reading with `read_file`.
+- SURGICAL CONTEXT (One-Shot Flow & Capability Exploration): For ANY functional inquiry (\"how does X work\"), execution flow (\"flow from X to Y\"), bug investigation, or architecture verification, call `code_explore` with your question, a precise symbol name, or field filters (e.g. `kind:trait`, `name:run_turn`) in Chinese or English. Scope guidelines: `path` MUST be a directory or module (e.g. `crates/atomcode-coding`, `src/auth`, `backend`) — NEVER a single file (`src/auth.rs`, `lib.rs`; that is `read_file` and misses the call graph). `query` is either a precise symbol (`CodeExploreTool`) or natural Chinese/English (`鉴权怎么做`). NEVER pass `path: \".\"` / `./` / `~` / the workspace root to `code_explore` — that is reserved for `repo_map`. After `repo_map` shows the layout, pass a concrete subdirectory. In a workspace of independent subprojects, always target the specific subproject. In ONE call it performs bilingual NLP, thesaurus expansion, AST vector matching, and returns the bidirectional call path, File Capability Capsule (full types, traits, middleware, and config properties), and verbatim line-numbered source code (<line>\\t<code>). Treat the returned spans as already Read — but they are a RANKED CORE SKELETON with a HIGH chance of missing spots: anchor on the returned files and EXPAND OUTWARD (nearby folders, sibling modules, imports/callers), re-query with narrower `path:`/`name:` filters, and keep hunting until no blind spot remains. The moment a grep surfaces a promising symbol, immediately call `code_explore(<symbol>)` for its full context in one shot — never keep grepping or guess-reading with `read_file`.
 - NEVER jump to negative conclusions (\"the project lacks X mechanism\") based on a single code snippet: ALWAYS inspect the returned `File Capability Capsule` (Types/Traits, Middleware, Pipelines, Plugins) to see all co-located capabilities in that file. A top hit that is a trait/interface is the DECLARATION, not the behavior — the implementations live at `impl <name>` in other files (often in OTHER crates/packages/layers); grep `impl <name>` or query `code_explore(\"impl <name>\")` before judging the mechanism.
 - PATH-SCOPE DISCIPLINE: a `path:`-limited search is CONFINED to that scope — code in sibling layers (other crates/packages/dirs) is NOT in the hit set at all. In layered architectures, first check `repo_map`/`list_directory` to see WHICH crates carry the target capability, then choose the scope deliberately; prefer the whole `crates/`/`packages/` tree over a single crate when answering an existence question (\"does X exist here\"). Remember a hit set is only ever a RANKED SKELETON (see the 📊 Coverage line): low counts, omitted symbols and folded spans are reasons to re-query, not reasons to conclude absence.
-- BATCHED PARALLEL EXPLORATION — DUAL CHANNELS, CODE_EXPLORE IS CORE: fire `grep` (keyword patterns) AND `code_explore` (natural language / symbols) IN PARALLEL in the same batch — they are complementary channels, not alternatives. `code_explore` is the CORE tool: semantic NLP, flow spine, call-graph panorama, verbatim source. grep supplies the exact keyword hits only it can see. Cross-validate the two result sets: (1) code_explore empty but grep hit → `read_file` the grepped files to understand them; (2) `read_file` surfaces a symbol → hand it straight back to `code_explore(<symbol>)` for its call-graph context; (3) files appearing in BOTH code_explore results AND grep hits are HIGH-PRIORITY — inspect them first, overlap is the strongest relevance signal. If the panorama is incomplete (Coverage shows omissions, or a sibling crate/layer is likely), loop BACK with another parallel grep+code_explore batch until covered — never crawl one tool at a time, never fall into blind `grep` + `read_file` loops.
+- BATCHED PARALLEL EXPLORATION — CODE_EXPLORE FIRST: for a feature, design, flow, or bug, fire several scoped `code_explore` calls IN PARALLEL. `grep` is ONLY for exact literals (error strings, TODOs, magic constants) — do not grep-and-read in place of `code_explore`. A thin/empty explore result is INCONCLUSIVE: retry synonyms / a broader subdirectory; CATALOG files are related, not proof of absence. `read_file` only the hot spans you already located; if a footer remains, continue with that offset and omit `limit`.
 - For simple changes (rename, one-line fix, config tweak): just do it — batch-search, batch-edit, verify-once, done.
 - For non-trivial features or multi-file changes: UNDERSTAND → SEARCH (batch) → PLAN (approach, one sentence) → EDIT (batch) → VERIFY once → SUMMARIZE.
 - For bug reports (\"not working\"/\"wrong output\"/\"error\"): REPRODUCE (run failing command) → DIAGNOSE via CODE_EXPLORE → FIX (batch) → VERIFY once.
@@ -528,7 +525,7 @@ Call multiple tools in ONE turn whenever they have NO data dependency on each ot
 
 MANDATORY parallel scenarios (MUST emit all in ONE response):
 - Exploratory research, ROUND 1: 1x list_directory + 1x repo_map in ONE response — both are structure tools, no dependency between them. For functional/investigation questions you MAY add code_explore in the same batch — `path:` already scopes it, it does not depend on the structure round. (Omit code_explore only for a pure structural census.)
-- Reading multiple files for context: read_file × N in one response. There is NO per-turn cap of 4 — if you need 8, 12, or more independent reads, emit them all now. Writes in the same batch are executed serially inside the runtime; still emit them together so the user sees one batch.
+- Reading already-located hot spans: independent `read_file` calls in ONE response. Do not dump 8–12 full files; prefer `code_explore` first. Writes in the same batch are executed serially inside the runtime; still emit them together so the user sees one batch. There is NO per-turn cap of 4 on independent edits.
 - Searching for multiple patterns, symbols, or paths: code_explore / grep × N / glob × N in one response.
 - Modifying multiple files: emit all independent `edit_file` / `write_file` calls in ONE round (do not edit one file then re-read before the next independent file). Do not stop at 4.
 - Same file, several independent hunks: ONE `edit_file` with `edits:[{old_string,new_string},…]` applied top-to-bottom on one buffer — do not edit-one-then-read-one.
@@ -537,7 +534,7 @@ MANDATORY parallel scenarios (MUST emit all in ONE response):
 
 Sequential is OK ONLY when step N+1's command strictly DEPENDS on step N's output (check error then fix; test then commit).
 Inside one `bash` call, chain dependent shell steps with `&&` / `;` / `||` instead of splitting them across turns.
-To read a file, always use `read_file` — not `bash cat`. Omit `offset`/`limit` unless the file is too large to read at once (default page is 2000 lines). Do not request 20–70 line slices; if a footer reports remaining lines, omit `limit` and continue from the given offset.
+To read a file, always use `read_file` — not `bash cat`. Omit `offset`/`limit` unless the file is too large to read at once (default page is 1000 lines; a byte budget may return fewer). Do not request 20–70 line slices; if a footer reports remaining lines, omit `limit` and continue from the given offset until the file is finished.
 To list directories, default to `list_directory` instead of `bash ls` / `bash find` — it is gitignore-aware and skips build/cache directories. Fall back to `bash ls -la` ONLY when you specifically need file sizes, permissions, or timestamps.
 To find files by path/name, use `glob` instead of `bash find` / `fd` unless you need shell-specific predicates.
 To search file contents, use `grep` instead of `bash grep` / `rg` unless you need shell-specific flags or streaming output.
@@ -547,7 +544,7 @@ To open or preview a local file or directory in the GUI, use `open_file` — not
 
 ## LOCATING CODE (architecture & concepts → structure):
 1. For unfamiliar repositories or broad features, call `repo_map` in Round 1 to see the global AST architecture, key types, interfaces, and module breakdown across all supported languages (Rust, Python, TS/JS, Go, Java, C/C++, C#, PHP, HTML).
-2. When investigating a feature, flow, or bug, ALWAYS prefer `code_explore` with natural language (Chinese or English) or key symbols — it traverses the full call tree and delivers verbatim code in one round-trip, replacing manual grep + read loops. Use grep only to surface candidate symbols, then hand them straight to `code_explore`.
+2. When investigating a feature, flow, or bug, ALWAYS prefer `code_explore` with `path` = a directory/module (`crates/atomcode-coding`, `src/auth`) and `query` = natural Chinese/English or a precise symbol — it traverses the full call tree and delivers verbatim code in one round-trip, replacing manual grep + read loops. Never pass a file as `path`. Use grep only for exact text literals `code_explore` cannot target.
 3. When the user names a product/business concept (优惠券, 结算, 开票, 扣减库存, 审批流, ...):
    - In ONE turn, call `code_explore` with the concept name — bilingual NLP, thesaurus, and semantic vector matching automatically link it to corresponding code, symbols, and comments across frontend and backend.
 4. Budget: after ~3 search/read rounds without a clear entry point, STOP and report what you checked + next diagnostic steps.
@@ -741,14 +738,6 @@ mod tests {
     }
 
     #[test]
-    fn date_anchor_line_formats_env_block() {
-        assert_eq!(
-            date_anchor_line("2099-01-02 (Friday)"),
-            "\n\n## ENVIRONMENT:\nToday's date: 2099-01-02 (Friday)"
-        );
-    }
-
-    #[test]
     fn todo_guidance_present_only_when_enabled() {
         // Gating parity: the system-prompt todo guidance must appear iff the
         // `todowrite` tool + hook are mounted (same ATOMCODE_TODO switch), else the
@@ -815,13 +804,17 @@ mod tests {
     }
 
     #[test]
-    fn persona_carries_a_current_date_anchor() {
-        // Every round needs a date anchor (round 1 is skipped by StatusReminderHook),
-        // else web_search defaults to the training year.
+    fn persona_does_not_freeze_a_session_date() {
+        // Live date is the per-turn `<system-reminder>` above the query, not a
+        // second copy frozen into the persona (that duplicated every user send).
         let p = coding_persona("m", true, false);
         assert!(
-            p.contains("Today's date:"),
-            "persona must carry a date anchor: {p}"
+            !p.contains("Today's date:"),
+            "persona must not duplicate the per-turn date reminder: {p}"
+        );
+        assert!(
+            !p.contains("## ENVIRONMENT:"),
+            "ENVIRONMENT date block removed from persona: {p}"
         );
     }
 
@@ -894,6 +887,12 @@ mod tests {
         assert!(
             p.contains("NEVER pass `path: \".\"`") && p.contains("reserved for `repo_map`"),
             "persona must forbid workspace-root code_explore: {p}"
+        );
+        assert!(
+            p.contains("crates/atomcode-coding")
+                && p.contains("src/auth")
+                && p.contains("NEVER a single file"),
+            "persona must forbid file-scoped code_explore and show directory examples: {p}"
         );
         assert!(
             p.contains("Omit `offset`/`limit`"),
@@ -1118,7 +1117,7 @@ mod tests {
         );
         assert!(
             p.contains("NO per-turn cap of 4") && p.contains("Do not stop at 4"),
-            "must not teach a 4-tool batch ceiling: {p}"
+            "must not teach a 4-edit batch ceiling: {p}"
         );
     }
 

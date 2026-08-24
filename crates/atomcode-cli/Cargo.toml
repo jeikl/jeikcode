@@ -8,6 +8,10 @@ default-run = "atomcode"
 name = "atomcode"
 path = "src/main.rs"
 
+[[bin]]
+name = "jeikcode"
+path = "src/main.rs"
+
 # Thin lib target so integration tests (and the bin) can reach testable
 # modules like `uninstall` (moved here from atomcode-core). A bin-only crate
 # exposes no API to `tests/`, which is why the uninstall manifest used to

@@ -214,7 +214,7 @@ impl<W: Write + Send> Renderer for PlainRenderer<W> {
                 self.drop_transient();
                 let _ = writeln!(
                     self.out,
-                    "AtomCode  {}  {}",
+                    "JeikCode  {}  {}",
                     scrub_controls(&model),
                     scrub_controls(&working_dir)
                 );

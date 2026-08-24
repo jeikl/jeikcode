@@ -10,7 +10,7 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use anyhow::Result;
-use clap::{CommandFactory, Parser, Subcommand};
+use clap::{CommandFactory, FromArgMatches, Parser, Subcommand};
 use clap_complete::Shell;
 
 mod schedule_cmd;
@@ -660,7 +660,9 @@ fn scan_config_language() -> Option<atomcode_tuix::i18n::Locale> {
 fn build_i18n_command() -> clap::Command {
     use atomcode_tuix::i18n::{t, Msg};
 
-    let cmd = Cli::command();
+    let cmd = Cli::command()
+        .name(invoked_cli_name())
+        .bin_name(invoked_cli_name());
 
     // Mutate the top-level about
     let cmd = cmd.about(t(Msg::CliAbout).into_owned());
@@ -792,6 +794,22 @@ const VERSION: &str = concat!(
     env!("ATOMCODE_BUILD_DIRTY"),
     ")"
 );
+
+fn invoked_cli_name() -> &'static str {
+    static NAME: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    NAME.get_or_init(|| {
+        std::env::args_os()
+            .next()
+            .map(std::path::PathBuf::from)
+            .and_then(|p| {
+                p.file_stem()
+                    .map(|s| s.to_string_lossy().to_ascii_lowercase())
+            })
+            .filter(|s| s == "jeikcode" || s == "atomcode")
+            .unwrap_or_else(|| "atomcode".into())
+    })
+    .as_str()
+}
 
 #[derive(Parser)]
 #[command(name = "atomcode", version = VERSION, about = "AI coding assistant in your terminal")]
@@ -1560,8 +1578,15 @@ async fn run() -> Result<i32> {
         // Unreachable: e.exit() prints the localised help and exits.
     }
 
-    // No --help was passed. Parse normally to get the Cli struct.
-    let cli = Cli::parse();
+    // No --help was passed. Parse with the invoked binary name so
+    // `jeikcode --help` and `atomcode --help` are the same product.
+    let cli = Cli::from_arg_matches(
+        &Cli::command()
+            .name(invoked_cli_name())
+            .bin_name(invoked_cli_name())
+            .get_matches(),
+    )
+    .unwrap_or_else(|e| e.exit());
 
     // ── Askpass early exit ────────────────────────────────────────────────────
     // Handle `atomcode __askpass <prompt>` before ANY TUI/telemetry setup.

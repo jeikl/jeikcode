@@ -34,24 +34,7 @@ offline_mode = "off"
 # Provider 示例
 # =============================================================================
 
-# ─── Example: AtomGit CodingPlan (recommended) ───
-# Run `atomcode login` to auto-configure via OAuth, which writes
-# providers like the one below. Manual setup is for reference only.
-#
-# [providers.AtomGit-deepseek-v4-flash]
-# type = "openai"
-# api_key = "<your-codingplan-api-key>"
-# model = "deepseek-v4-flash"
-# base_url = "https://llm-api.atomgit.com/v1"
-# context_window = 1000000
-#
-# [providers.AtomGit-Qwen-Qwen3-VL-8B-Instruct]
-# type = "openai"
-# api_key = "<your-codingplan-api-key>"
-# model = "Qwen/Qwen3-VL-8B-Instruct"
-# base_url = "https://llm-api.atomgit.com/v1"
-# context_window = 64000
-# ─────────────────────────────────────────────────
+# ─── Add a provider via `/provider` in the TUI, or write a table like below. ───
 
 # -------- DeepSeek ----------
 [providers.deepseek]
@@ -145,39 +128,10 @@ model = "deepseek-ai/DeepSeek-V3"
 base_url = "https://api.siliconflow.cn/v1"
 context_window = 64000
 
-# -------- AtomGit CodingPlan（OAuth 自动配置）----------
-# /login 命令会自动写入，无需手动填写 api_key
-# 以下仅为展示格式，实际由系统自动生成。
-# [providers."AtomGit-GLM-5.2"]
-# type = "openai"
-# model = "GLM-5.2"
-# base_url = "https://llm-api.atomgit.com/v1"
-# context_window = 1000000
-# max_tokens = 131072
-#
-# [providers."AtomGit-deepseek-v4-flash"]
-# type = "openai"
-# model = "deepseek-v4-flash"
-# base_url = "https://llm-api.atomgit.com/v1"
-# context_window = 1000000
-#
-# [providers."AtomGit-Qwen-Qwen3-VL-8B-Instruct"]
-# type = "openai"
-# model = "Qwen/Qwen3-VL-8B-Instruct"
-# base_url = "https://llm-api.atomgit.com/v1"
-# context_window = 64000
-
 # =============================================================================
-# 视觉预处理（当主 provider 不支持图片时，用此 provider 代为识别）
+# 视觉预处理（可选：主模型不支持图片时，指定另一个已配置的 provider 代为识别）
 # =============================================================================
-# vision_preprocessor_provider = "qwen-vl"
-
-# [providers."qwen-vl"]
-# type = "openai"
-# api_key = "sk-..."
-# model = "Qwen/Qwen3-VL-8B-Instruct"
-# base_url = "https://llm-api.atomgit.com/v1"
-# context_window = 64000
+# vision_preprocessor_provider = "your-vl-provider-key"
 
 # =============================================================================
 # 多 provider 切换快捷键

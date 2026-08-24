@@ -23,9 +23,11 @@ $Exe = Join-Path $RepoRoot "target\release\atomcode.exe"
 $Prefix = if ($env:ATOMCODE_PREFIX) { $env:ATOMCODE_PREFIX } else { Join-Path $HOME ".local\bin" }
 New-Item -ItemType Directory -Force -Path $Prefix | Out-Null
 $Wrapper = Join-Path $Prefix "atomcode.cmd"
+$AliasWrapper = Join-Path $Prefix "jeikcode.cmd"
 
 if ($Uninstall) {
     Remove-Item -Force $Wrapper -ErrorAction SilentlyContinue
+    Remove-Item -Force $AliasWrapper -ErrorAction SilentlyContinue
     Write-Host "==> removed dev wrapper: $Wrapper"
     exit 0
 }
@@ -50,7 +52,9 @@ set ATOMCODE_DEV=1
 set ATOMCODE_NO_UPDATE=1
 "$Exe" %*
 "@ | Set-Content -Path $Wrapper -Encoding Ascii
+Copy-Item -Force $Wrapper $AliasWrapper
 Write-Host "==> installed dev wrapper: $Wrapper"
+Write-Host "    alias: $AliasWrapper"
 Write-Host "    -> $Exe"
 
 # --- PATH ---
@@ -63,5 +67,5 @@ if ($currentPath -notlike "*$Prefix*") {
 }
 
 Write-Host ""
-Write-Host "==> 完成! 新开一个终端直接运行: atomcode"
+Write-Host "==> 完成! 新开一个终端直接运行: atomcode  或  jeikcode"
 Write-Host "    提示: 源码更新后重新执行 scripts\dev-install.ps1 即可(增量构建很快)"

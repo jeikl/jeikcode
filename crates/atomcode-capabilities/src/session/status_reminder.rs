@@ -1,8 +1,9 @@
 //! `StatusReminderHook` — a per-turn `<system-reminder>` tail carrying live runtime status
 //! (date + round budget) so the model can pace itself and resolve relative dates ("yesterday")
-//! into concrete `after`/`before` for [`recall`](super::recall). Deliberately DATE-only (no
-//! wall-clock time) and with NO context-usage gauge — context pressure is handled silently by
-//! auto-compaction, never pushed to the model (see `render`).
+//! into concrete `after`/`before` for [`recall`](super::recall). This is the **sole**
+//! model-facing calendar date (the persona no longer freezes a duplicate `Today's date`).
+//! Deliberately DATE-only (no wall-clock time) and with NO context-usage gauge — context
+//! pressure is handled silently by auto-compaction, never pushed to the model (see `render`).
 //!
 //! Cache-safety: injected once per user turn in [`LifecycleHooks::turn_start`], as a
 //! synthetic user message **immediately ABOVE** the real query (Grok Build order).

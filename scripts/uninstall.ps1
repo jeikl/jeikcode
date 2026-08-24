@@ -36,13 +36,15 @@ if ($Purge -and $KeepData) { Write-Error "-Purge conflicts with -KeepData"; exit
 # locate install dir
 $InstallDir = if ($env:ATOMCODE_PREFIX) { $env:ATOMCODE_PREFIX } else { Join-Path $env:LOCALAPPDATA "AtomCode" }
 $Binary = Join-Path $InstallDir "atomcode.exe"
+$AliasBinary = Join-Path $InstallDir "jeikcode.exe"
 
 $DataDir = if ($env:ATOMCODE_HOME) { $env:ATOMCODE_HOME } else { Join-Path $env:USERPROFILE ".atomcode" }
 
 # plan
 Write-Host "Will remove (Group 1):"
 if (Test-Path $Binary) { Write-Host "  $Binary" }
-foreach ($f in @("atomcode.exe.bak",".atomcode.rolling",".atomcode.download",".atomcode.writable-probe")) {
+if (Test-Path $AliasBinary) { Write-Host "  $AliasBinary" }
+foreach ($f in @("atomcode.exe.bak","jeikcode.exe.bak",".atomcode.rolling",".atomcode.download",".atomcode.writable-probe")) {
     $p = Join-Path $InstallDir $f
     if (Test-Path $p) { Write-Host "  $p" }
 }
@@ -109,14 +111,16 @@ if ($cur) {
 }
 
 # binary + install dir
-if (Test-Path $Binary) {
-    try {
-        Remove-Item -Force $Binary
-        Remove-Item -Recurse -Force $InstallDir -ErrorAction SilentlyContinue
-    } catch {
-        Write-Error "could not remove $Binary — close any running atomcode.exe and re-run."
-        exit 4
+foreach ($bin in @($Binary, $AliasBinary)) {
+    if (Test-Path $bin) {
+        try {
+            Remove-Item -Force $bin
+        } catch {
+            Write-Error "could not remove $bin — close any running atomcode/jeikcode and re-run."
+            exit 4
+        }
     }
 }
+Remove-Item -Recurse -Force $InstallDir -ErrorAction SilentlyContinue
 
 Write-Host "uninstall complete."

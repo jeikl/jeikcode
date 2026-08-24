@@ -623,6 +623,7 @@ async fn prepare_with_plugin_hooks_reusing_lease(
     //    sacred_floor — compaction cannot drain it.
     // 2b. SkillCatalogHook — session_start: inject the AVAILABLE SKILLS catalog as a
     //    frozen synthetic User after memory. Same sacred-floor protection.
+    // 2b2. CodeToolsHook — frozen `=== CODE TOOLS ===` routing card (code_explore first).
     // 2c. McpInstructionsHook — session_start / turn_start: inject MCP server
     //     instructions as a frozen synthetic User after skills. Unchanged bytes
     //     keep the prompt-cache prefix stable; the user query stays at the tail.
@@ -652,6 +653,10 @@ async fn prepare_with_plugin_hooks_reusing_lease(
     // (registered below) uses it to stay a no-op when there's nothing to trigger.
     let has_skills = skill_catalog.as_ref().is_some_and(|c| !c.trim().is_empty());
     hooks.push(Arc::new(SkillCatalogHook::new(skill_catalog)));
+    let code_explore_mounted = names.iter().any(|n| n == "code_explore");
+    hooks.push(Arc::new(crate::code_tools::CodeToolsHook::new(
+        code_explore_mounted,
+    )));
     if let Some(registry) = &mcp_registry {
         hooks.push(Arc::new(McpInstructionsHook::new(
             Arc::clone(registry),
@@ -712,6 +717,10 @@ async fn prepare_with_plugin_hooks_reusing_lease(
     // catalog (never nudge use_skill when no skills are installed). No-op otherwise.
     hooks.push(Arc::new(crate::skill_first::SkillFirstHook::new(
         &cfg.model, has_skills,
+    )));
+    hooks.push(Arc::new(crate::code_tools_first::CodeToolsFirstHook::new(
+        &cfg.model,
+        code_explore_mounted,
     )));
     // NOTE: the `RateLimitHook` is NOT built here. It gates CodingPlan-specific 429
     // messaging on `cfg.base_url` being the gateway, so — like the turn-level

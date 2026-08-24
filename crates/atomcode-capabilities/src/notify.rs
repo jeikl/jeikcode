@@ -365,7 +365,7 @@ fn write_iterm2_notification(out: &mut dyn Write, title: &str, body: &str) -> io
         (false, false) => sanitize_plain_text(&format!("{title}: {body}")),
         (false, true) => sanitize_plain_text(title),
         (true, false) => sanitize_plain_text(body),
-        (true, true) => String::from("AtomCode"),
+        (true, true) => String::from("JeikCode"),
     };
     write!(out, "\x1b]9;{payload}\x1b\\")?;
     Ok(())

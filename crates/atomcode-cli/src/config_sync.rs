@@ -1,4 +1,3 @@
-use std::collections::HashMap;
 use std::fs;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
@@ -26,25 +25,92 @@ pub const BUNDLED_ASSETS: &[BundledFileEntry] = &[
         description: "工作流与执行规范 (rules.yaml)",
     },
     BundledFileEntry {
-        relative_path: "prompts/prompts.md",
-        content: include_str!("../../atomcode-coding/assets/prompts/prompts.md"),
-        description: "提示词指南 (prompts.md)",
+        relative_path: "prompts/root_docs_prompts.md",
+        content: include_str!("../../atomcode-coding/assets/prompts/root_docs_prompts.md"),
+        description: "提示词指南（不加载进模型） (root_docs_prompts.md)",
     },
     BundledFileEntry {
-        relative_path: "prompts/内置工具.yaml",
-        content: include_str!("../../atomcode-coding/assets/prompts/内置工具.yaml"),
-        description: "内置工具提示词说明 (内置工具.yaml)",
+        relative_path: "prompts/root_docs_内置工具.yaml",
+        content: include_str!("../../atomcode-coding/assets/prompts/root_docs_内置工具.yaml"),
+        description: "内置工具说明文档（不加载进模型） (root_docs_内置工具.yaml)",
     },
     BundledFileEntry {
-        relative_path: "prompts/内置技能.yaml",
-        content: include_str!("../../atomcode-coding/assets/prompts/内置技能.yaml"),
-        description: "内置技能提示词说明 (内置技能.yaml)",
+        relative_path: "prompts/root_docs_内置技能.yaml",
+        content: include_str!("../../atomcode-coding/assets/prompts/root_docs_内置技能.yaml"),
+        description: "内置技能说明文档（不加载进模型） (root_docs_内置技能.yaml)",
     },
     BundledFileEntry {
         relative_path: "config.toml",
-        content: "[tools.bash]\ndefault_timeout_secs = 900\nmax_timeout_secs = 1800\nsilent_kill_secs = 900\n",
-        description: "系统与工具通用配置 (config.toml - 基础工具段)",
+        content: include_str!("../assets/default-config.toml"),
+        description: "系统与工具通用配置 (config.toml — 保留用户模型/账号)",
     },
+    BundledFileEntry {
+        relative_path: "builtin-tools.txt",
+        content: include_str!("../../atomcode-capabilities/assets/builtin-tools.txt"),
+        description: "内置工具清单 (builtin-tools.txt)",
+    },
+    BundledFileEntry {
+        relative_path: "mcp.json",
+        content: include_str!("../../atomcode-capabilities/assets/mcp.json"),
+        description: "默认 MCP 服务器 (mcp.json)",
+    },
+    BundledFileEntry {
+        relative_path: ".codegraphignore",
+        content: include_str!("../../atomcode-capabilities/assets/.codegraphignore"),
+        description: "代码图谱忽略规则 (.codegraphignore)",
+    },
+    BundledFileEntry {
+        relative_path: "thesaurus/admin_system.txt",
+        content: include_str!("../../atomcode-capabilities/assets/thesaurus/admin_system.txt"),
+        description: "词林 admin_system.txt",
+    },
+    BundledFileEntry {
+        relative_path: "thesaurus/agent_core.txt",
+        content: include_str!("../../atomcode-capabilities/assets/thesaurus/agent_core.txt"),
+        description: "词林 agent_core.txt",
+    },
+    BundledFileEntry {
+        relative_path: "thesaurus/ai_agent.txt",
+        content: include_str!("../../atomcode-capabilities/assets/thesaurus/ai_agent.txt"),
+        description: "词林 ai_agent.txt",
+    },
+    BundledFileEntry {
+        relative_path: "thesaurus/computer_science.txt",
+        content: include_str!("../../atomcode-capabilities/assets/thesaurus/computer_science.txt"),
+        description: "词林 computer_science.txt",
+    },
+    BundledFileEntry {
+        relative_path: "thesaurus/ecommerce.txt",
+        content: include_str!("../../atomcode-capabilities/assets/thesaurus/ecommerce.txt"),
+        description: "词林 ecommerce.txt",
+    },
+    BundledFileEntry {
+        relative_path: "thesaurus/fullstack_dev.txt",
+        content: include_str!("../../atomcode-capabilities/assets/thesaurus/fullstack_dev.txt"),
+        description: "词林 fullstack_dev.txt",
+    },
+    BundledFileEntry {
+        relative_path: "thesaurus/medical.txt",
+        content: include_str!("../../atomcode-capabilities/assets/thesaurus/medical.txt"),
+        description: "词林 medical.txt",
+    },
+    BundledFileEntry {
+        relative_path: "thesaurus/robotics.txt",
+        content: include_str!("../../atomcode-capabilities/assets/thesaurus/robotics.txt"),
+        description: "词林 robotics.txt",
+    },
+    BundledFileEntry {
+        relative_path: "thesaurus/web_http.txt",
+        content: include_str!("../../atomcode-capabilities/assets/thesaurus/web_http.txt"),
+        description: "词林 web_http.txt",
+    },
+];
+
+/// Old prompt seed names that must be removed after the root_docs_ rename.
+const STALE_HOME_FILES: &[&str] = &[
+    "prompts/prompts.md",
+    "prompts/内置工具.yaml",
+    "prompts/内置技能.yaml",
 ];
 
 #[derive(Clone, Debug)]
@@ -57,51 +123,47 @@ pub struct ConfigDiffItem {
     pub selected: bool,
 }
 
-/// 智能合并 config.toml：严格保留用户的模型自定义配置、默认选择模型、档位等，只同步 tools/系统通用更改
+/// Keys that stay on upgrade: the user's model/account/provider customisation.
+const PRESERVE_CONFIG_KEYS: &[&str] = &[
+    "models",
+    "default_model",
+    "default_provider",
+    "providers",
+    "provider_accounts",
+    "provider",
+    "model",
+    "profiles",
+    "reasoning_effort",
+    "evaluator_provider",
+];
+
+/// New-install defaults for everything except the user's model tables.
 pub fn merge_user_config_preserving_models(existing: &str, new_template: &str) -> String {
-    let mut existing_val: toml::Value = match toml::from_str(existing) {
+    let existing_val: toml::Value = match toml::from_str(existing) {
         Ok(v) => v,
         Err(_) => return existing.to_string(),
     };
-    let new_val: toml::Value = match toml::from_str(new_template) {
+    let mut new_val: toml::Value = match toml::from_str(new_template) {
         Ok(v) => v,
         Err(_) => return existing.to_string(),
     };
 
-    if let (toml::Value::Table(ref mut exist_tab), toml::Value::Table(ref new_tab)) =
-        (&mut existing_val, &new_val)
+    if let (toml::Value::Table(exist_tab), toml::Value::Table(ref mut new_tab)) =
+        (&existing_val, &mut new_val)
     {
-        for (k, v) in new_tab {
-            // ⚠️ 严格跳过用户的自定义模型配置和档位偏好
-            if k == "models"
-                || k == "default_model"
-                || k == "model"
-                || k == "profiles"
-                || k == "providers"
-                || k == "provider"
-                || k == "reasoning_effort"
-            {
-                continue;
+        for k in PRESERVE_CONFIG_KEYS {
+            if let Some(v) = exist_tab.get(*k) {
+                new_tab.insert((*k).to_string(), v.clone());
             }
-            if k == "tools" {
-                if let (Some(toml::Value::Table(exist_tools)), toml::Value::Table(new_tools)) =
-                    (exist_tab.get_mut("tools"), v)
-                {
-                    for (tool_k, tool_v) in new_tools {
-                        exist_tools.insert(tool_k.clone(), tool_v.clone());
-                    }
-                    continue;
-                }
-            }
-            exist_tab.insert(k.clone(), v.clone());
         }
     }
 
-    toml::to_string_pretty(&existing_val).unwrap_or_else(|_| existing.to_string())
+    toml::to_string_pretty(&new_val).unwrap_or_else(|_| existing.to_string())
 }
 
 /// 扫描 ~/.atomcode 目录下所有涉及的内置非模型配置变更项
 pub fn scan_atomcode_config_diffs(atomcode_home: &Path) -> Vec<ConfigDiffItem> {
+    remove_stale_home_files(atomcode_home);
     let mut diffs = Vec::new();
 
     for entry in BUNDLED_ASSETS {
@@ -150,6 +212,15 @@ pub fn scan_atomcode_config_diffs(atomcode_home: &Path) -> Vec<ConfigDiffItem> {
     }
 
     diffs
+}
+
+fn remove_stale_home_files(atomcode_home: &Path) {
+    for rel in STALE_HOME_FILES {
+        let p = atomcode_home.join(rel);
+        if p.exists() {
+            let _ = fs::remove_file(&p);
+        }
+    }
 }
 
 /// 交互式多选列表渲染与交互引擎：

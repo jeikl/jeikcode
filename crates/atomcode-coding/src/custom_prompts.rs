@@ -1,12 +1,15 @@
 ﻿//! Custom prompt loader and in-memory cache with hot-reloading for AtomCode.
 //!
 //! Loads configuration from `$ATOMCODE_HOME/prompts/` (or `~/.atomcode/prompts/`):
-//! - `init.yaml`: Identity, Precedence, Platform, Environment. **Loaded** — overrides built-in identity.
-//! - `rules.yaml`: Workflow, Tools Discipline, Doing Tasks, Task Tracking, Delegation, etc.
-//!   **Loaded** — when present, **replaces** the compiled-in `RULES` persona block (not merged).
-//! - `内置工具.yaml` / `内置技能.yaml`: documentation / seed only. **Not loaded.**
-//!   Live tool schema comes from each `Tool::description()` / `parameters_schema()` in Rust;
-//!   live skills come from installed skill dirs (`SKILL.md`), not this YAML.
+//! - `init.yaml` (**live**): identity, precedence, security, environment. Every key in
+//!   the seed is deserialized and rendered into the System persona.
+//! - `rules.yaml` (**live**): workflow, tools discipline, locating code, doing tasks,
+//!   etc. When present, **replaces** the compiled-in `RULES` block (not merged).
+//!   Every key in the seed is rendered; unknown keys are ignored.
+//! - `root_docs_prompts.md` / `root_docs_内置工具.yaml` / `root_docs_内置技能.yaml`:
+//!   human-facing seed documents. **Not loaded** into the model. Live tool schema
+//!   comes from `Tool::description()` / `parameters_schema()`; live skills come
+//!   from installed `SKILL.md` dirs.
 //!
 //! Utilizes an in-memory cache with modification timestamp (`mtime`) validation:
 //! - If the files have not been modified: returns cached in-memory structure with 0 parsing cost.
@@ -24,7 +27,8 @@ pub struct CustomPromptConfig {
     pub version: Option<String>,
     pub identity: Option<IdentityConfig>,
     pub precedence: Option<PrecedenceConfig>,
-    pub platform: Option<PlatformConfig>,
+    pub security: Option<SecurityConfig>,
+    pub environment: Option<EnvironmentConfig>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, Default)]
@@ -42,8 +46,15 @@ pub struct PrecedenceConfig {
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, Default)]
-pub struct PlatformConfig {
-    pub windows: Option<String>,
+pub struct SecurityConfig {
+    pub system_reminders: Option<String>,
+    pub mcp_instructions: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, Default)]
+pub struct EnvironmentConfig {
+    pub context_management: Option<String>,
+    pub windows_platform: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, Default)]
@@ -59,7 +70,6 @@ pub struct CustomRulesConfig {
     pub output: Option<OutputConfig>,
     pub chinese_support: Option<String>,
     pub task_tracking: Option<String>,
-    pub user_communication: Option<String>,
     pub asking_the_user: Option<String>,
     pub delegation: Option<String>,
     pub code_review: Option<String>,
@@ -88,6 +98,7 @@ pub struct ToolsDisciplineConfig {
 #[derive(Debug, Clone, Deserialize, Serialize, Default)]
 pub struct LocatingCodeConfig {
     pub repo_map_rule: Option<String>,
+    pub explore_first: Option<String>,
     pub business_concepts: Option<String>,
     pub upgrade_rule: Option<String>,
 }
@@ -142,9 +153,18 @@ fn strip_utf8_bom(content: &str) -> &str {
 const PROMPT_SEEDS: &[(&str, &str)] = &[
     ("init.yaml", include_str!("../assets/prompts/init.yaml")),
     ("rules.yaml", include_str!("../assets/prompts/rules.yaml")),
-    ("prompts.md", include_str!("../assets/prompts/prompts.md")),
-    ("内置工具.yaml", include_str!("../assets/prompts/内置工具.yaml")),
-    ("内置技能.yaml", include_str!("../assets/prompts/内置技能.yaml")),
+    (
+        "root_docs_prompts.md",
+        include_str!("../assets/prompts/root_docs_prompts.md"),
+    ),
+    (
+        "root_docs_内置工具.yaml",
+        include_str!("../assets/prompts/root_docs_内置工具.yaml"),
+    ),
+    (
+        "root_docs_内置技能.yaml",
+        include_str!("../assets/prompts/root_docs_内置技能.yaml"),
+    ),
 ];
 
 /// Idempotent first-run seed of `~/.atomcode/prompts/` (or `$ATOMCODE_HOME/prompts/`).
@@ -283,13 +303,71 @@ pub fn render_identity_and_precedence(model: &str) -> (String, Option<String>) {
     }
 }
 
+/// Live `init.yaml` sections that sit after identity/precedence: system reminders,
+/// MCP isolation, context management. `None` when no init file is loaded.
+pub fn render_init_live_prefix() -> Option<String> {
+    let cfg = get_custom_prompt_config()?;
+    render_init_live_prefix_from(&cfg)
+}
+
+pub(crate) fn render_init_live_prefix_from(cfg: &CustomPromptConfig) -> Option<String> {
+    let mut out = String::new();
+    if let Some(sec) = &cfg.security {
+        if let Some(s) = sec.system_reminders.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+            out.push_str("## SYSTEM REMINDERS:\n");
+            out.push_str(s);
+            out.push_str("\n\n");
+        }
+        if let Some(s) = sec.mcp_instructions.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+            out.push_str("## MCP SERVER INSTRUCTIONS:\n");
+            out.push_str(s);
+            out.push_str("\n\n");
+        }
+    }
+    if let Some(env) = &cfg.environment {
+        if let Some(s) = env
+            .context_management
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
+            out.push_str("## CONTEXT MANAGEMENT:\n");
+            out.push_str(s);
+            out.push_str("\n\n");
+        }
+    }
+    let trimmed = out.trim_end().to_string();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed)
+    }
+}
+
+/// Windows platform line from live `init.yaml`. `None` when unset or not loaded.
+pub fn render_init_windows_platform() -> Option<String> {
+    let cfg = get_custom_prompt_config()?;
+    cfg.environment
+        .as_ref()
+        .and_then(|e| e.windows_platform.clone())
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+}
+
 /// Render rules from `rules.yaml` if available, formatted as markdown sections.
 pub fn render_custom_rules() -> Option<String> {
     let cfg = get_custom_rules_config()?;
+    let out = render_custom_rules_from(&cfg);
+    if out.is_empty() {
+        None
+    } else {
+        Some(out)
+    }
+}
+
+pub(crate) fn render_custom_rules_from(cfg: &CustomRulesConfig) -> String {
     let mut out = String::new();
 
-    // Context management & system reminders prefix
-    out.push_str("## CONTEXT MANAGEMENT:\nThe context window is managed for you: as it fills, older turns are automatically compacted (tool results are stubbed, then summarized). Do NOT tell the user to start a new conversation, clear the history, or that you are \"running low on context\" in order to manage it — that is handled automatically. Keep working; if some earlier detail was condensed and you need it, re-read the source.\n\n");
 
     // Workflow
     if let Some(wf) = &cfg.workflow {
@@ -339,20 +417,33 @@ pub fn render_custom_rules() -> Option<String> {
             }
             out.push('\n');
         }
+        if let Some(firm) = td.firm_tool_discipline.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+            out.push_str("## TOOL DISCIPLINE (MANDATORY):\n");
+            out.push_str(firm);
+            out.push_str("\n\n");
+        }
     }
 
     // Locating code
     if let Some(lc) = &cfg.locating_code {
         out.push_str("## LOCATING CODE:\n");
+        let mut n = 1u32;
         if let Some(r) = &lc.repo_map_rule {
-            out.push_str(&format!("1. {r}\n"));
+            out.push_str(&format!("{n}. {r}\n"));
+            n += 1;
+        }
+        if let Some(e) = &lc.explore_first {
+            out.push_str(&format!("{n}. {e}\n"));
+            n += 1;
         }
         if let Some(b) = &lc.business_concepts {
-            out.push_str(&format!("2. {b}\n"));
+            out.push_str(&format!("{n}. {b}\n"));
+            n += 1;
         }
         if let Some(u) = &lc.upgrade_rule {
-            out.push_str(&format!("3. UPGRADE: {u}\n"));
+            out.push_str(&format!("{n}. UPGRADE: {u}\n"));
         }
+        let _ = n;
         out.push('\n');
     }
 
@@ -413,7 +504,33 @@ pub fn render_custom_rules() -> Option<String> {
         out.push_str(&format!("## TASK TRACKING:\n{tt}\n\n"));
     }
 
-    Some(out.trim_end().to_string())
+    if let Some(ask) = &cfg.asking_the_user {
+        out.push_str(&format!("## ASKING THE USER:\n{ask}\n\n"));
+    }
+
+    if let Some(del) = &cfg.delegation {
+        out.push_str(&format!("## DELEGATING WITH `task`:\n{del}\n\n"));
+    }
+
+    if let Some(rev) = &cfg.code_review {
+        out.push_str(&format!("## CODE REVIEW:\n{rev}\n\n"));
+    }
+
+    if let Some(sk) = &cfg.skills {
+        out.push_str(&format!("## SKILLS:\n{sk}\n\n"));
+    }
+
+    if let Some(firm) = &cfg.firm_execution_discipline {
+        if !firm.is_empty() {
+            out.push_str("## EXECUTION DISCIPLINE (MANDATORY):\n");
+            for item in firm {
+                out.push_str(&format!("- {item}\n"));
+            }
+            out.push('\n');
+        }
+    }
+
+    out.trim_end().to_string()
 }
 
 #[cfg(test)]
@@ -483,14 +600,99 @@ doing_tasks:
         let rules: CustomRulesConfig =
             serde_yaml::from_str(strip_utf8_bom(include_str!("../assets/prompts/rules.yaml")))
                 .expect("rules.yaml");
-        assert!(rules
+        let surgical = rules
             .workflow
             .as_ref()
             .unwrap()
             .surgical_context
             .as_deref()
-            .unwrap()
-            .contains("NEVER pass"));
+            .unwrap();
+        assert!(surgical.contains("NEVER pass"));
+        assert!(
+            surgical.contains("crates/atomcode-coding") && surgical.contains("src/auth.rs"),
+            "surgical_context must show directory GOOD / file BAD: {surgical}"
+        );
+        assert!(
+            rules
+                .locating_code
+                .as_ref()
+                .unwrap()
+                .explore_first
+                .as_deref()
+                .unwrap()
+                .contains("code_explore"),
+            "explore_first is a live rules.yaml field"
+        );
+    }
+
+    #[test]
+    fn seed_init_yaml_live_fields_all_render() {
+        let init: CustomPromptConfig =
+            serde_yaml::from_str(strip_utf8_bom(include_str!("../assets/prompts/init.yaml")))
+                .expect("init.yaml");
+        let prefix = render_init_live_prefix_from(&init).expect("init live prefix");
+        assert!(prefix.contains("## SYSTEM REMINDERS:"), "{prefix}");
+        assert!(prefix.contains("## MCP SERVER INSTRUCTIONS:"), "{prefix}");
+        assert!(prefix.contains("## CONTEXT MANAGEMENT:"), "{prefix}");
+        assert!(
+            init.environment
+                .as_ref()
+                .unwrap()
+                .windows_platform
+                .as_deref()
+                .unwrap()
+                .contains("where"),
+            "windows_platform is live"
+        );
+    }
+
+    #[test]
+    fn seed_rules_yaml_live_fields_all_render() {
+        let rules: CustomRulesConfig =
+            serde_yaml::from_str(strip_utf8_bom(include_str!("../assets/prompts/rules.yaml")))
+                .expect("rules.yaml");
+        let out = render_custom_rules_from(&rules);
+        for needle in [
+            "## WORKFLOW:",
+            "PRIMARY EXPLORATION",
+            "## TOOL DISCIPLINE (MANDATORY):",
+            "## LOCATING CODE:",
+            "## ASKING THE USER:",
+            "## DELEGATING WITH `task`:",
+            "## CODE REVIEW:",
+            "## SKILLS:",
+            "## EXECUTION DISCIPLINE (MANDATORY):",
+            "## TASK TRACKING:",
+        ] {
+            assert!(out.contains(needle), "missing live field {needle} in:\n{out}");
+        }
+        assert!(
+            !out.contains("## CONTEXT MANAGEMENT:"),
+            "context lives in init.yaml, not rules.yaml"
+        );
+    }
+
+    #[test]
+    fn prompt_seeds_are_live_yaml_or_root_docs() {
+        let names: Vec<&str> = PROMPT_SEEDS.iter().map(|(n, _)| *n).collect();
+        assert_eq!(
+            names,
+            vec![
+                "init.yaml",
+                "rules.yaml",
+                "root_docs_prompts.md",
+                "root_docs_内置工具.yaml",
+                "root_docs_内置技能.yaml",
+            ]
+        );
+        for (name, _) in PROMPT_SEEDS {
+            if *name != "init.yaml" && *name != "rules.yaml" {
+                assert!(
+                    name.starts_with("root_docs_"),
+                    "non-live seed must be named root_docs_*: {name}"
+                );
+            }
+        }
     }
 
     #[test]

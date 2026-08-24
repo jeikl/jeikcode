@@ -63,7 +63,7 @@ env  ATOMCODE_UPDATE_MANIFEST_URL / ATOMCODE_UPDATE_DOWNLOAD_BASE   (最高)
 首次启动幂等 seed(不覆盖用户已有文件):
 
 - `CodeExploreTool::new`:`~/.atomcode/thesaurus/` 9 个领域词林(agent_core / ai_agent / computer_science / web_http / fullstack_dev / ecommerce / admin_system / medical / robotics)、`builtin-tools.txt`、`mcp.json`、`.codegraphignore`;
-- Persona 组装:`~/.atomcode/prompts/` 写入 `init.yaml`(JeikCode 身份)+ `rules.yaml`(工作流/并发纪律,含 `code_explore` 禁止根 path)+ `prompts.md` + `内置工具.yaml` / `内置技能.yaml`(文档/种子,不覆盖线上 schema)。已有文件永不覆盖。
+- Persona 组装:`~/.atomcode/prompts/` 写入 `init.yaml`(身份/优先级/安全/环境,全部进 System)+ `rules.yaml`(工作流/纪律,全部进 System)+ `root_docs_prompts.md` + `root_docs_内置工具.yaml` / `root_docs_内置技能.yaml`(人类文档,不进模型、不覆盖线上 schema)。已有文件永不覆盖。
 
 ### 5. 跨平台修复(与官方代码差异)
 

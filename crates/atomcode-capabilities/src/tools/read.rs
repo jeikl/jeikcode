@@ -16,13 +16,14 @@ use serde_json::json;
 /// UTF-8/GB18030 detection and codeintel. Refuse pathological inputs uniformly,
 /// including callers that supplied an offset/limit.
 const MAX_IN_MEMORY_BYTES: u64 = 64 * 1024 * 1024;
-/// Default page size when the caller omits `limit`. Matches OpenCode / DeepSeek
-/// Harness; Grok defaults to 1000 but tells the model not to fill a window.
-const DEFAULT_READ_LIMIT: usize = 2000;
-/// Keep one page (body plus continuation) under this budget. 256 KiB is enough
-/// for a typical 1500–2000 line source file with per-line numbers; the old 64 KiB
-/// cap silently chopped that page around ~700 lines and taught the model to crawl.
-const MAX_READ_OUTPUT_BYTES: usize = 256 * 1024;
+/// Default page size when the caller omits `limit`. Matches Grok Build (1000).
+/// Remainder is always recoverable via `offset` + omit `limit` (same continuation
+/// contract as Grok); do not dump the rest into this page.
+const DEFAULT_READ_LIMIT: usize = 1000;
+/// Keep one page (body plus continuation) under this budget. 80 KiB ≈ Grok's
+/// 25k-token FileTooLarge ceiling for typical numbered source; OpenCode uses 50 KiB.
+/// A footer always tells the model how to read the rest.
+const MAX_READ_OUTPUT_BYTES: usize = 80 * 1024;
 /// Per-line display cap (very long minified lines are truncated with a marker).
 const MAX_LINE_LEN: usize = 2000;
 
@@ -180,11 +181,12 @@ impl Tool for ReadFileTool {
     fn description(&self) -> &str {
         "Read a file from the filesystem. Returns the contents prefixed with 1-based \
          line numbers (`<n>\\t<content>`). Omit `offset` and `limit` unless the file is too \
-         large to read at once — the default page is 2000 lines (a byte budget may return \
+         large to read at once — the default page is 1000 lines (an 80 KiB budget may return \
          fewer). Do not request tiny windows (20–70 lines). If a footer reports remaining \
-         lines, omit `limit` (or use a large remaining window) rather than repeating a small \
-         page. If the path is a directory its entries are listed instead. Relative paths \
-         resolve against the working directory."
+         lines, call again with that `offset` and omit `limit` to continue — that is how you \
+         finish a truncated file (do not repeat a small page). Prefer `code_explore` for \
+         feature/design/logic before reading many files. If the path is a directory its \
+         entries are listed instead. Relative paths resolve against the working directory."
     }
     fn parameters_schema(&self) -> serde_json::Value {
         json!({
@@ -200,7 +202,7 @@ impl Tool for ReadFileTool {
                     "type": "integer",
                     "minimum": 1,
                     "default": DEFAULT_READ_LIMIT,
-                    "description": "Maximum lines to read. Omit unless you need a specific window. Defaults to 2000; the output byte budget may return fewer. Do not use 20–70 line slices."
+                    "description": "Maximum lines to read. Omit unless you need a specific window. Defaults to 1000; the output byte budget may return fewer. After a partial page, omit `limit` and use the footer offset to read the rest. Do not use 20–70 line slices."
                 }
             },
             "required": ["file_path"]
@@ -212,8 +214,8 @@ impl Tool for ReadFileTool {
         true
     }
     /// Self-capped to `MAX_READ_OUTPUT_BYTES`. Skipping the generic 64 KiB artifact
-    /// fold / kernel cap is what makes the 2000-line default page actually reach
-    /// the model instead of being chopped into a fetch_output crawl.
+    /// fold / kernel cap is what makes one numbered page reach the model; remainder
+    /// is recovered with `offset` (Grok-style), not `fetch_output`.
     fn never_truncate_result(&self) -> bool {
         true
     }
@@ -338,7 +340,14 @@ impl Tool for ReadFileTool {
                 "[no lines in requested range (start={start}, total={total})]"
             ));
         }
-        let page_limit = a.limit.unwrap_or(DEFAULT_READ_LIMIT);
+        let skill_md = path
+            .file_name()
+            .is_some_and(|n| n == "SKILL.md");
+        let page_limit = if skill_md {
+            a.limit.unwrap_or(usize::MAX)
+        } else {
+            a.limit.unwrap_or(DEFAULT_READ_LIMIT)
+        };
         let requested_end_idx = start_idx.saturating_add(page_limit).min(total);
 
         let mut out = String::new();
@@ -364,7 +373,8 @@ impl Tool for ReadFileTool {
             } else {
                 0
             };
-            if !out.is_empty()
+            if !skill_md
+                && !out.is_empty()
                 && out
                     .len()
                     .saturating_add(rendered.len())
@@ -652,15 +662,40 @@ mod tests {
             .await;
 
         assert!(!r.is_error, "{}", r.content);
-        assert!(r.content.contains("2000\tline 2000"), "{}", r.content);
-        assert!(!r.content.contains("2001\tline 2001"), "{}", r.content);
+        assert!(r.content.contains("1000\tline 1000"), "{}", r.content);
+        assert!(!r.content.contains("1001\tline 1001"), "{}", r.content);
         assert!(
-            r.content.contains("Showing lines 1-2000 of 2505")
-                && r.content.contains("offset=2001")
+            r.content.contains("Showing lines 1-1000 of 2505")
+                && r.content.contains("offset=1001")
                 && r.content.to_ascii_lowercase().contains("omit `limit`")
                 && !r.content.contains("\"limit\":"),
             "{}",
             r.content
+        );
+
+        let page2 = ReadFileTool::default()
+            .execute(
+                r#"{"file_path":"notes.txt","offset":1001}"#,
+                &ctx(d.path()),
+            )
+            .await;
+        assert!(!page2.is_error, "{}", page2.content);
+        assert!(page2.content.contains("1001\tline 1001"), "{}", page2.content);
+        assert!(page2.content.contains("offset=2001"), "{}", page2.content);
+
+        let page3 = ReadFileTool::default()
+            .execute(
+                r#"{"file_path":"notes.txt","offset":2001}"#,
+                &ctx(d.path()),
+            )
+            .await;
+        assert!(!page3.is_error, "{}", page3.content);
+        assert!(page3.content.contains("2001\tline 2001"), "{}", page3.content);
+        assert!(page3.content.contains("2505\tline 2505"), "{}", page3.content);
+        assert!(
+            page3.content.contains("(end)") || !page3.content.contains("offset="),
+            "last page finishes the file: {}",
+            page3.content
         );
     }
 
@@ -951,7 +986,7 @@ mod tests {
     async fn file_under_the_default_page_returns_in_full() {
         let d = tempfile::tempdir().unwrap();
         let mut src = String::new();
-        for i in 0..1600 {
+        for i in 0..800 {
             src.push_str(&format!("line {i}\n"));
         }
         std::fs::write(d.path().join("big.txt"), &src).unwrap();
@@ -959,10 +994,10 @@ mod tests {
             .execute(r#"{"file_path":"big.txt"}"#, &ctx(d.path()))
             .await;
         assert!(r.content.contains("line 0"), "{}", r.content);
-        assert!(r.content.contains("line 1599"), "{}", r.content);
+        assert!(r.content.contains("line 799"), "{}", r.content);
         assert!(
             !r.content.contains("read_file("),
-            "a 1600-line file must not paginate under a 2000-line default: {}",
+            "an 800-line file must not paginate under a 1000-line default: {}",
             r.content
         );
     }

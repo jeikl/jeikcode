@@ -65,8 +65,11 @@ try {
     exit 1
 }
 
+$Alias = Join-Path $Prefix "jeikcode$ext"
+Copy-Item -Force $Target $Alias
 Write-Host ""
 Write-Host "Installed: $Target"
+Write-Host "Alias:     $Alias"
 & $Target --version 2>$null
 
 # --- PATH ---

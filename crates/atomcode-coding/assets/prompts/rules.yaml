@@ -1,8 +1,8 @@
-﻿# AtomCode 执行规范与规则定义模板 (rules.yaml)
+﻿# AtomCode 执行规范与规则定义模板 (rules.yaml) — LIVE，全部字段进 System
 # ==============================================================================
 # 本文件包含了 AtomCode 的全套核心执行规则与纪律常量。
-# 您可以自由修改、增删、精简本文件中的任何规则，保存后 AtomCode 会自动热重载生效！
-# 【提示】：每项规则上方均配有完整的【中文翻译】与【作用说明】。
+# 文件存在时整段替换编译期 RULES。您可以增删本文件中的规则，保存后下一轮对话热重载。
+# 本文件里的每个键都会被加载器渲染；不要在这里写 root_docs 文档内容。
 # ==============================================================================
 
 version: "2.0.0"
@@ -23,9 +23,11 @@ workflow:
   # 【中文】：对于任何功能咨询、调用链路追踪或 bug 排查，先 repo_map 看大观，再把 code_explore 的 path 锁到具体子目录（禁止传 `.` / `./` / `~` / 工作区根）。只有 repo_map 可以扫全仓。
   surgical_context: >-
     SURGICAL CONTEXT: For ANY functional inquiry, execution flow, bug investigation, or targeted module Q&A:
-    after `repo_map` shows the layout, call `code_explore` scoped to a concrete subdirectory (e.g. `crates/kernel`, `backend`)
-    with natural language questions (Chinese or English). NEVER pass `path: '.'` / `./` / `~` / the workspace root to
-    `code_explore` — that is reserved for `repo_map`.
+    after `repo_map` shows the layout, call `code_explore` with path MUST be a directory/module
+    (e.g. `crates/atomcode-coding`, `src/auth`, `backend`) and query either a precise symbol name
+    (`CodeExploreTool`) or natural Chinese/English (`鉴权怎么做`, `how does session compaction work`).
+    NEVER a single file (`src/auth.rs`, `lib.rs`) — that is `read_file` and misses the call graph.
+    NEVER pass `path: '.'` / `./` / `~` / the workspace root — that is reserved for `repo_map`.
 
   # 负面结论防误判
   # 【中文】：严禁仅凭单一片段就武断断定“项目缺乏某功能”；在下结论前，必须去探索实现文件（如 impl 块）。
@@ -36,9 +38,9 @@ workflow:
   # 双通道并行探索：code_explore (CodeGraph) 为主，grep 为辅
   # 【中文】：探索时 code_explore 是首要核心（语义意图、调用关系图、连带源码一网打尽），grep 仅用于补充精确字面量匹配。
   batched_parallel_exploration: >-
-    BATCHED PARALLEL EXPLORATION — CODE_EXPLORE IS CORE: Fire `code_explore` (semantic/call graphs/flow panorama)
-    AND `grep` (exact keywords) IN PARALLEL. `code_explore` is the primary code-intelligence engine; use grep
-    only as a secondary channel for literal constants.
+    BATCHED PARALLEL EXPLORATION — CODE_EXPLORE FIRST: For a feature, design, flow, or bug, fire several
+    scoped `code_explore` calls IN PARALLEL. Use `grep` ONLY for exact literals (error strings, TODOs).
+    Do not grep-and-read instead of `code_explore`. A thin result is not absence — retry synonyms / a broader path.
 
   # 任务的标准阶段 — 批量读、批量改、一次验证，禁止「一小改一测试」。
   general_phases:
@@ -68,7 +70,7 @@ tools_discipline:
   # 强制并发场景
   mandatory_parallel:
     - "Round 1 Exploration: 1x list_directory + 1x repo_map in ONE response."
-    - "Reading multiple files: read_file x N in ONE response. There is NO per-turn cap of 4 — if you need 8, 12, or more independent reads, emit them all now. Writes in the same batch are executed serially inside the runtime; still emit them together so the user sees one batch."
+    - "Reading already-located hot spans: independent read_file calls in ONE response. Do not dump 8-12 full files; prefer code_explore first. Writes in the same batch run serially; still emit them together. There is NO per-turn cap of 4 on independent edits."
     - "Multiple searches: code_explore / grep x N / glob x N in ONE response."
     - "Multiple file edits: emit all independent edit_file / write_file calls in ONE response. Do not stop at 4."
     - "Same file multi-hunk edits: ONE edit_file with `edits:[{old_string, new_string}, ...]` batch."
@@ -78,7 +80,7 @@ tools_discipline:
   # 工具首选规范
   tool_preferences:
     explore: "Use `code_explore` as the PRIMARY code-intelligence tool to understand flows, caller/callee trees, and cross-file architecture before reading raw files."
-    read: "Use `read_file`, never `bash cat`. Use it for reading full files or specific spans after code_explore outlines the targets."
+    read: "Use `read_file`, never `bash cat`. Read hot spans after code_explore. Default page is 1000 lines; if a footer remains, call again with that offset and omit `limit` to finish the file."
     list: "Use `list_directory`, never `bash ls`."
     glob: "Use `glob`, never `bash find`."
     grep: "Use `grep`, never `bash grep` / `rg`. Reserve grep for exact text literals or regex patterns."
@@ -98,8 +100,9 @@ locating_code:
   repo_map_rule: "Use `repo_map` in Round 1 for global AST architecture and directory structure."
   explore_first: >-
     PRIMARY EXPLORATION: For ANY investigation into features, execution flow, or bugs, ALWAYS prioritize
-    `code_explore` with natural language or key symbols — it traverses the full call tree and delivers
-    verbatim code in one round-trip, replacing manual grep + read loops.
+    `code_explore` with path = a directory/module (`crates/atomcode-coding`, `src/auth`) and query =
+    natural Chinese/English or a precise symbol — it traverses the full call tree and delivers
+    verbatim code in one round-trip, replacing manual grep + read loops. Never pass a file as `path`.
   business_concepts: >-
     When user mentions business concepts (e.g. 优惠券, 结算, 开票, 扣减库存, 审批流):
     Call `code_explore` with the concept name — NLP and thesaurus will link to corresponding code.

@@ -6727,7 +6727,7 @@ impl<W: Write + Send> RetainedRenderer<W> {
 
         // ---- Row 0: header (unchanged from the previous implementation) ----
         // Row 1: brand left + version · license right
-        let left_txt = "◆ AtomCode";
+        let left_txt = "◆ JeikCode";
         let right_ver = concat!("v", env!("CARGO_PKG_VERSION"));
         let right_lic = "MIT";
         let left_w = crate::width::display_width(left_txt);
@@ -12346,7 +12346,7 @@ mod tests {
 
         // Two-column layout: brand + blank + (mascot | tips) rows + cwd/model +
         // trailing blank. All pieces should be somewhere in the visible body.
-        let found_brand = (0..30).any(|r| vterm.row_text(r).contains("AtomCode"));
+        let found_brand = (0..30).any(|r| vterm.row_text(r).contains("JeikCode"));
         let found_cwd = (0..30).any(|r| vterm.row_text(r).contains("~/p/a"));
         let found_model = (0..30).any(|r| vterm.row_text(r).contains("glm-5"));
         // New layout shows tips (/login always pinned) instead of idle hint text.
@@ -12366,7 +12366,7 @@ mod tests {
     /// Before this fix, on_resize cleared body_lines so the welcome
     /// transcript disappeared. Now body is preserved — resizing
     /// smaller may clip content on the right (draw_row truncates
-    /// at screen.width), but "AtomCode" / cwd / model lines still
+    /// at screen.width), but "JeikCode" / cwd / model lines still
     /// read. User keeps their chat history across resize.
     ///
     /// Same issue applies on Windows identically (same code path),
@@ -12392,7 +12392,7 @@ mod tests {
         drain_into_vterm(&buf, &mut vterm);
 
         // Sanity: welcome is visible pre-resize (above footer).
-        let pre_has = (0..24).any(|r| vterm.row_text(r).contains("AtomCode"));
+        let pre_has = (0..24).any(|r| vterm.row_text(r).contains("JeikCode"));
         assert!(
             pre_has,
             "welcome missing before resize\ndump:\n{}",
@@ -12405,7 +12405,7 @@ mod tests {
         let mut vterm = crate::test_term::VirtualTerminal::new(50, 16);
         drain_into_vterm(&buf, &mut vterm);
 
-        let post_has = (0..16).any(|r| vterm.row_text(r).contains("AtomCode"));
+        let post_has = (0..16).any(|r| vterm.row_text(r).contains("JeikCode"));
         assert!(
             post_has,
             "welcome disappeared after resize (regression of pre-fix behaviour)\n\
@@ -12507,9 +12507,9 @@ mod tests {
 
         let brand_row = (0..18)
             .map(|row| post.row_text(row))
-            .find(|row| row.contains("AtomCode"))
+            .find(|row| row.contains("JeikCode"))
             .expect("brand row should remain visible after widening");
-        let atom_idx = brand_row.find("AtomCode").unwrap();
+        let atom_idx = brand_row.find("JeikCode").unwrap();
         let ver_idx = brand_row
             .find(concat!("v", env!("CARGO_PKG_VERSION")))
             .unwrap();
@@ -12557,7 +12557,7 @@ mod tests {
 
         let brand_row = (0..30)
             .map(|row| post.row_text(row))
-            .find(|row| row.contains("AtomCode"))
+            .find(|row| row.contains("JeikCode"))
             .expect("brand row should remain visible after shrinking");
         let version_row = (0..30)
             .map(|row| post.row_text(row))
@@ -12697,7 +12697,7 @@ mod tests {
         drain_into_vterm(&buf, &mut vterm);
 
         assert!(
-            (0..30).any(|row| vterm.row_text(row).contains("AtomCode")),
+            (0..30).any(|row| vterm.row_text(row).contains("JeikCode")),
             "brand missing on narrow terminal\n{}",
             vterm.dump()
         );
@@ -15060,7 +15060,7 @@ mod tests {
         r.flush_deferred();
         drain_into_vterm(&buf, &mut vterm);
         assert!(
-            (0..24).any(|row| vterm.row_text(row).contains("AtomCode")),
+            (0..24).any(|row| vterm.row_text(row).contains("JeikCode")),
             "baseline welcome missing:\n{}",
             vterm.dump()
         );
@@ -15085,7 +15085,7 @@ mod tests {
 
         // Welcome must be back.
         let still_has = (0..24)
-            .filter(|row| vterm.row_text(*row).contains("AtomCode"))
+            .filter(|row| vterm.row_text(*row).contains("JeikCode"))
             .count();
         assert_eq!(
             still_has,
@@ -15123,7 +15123,7 @@ mod tests {
         r.flush_deferred();
         drain_into_vterm(&buf, &mut vterm);
         assert!(
-            (0..24).any(|row| vterm.row_text(row).contains("AtomCode")),
+            (0..24).any(|row| vterm.row_text(row).contains("JeikCode")),
             "baseline welcome missing:\n{}",
             vterm.dump()
         );
@@ -15162,7 +15162,7 @@ mod tests {
         // blank prev_cells — verify by rendering the SAME welcome
         // content as before (so a naive cache would emit zero
         // bytes) and asserting it still produces a non-trivial
-        // emit that restores AtomCode on the grid.
+        // emit that restores JeikCode on the grid.
         r.render(UiLine::Welcome {
             model: "glm-5".into(),
             working_dir: "~/project/atomcode".into(),
@@ -15177,7 +15177,7 @@ mod tests {
         r.flush_deferred();
         drain_into_vterm(&buf, &mut vterm);
         assert!(
-            (0..24).any(|row| vterm.row_text(row).contains("AtomCode")),
+            (0..24).any(|row| vterm.row_text(row).contains("JeikCode")),
             "after resume_from_external the next paint must restore welcome (full repaint, not diff-skip):\n{}",
             vterm.dump()
         );
@@ -15261,7 +15261,7 @@ mod tests {
         // anchored layout makes ghost rows from the OLD bottom-anchored
         // re-paint impossible, but we keep the invariant pinned).
         let brand_rows = (0..24)
-            .filter(|r| vterm.row_text(*r).contains("AtomCode"))
+            .filter(|r| vterm.row_text(*r).contains("JeikCode"))
             .count();
         assert_eq!(
             brand_rows,

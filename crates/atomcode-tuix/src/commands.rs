@@ -134,7 +134,7 @@ pub fn command_display_name(canonical: &str) -> String {
 }
 
 const BUILTIN_COMMANDS: &[Command] = &[
-    Command { name: "login",   desc: "Sign in with AtomGit OAuth and claim CodingPlan models", needs_args: false, hidden: false },
+    Command { name: "login",   desc: "Sign in with AtomGit OAuth and claim CodingPlan models", needs_args: false, hidden: true },
     // needs_args=true so selecting it only completes to `/webui ` (does NOT
     // launch) — lets the user append a subcommand (stop / lan / --host <addr>)
     // before Enter. A bare `/webui ` + Enter still launches on 127.0.0.1.
@@ -144,8 +144,8 @@ const BUILTIN_COMMANDS: &[Command] = &[
     Command { name: "setup",      desc: "First run: install recommender skill + run it. Extra text forwarded as a steering hint", needs_args: true, hidden: false },
     Command { name: "resume",  desc: "Resume a previous session", needs_args: false, hidden: false },
     Command { name: "rename",  desc: "Rename current session", needs_args: true, hidden: false },
-    Command { name: "logout",  desc: "Sign out of AtomGit", needs_args: false, hidden: false },
-    Command { name: "whoami",  desc: "Show current logged-in user", needs_args: false, hidden: false },
+    Command { name: "logout",  desc: "Sign out of AtomGit", needs_args: false, hidden: true },
+    Command { name: "whoami",  desc: "Show current logged-in user", needs_args: false, hidden: true },
     Command { name: "model",   desc: "Switch provider / model", needs_args: false, hidden: false },
     Command { name: "modeladd", desc: "Add a model; fetches upstream /models as a picker", needs_args: false, hidden: false },
     Command { name: "provider", desc: "Manage providers (add / edit / delete)", needs_args: false, hidden: false },
@@ -160,7 +160,7 @@ const BUILTIN_COMMANDS: &[Command] = &[
     Command { name: "diff",    desc: "Show git diff", needs_args: false, hidden: false },
     Command { name: "clear",   desc: "Start a new conversation (clears context + screen)", needs_args: false, hidden: false },
     Command { name: "session", desc: "Start a new session (clears conversation)", needs_args: false, hidden: false },
-    Command { name: "usage",   desc: "Show CodingPlan usage (tabs: current / overview / models)", needs_args: false, hidden: false },
+    Command { name: "usage",   desc: "Show CodingPlan usage (tabs: current / overview / models)", needs_args: false, hidden: true },
     // `/cost` reports THIS SESSION's token cost from local accounting × the model
     // price table — works for ANY model, including self-integrated ones the
     // gateway-only `/usage` modal can't see.
@@ -177,7 +177,7 @@ const BUILTIN_COMMANDS: &[Command] = &[
     // selection happens in the modal, not on the command line.
     Command { name: "rewind",  desc: "Restore the conversation to an earlier checkpoint", needs_args: false, hidden: false },
     Command { name: "worktree", desc: "Git worktree isolation (create/list/done/cleanup)", needs_args: true, hidden: false },
-    Command { name: "upgrade", desc: "Upgrade atomcode to latest (subcommand: rollback)", needs_args: false, hidden: false },
+    Command { name: "upgrade", desc: "Upgrade jeikcode/atomcode to latest (subcommand: rollback)", needs_args: false, hidden: false },
     Command { name: "plan",    desc: "Switch to Plan mode (read-only exploration)", needs_args: false, hidden: false },
     Command { name: "build",   desc: "Switch to Build mode (full execution)", needs_args: false, hidden: false },
     Command { name: "auto",    desc: "Switch to Auto mode (auto-approve all tools)", needs_args: false, hidden: false },
@@ -200,7 +200,7 @@ const BUILTIN_COMMANDS: &[Command] = &[
     Command { name: "keys",    desc: "Show keyboard shortcuts", needs_args: false, hidden: false },
     Command { name: "language", desc: "Switch display and commit language", needs_args: false, hidden: false },
     Command { name: "welcome", desc: "Re-run the onboarding wizard", needs_args: false, hidden: false },
-    Command { name: "quit",    desc: "Exit AtomCode", needs_args: false, hidden: false },
+    Command { name: "quit",    desc: "Exit JeikCode", needs_args: false, hidden: false },
     // Gateway entry that opens a second-level palette listing all
     // user-invocable skills. needs_args=true so Enter rewrites the
     // buffer to `/skills ` and lets the sub-mode menu render the

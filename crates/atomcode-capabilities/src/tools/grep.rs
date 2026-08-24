@@ -59,10 +59,15 @@ impl Tool for GrepTool {
         "grep"
     }
     fn description(&self) -> &str {
-        "Search file contents by regular expression (literal / exact-string search). \
-         Pass `pattern` as a raw regex — no surrounding quotes, never in `description`. \
+        "Search file contents by regular expression (literal / exact-string search).\n\
+         pattern (required JSON field): the regex itself. NEVER put it in `description`.\n\
+           GOOD: {\"pattern\":\"GetSalePostSettingData\",\"path\":\"src/auth\"}\n\
+           GOOD: {\"pattern\":\"positionTracking\"}\n\
+           BAD:  {\"description\":\" [Constraint: pattern: foo]\"}  — that is not `pattern`\n\
+           BAD:  {\"description\":\" [Constraint: path: a.cs, pattern: Foo]\"}\n\
+         path: directory or file to search (optional; default working directory).\n\
          For a feature, design, or code-logic question, use `code_explore` \
-         (path = a directory/module, query = Chinese/English or a symbol) instead. \
+         (path = a directory/module, query = Chinese/English or a symbol) instead of grep.\n\
          Smart-case: case-insensitive unless the pattern contains an uppercase letter. \
          Escape regex metachars, e.g. `console\\.log\\(`. Use `glob` (e.g. `*.rs`) to \
          restrict file types. Default 200 matches and 0 context lines; raise `max_results` \
@@ -72,8 +77,14 @@ impl Tool for GrepTool {
         json!({
             "type": "object",
             "properties": {
-                "pattern": { "type": "string", "description": "Regex to search for (this field is required; do not put it in `description`)" },
-                "path": { "type": "string", "description": "Directory or file to search (default: the working directory)" },
+                "pattern": {
+                    "type": "string",
+                    "description": "REQUIRED JSON field: the regex to search for. Example: 'GetSalePostSettingData'. Do NOT put this in `description` or wrap it as '[Constraint: pattern: …]'."
+                },
+                "path": {
+                    "type": "string",
+                    "description": "Directory or file to search (default: the working directory). Pass as `path`, not inside `description`."
+                },
                 "glob": { "type": "string", "description": "File-name glob to restrict which files are searched, e.g. `*.rs`, `*.{ts,tsx}` (ripgrep-style: no `/` matches at any depth)" },
                 "max_results": { "type": "integer", "description": "Max matching lines to return (default 200). Raise this instead of re-running a narrower crawl." },
                 "context": { "type": "integer", "description": "Lines of context around each match (default 0, max 10)" }
@@ -829,6 +840,23 @@ mod tests {
             !r.content.contains("f.txt-1-") && !r.content.contains("f.txt-3-"),
             "default context must be 0: {}",
             r.content
+        );
+    }
+
+    #[test]
+    fn description_forbids_constraint_description_payload() {
+        let d = GrepTool.description();
+        assert!(
+            d.contains("never in `description`") || d.contains("NEVER put it in `description`"),
+            "{d}"
+        );
+        assert!(d.contains("[Constraint: pattern:"), "{d}");
+        assert!(d.contains("code_explore"), "{d}");
+        let schema = GrepTool.parameters_schema();
+        let pat = schema["properties"]["pattern"]["description"].as_str().unwrap_or("");
+        assert!(
+            pat.contains("Constraint") || pat.contains("description"),
+            "{pat}"
         );
     }
 

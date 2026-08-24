@@ -91,21 +91,21 @@ tools:
 
   - name: "list_directory"
     category: "filesystem"
-    # 【中文】：列出目录下的文件与子目录（遵循 .gitignore）。
-    description: "List directory contents respecting .gitignore."
+    # 【中文】：对已知的一个目录做 ls（gitignore 感知）。不是工作区总览——总览用 repo_map，二者不要并行。
+    description: "List one directory like ls (gitignore-aware). Not a workspace overview — that is repo_map. Do not pair the two."
     parameters:
       path:
         type: "string"
         required: false
         default: "."
-        # 【中文】：目录路径
-        description: "Directory path."
+        # 【中文】：要列出的那个目录（不是整仓）
+        description: "Directory to list (one dir you already know, not the whole workspace)."
       depth:
         type: "integer"
         required: false
-        default: 2
-        # 【中文】：最大遍历深度
-        description: "Max recursion depth."
+        default: 1
+        # 【中文】：最大遍历深度。默认 1 = 本目录 + 直接子项。工作区树请用 repo_map。
+        description: "Max recursion depth (default 1, max 6). Workspace tree → repo_map."
 
   - name: "glob"
     category: "filesystem"

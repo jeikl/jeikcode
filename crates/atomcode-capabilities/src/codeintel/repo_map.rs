@@ -77,16 +77,18 @@ impl Tool for RepoMapTool {
          searches. Prints the COMPLETE index-backed DIRECTORY TREE: every top-level file is listed \
          by name and every subdirectory is recursed to the deepest level (files inside deeper \
          directories are counted, not named — never elided), so you see the real module/layer \
-         layout in one round instead of wandering with list_directory. Always pair it with \
-         list_directory in the same round (they are cheap and complementary).\n\
+         layout in one round. Do NOT also call list_directory — that is `ls` for one directory \
+         you already know, not a second workspace tree.\n\
          \n\
          HOW IT FITS THE FLOW — structure first, then dive:\n\
-         1. Round 1: repo_map (full layout) + list_directory — never skip on an unfamiliar repo.\n\
+         1. Round 1: `repo_map` ONLY (full layout) — never skip on an unfamiliar repo. Do not \
+         pair it with list_directory.\n\
          2. Dive with several parallel `code_explore` calls (one per DIRECTORY/module + question \
          or symbol; never a file as `path`). `grep` only for exact literals. `read_file` only the \
          hot spans Coverage/CATALOG already named.\n\
-         3. Only if you need actual file names under a specific dir, use list_directory; only to \
-         read a specific file's full body, use read_file.\n\
+         3. Only if you need actual file names under a specific dir you already know, use \
+         list_directory (like `ls`, default depth 1); only to read a specific file's full body, \
+         use read_file.\n\
          \n\
          MODES — default `tree` = structure only (small, never truncated). Pass `mode: full` \
          (tree + budgeted symbol outline) or `symbols` (symbols only) when you already know the \

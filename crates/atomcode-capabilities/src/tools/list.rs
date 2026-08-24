@@ -34,16 +34,18 @@ impl Tool for ListDirTool {
         "list_directory"
     }
     fn description(&self) -> &str {
-        "List a directory tree (indented; directories end with '/'). `depth` controls \
-         recursion (default 3, max 6). Build/VCS/cache directories (node_modules, .git, \
-         target, …) are skipped. Relative paths resolve against the working directory."
+        "List ONE directory like `ls` (indented; directories end with '/'). `depth` \
+         default 1 = this directory plus immediate children (max 6). This is NOT a \
+         workspace overview — use `repo_map` for that, and do not pair the two. \
+         Build/VCS/cache directories (node_modules, .git, target, …) are skipped. \
+         Relative paths resolve against the working directory."
     }
     fn parameters_schema(&self) -> serde_json::Value {
         json!({
             "type": "object",
             "properties": {
                 "path": { "type": "string", "description": "Directory to list (default: the working directory)" },
-                "depth": { "type": "integer", "description": "Max recursion depth (default 3, max 6)" }
+                "depth": { "type": "integer", "description": "Max recursion depth (default 1, max 6). 1 = this directory plus immediate children. Workspace tree → repo_map." }
             }
         })
     }
@@ -64,7 +66,7 @@ impl Tool for ListDirTool {
         };
         let raw = a.path.unwrap_or_else(|| ".".to_string());
         let root = resolve_path(&raw, &ctx.working_dir);
-        let depth = a.depth.unwrap_or(3).min(MAX_DEPTH_CAP);
+        let depth = a.depth.unwrap_or(1).min(MAX_DEPTH_CAP);
 
         match tokio::fs::metadata(&root).await {
             Ok(m) if m.is_dir() => {}
@@ -292,6 +294,23 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn default_depth_stops_at_immediate_children() {
+        let d = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(d.path().join("src/nested")).unwrap();
+        std::fs::write(d.path().join("src/main.rs"), "fn main(){}").unwrap();
+        std::fs::write(d.path().join("src/nested/lib.rs"), "").unwrap();
+        let r = ListDirTool.execute(r#"{"path":"."}"#, &ctx(d.path())).await;
+        assert!(!r.is_error, "{}", r.content);
+        assert!(r.content.contains("src/"), "{}", r.content);
+        assert!(r.content.contains("main.rs"), "{}", r.content);
+        assert!(
+            !r.content.contains("lib.rs"),
+            "default depth 1 must not list grandchildren: {}",
+            r.content
+        );
+    }
+
+    #[tokio::test]
     async fn skips_build_dirs() {
         let d = tempfile::tempdir().unwrap();
         std::fs::create_dir(d.path().join("target")).unwrap();
@@ -416,7 +435,9 @@ mod tests {
                 std::fs::write(dir.join("src").join(format!("f{i:03}.txt")), "x").unwrap();
             }
         }
-        let r = ListDirTool.execute(r#"{"path":"."}"#, &ctx(d.path())).await;
+        let r = ListDirTool
+            .execute(r#"{"path":".","depth":3}"#, &ctx(d.path()))
+            .await;
         assert!(!r.is_error, "{}", r.content);
         assert!(r.content.contains("elided"), "{}", r.content);
         // Every top-level entry survives — the crux of the fix.

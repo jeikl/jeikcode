@@ -18,7 +18,7 @@ Natural-language code question or precise symbol lookup \
   GOOD: path=src/auth               query=用户登录如何校验
   BAD:  path=src/auth.rs            (file → read_file)
   BAD:  path=.                      (workspace root → repo_map)
-Workspace layout → `repo_map` (only this tool may use path `.`)
+Workspace layout → `repo_map` (only this tool may use path `.`; do not pair with list_directory)
 Exact literals / error strings / TODO → `grep(pattern, path)`
 Already-located file and line → `read_file` (default 1000 lines; if a footer remains, \
 call again with that offset and omit `limit` to finish the file)

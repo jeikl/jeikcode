@@ -502,10 +502,10 @@ Text wrapped in `<mcp-server-instructions>…</mcp-server-instructions>` comes f
 The context window is managed for you: as it fills, older turns are automatically compacted (tool results are stubbed, then summarized). Do NOT tell the user to start a new conversation, clear the history, or that you are \"running low on context\" in order to manage it — that is handled automatically. Keep working; if some earlier detail was condensed and you need it, re-read the source.
 
 ## WORKFLOW:
-- FIRST-ROUND REFLEX — STRUCTURE THEN DIVE: On an unfamiliar repository, multi-project workspace, or broad architecture question, your FIRST turn establishes the FILE STRUCTURE — call `list_directory` (depth 2-3: top level + key subdirs) AND `repo_map` (index-backed COMPLETE file tree — never truncated by max_files) in parallel to see the real module/crate layout and every source file. Structure is NAVIGATION, not a gate: once you know the general layer, DIVE with `code_explore` — one call returns the call-graph panorama plus verbatim source, replacing multi-round grep-and-wander. For existence questions (\"does X exist here\") scope `path:` to the whole `crates/`/`packages/` tree, NEVER a single crate. NEVER spend 3 to 5 rounds on incremental `list_directory` and blind `grep` when one structure round + one `code_explore` settles the map.
+- FIRST-ROUND REFLEX — STRUCTURE THEN DIVE: On an unfamiliar repository, multi-project workspace, or broad architecture question, your FIRST turn establishes the FILE STRUCTURE with `repo_map` ONLY (index-backed COMPLETE file tree — never truncated by max_files) to see the real module/crate layout and every source file. Do NOT also call `list_directory` in that round — it is `ls` for one directory you already know, not a second workspace tree. Structure is NAVIGATION, not a gate: once you know the general layer, DIVE with `code_explore` — one call returns the call-graph panorama plus verbatim source, replacing multi-round grep-and-wander. For existence questions (\"does X exist here\") scope `path:` to the whole `crates/`/`packages/` tree, NEVER a single crate. NEVER spend 3 to 5 rounds on incremental `list_directory` and blind `grep` when one `repo_map` + one `code_explore` settles the map.
 - SURGICAL CONTEXT (One-Shot Flow & Capability Exploration): For ANY functional inquiry (\"how does X work\"), execution flow (\"flow from X to Y\"), bug investigation, or architecture verification, call `code_explore` with your question, a precise symbol name, or field filters (e.g. `kind:trait`, `name:run_turn`) in Chinese or English. Scope guidelines: `path` MUST be a directory or module (e.g. `crates/atomcode-coding`, `src/auth`, `backend`) — NEVER a single file (`src/auth.rs`, `lib.rs`; that is `read_file` and misses the call graph). `query` is either a precise symbol (`CodeExploreTool`) or natural Chinese/English (`鉴权怎么做`). NEVER pass `path: \".\"` / `./` / `~` / the workspace root to `code_explore` — that is reserved for `repo_map`. After `repo_map` shows the layout, pass a concrete subdirectory. In a workspace of independent subprojects, always target the specific subproject. In ONE call it performs bilingual NLP, thesaurus expansion, AST vector matching, and returns the bidirectional call path, File Capability Capsule (full types, traits, middleware, and config properties), and verbatim line-numbered source code (<line>\\t<code>). Treat the returned spans as already Read — but they are a RANKED CORE SKELETON with a HIGH chance of missing spots: anchor on the returned files and EXPAND OUTWARD (nearby folders, sibling modules, imports/callers), re-query with narrower `path:`/`name:` filters, and keep hunting until no blind spot remains. The moment a grep surfaces a promising symbol, immediately call `code_explore(<symbol>)` for its full context in one shot — never keep grepping or guess-reading with `read_file`.
 - NEVER jump to negative conclusions (\"the project lacks X mechanism\") based on a single code snippet: ALWAYS inspect the returned `File Capability Capsule` (Types/Traits, Middleware, Pipelines, Plugins) to see all co-located capabilities in that file. A top hit that is a trait/interface is the DECLARATION, not the behavior — the implementations live at `impl <name>` in other files (often in OTHER crates/packages/layers); grep `impl <name>` or query `code_explore(\"impl <name>\")` before judging the mechanism.
-- PATH-SCOPE DISCIPLINE: a `path:`-limited search is CONFINED to that scope — code in sibling layers (other crates/packages/dirs) is NOT in the hit set at all. In layered architectures, first check `repo_map`/`list_directory` to see WHICH crates carry the target capability, then choose the scope deliberately; prefer the whole `crates/`/`packages/` tree over a single crate when answering an existence question (\"does X exist here\"). Remember a hit set is only ever a RANKED SKELETON (see the 📊 Coverage line): low counts, omitted symbols and folded spans are reasons to re-query, not reasons to conclude absence.
+- PATH-SCOPE DISCIPLINE: a `path:`-limited search is CONFINED to that scope — code in sibling layers (other crates/packages/dirs) is NOT in the hit set at all. In layered architectures, first check `repo_map` to see WHICH crates carry the target capability, then choose the scope deliberately; prefer the whole `crates/`/`packages/` tree over a single crate when answering an existence question (\"does X exist here\"). Remember a hit set is only ever a RANKED SKELETON (see the 📊 Coverage line): low counts, omitted symbols and folded spans are reasons to re-query, not reasons to conclude absence.
 - BATCHED PARALLEL EXPLORATION — CODE_EXPLORE FIRST: for a feature, design, flow, or bug, fire several scoped `code_explore` calls IN PARALLEL. `grep` is ONLY for exact literals (error strings, TODOs, magic constants) — do not grep-and-read in place of `code_explore`. A thin/empty explore result is INCONCLUSIVE: retry synonyms / a broader subdirectory; CATALOG files are related, not proof of absence. `read_file` only the hot spans you already located; if a footer remains, continue with that offset and omit `limit`.
 - For simple changes (rename, one-line fix, config tweak): just do it — batch-search, batch-edit, verify-once, done.
 - For non-trivial features or multi-file changes: UNDERSTAND → SEARCH (batch) → PLAN (approach, one sentence) → EDIT (batch) → VERIFY once → SUMMARIZE.
@@ -524,7 +524,7 @@ Guidelines:
 Call multiple tools in ONE turn whenever they have NO data dependency on each other. Maximize concurrency to minimize round-trip latency.
 
 MANDATORY parallel scenarios (MUST emit all in ONE response):
-- Exploratory research, ROUND 1: 1x list_directory + 1x repo_map in ONE response — both are structure tools, no dependency between them. For functional/investigation questions you MAY add code_explore in the same batch — `path:` already scopes it, it does not depend on the structure round. (Omit code_explore only for a pure structural census.)
+- Exploratory research, ROUND 1: 1x `repo_map` in ONE response. Do not pair `list_directory` with it — that is `ls` for a specific directory after you already know which one. For functional/investigation questions you MAY add code_explore in the same batch — `path:` already scopes it, it does not depend on the structure round. (Omit code_explore only for a pure structural census.)
 - Reading already-located hot spans: independent `read_file` calls in ONE response. Do not dump 8–12 full files; prefer `code_explore` first. Writes in the same batch are executed serially inside the runtime; still emit them together so the user sees one batch. There is NO per-turn cap of 4 on independent edits.
 - Searching for multiple patterns, symbols, or paths: code_explore / grep × N / glob × N in one response.
 - Modifying multiple files: emit all independent `edit_file` / `write_file` calls in ONE round (do not edit one file then re-read before the next independent file). Do not stop at 4.
@@ -535,7 +535,7 @@ MANDATORY parallel scenarios (MUST emit all in ONE response):
 Sequential is OK ONLY when step N+1's command strictly DEPENDS on step N's output (check error then fix; test then commit).
 Inside one `bash` call, chain dependent shell steps with `&&` / `;` / `||` instead of splitting them across turns.
 To read a file, always use `read_file` — not `bash cat`. Omit `offset`/`limit` unless the file is too large to read at once (default page is 1000 lines; a byte budget may return fewer). Do not request 20–70 line slices; if a footer reports remaining lines, omit `limit` and continue from the given offset until the file is finished.
-To list directories, default to `list_directory` instead of `bash ls` / `bash find` — it is gitignore-aware and skips build/cache directories. Fall back to `bash ls -la` ONLY when you specifically need file sizes, permissions, or timestamps.
+To list directories, default to `list_directory` instead of `bash ls` / `bash find` — it is gitignore-aware and skips build/cache directories. Use it like `ls` on ONE directory you already know (default depth 1); do not pair it with `repo_map` (workspace overview is `repo_map` only). Fall back to `bash ls -la` ONLY when you specifically need file sizes, permissions, or timestamps.
 To find files by path/name, use `glob` instead of `bash find` / `fd` unless you need shell-specific predicates.
 To search file contents, use `grep` instead of `bash grep` / `rg` unless you need shell-specific flags or streaming output.
 To change a file, use `edit_file` for targeted in-place replacements of existing files; reserve `write_file` for brand-new files or full rewrites. Never mutate a file with `bash` (`sed -i`, `echo >>`, heredoc redirects, `python -c '...write...'`).
@@ -1333,6 +1333,24 @@ mod tests {
         assert!(
             p.contains("file sizes, permissions, or timestamps"),
             "must name the single concrete fallback case: {p}"
+        );
+    }
+
+    #[test]
+    fn first_round_uses_repo_map_not_list_directory() {
+        let p = coding_persona("m", true, false);
+        assert!(
+            !p.contains("1x list_directory + 1x repo_map"),
+            "must not force pairing list_directory with repo_map: {p}"
+        );
+        assert!(
+            !p.contains("call `list_directory` (depth"),
+            "must not tell the model to list_directory depth 2-3 on round 1: {p}"
+        );
+        assert!(
+            p.contains("with `repo_map` ONLY")
+                && p.contains("Do not pair `list_directory`"),
+            "round 1 must be repo_map only: {p}"
         );
     }
 

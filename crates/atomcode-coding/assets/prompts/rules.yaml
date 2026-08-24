@@ -11,11 +11,12 @@ version: "2.0.0"
 # 1. 核心工作流程 (Workflow)
 # ------------------------------------------------------------------------------
 workflow:
-  # 第一轮探索反射：结构导航后，立即以 code_explore (CodeGraph) 为核心主力深度下潜
-  # 【中文】：在面对代码库或架构问题时，第一轮通过 repo_map/list_directory 建立结构后，必须立即把 code_explore 作为核心主力工具（Core Tool），直接获取调用图与源码，严禁陷入多轮低效的 grep-and-read 漫游。
+  # 第一轮探索反射：只用 repo_map 看仓库树，随后以 code_explore 下潜
+  # 【中文】：陌生仓库或架构问题，第一轮只调 `repo_map`（完整文件树）。不要同时打 `list_directory`——那是对已知目录的 ls，不是第二份工作区树。看清层级后立刻用 code_explore 下潜，禁止多轮 grep-and-read。
   first_round_reflex: >-
     FIRST-ROUND REFLEX — STRUCTURE THEN DIVE: On an unfamiliar repository or broad architecture question,
-    your FIRST turn establishes the FILE STRUCTURE — call `list_directory` (depth 2-3) AND `repo_map` in parallel.
+    your FIRST turn establishes the FILE STRUCTURE with `repo_map` ONLY (index-backed complete tree).
+    Do NOT also call `list_directory` in that round — it is `ls` for one directory you already know, not a second workspace tree.
     Once you know the general layer, DIVE with `code_explore` as your CORE tool for the full call-graph panorama
     plus verbatim source, replacing multi-round grep-and-wander.
   
@@ -69,7 +70,7 @@ tools_discipline:
 
   # 强制并发场景
   mandatory_parallel:
-    - "Round 1 Exploration: 1x list_directory + 1x repo_map in ONE response."
+    - "Round 1 Exploration: 1x repo_map in ONE response. Do NOT also emit list_directory — that is `ls` for a specific directory after you already know which one."
     - "Reading already-located hot spans: independent read_file calls in ONE response. Do not dump 8-12 full files; prefer code_explore first. Writes in the same batch run serially; still emit them together. There is NO per-turn cap of 4 on independent edits."
     - "Multiple searches: code_explore / grep x N / glob x N in ONE response."
     - "Multiple file edits: emit all independent edit_file / write_file calls in ONE response. Do not stop at 4."
@@ -81,7 +82,7 @@ tools_discipline:
   tool_preferences:
     explore: "Use `code_explore` as the PRIMARY code-intelligence tool to understand flows, caller/callee trees, and cross-file architecture before reading raw files."
     read: "Use `read_file`, never `bash cat`. Read hot spans after code_explore. Default page is 1000 lines; if a footer remains, call again with that offset and omit `limit` to finish the file."
-    list: "Use `list_directory`, never `bash ls`."
+    list: "Use `list_directory` like `ls` for ONE directory you already know (default depth 1). Never as a workspace overview — that is `repo_map`. Never pair the two. Never `bash ls`."
     glob: "Use `glob`, never `bash find`."
     grep: "Use `grep`, never `bash grep` / `rg`. Reserve grep for exact text literals or regex patterns."
     edit: "Use `edit_file` for in-place modifications; never use `sed`/`awk`/scripts to mutate code."
@@ -97,7 +98,7 @@ tools_discipline:
 # 3. 代码定位与业务词典 (Locating Code)
 # ------------------------------------------------------------------------------
 locating_code:
-  repo_map_rule: "Use `repo_map` in Round 1 for global AST architecture and directory structure."
+  repo_map_rule: "Use `repo_map` in Round 1 for global AST architecture and directory structure. Do not also call `list_directory`."
   explore_first: >-
     PRIMARY EXPLORATION: For ANY investigation into features, execution flow, or bugs, ALWAYS prioritize
     `code_explore` with path = a directory/module (`crates/atomcode-coding`, `src/auth`) and query =

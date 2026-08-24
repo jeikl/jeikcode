@@ -322,7 +322,8 @@ fn shell_tool_description(
              Prefer the dedicated tools over bash for file operations — they are \
              gitignore-aware, cross-platform, and cheaper: read_file to read a file (NOT \
              cat/head/tail), grep to search file contents (NOT grep/rg), glob to find \
-             files by name (NOT find/fd), list_directory for a directory tree (NOT ls), \
+             files by name (NOT find/fd), list_directory to list one directory like ls \
+             (NOT bash ls; workspace tree is repo_map), \
              edit_file to MODIFY a file and write_file to create/overwrite one. NEVER edit \
              a file with a shell command (sed/awk/perl -i, or `>`/`>>`/tee redirection) — \
              it corrupts indentation and encoding (especially on Windows) and cascades; if \

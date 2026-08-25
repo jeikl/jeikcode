@@ -54,46 +54,47 @@ During its evolution, JeikCode synthesized the core design strengths of industry
 
 ## 2. Functional & Architectural Comparison
 
-The following comparison focuses strictly on **agent execution loops, code retrieval, context management, tool resilience, and protocol mechanisms** using clear ✅ and ❌ indicators:
+The following comparison objectively presents the mechanisms and functional strengths of **JeikCode**, **Claude Code**, **OpenCode**, and **Grok Build**:
 
-### 1. Core Agentic Feature Matrix
+### 1. Core Feature & Mechanism Comparison Matrix
 
-| Core Feature & Mechanism | **JeikCode (This Project)** | **Claude Code** | **OpenCode** | **Grok Build** | **Legacy Baseline** |
+| Core Feature & Mechanism | **JeikCode (This Project)** | **Claude Code (Anthropic)** | **OpenCode (OpenCode AI)** | **Grok Build (SpaceXAI)** | **Legacy Baseline** |
 | :--- | :---: | :---: | :---: | :---: | :---: |
-| **Autonomous Read-Edit-Test-Verify Loop** | ✅ Dynamic Budget + State Machine | ✅ Basic CLI Loop | ✅ Effect-TS Pipeline | ✅ PTY Process Loop | ❌ Weak Glue Layer |
-| **5-Stage Tool Repair Chain (with Windows Backslash Rescue)** | ✅ 5-Tier Self-Healing | ❌ Raw Error String | ❌ Strict Error Abort | ✅ Basic Parameter Fix | ❌ Prone to Serde Failure |
-| **Schema Type Coercion (`"3"`→`3`, `"true"`→`true`)** | ✅ Auto Type Coercion | ❌ Relies on LLM Guess | ❌ Relies on LLM Retry | ✅ Partial Coercion | ❌ No Type Healing |
-| **3-Attempt Repetitive Tool Circuit Breaker (Loop Guard)** | ✅ Rigid Loop Guard | ❌ Prone to Infinite Loops | ❌ Context Truncation | ✅ Loop Guard Guard | ❌ No Loop Breaker |
-| **Native CodeExplore Bilingual Semantic Search** | ✅ **Weighted Multi-Vector** | ❌ None (Grep only) | ❌ None (LSP/Grep) | ❌ None (Symbol AST) | ❌ Zero-Hit Misses |
-| **repo_map Structure-First Directory Tree (No Truncation)** | ✅ Complete Dir Tree | ❌ Truncated by Token | ❌ Basic Dir Listing | ✅ Dir Tree Viewer | ❌ Coarse Elision |
-| **Low-Relevance Code Collapsed into Minimal Token Budget** | ✅ Minimal Token Cost | ❌ Heavy Dump Context | ❌ Basic File Folding | ✅ Output Budgeting | ❌ Hard Truncation |
-| **KV Cache Prefix Stability (Append-Only Discipline)** | ✅ `user-wrap` Tail Wrap | ❌ Injections Corrupt Cache | ❌ Dynamic Interruption | ❌ Transcript Truncation | ❌ Reminder Thrashing |
-| **`sacred_floor` Memory / Rule Protection on Compression** | ✅ Never Lost | ❌ Sliding Window Loss | ❌ Prone to Loss | ✅ Event Compaction | ❌ Drops Rules |
-| **Fully Externalized Prompts with Millisecond Hot-Reload** | ✅ Immediate Effect | ❌ Compiled in Binary | ❌ Session Restart Needed | ❌ Recompile Needed | ❌ Restart Needed |
-| **Multi-Project Knowledge Packs Precedence (`rules/dbwords`)** | ✅ Strict Over System | ❌ Single `CLAUDE.md` | ❌ Context Concat | ✅ Rule Precedence | ❌ Single File Only |
-| **Agent Self-Configuration Tool (`jeikcode_config_guide`)** | ✅ 8-Chapter Guide Tool | ❌ None (Static Web) | ❌ None (Static Docs) | ❌ None (Internal Docs) | ❌ No Self-Inspection |
-| **Multi-Protocol Support (Responses / Completions / Anthropic)** | ✅ 4 Protocols Native | ❌ Anthropic Only | ✅ Multi-Model | ❌ Grok Only | ❌ No Responses |
-| **4-Gear Reasoning Effort Switching (`low/med/high/xhigh`)** | ✅ Realtime `/effort` | ❌ Thinking Budget Only | ❌ Manual Frontend | ✅ Bound to Grok | ❌ Stale Bindings |
-| **Independent First-Token Liveness Timeout (60s × 3)** | ✅ Solves R1/Grok3 Hangs | ❌ Single Stream Timeout | ❌ Request Timeout | ✅ Process Watchdog | ❌ Stream Hangs |
-| **Multi-Instance Headless Remote Serve + WebUI Gateway** | ✅ Native Rust Engine | ❌ Local CLI Only | ✅ Web + Desktop App | ❌ Pager TUI Only | ❌ Basic WebUI |
-| **Double-Press ESC/Ctrl+C Cancel + Linux TTY Grabbing** | ✅ Anti-Misoperation | ❌ Single ESC Drops State | ❌ Basic Interrupt | ✅ Terminal PTY Guard | ❌ Linux TTY Lockup |
+| **Autonomous Read-Edit-Test-Verify Loop** | ✅ **L0/L1/L2 Dynamic State Machine** | ✅ **Unix-Style Autonomous Loop** | ✅ **Effect-TS Async Event Pipeline** | ✅ **PTY Process-Level Flow** | ⚠️ Weak Glue Layer |
+| **5-Stage Tool Repair Chain (with Windows Backslash Rescue)** | ✅ **5-Tier Self-Healing Pipeline** | ⚠️ Relies on Claude Self-Correction | ⚠️ Schema Failure Aborts on Error | ✅ Diagnostic Feedback & Coercion | ❌ Prone to Serde Failure |
+| **Schema Type Coercion (`"3"`→`3`, `"true"`→`true`)** | ✅ **Client-Side Type Level Fix** | ⚠️ Relies on LLM Re-Generation | ⚠️ Relies on LLM Re-Generation | ✅ Partial Type Coercion | ❌ No Type Healing |
+| **3-Attempt Repetitive Tool Circuit Breaker (Loop Guard)** | ✅ **Loop Guard Circuit Breaker** | ⚠️ Context Truncation / Self-Correction | ⚠️ Context Truncation / Manual Stop | ✅ **Loop Guard Guard Active** | ❌ Prone to Infinite Loops |
+| **Code Search: Weighted AST + Bilingual Code/Comment Semantic** | ✅ **CodeExplore Multi-Vector Search** | ⚠️ ripgrep / Glob Full Text Search | ⚠️ LSP Symbols + ripgrep Search | ⚠️ xai-codebase-graph AST Graph | ❌ Basic Hash Misses |
+| **repo_map Structure-First Directory Tree (No Truncation)** | ✅ **Complete Dir Tree Overview** | ⚠️ Explores on Demand by Size | ⚠️ Basic Directory Listing | ✅ Full Directory Tree View | ❌ Coarse Elision |
+| **Low-Relevance Code Collapsed into Minimal Token Budget** | ✅ **Top-Placed Core + Low Budget Rest** | ⚠️ Relies on Model Tool Pruning | ⚠️ Basic File Folding | ✅ Output Budget Management | ❌ Hard Truncation |
+| **KV Cache Prefix Stability (Append-Only Discipline)** | ✅ **`user-wrap.md` Tail Wrapping** | ✅ **Anthropic Ephemeral Cache** | ⚠️ Relies on Native Provider Cache | ⚠️ SQLite Transcript Based | ❌ Reminder Thrashing |
+| **`sacred_floor` Memory / Rule Protection on Compression** | ✅ **Critical Rules Never Dropped** | ✅ **autoDream Memory Consolidation** | ⚠️ Sliding Window Truncation | ✅ Compaction Transcript Log | ❌ Drops Rules/Memory |
+| **Fully Externalized Prompts with Millisecond Hot-Reload** | ✅ **`init/rules/wrap` mtime Hot-Reload** | ⚠️ Supports `CLAUDE.md`, Core is Internal | ⚠️ Supports Custom Prompt on Reload | ⚠️ Supports Precedence, Core Baked | ❌ Restart Needed |
+| **Multi-Project Knowledge Packs Precedence (`rules/dbwords`)** | ✅ **4-Tier Packs Strict Over System** | ✅ **Supports `CLAUDE.md` Project Spec** | ✅ **Context Injection & Rules** | ✅ **Project Rule Configurations** | ❌ Single File Only |
+| **Agent Self-Configuration Tool (`jeikcode_config_guide`)** | ✅ **8-Chapter Teaches & Self-Check** | ❌ Relies on Official Web Docs | ❌ Relies on Community Web Docs | ❌ Relies on Internal User Manual | ❌ No Self-Inspection |
+| **MCP (Model Context Protocol) & Skills Ecosystem** | ✅ **Native MCP + Dynamic Skills** | ✅ **Deep MCP & Skills/Hooks** | ✅ **Rich Plugin & MCP Ecosystem** | ✅ **Built-in Tools & MCP Support** | ⚠️ Basic Local Skills |
+| **Multi-Protocol Support (Responses / Completions / Anthropic)** | ✅ **4 Major Protocols Supported** | ⚠️ Claude Protocol Focused | ✅ **Broad Multi-Model Protocols** | ⚠️ xAI Grok Protocol Focused | ❌ No Responses |
+| **4-Gear Reasoning Effort Switching (`low/med/high/xhigh`)** | ✅ **Realtime `/effort` & WebUI** | ✅ **Integrated Claude 3.7 Thinking** | ⚠️ Frontend Panel Manual Setting | ✅ **Integrated Grok Reasoning** | ❌ Stale Bindings |
+| **Independent First-Token Liveness Timeout (60s × 3)** | ✅ **Solves R1/Grok3 Silent Hangs** | ⚠️ Unified Stream Request Timeout | ⚠️ Unified Effect Timeout | ✅ Process Watchdog & Signals | ❌ Stream Hangs |
+| **Multi-Instance Headless Remote Serve + WebUI Gateway** | ✅ **Native Rust Serve + Web Console** | ❌ Terminal CLI Focused | ✅ **Web Console + Desktop App** | ❌ Terminal Pager TUI Mode | ⚠️ Basic WebUI |
+| **Double-Press ESC/Ctrl+C Cancel + Linux TTY Grabbing** | ✅ **Anti-Misoperation + TTY Guard** | ⚠️ Single ESC Cancels Stream | ⚠️ Basic Keyboard Interrupt | ✅ **PTY Terminal Control** | ❌ Linux TTY Lockup |
 
 ---
 
-### 2. Programming Language AST & Semantic Retrieval Support
+### 2. Programming Language Search & Parsing Support Matrix
 
-JeikCode's native CodeExplore supports fullstack AST parsing across all major programming languages:
+All agents support major programming languages, with JeikCode's CodeExplore specializing in deep AST structure and bilingual natural language semantic mapping:
 
 | Language & Framework | **JeikCode (CodeExplore)** | **Claude Code** | **OpenCode** | **Grok Build** |
 | :--- | :---: | :---: | :---: | :---: |
-| **Java** | ✅ **AST Analysis + Semantic Search** | ❌ (Standard Grep) | ✅ (Relies on LSP) | ✅ (Basic Symbol Graph) |
-| **C / C++** | ✅ **AST Analysis + Semantic Search** | ❌ (Standard Grep) | ✅ (Relies on LSP) | ✅ (Native Support) |
-| **Python** | ✅ **AST Analysis + Semantic Search** | ❌ (Standard Grep) | ✅ (Relies on LSP) | ✅ (Basic Symbol Graph) |
-| **Vue (Vue2/3 SFC Dual Parse)** | ✅ **Template + Script Deep Support** | ❌ (Standard Grep) | ❌ (No SFC Graph) | ❌ (Weak Frontend) |
-| **TypeScript / JavaScript** | ✅ **JSX / TSX Element Extraction** | ❌ (Standard Grep) | ✅ (Relies on LSP) | ✅ (Basic Symbol Graph) |
-| **Rust** | ✅ **AST Analysis + Semantic Search** | ❌ (Standard Grep) | ✅ (Relies on LSP) | ✅ (Native Support) |
-| **Go** | ✅ **AST Analysis + Semantic Search** | ❌ (Standard Grep) | ✅ (Relies on LSP) | ✅ (Basic Symbol Graph) |
-| **Svelte / Astro / CSS / SCSS** | ✅ **Component & Style Selectors** | ❌ (Standard Grep) | ❌ (No SFC Graph) | ❌ (Unsupported) |
+| **Java** | ✅ **AST Graph + Semantic Search** | ✅ **ripgrep Fulltext / Regex** | ✅ **LSP Symbols + Text Search** | ✅ **Syntax Graph + Fuzzy Search** |
+| **C / C++** | ✅ **AST Graph + Semantic Search** | ✅ **ripgrep Fulltext / Regex** | ✅ **LSP Symbols + Text Search** | ✅ **Native PTY + Syntax Graph** |
+| **Python** | ✅ **AST Graph + Semantic Search** | ✅ **ripgrep Fulltext / Regex** | ✅ **LSP Symbols + Text Search** | ✅ **Syntax Graph + Fuzzy Search** |
+| **Vue (Vue2/3 SFC)** | ✅ **Template + Script Dual AST** | ✅ **ripgrep Fulltext / Regex** | ⚠️ Generic File Search | ⚠️ Generic File Search |
+| **TypeScript / JavaScript** | ✅ **JSX / TSX Element Extraction** | ✅ **ripgrep Fulltext / Regex** | ✅ **LSP Symbols + Text Search** | ✅ **Syntax Graph + Fuzzy Search** |
+| **Rust** | ✅ **AST Graph + Semantic Search** | ✅ **ripgrep Fulltext / Regex** | ✅ **LSP Symbols + Text Search** | ✅ **Native Deep Support** |
+| **Go** | ✅ **AST Graph + Semantic Search** | ✅ **ripgrep Fulltext / Regex** | ✅ **LSP Symbols + Text Search** | ✅ **Syntax Graph + Fuzzy Search** |
+| **Svelte / Astro / SCSS** | ✅ **Component & Style Selectors** | ✅ **ripgrep Fulltext / Regex** | ⚠️ Generic File Search | ⚠️ Generic File Search |
 
 ---
 

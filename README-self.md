@@ -1,6 +1,6 @@
-# AtomCode Self — 自建 fork 版说明
+# JeikCode Self — 增强版架构与自建更新说明
 
-> 本 fork(`origin = jeikls/atomcode`,基于官方 `atomgit_atomcode/atomcode` fork,维护分支 **`local-dev`**)在官方基础上做了大量工程化增强。本文档说明**与官方的差异**:配置、代码、功能三个维度,以及自建无感更新的使用方式。
+> 本项目（`origin = jeikls/atomcode`，GitHub 镜像 `jeikl/jeikcode`，维护分支 **`local-dev`**）在官方架构基础上进行了全方位的深度工程化重构与自主增强。本文档系统性说明在配置体系、核心机制、图谱检索、工具容错以及自建无感更新等关键维度的架构突破与使用指南。
 
 ---
 

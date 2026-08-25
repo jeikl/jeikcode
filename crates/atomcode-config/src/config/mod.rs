@@ -1680,7 +1680,7 @@ impl Config {
 
     pub(crate) fn parse_disk_content(content: &str, path: &Path) -> Result<Self> {
         let mut config: Config = toml::from_str(content)
-            .with_context(|| format!("Failed to parse config: {}", path.display()))?;
+            .map_err(|e| anyhow::anyhow!("Failed to parse config {}: {e}", path.display()))?;
         migrate_legacy_lsp_default(&mut config);
         Ok(config)
     }
@@ -1690,7 +1690,7 @@ impl Config {
         path: &Path,
     ) -> Result<(Self, Vec<String>)> {
         let mut document: toml::Value = toml::from_str(content)
-            .with_context(|| format!("Failed to parse config: {}", path.display()))?;
+            .map_err(|e| anyhow::anyhow!("Failed to parse config {}: {e}", path.display()))?;
         let mut warnings = Vec::new();
         let mut quarantined: std::collections::BTreeMap<String, toml::Value> =
             std::collections::BTreeMap::new();
@@ -1716,7 +1716,7 @@ impl Config {
 
         let mut config: Config = document
             .try_into()
-            .with_context(|| format!("Failed to parse config: {}", path.display()))?;
+            .map_err(|e| anyhow::anyhow!("Failed to parse config {}: {e}", path.display()))?;
         config.quarantined_providers = quarantined;
         migrate_legacy_lsp_default(&mut config);
         if config
@@ -2828,6 +2828,15 @@ model = "missing-type"
         "#;
         let cfg: Config = toml::from_str(toml_str).unwrap();
         assert_eq!(cfg.language, None);
+    }
+
+    #[test]
+    fn parses_default_config_asset_with_hyphen_language() {
+        let content = include_str!("../../../atomcode-cli/assets/default-config.toml");
+        let path = std::path::Path::new("/root/.atomcode/config.toml");
+        let (cfg, warnings) = Config::parse_disk_content_tolerant(content, path).unwrap();
+        assert_eq!(cfg.language, Some(crate::locale::Locale::ZhCn));
+        assert!(warnings.is_empty(), "unexpected warnings: {warnings:?}");
     }
 
     #[test]

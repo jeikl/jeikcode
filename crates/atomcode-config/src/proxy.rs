@@ -20,8 +20,11 @@ const ENV_NO_PROXY: &[&str] = &["NO_PROXY", "no_proxy"];
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum ProxyMode {
+    #[serde(alias = "follow-system", alias = "followSystem")]
     FollowSystem,
+    #[serde(alias = "default-proxy", alias = "defaultProxy")]
     DefaultProxy,
+    #[serde(alias = "no-proxy", alias = "noProxy")]
     NoProxy,
 }
 

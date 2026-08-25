@@ -3,38 +3,38 @@ use std::str::FromStr;
 
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize)]
 pub enum Locale {
-    #[serde(
-        rename = "en",
-        alias = "EN",
-        alias = "english",
-        alias = "English",
-        alias = "en-US",
-        alias = "en_US"
-    )]
+    #[serde(rename = "en")]
     En,
-    #[serde(
-        rename = "zh_CN",
-        alias = "zh-CN",
-        alias = "zh_cn",
-        alias = "zh-cn",
-        alias = "zh",
-        alias = "ZH",
-        alias = "chinese",
-        alias = "Chinese",
-        alias = "简体中文",
-        alias = "zh_TW",
-        alias = "zh-TW",
-        alias = "zh_tw",
-        alias = "zh-tw",
-        alias = "zh_HK",
-        alias = "zh-HK",
-        alias = "zh_hk",
-        alias = "zh-hk",
-        alias = "繁體中文"
-    )]
+    #[serde(rename = "zh_CN")]
     ZhCn,
+}
+
+impl<'de> Deserialize<'de> for Locale {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        struct LocaleVisitor;
+
+        impl<'de> serde::de::Visitor<'de> for LocaleVisitor {
+            type Value = Locale;
+
+            fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
+                formatter.write_str("a locale string like 'en', 'zh_CN', 'zh-CN', 'zh', etc.")
+            }
+
+            fn visit_str<E>(self, value: &str) -> Result<Locale, E>
+            where
+                E: serde::de::Error,
+            {
+                Locale::from_str(value).map_err(serde::de::Error::custom)
+            }
+        }
+
+        deserializer.deserialize_str(LocaleVisitor)
+    }
 }
 
 impl Default for Locale {
@@ -56,11 +56,20 @@ impl FromStr for Locale {
     type Err = String;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        match s.to_ascii_lowercase().as_str() {
-            "en" | "english" => Ok(Locale::En),
-            "zh" | "zh_cn" | "zh-cn" | "chinese" | "简体中文" | "zh_tw" | "zh-tw" | "zh_hk"
-            | "zh-hk" | "繁體中文" => Ok(Locale::ZhCn),
-            other => Err(format!("unsupported locale: {other}")),
+        let normalized = s.trim().to_ascii_lowercase().replace('-', "_");
+        match normalized.as_str() {
+            "en" | "english" | "en_us" | "en_gb" | "en_ca" | "en_au" => Ok(Locale::En),
+            "zh" | "zh_cn" | "zh_hans" | "chinese" | "简体中文" | "zh_tw" | "zh_hk" | "zh_hant"
+            | "繁體中文" => Ok(Locale::ZhCn),
+            other => {
+                if other.starts_with("en") {
+                    Ok(Locale::En)
+                } else if other.starts_with("zh") || other.contains("中文") {
+                    Ok(Locale::ZhCn)
+                } else {
+                    Err(format!("unsupported locale: {s}"))
+                }
+            }
         }
     }
 }
@@ -114,5 +123,17 @@ mod tests {
         let toml_parsed: toml::Value = toml::from_str(r#"language = "zh-CN""#).unwrap();
         let lang: Option<Locale> = toml_parsed.get("language").unwrap().clone().try_into().unwrap();
         assert_eq!(lang, Some(Locale::ZhCn));
+
+        for val in &["zh-CN", "zh_CN", "zh-cn", "zh_cn", "ZH-CN", "ZH_CN", "zh", "ZH", "简体中文", "zh-TW", "zh_TW"] {
+            let toml_doc: toml::Value = toml::from_str(&format!(r#"language = "{val}""#)).unwrap();
+            let parsed_lang: Option<Locale> = toml_doc.get("language").unwrap().clone().try_into().unwrap();
+            assert_eq!(parsed_lang, Some(Locale::ZhCn), "failed for {val}");
+        }
+
+        for val in &["en", "EN", "en-US", "en_US", "en-us", "en_us", "English", "english"] {
+            let toml_doc: toml::Value = toml::from_str(&format!(r#"language = "{val}""#)).unwrap();
+            let parsed_lang: Option<Locale> = toml_doc.get("language").unwrap().clone().try_into().unwrap();
+            assert_eq!(parsed_lang, Some(Locale::En), "failed for {val}");
+        }
     }
 }

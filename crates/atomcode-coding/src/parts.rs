@@ -335,10 +335,6 @@ async fn prepare_with_plugin_hooks_reusing_lease(
         names.push("lsp".into());
     }
 
-    #[cfg(feature = "atomgit")]
-    crate::assemble::register_atomgit_capabilities(&mut registry, &mut names)
-        .map_err(|error| io::Error::other(format!("AtomGit tool setup failed: {error}")))?;
-
     if opts.web && !atomcode_config::config::offline::is_offline_active() {
         registry.register(Arc::new(WebFetchTool));
         // web_search backend: explicit config wins; else the `ATOMCODE_WEB_SEARCH_PROVIDER`
@@ -2188,18 +2184,17 @@ mod tests {
         assert!(!parts.request_user_input_enabled);
     }
 
-    #[cfg(feature = "atomgit")]
     #[tokio::test]
-    async fn production_prepare_exposes_atomgit_tools() {
+    async fn production_prepare_does_not_expose_atomgit_tools() {
         let project = tempfile::tempdir().unwrap();
         let cfg = CodingAgentConfig::new("k", "http://localhost", "m", project.path());
         let parts = prepare(&cfg, io_free_opts()).await.unwrap();
         let names = parts.selected_tool_names();
 
-        for expected in ["atomgit_repo", "atomgit_pr", "atomgit_issue"] {
+        for unexpected in ["atomgit_repo", "atomgit_pr", "atomgit_issue"] {
             assert!(
-                names.iter().any(|name| name == expected),
-                "production tool catalog must expose {expected}: {names:?}"
+                !names.iter().any(|name| name == unexpected),
+                "production tool catalog must not expose {unexpected}: {names:?}"
             );
         }
     }

@@ -1140,7 +1140,7 @@ Msg::CmdDescBackground => "Run a one-shot task in an isolated background context
             format!(
                 "✓ {done} · {turn_count} rounds · {tool_call_count} tools · {duration} · {} tokens{}",
                 super::fmt_tokens(total_tokens),
-                cached_pct.map(|p| format!(" · {p}% cached")).unwrap_or_default(),
+                cached_pct.map(|p| format!(" · {p}% cache")).unwrap_or_default(),
             ).into(),
         Msg::TurnSummaryError { turn_count, tool_call_count, duration, total_tokens, reason } => {
             let cause = reason.map(|r| format!(": {r}")).unwrap_or_default();

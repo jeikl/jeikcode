@@ -1111,7 +1111,7 @@ Msg::CmdDescBackground => "在隔离的后台上下文中运行一次性任务�
             format!(
                 "✓ {done} · {turn_count} 轮 · {tool_call_count} 工具 · {duration} · {} tokens{}",
                 super::fmt_tokens(total_tokens),
-                cached_pct.map(|p| format!(" · {p}% cached")).unwrap_or_default(),
+                cached_pct.map(|p| format!(" · {p}% cache")).unwrap_or_default(),
             ).into(),
         Msg::TurnSummaryError { turn_count, tool_call_count, duration, total_tokens, reason } => {
             let cause = reason.map(|r| format!("：{r}")).unwrap_or_default();

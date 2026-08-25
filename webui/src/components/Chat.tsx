@@ -259,26 +259,72 @@ function estimateTextTokens(text: string | null | undefined): number {
   return Math.max(1, Math.ceil(text.length / 3.5));
 }
 
-/** Estimate token count for a single message. */
-function estimateMessageTokens(m: Message): number {
-  let len = 0;
-  for (const p of m.parts) {
-    if (p.kind === 'text' || p.kind === 'reasoning' || p.kind === 'notice' || p.kind === 'rate_limited') {
-      len += p.text.length;
-    } else if (p.kind === 'tool') {
-      len += (p.tool.name?.length ?? 0) + (p.tool.args?.length ?? 0) + (p.tool.output?.length ?? 0);
+/** Format token count to human friendly string (e.g. 1.2k, 128k, 1.0M). */
+function formatTokenMetric(num: number | undefined | null): string {
+  if (num == null || num <= 0) return '0';
+  if (num >= 1_000_000) return `${(num / 1_000_000).toFixed(1)}M`;
+  if (num >= 10_000) return `${(num / 1_000).toFixed(0)}k`;
+  if (num >= 1_000) return `${(num / 1_000).toFixed(1)}k`;
+  return String(num);
+}
+
+/** Estimate token breakdown for a single message. */
+function estimateMessageTokens(m: Message): { prompt: number; completion: number; reasoning: number } {
+  let prompt = 0;
+  let completion = 0;
+  let reasoning = 0;
+
+  if (m.role === 'user') {
+    for (const p of m.parts) {
+      if (p.kind === 'text') prompt += estimateTextTokens(p.text);
+    }
+  } else if (m.role === 'assistant') {
+    for (const p of m.parts) {
+      if (p.kind === 'text') completion += estimateTextTokens(p.text);
+      else if (p.kind === 'reasoning') reasoning += estimateTextTokens(p.text);
+      else if (p.kind === 'tool') {
+        prompt += estimateTextTokens((p.tool.name || '') + ' ' + (p.tool.args || '') + ' ' + (p.tool.output || ''));
+      } else if (p.kind === 'notice' || p.kind === 'rate_limited') {
+        prompt += estimateTextTokens(p.text);
+      }
     }
   }
-  return Math.max(1, Math.ceil(len / 3.5));
+  return { prompt, completion, reasoning };
 }
 
 /** Estimate total token usage across all messages in a session. */
 function estimateAllMessagesTokens(messages: Message[]): TokenUsage {
-  let total = 0;
-  for (const m of messages) {
-    total += estimateMessageTokens(m);
+  let prompt = 0;
+  let completion = 0;
+  let reasoning = 0;
+  let prefixTokens = 0;
+
+  for (let i = 0; i < messages.length; i++) {
+    const m = messages[i];
+    const isLast = i === messages.length - 1;
+    const est = estimateMessageTokens(m);
+
+    if (m.role === 'assistant' && !isLast) {
+      // In multi-turn chat, historical assistant text is fed back as prompt context,
+      // while historical reasoning is omitted by default from next-turn prompt context.
+      prompt += est.prompt + est.completion;
+      prefixTokens = prompt; // Historical turns form the candidate prefix
+    } else {
+      prompt += est.prompt;
+      completion += est.completion;
+      reasoning += est.reasoning;
+    }
   }
-  return { prompt: total, completion: 0, total };
+  const total = prompt + completion + reasoning;
+  const cached = prefixTokens > 0 ? prefixTokens : 0;
+  return {
+    prompt,
+    completion: completion + reasoning,
+    total,
+    cached,
+    cached_estimated: cached > 0,
+    reasoning,
+  };
 }
 
 /** Max attached images per message and per-image byte cap (raw file size). */
@@ -330,6 +376,9 @@ interface TokenUsage {
   prompt: number;
   completion: number;
   total: number;
+  cached?: number;
+  cached_estimated?: boolean;
+  reasoning?: number;
 }
 
 interface PermissionRequestEvent {
@@ -644,6 +693,8 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
     pushCommandNotice(t('chat.steerRecovered'));
   }
   const [tokens, setTokens] = useState<TokenUsage | null>(null);
+  const lastUserTokensRef = useRef(0);
+  const [modelCatalog, setModelCatalog] = useState<ModelInfo[]>([]);
   const [historyHint, setHistoryHint] = useState<string | null>(null);
   const [activeTodos, setActiveTodos] = useState<TodoItem[] | null>(null);
   const activeTodosRef = useRef<TodoItem[] | null>(null);
@@ -659,6 +710,17 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
   const followDefaultProvider = useCallback((name: string) => {
     if (!providerPinnedRef.current) setProvider(name);
   }, []);
+
+  useEffect(() => {
+    let active = true;
+    getModels().then((m) => { if (active) setModelCatalog(m); }).catch(() => {});
+    return () => { active = false; };
+  }, [provider]);
+
+  const activeModelMeta = modelCatalog.find((m) => m.provider === provider)
+    ?? modelCatalog.find((m) => m.is_default)
+    ?? modelCatalog[0];
+  const contextLimit = activeModelMeta?.context_window;
   // 审批模式（build / accept_edits / bypass / plan）。进程级 runtime 状态，
   // 由 /live snapshot + 'mode' 事件同步，切换调 postLiveMode（下一轮生效）。
   // confirmedMode 是 daemon 已确认值。
@@ -2422,12 +2484,20 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
           break;
         }
         const userDelta = estimateTextTokens(userText);
+        lastUserTokensRef.current = userDelta;
         if (userDelta > 0) {
           setTokens((prev) => {
             const p = (prev?.prompt ?? 0) + userDelta;
             const c = prev?.completion ?? 0;
             const t = (prev?.total ?? 0) + userDelta;
-            return { prompt: p, completion: c, total: t };
+            return {
+              prompt: p,
+              completion: c,
+              total: t,
+              cached: prev?.cached ?? 0,
+              cached_estimated: prev?.cached_estimated ?? false,
+              reasoning: 0,
+            };
           });
         }
         setMessages((prev) => {
@@ -2472,7 +2542,7 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
             const p = prev?.prompt ?? 0;
             const c = (prev?.completion ?? 0) + textDelta;
             const t = (prev?.total ?? 0) + textDelta;
-            return { prompt: p, completion: c, total: t };
+            return { prompt: p, completion: c, total: t, cached: prev?.cached ?? 0, reasoning: prev?.reasoning ?? 0 };
           });
         }
         break;
@@ -2495,7 +2565,8 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
             const p = prev?.prompt ?? 0;
             const c = (prev?.completion ?? 0) + rDelta;
             const t = (prev?.total ?? 0) + rDelta;
-            return { prompt: p, completion: c, total: t };
+            const r = (prev?.reasoning ?? 0) + rDelta;
+            return { prompt: p, completion: c, total: t, cached: prev?.cached ?? 0, reasoning: r };
           });
         }
         break;
@@ -2562,19 +2633,37 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
             const p = (prev?.prompt ?? 0) + toolDelta;
             const c = prev?.completion ?? 0;
             const t = (prev?.total ?? 0) + toolDelta;
-            return { prompt: p, completion: c, total: t };
+            return { prompt: p, completion: c, total: t, cached: prev?.cached ?? 0, reasoning: prev?.reasoning ?? 0 };
           });
         }
         break;
       }
 
-      case 'tokens':
-        setTokens({
-          prompt: event.prompt,
-          completion: event.completion,
-          total: event.total,
+      case 'tokens': {
+        const officialCached = event.cached != null && event.cached > 0;
+        setTokens((prev) => {
+          let cached = officialCached ? event.cached! : 0;
+          let cached_estimated = false;
+          // If no official cache was reported by provider, estimate from historical prefix
+          if (!officialCached && (prev?.prompt ?? 0) > 0 && event.prompt > 0) {
+            const userTokens = lastUserTokensRef.current || 0;
+            const prefix = Math.max(0, event.prompt - userTokens);
+            if (prefix > 0 && userTokens > 0) {
+              cached = prefix;
+              cached_estimated = true;
+            }
+          }
+          return {
+            prompt: event.prompt,
+            completion: event.completion,
+            total: event.total,
+            cached,
+            cached_estimated,
+            reasoning: prev?.reasoning ?? 0,
+          };
         });
         break;
+      }
 
       case 'permission_request':
         // Always mark the tool row; restore the modal unless a pure observer
@@ -2605,6 +2694,8 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
               prompt: prev?.prompt ?? 0,
               completion: prev?.completion ?? (event.tokens as number),
               total: Math.max(prev?.total ?? 0, event.tokens as number),
+              cached: prev?.cached ?? 0,
+              reasoning: prev?.reasoning ?? 0,
             }));
           } else if (typeof event.tokens === 'object') {
             const tok = event.tokens as any;
@@ -2613,6 +2704,8 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
                 prompt: tok.prompt ?? tok.input ?? 0,
                 completion: tok.completion ?? tok.output ?? 0,
                 total: tok.total,
+                cached: tok.cached ?? tok.cached_input ?? 0,
+                reasoning: tok.reasoning ?? 0,
               });
             }
           }
@@ -2962,12 +3055,20 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
     setHistoryHint(null);
 
     const userDelta = estimateTextTokens(text);
+    lastUserTokensRef.current = userDelta;
     if (userDelta > 0) {
       setTokens((prev) => {
         const p = (prev?.prompt ?? 0) + userDelta;
         const c = prev?.completion ?? 0;
         const t = (prev?.total ?? 0) + userDelta;
-        return { prompt: p, completion: c, total: t };
+        return {
+          prompt: p,
+          completion: c,
+          total: t,
+          cached: prev?.cached ?? 0,
+          cached_estimated: prev?.cached_estimated ?? false,
+          reasoning: 0,
+        };
       });
     }
 
@@ -3506,11 +3607,88 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
               })}
             </span>
           )}
-          {tokens && (
-            <span class="footer-tokens">
-              {(tokens.total / 1000).toFixed(1)}k tokens
-            </span>
-          )}
+          {tokens && (() => {
+            const prompt = tokens.prompt ?? 0;
+            const completion = tokens.completion ?? 0;
+            const cached = tokens.cached ?? 0;
+            const isEstimated = Boolean(tokens.cached_estimated);
+            const reasoning = tokens.reasoning ?? 0;
+            const total = tokens.total ?? (prompt + completion);
+            const cachedPct = cached > 0 && prompt > 0 ? Math.min(100, Math.round((cached / prompt) * 100)) : null;
+            const pctOfLimit = contextLimit && contextLimit > 0 ? Math.min(100, Math.round((total / contextLimit) * 100)) : null;
+            const billable = completion + Math.max(0, prompt - cached);
+
+            const promptStr = prompt.toLocaleString();
+            const completionStr = completion.toLocaleString();
+            const cachedStr = cached.toLocaleString();
+            const reasoningStr = reasoning.toLocaleString();
+            const totalStr = total.toLocaleString();
+            const limitStr = contextLimit ? contextLimit.toLocaleString() : null;
+            const billableStr = billable.toLocaleString();
+
+            const tooltipLines: string[] = [
+              '📊 Token 与上下文占用详情',
+              '──────────────────────────────',
+              `📥 输入 (Prompt/上下文): ${promptStr}`,
+            ];
+            if (cached > 0) {
+              if (isEstimated) {
+                tooltipLines.push(`⚡ 预估前缀缓存 (Est. Cache): ${cachedStr} (${cachedPct}% 预估，本地前缀估算)`);
+              } else {
+                tooltipLines.push(`⚡ 在线缓存命中 (Cache Hit): ${cachedStr} (${cachedPct}% 命中率，厂商权威数据)`);
+              }
+            }
+            if (reasoning > 0) {
+              const contentTokens = Math.max(0, completion - reasoning);
+              tooltipLines.push(`📤 输出 (Completion): ${completionStr} (正文 ${contentTokens.toLocaleString()} · 思考 ${reasoningStr})`);
+            } else {
+              tooltipLines.push(`📤 输出 (Completion): ${completionStr}`);
+            }
+            if (contextLimit) {
+              tooltipLines.push(`🎯 当前总上下文: ${totalStr} / ${limitStr} (${pctOfLimit}%)`);
+            } else {
+              tooltipLines.push(`🎯 当前总上下文: ${totalStr}`);
+            }
+            tooltipLines.push(`💡 计费估算 Token: ${billableStr}`);
+            const tooltipText = tooltipLines.join('\n');
+
+            return (
+              <span class="footer-tokens" title={tooltipText} aria-label={tooltipText}>
+                <span class="token-pill token-prompt" title={`输入上下文 (Prompt): ${promptStr}`}>
+                  <span class="token-icon">↓</span>
+                  <span>{formatTokenMetric(prompt)}</span>
+                </span>
+                <span class="token-pill token-completion" title={`输出生成 (Completion): ${completionStr}${reasoning > 0 ? ` (含思考 ${reasoningStr})` : ''}`}>
+                  <span class="token-icon">↑</span>
+                  <span>{formatTokenMetric(completion)}</span>
+                </span>
+                {cached > 0 && (
+                  <span
+                    class={'token-pill token-cached' + (isEstimated ? ' is-estimated' : '')}
+                    title={isEstimated ? `预估前缀缓存: ${cachedStr} (${cachedPct}% 预估)` : `在线缓存命中: ${cachedStr} (${cachedPct}%)`}
+                  >
+                    <span class="token-icon">⚡</span>
+                    <span>{cachedPct != null ? `${cachedPct}%` : formatTokenMetric(cached)} {isEstimated ? '预估cache' : 'cache'}</span>
+                  </span>
+                )}
+                {reasoning > 0 && (
+                  <span class="token-pill token-reasoning" title={`思考过程 (Reasoning): ${reasoningStr}`}>
+                    <span class="token-icon">💭</span>
+                    <span>{formatTokenMetric(reasoning)}</span>
+                  </span>
+                )}
+                {pctOfLimit != null ? (
+                  <span class="token-pill token-total" title={`上下文窗口使用率: ${totalStr} / ${limitStr} (${pctOfLimit}%)`}>
+                    <span>({pctOfLimit}%)</span>
+                  </span>
+                ) : (
+                  <span class="token-pill token-total" title={`当前总上下文: ${totalStr}`}>
+                    <span>({formatTokenMetric(total)})</span>
+                  </span>
+                )}
+              </span>
+            );
+          })()}
         </div>
         <div class="input-footer-actions">
           <ModeSelector

@@ -217,12 +217,6 @@ fn mount_coding_tools(
     lsp: &LspSettings,
 ) -> Result<(MountedTools, Option<atomcode_capabilities::tools::TodoLive>), String> {
     let (registry, names, live) = base_coding_tools(vision, todo_enabled, lsp);
-    #[cfg(feature = "atomgit")]
-    let (registry, names, live) = {
-        let (mut registry, mut names, live) = (registry, names, live);
-        register_atomgit_capabilities(&mut registry, &mut names)?;
-        (registry, names, live)
-    };
     let refs: Vec<&str> = names.iter().map(String::as_str).collect();
     Ok((registry.mount(&refs), live))
 }
@@ -269,26 +263,7 @@ fn base_coding_tools(
 /// Register the shipped AtomGit REST capabilities into a coding tool catalog.
 ///
 /// Both the minimal builder above and the production `parts::prepare → assemble`
-/// path use this helper so a feature-enabled build cannot expose different tools
-/// depending on which assembly entry point the driver uses.
-#[cfg(feature = "atomgit")]
-pub(crate) fn register_atomgit_capabilities(
-    registry: &mut ToolRegistry,
-    names: &mut Vec<String>,
-) -> Result<(), String> {
-    use atomcode_capabilities::tools::{
-        atomgit_tool_names, register_atomgit_tools, AtomgitClient, AtomgitConfig, LiveTokenProvider,
-    };
 
-    let client = AtomgitClient::new(AtomgitConfig {
-        base_url: "https://api.atomgit.com/api/v5".to_string(),
-        user_agent: format!("atomcode/{}", env!("CARGO_PKG_VERSION")),
-        token: Arc::new(LiveTokenProvider),
-    })?;
-    register_atomgit_tools(registry, Arc::new(client));
-    names.extend(atomgit_tool_names().iter().map(|name| (*name).to_string()));
-    Ok(())
-}
 
 #[cfg(test)]
 mod tests {

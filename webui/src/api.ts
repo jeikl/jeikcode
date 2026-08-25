@@ -873,7 +873,7 @@ export type LiveWireEvent =
   | { type: 'tool_output'; chunk: string }
   | { type: 'tool_progress'; id: string; progress: string }
   | { type: 'tool_result'; id: string; name: string; output: string; success: boolean; duration_ms: number }
-  | { type: 'tokens'; prompt: number; completion: number; total: number }
+  | { type: 'tokens'; prompt: number; completion: number; total: number; cached?: number }
   | { type: 'state'; running: boolean; stop_reason?: string; message?: string }
   | { type: 'error'; message: string }
   | { type: 'warning'; message: string }

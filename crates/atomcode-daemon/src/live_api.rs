@@ -845,6 +845,8 @@ pub(crate) enum LiveWireEvent {
         prompt: usize,
         completion: usize,
         total: usize,
+        #[serde(default)]
+        cached: usize,
     },
     #[serde(rename = "state")]
     State {
@@ -1016,6 +1018,7 @@ impl NativeLiveWireProjector {
                     prompt: meta.tokens.prompt as usize,
                     completion: meta.tokens.completion as usize,
                     total: (meta.tokens.prompt + meta.tokens.completion) as usize,
+                    cached: meta.tokens.cached as usize,
                 },
                 Kernel::Compacted {
                     bytes_after,
@@ -1027,6 +1030,7 @@ impl NativeLiveWireProjector {
                         prompt: after_tokens,
                         completion: 0,
                         total: after_tokens,
+                        cached: 0,
                     }
                 }
                 Kernel::Error { message, .. } => LiveWireEvent::Error { message },
@@ -1802,7 +1806,7 @@ pub(crate) async fn live_provider(
     let requested_session_id = parse_session_id(req.session_id);
     let join = match crate::native_live::join_for_provider(requested_session_id.as_deref()) {
         Ok(join) => join,
-        Err(crate::live_hub::HubError::Unbound) => {
+        Err(crate::live_hub::HubError::Unbound | crate::live_hub::HubError::StaleBinding) => {
             match crate::native_live::ensure_headless_runtime(
                 live_current_working_dir(&working_dir),
                 state.telemetry.clone(),
@@ -1814,16 +1818,20 @@ pub(crate) async fn live_provider(
             {
                 Ok(join) => join,
                 Err(error) => {
+                    let active_turn = error.contains("active live runtime") || error.contains("active turn");
                     return Json(serde_json::json!({
                         "ok": false,
+                        "active_turn": active_turn,
                         "error": error,
                     }));
                 }
             }
         }
         Err(error) => {
+            let active_turn = matches!(error, crate::live_hub::HubError::ActiveTurn);
             return Json(serde_json::json!({
                 "ok": false,
+                "active_turn": active_turn,
                 "error": format!("provider session rejected: {error:?}"),
             }));
         }

@@ -1834,12 +1834,12 @@ mod tests {
         // The bullet must sit at the same column across all three.
         let rows_with_bracket: Vec<String> = (0..24)
             .map(|r| vt.row_text(r))
-            .filter(|r| r.contains("[1]") || r.contains("[2]") || r.contains("[3]"))
+            .filter(|r| r.contains("[1]") || r.contains("[2]"))
             .collect();
         assert_eq!(
             rows_with_bracket.len(),
-            3,
-            "expected 3 option rows, got {rows_with_bracket:?}"
+            2,
+            "expected 2 option rows, got {rows_with_bracket:?}"
         );
         // Bullet position (●/○) — all three rows must place it at
         // the same column index. Locate via find().

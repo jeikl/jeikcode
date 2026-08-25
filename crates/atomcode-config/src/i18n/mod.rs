@@ -287,7 +287,7 @@ mod tests {
                 cached_pct: Some(97),
             },
         );
-        assert!(with.contains("152.00K tokens · 97% cached"), "got: {with}");
+        assert!(with.contains("152.00K tokens · 97% cache"), "got: {with}");
         let without = t_with(
             Locale::En,
             Msg::TurnSummary {

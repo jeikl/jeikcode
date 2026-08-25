@@ -3409,6 +3409,9 @@ pub struct ModelInfo {
     pub reasoning_effort: Option<String>,
     /// Available reasoning effort levels for this model (e.g. `["low", "medium", "high", "xhigh"]`).
     pub reasoning_levels: Vec<String>,
+    /// Model's configured context window size in tokens, if known (e.g. 128000, 1000000).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub context_window: Option<usize>,
 }
 
 /// Build the `/models` list from the UNIFIED model catalog (`logical_models`)
@@ -3435,6 +3438,7 @@ fn models_from_config(config: &Config) -> Vec<ModelInfo> {
                 ),
                 reasoning_effort: p.reasoning_effort.clone(),
                 reasoning_levels: p.effective_reasoning_levels(),
+                context_window: Some(p.context_window).filter(|w| *w > 0),
             })
         })
         .collect()

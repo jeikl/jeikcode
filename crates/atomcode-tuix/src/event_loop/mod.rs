@@ -16851,7 +16851,7 @@ fn flush_pending_separator(state: &mut UiState, renderer: &mut dyn Renderer, as_
     let dur = crate::render::fmt_dur(ps.duration);
     let cached = ps
         .cached_pct
-        .map(|p| format!(" · {p}% cached"))
+        .map(|p| format!(" · {p}% cache"))
         .unwrap_or_default();
     let label = if as_goal_end {
         format!(

@@ -76,7 +76,7 @@ export type SSEEvent =
   | { type: 'tool_output'; chunk: string }
   | { type: 'tool_progress'; id: string; progress: string }
   | { type: 'tool_result'; id: string; name: string; output: string; success: boolean; duration_ms: number }
-  | { type: 'tokens'; prompt: number; completion: number; total: number }
+  | { type: 'tokens'; prompt: number; completion: number; total: number; cached?: number; cached_estimated?: boolean; reasoning?: number }
   | { type: 'permission_request'; session_id: string; tool_name: string; reason: string; call_id: string; arguments: unknown }
   | UserInputRequestEvent
   | { type: 'done'; tokens: unknown; tool_calls: unknown; session_id: string; stop_reason?: string; message?: string }
@@ -105,6 +105,7 @@ export interface ModelInfo {
   reasoning_effort: string | null;
   /** Available reasoning effort levels for this model. */
   reasoning_levels?: string[];
+  context_window?: number;
 }
 
 export async function getModels(): Promise<ModelInfo[]> {

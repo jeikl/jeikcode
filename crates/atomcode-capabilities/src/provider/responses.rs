@@ -746,6 +746,8 @@ fn parse_usage(usage: &Value) -> TokenUsage {
     let cached = usage
         .pointer("/input_tokens_details/cached_tokens")
         .or_else(|| usage.pointer("/prompt_tokens_details/cached_tokens"))
+        .or_else(|| usage.get("prompt_cache_hit_tokens"))
+        .or_else(|| usage.get("cached_tokens"))
         .and_then(Value::as_u64)
         .unwrap_or(0) as u32;
     TokenUsage {

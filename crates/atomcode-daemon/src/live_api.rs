@@ -1787,7 +1787,7 @@ pub(crate) async fn live_provider(
     State(state): State<AppState>,
     Json(req): Json<LiveProviderReq>,
 ) -> impl IntoResponse {
-    let working_dir = { state.project.read().await.working_dir.clone() };
+    let _working_dir = { state.project.read().await.working_dir.clone() };
     let config = match Config::load(&Config::default_path()) {
         Ok(config) => config,
         Err(error) => {
@@ -1803,29 +1803,24 @@ pub(crate) async fn live_provider(
             "error": format!("provider {:?} not found", req.provider),
         }));
     }
+    let requested_provider = req.provider.clone();
+    let _ = atomcode_config::ConfigStore::default_store().update(|cfg| {
+        if cfg.selection_exists(&requested_provider) {
+            cfg.default_model = Some(requested_provider.clone());
+            cfg.default_provider = requested_provider.clone();
+        }
+        Ok(())
+    });
+
     let requested_session_id = parse_session_id(req.session_id);
     let join = match crate::native_live::join_for_provider(requested_session_id.as_deref()) {
         Ok(join) => join,
         Err(crate::live_hub::HubError::Unbound | crate::live_hub::HubError::StaleBinding) => {
-            match crate::native_live::ensure_headless_runtime(
-                live_current_working_dir(&working_dir),
-                state.telemetry.clone(),
-                req.provider.clone(),
-                native_runtime_mode(live_current_approval_mode()),
-                requested_session_id,
-            )
-            .await
-            {
-                Ok(join) => join,
-                Err(error) => {
-                    let active_turn = error.contains("active live runtime") || error.contains("active turn");
-                    return Json(serde_json::json!({
-                        "ok": false,
-                        "active_turn": active_turn,
-                        "error": error,
-                    }));
-                }
-            }
+            // When the live hub is unbound or not bound to this session, updating the
+            // ConfigStore (above) is sufficient for non-sync / /chat sessions.
+            // Spawning a headless runtime here would eagerly lock the session lease
+            // and prevent subsequent /chat turns from acquiring it.
+            return Json(serde_json::json!({ "ok": true }));
         }
         Err(error) => {
             let active_turn = matches!(error, crate::live_hub::HubError::ActiveTurn);
@@ -1836,14 +1831,6 @@ pub(crate) async fn live_provider(
             }));
         }
     };
-    let requested_provider = req.provider.clone();
-    let _ = atomcode_config::ConfigStore::default_store().update(|cfg| {
-        if cfg.selection_exists(&requested_provider) {
-            cfg.default_model = Some(requested_provider.clone());
-            cfg.default_provider = requested_provider.clone();
-        }
-        Ok(())
-    });
 
     let requested_fingerprint =
         match crate::native_live::provider_fingerprint(&config, &req.provider) {

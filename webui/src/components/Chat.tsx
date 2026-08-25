@@ -27,7 +27,7 @@
 
 import { VNode } from 'preact';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'preact/hooks';
-import { streamChat, stopChat, getActiveChatSessions, getChatPending, watchChatSession, SSEEvent, getSession, SessionMetaWithProject, getModels, ImageData, streamLive, postLiveMessage, postLiveStop, postLivePermission, postLiveProvider, postLiveMode, getApprovalMode, ApprovalMode, postLiveSwitchSession, LiveWireEvent, SessionMessage, getSkills, SkillInfo, listDir, changeDir, postConfigReload, postCommand, postLiveCompact, postLiveUserInput, postChatUserInput, setDefaultProvider, type CommandResult, UserInputRequestEvent } from '../api';
+import { streamChat, stopChat, getActiveChatSessions, getChatPending, watchChatSession, SSEEvent, getSession, SessionMetaWithProject, getModels, ModelInfo, ImageData, streamLive, postLiveMessage, postLiveStop, postLivePermission, postLiveProvider, postLiveMode, getApprovalMode, ApprovalMode, postLiveSwitchSession, LiveWireEvent, SessionMessage, getSkills, SkillInfo, listDir, changeDir, postConfigReload, postCommand, postLiveCompact, postLiveUserInput, postChatUserInput, setDefaultProvider, type CommandResult, UserInputRequestEvent } from '../api';
 import {
   parseSlashCommand,
   buildCommandMap,
@@ -694,6 +694,27 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
   }
   const [tokens, setTokens] = useState<TokenUsage | null>(null);
   const lastUserTokensRef = useRef(0);
+  const [showTokenDetails, setShowTokenDetails] = useState(false);
+  const tokenPopoverRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (!showTokenDetails) return;
+    const handleClickOutside = (e: MouseEvent) => {
+      if (tokenPopoverRef.current && !tokenPopoverRef.current.contains(e.target as Node)) {
+        setShowTokenDetails(false);
+      }
+    };
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') setShowTokenDetails(false);
+    };
+    document.addEventListener('mousedown', handleClickOutside);
+    document.addEventListener('keydown', handleKeyDown);
+    return () => {
+      document.removeEventListener('mousedown', handleClickOutside);
+      document.removeEventListener('keydown', handleKeyDown);
+    };
+  }, [showTokenDetails]);
+
   const [modelCatalog, setModelCatalog] = useState<ModelInfo[]>([]);
   const [historyHint, setHistoryHint] = useState<string | null>(null);
   const [activeTodos, setActiveTodos] = useState<TodoItem[] | null>(null);
@@ -3614,7 +3635,18 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
             const isEstimated = Boolean(tokens.cached_estimated);
             const reasoning = tokens.reasoning ?? 0;
             const total = tokens.total ?? (prompt + completion);
-            const cachedPct = cached > 0 && prompt > 0 ? Math.min(100, Math.round((cached / prompt) * 100)) : null;
+            const cachedPct = (() => {
+              if (cached <= 0 || prompt <= 0) return null;
+              if (cached >= prompt) return '100%';
+              const ratio = (cached / prompt) * 100;
+              if (ratio >= 99.5) {
+                return ratio >= 99.9 ? '99.9%' : `${ratio.toFixed(1)}%`;
+              }
+              if (ratio >= 10) {
+                return `${Math.round(ratio)}%`;
+              }
+              return `${ratio.toFixed(1)}%`;
+            })();
             const pctOfLimit = contextLimit && contextLimit > 0 ? Math.min(100, Math.round((total / contextLimit) * 100)) : null;
             const billable = completion + Math.max(0, prompt - cached);
 
@@ -3633,9 +3665,9 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
             ];
             if (cached > 0) {
               if (isEstimated) {
-                tooltipLines.push(`⚡ 预估前缀缓存 (Est. Cache): ${cachedStr} (${cachedPct}% 预估，本地前缀估算)`);
+                tooltipLines.push(`⚡ 预估前缀缓存 (Est. Cache): ${cachedStr} (${cachedPct} 预估，本地前缀估算)`);
               } else {
-                tooltipLines.push(`⚡ 在线缓存命中 (Cache Hit): ${cachedStr} (${cachedPct}% 命中率，厂商权威数据)`);
+                tooltipLines.push(`⚡ 在线缓存命中 (Cache Hit): ${cachedStr} (${cachedPct} 命中率，厂商权威数据)`);
               }
             }
             if (reasoning > 0) {
@@ -3653,40 +3685,179 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
             const tooltipText = tooltipLines.join('\n');
 
             return (
-              <span class="footer-tokens" title={tooltipText} aria-label={tooltipText}>
-                <span class="token-pill token-prompt" title={`输入上下文 (Prompt): ${promptStr}`}>
-                  <span class="token-icon">↓</span>
-                  <span>{formatTokenMetric(prompt)}</span>
+              <div class="footer-tokens-wrapper">
+                <span
+                  class={`footer-tokens${showTokenDetails ? ' is-active' : ''}`}
+                  role="button"
+                  tabIndex={0}
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    setShowTokenDetails((v) => !v);
+                  }}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter' || e.key === ' ') {
+                      e.preventDefault();
+                      setShowTokenDetails((v) => !v);
+                    }
+                  }}
+                  title={tooltipText}
+                  aria-label={tooltipText}
+                  aria-haspopup="dialog"
+                  aria-expanded={showTokenDetails}
+                >
+                  <span class="token-pill token-prompt" title={`输入上下文 (Prompt): ${promptStr}`}>
+                    <span class="token-icon">↓</span>
+                    <span>input: {formatTokenMetric(prompt)}</span>
+                  </span>
+                  <span class="token-pill token-completion" title={`输出生成 (Completion): ${completionStr}${reasoning > 0 ? ` (含思考 ${reasoningStr})` : ''}`}>
+                    <span class="token-icon">↑</span>
+                    <span>output: {formatTokenMetric(completion)}</span>
+                  </span>
+                  {cached > 0 && (
+                    <span
+                      class={'token-pill token-cached' + (isEstimated ? ' is-estimated' : '')}
+                      title={isEstimated ? `预估前缀缓存: ${cachedStr} (${cachedPct} 预估)` : `在线缓存命中: ${cachedStr} (${cachedPct})`}
+                    >
+                      <span class="token-icon">⚡</span>
+                      <span>cache: {cachedPct != null ? cachedPct : formatTokenMetric(cached)}</span>
+                    </span>
+                  )}
+                  {reasoning > 0 && (
+                    <span class="token-pill token-reasoning" title={`思考过程 (Reasoning): ${reasoningStr}`}>
+                      <span class="token-icon">💭</span>
+                      <span>{formatTokenMetric(reasoning)}</span>
+                    </span>
+                  )}
+                  {contextLimit ? (
+                    <span class="token-pill token-total" title={`上下文窗口使用率: ${totalStr} / ${limitStr} (${pctOfLimit}%)`}>
+                      <span class="token-icon">🎯</span>
+                      <span>{formatTokenMetric(total)}/{formatTokenMetric(contextLimit)} ({pctOfLimit}%)</span>
+                    </span>
+                  ) : (
+                    <span class="token-pill token-total" title={`当前总上下文: ${totalStr}`}>
+                      <span class="token-icon">🎯</span>
+                      <span>{formatTokenMetric(total)}</span>
+                    </span>
+                  )}
                 </span>
-                <span class="token-pill token-completion" title={`输出生成 (Completion): ${completionStr}${reasoning > 0 ? ` (含思考 ${reasoningStr})` : ''}`}>
-                  <span class="token-icon">↑</span>
-                  <span>{formatTokenMetric(completion)}</span>
-                </span>
-                {cached > 0 && (
-                  <span
-                    class={'token-pill token-cached' + (isEstimated ? ' is-estimated' : '')}
-                    title={isEstimated ? `预估前缀缓存: ${cachedStr} (${cachedPct}% 预估)` : `在线缓存命中: ${cachedStr} (${cachedPct}%)`}
+
+                {showTokenDetails && (
+                  <div
+                    class="token-details-popover"
+                    ref={tokenPopoverRef}
+                    role="dialog"
+                    aria-label="Token 与上下文占用详情"
+                    onClick={(e) => e.stopPropagation()}
                   >
-                    <span class="token-icon">⚡</span>
-                    <span>{cachedPct != null ? `${cachedPct}%` : formatTokenMetric(cached)} {isEstimated ? '预估cache' : 'cache'}</span>
-                  </span>
+                    <div class="token-popover-header">
+                      <div class="token-popover-title">
+                        <span class="token-popover-icon">📊</span>
+                        <span>Token 与上下文占用详情</span>
+                      </div>
+                      <button
+                        type="button"
+                        class="token-popover-close"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          setShowTokenDetails(false);
+                        }}
+                        title="关闭"
+                        aria-label="关闭"
+                      >
+                        ✕
+                      </button>
+                    </div>
+
+                    {contextLimit && (
+                      <div class="token-popover-progress-box">
+                        <div class="token-popover-progress-labels">
+                          <span class="token-popover-progress-title">🎯 上下文窗口预算</span>
+                          <span class="token-popover-progress-val">
+                            {totalStr} / {limitStr} ({pctOfLimit}%)
+                          </span>
+                        </div>
+                        <div class="token-popover-progress-track">
+                          <div
+                            class="token-popover-progress-fill"
+                            style={{
+                              width: `${Math.min(100, Math.max(2, pctOfLimit ?? 0))}%`,
+                              backgroundColor:
+                                (pctOfLimit ?? 0) > 85
+                                  ? '#ef4444'
+                                  : (pctOfLimit ?? 0) > 65
+                                  ? '#f59e0b'
+                                  : 'var(--app-brand-accent, #10a37f)',
+                            }}
+                          />
+                        </div>
+                      </div>
+                    )}
+
+                    <div class="token-popover-grid">
+                      <div class="token-popover-row">
+                        <div class="token-popover-row-left">
+                          <span class="token-row-icon">📥</span>
+                          <span class="token-row-label">输入 (Prompt/上下文)</span>
+                        </div>
+                        <span class="token-popover-row-val">{promptStr}</span>
+                      </div>
+
+                      {cached > 0 && (
+                        <div class="token-popover-row is-cached">
+                          <div class="token-popover-row-left">
+                            <span class="token-row-icon">⚡</span>
+                            <span class="token-row-label">
+                              {isEstimated
+                                ? '预估前缀缓存 (Est. Cache)'
+                                : '在线缓存命中 (Cache Hit)'}
+                            </span>
+                          </div>
+                          <div class="token-popover-row-val-group">
+                            <span class="token-popover-row-val">{cachedStr}</span>
+                            <span class="token-popover-row-badge">
+                              {cachedPct} {isEstimated ? '预估' : '命中'}
+                            </span>
+                          </div>
+                        </div>
+                      )}
+
+                      <div class="token-popover-row">
+                        <div class="token-popover-row-left">
+                          <span class="token-row-icon">📤</span>
+                          <span class="token-row-label">输出 (Completion)</span>
+                        </div>
+                        <div class="token-popover-row-val-group">
+                          <span class="token-popover-row-val">{completionStr}</span>
+                          {reasoning > 0 && (
+                            <span class="token-popover-row-sub">
+                              正文 {Math.max(0, completion - reasoning).toLocaleString()} · 思考 {reasoningStr}
+                            </span>
+                          )}
+                        </div>
+                      </div>
+
+                      <div class="token-popover-row is-total">
+                        <div class="token-popover-row-left">
+                          <span class="token-row-icon">🎯</span>
+                          <span class="token-row-label">当前总上下文</span>
+                        </div>
+                        <span class="token-popover-row-val">
+                          {totalStr}
+                          {contextLimit ? ` / ${limitStr}` : ''}
+                        </span>
+                      </div>
+
+                      <div class="token-popover-row is-billable">
+                        <div class="token-popover-row-left">
+                          <span class="token-row-icon">💡</span>
+                          <span class="token-row-label">计费估算 Token</span>
+                        </div>
+                        <span class="token-popover-row-val">{billableStr}</span>
+                      </div>
+                    </div>
+                  </div>
                 )}
-                {reasoning > 0 && (
-                  <span class="token-pill token-reasoning" title={`思考过程 (Reasoning): ${reasoningStr}`}>
-                    <span class="token-icon">💭</span>
-                    <span>{formatTokenMetric(reasoning)}</span>
-                  </span>
-                )}
-                {pctOfLimit != null ? (
-                  <span class="token-pill token-total" title={`上下文窗口使用率: ${totalStr} / ${limitStr} (${pctOfLimit}%)`}>
-                    <span>({pctOfLimit}%)</span>
-                  </span>
-                ) : (
-                  <span class="token-pill token-total" title={`当前总上下文: ${totalStr}`}>
-                    <span>({formatTokenMetric(total)})</span>
-                  </span>
-                )}
-              </span>
+              </div>
             );
           })()}
         </div>

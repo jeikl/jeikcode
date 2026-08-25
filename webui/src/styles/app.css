@@ -1264,35 +1264,49 @@ body {
 
 .footer-hint { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .footer-spacer { flex: 1; }
+.footer-tokens-wrapper {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+}
+
 .footer-tokens {
   display: inline-flex;
   align-items: center;
   gap: 6px;
-  opacity: 0.85;
+  opacity: 0.9;
   font-size: 11px;
   font-variant-numeric: tabular-nums;
   white-space: nowrap;
-  cursor: help;
-  padding: 2px 7px;
-  border-radius: 5px;
+  cursor: pointer;
+  padding: 2px 8px;
+  border-radius: 6px;
   background: var(--app-input-footer-bg, rgba(128, 128, 128, 0.08));
   border: 1px solid var(--app-border-subtle, rgba(128, 128, 128, 0.12));
-  transition: opacity 0.15s ease, background 0.15s ease, border-color 0.15s ease;
+  transition: opacity 0.15s ease, background 0.15s ease, border-color 0.15s ease, box-shadow 0.15s ease;
   user-select: none;
 }
-.footer-tokens:hover {
+.footer-tokens:hover,
+.footer-tokens.is-active {
   opacity: 1;
   background: var(--app-hover-bg, rgba(128, 128, 128, 0.15));
-  border-color: var(--app-border, rgba(128, 128, 128, 0.25));
+  border-color: var(--app-border, rgba(128, 128, 128, 0.28));
+}
+.footer-tokens.is-active {
+  box-shadow: 0 0 0 1px var(--app-brand-accent, #10a37f);
+}
+.footer-tokens:focus-visible {
+  outline: 2px solid var(--app-brand-accent, #10a37f);
+  outline-offset: 1px;
 }
 .footer-tokens .token-pill {
   display: inline-flex;
   align-items: center;
-  gap: 2px;
+  gap: 3px;
 }
 .footer-tokens .token-icon {
-  opacity: 0.8;
-  font-size: 10px;
+  opacity: 0.85;
+  font-size: 11px;
   line-height: 1;
 }
 .footer-tokens .token-prompt {
@@ -1309,8 +1323,211 @@ body {
   color: #a855f7;
 }
 .footer-tokens .token-total {
-  opacity: 0.8;
+  opacity: 0.9;
   font-weight: 500;
+  color: var(--app-foreground);
+}
+
+/* Floating Token Details Popover */
+.token-details-popover {
+  position: absolute;
+  bottom: calc(100% + 8px);
+  left: 0;
+  min-width: 320px;
+  max-width: 420px;
+  padding: 12px 14px;
+  border-radius: 10px;
+  background: var(--app-popover-bg, var(--app-card-bg, #1e1e24));
+  border: 1px solid var(--app-border, rgba(128, 128, 128, 0.25));
+  box-shadow: 0 10px 30px -5px rgba(0, 0, 0, 0.35), 0 0 0 1px var(--app-border-subtle, rgba(255, 255, 255, 0.05));
+  backdrop-filter: blur(12px);
+  z-index: 100;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  font-size: 12px;
+  line-height: 1.4;
+  color: var(--app-foreground);
+  animation: tokenPopoverFadeIn 0.15s ease-out;
+}
+
+@keyframes tokenPopoverFadeIn {
+  from {
+    opacity: 0;
+    transform: translateY(4px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.token-popover-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  border-bottom: 1px solid var(--app-border-subtle, rgba(128, 128, 128, 0.12));
+  padding-bottom: 8px;
+}
+
+.token-popover-title {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-weight: 600;
+  font-size: 13px;
+  color: var(--app-foreground);
+}
+
+.token-popover-icon {
+  font-size: 14px;
+}
+
+.token-popover-close {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  border-radius: 4px;
+  border: none;
+  background: transparent;
+  color: var(--app-secondary-foreground);
+  cursor: pointer;
+  font-size: 13px;
+  line-height: 1;
+  transition: background 0.1s ease, color 0.1s ease;
+}
+.token-popover-close:hover {
+  background: var(--app-hover-bg, rgba(128, 128, 128, 0.15));
+  color: var(--app-foreground);
+}
+
+.token-popover-progress-box {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  padding: 8px 10px;
+  background: var(--app-subtle-bg, rgba(128, 128, 128, 0.06));
+  border-radius: 6px;
+  border: 1px solid var(--app-border-subtle, rgba(128, 128, 128, 0.1));
+}
+
+.token-popover-progress-labels {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  font-size: 11px;
+}
+
+.token-popover-progress-title {
+  color: var(--app-secondary-foreground);
+  font-weight: 500;
+}
+
+.token-popover-progress-val {
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  color: var(--app-foreground);
+}
+
+.token-popover-progress-track {
+  width: 100%;
+  height: 6px;
+  background: var(--app-border-subtle, rgba(128, 128, 128, 0.15));
+  border-radius: 3px;
+  overflow: hidden;
+}
+
+.token-popover-progress-fill {
+  height: 100%;
+  border-radius: 3px;
+  transition: width 0.3s ease, background-color 0.3s ease;
+}
+
+.token-popover-grid {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.token-popover-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 4px 6px;
+  border-radius: 5px;
+  transition: background 0.1s ease;
+}
+.token-popover-row:hover {
+  background: var(--app-subtle-bg, rgba(128, 128, 128, 0.05));
+}
+
+.token-popover-row-left {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--app-secondary-foreground);
+}
+
+.token-row-icon {
+  font-size: 12px;
+  line-height: 1;
+}
+
+.token-row-label {
+  font-size: 12px;
+}
+
+.token-popover-row-val {
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  color: var(--app-foreground);
+}
+
+.token-popover-row-val-group {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 1px;
+}
+
+.token-popover-row-badge {
+  font-size: 10px;
+  font-weight: 600;
+  padding: 1px 5px;
+  border-radius: 4px;
+  background: rgba(234, 179, 8, 0.15);
+  color: #eab308;
+}
+
+.token-popover-row-sub {
+  font-size: 10px;
+  color: var(--app-secondary-foreground);
+  font-variant-numeric: tabular-nums;
+}
+
+.token-popover-row.is-total {
+  border-top: 1px dashed var(--app-border-subtle, rgba(128, 128, 128, 0.15));
+  padding-top: 6px;
+  margin-top: 2px;
+}
+.token-popover-row.is-total .token-popover-row-val {
+  color: var(--app-brand-accent, #10a37f);
+}
+
+.token-popover-row.is-billable {
+  background: var(--app-subtle-bg, rgba(128, 128, 128, 0.06));
+  padding: 5px 8px;
+  border-radius: 6px;
+  border: 1px solid var(--app-border-subtle, rgba(128, 128, 128, 0.08));
+}
+.token-popover-row.is-billable .token-row-label {
+  font-weight: 500;
+}
+.token-popover-row.is-billable .token-popover-row-val {
+  color: #38bdf8;
 }
 .footer-turn-elapsed {
   font-variant-numeric: tabular-nums;

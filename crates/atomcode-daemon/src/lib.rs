@@ -5053,8 +5053,11 @@ async fn process_chat_request(
         if let Some(event) = projector.finish() {
             let _ = event_tx.send(event);
         }
+        let message = projector.last_error.clone().unwrap_or_else(|| {
+            "coding runtime event stream closed before turn terminal".into()
+        });
         let _ = event_tx.send(ChatEvent::Error {
-            message: "coding runtime event stream closed before turn terminal".into(),
+            message,
         });
     }
 

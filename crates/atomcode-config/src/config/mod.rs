@@ -245,6 +245,8 @@ impl Default for SubAgentConfig {
             max_rounds: 200,
         }
     }
+}
+
 fn default_auto_update_interval_secs() -> u64 {
     3600
 }

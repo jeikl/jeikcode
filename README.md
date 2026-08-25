@@ -1,4 +1,5 @@
 <div align="center">
+  <img src="./assets/jeikcode-logo.svg" alt="JeikCode Logo" width="120" />
 <pre>
        _      _ _     ____          _
       | | ___(_) | __/ ___|___   __| | ___

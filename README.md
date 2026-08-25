@@ -1,41 +1,32 @@
 <div align="center">
-  <img src="./assets/jeikcode-logo.svg" alt="JeikCode Logo" width="120" />
-<pre>
-       _      _ _     ____          _
-      | | ___(_) | __/ ___|___   __| | ___
-   _  | |/ _ \ | |/ / |   / _ \ / _` |/ _ \
-  | |_| |  __/ |   <| |__| (_) | (_| |  __/
-   \___/ \___|_|_|\_\\____\___/ \__,_|\___|
-</pre>
+  <img src="./assets/jeikcode-logo.svg" alt="JeikCode Logo" width="130" />
+  <h1>JeikCode</h1>
+  <p><strong>Ultra-fast, Autonomous Open-Source Terminal AI Coding Agent Built with Rust</strong></p>
+  <p>
+    <em>AST-Weighted Semantic Code Exploration · Append-Only KV Cache Stability · OpenAI Responses & Anthropic Protocol Support</em>
+  </p>
+  <p>
+    English · <a href="./README.zh-CN.md">简体中文</a>
+  </p>
+  <p>
+    <a href="#1-what-is-jeikcode">What is JeikCode</a> ·
+    <a href="#2-functional--architectural-comparison">Feature Comparison</a> ·
+    <a href="#3-native-codeexplore--repomap-deep-retrieval">CodeExplore</a> ·
+    <a href="#4-core-architectural-highlights">Highlights</a> ·
+    <a href="#5-installation--quick-start">Quick Start</a> ·
+    <a href="#6-keybindings--commands">Commands</a> ·
+    <a href="#7-multi-project-knowledge-packs">Knowledge Packs</a>
+  </p>
+  <p>
+    <img src="https://img.shields.io/badge/version-6.0.26-blue.svg" alt="version">
+    <img src="https://img.shields.io/badge/rust-1.88%2B-orange.svg" alt="rust">
+    <img src="https://img.shields.io/badge/license-MIT-green.svg" alt="license">
+    <img src="https://img.shields.io/badge/platform-macOS%20%7C%20Linux%20%7C%20Windows%20%7C%20HarmonyOS-lightgrey.svg" alt="platform">
+    <a href="https://github.com/jeikl/jeikcode" target="_blank">
+      <img src="https://img.shields.io/github/stars/jeikl/jeikcode?style=social" alt="GitHub Stars"/>
+    </a>
+  </p>
 </div>
-
-<p align="center">
-  <strong>Ultra-fast, Autonomous Open-Source Terminal AI Coding Agent Built with Rust</strong>
-</p>
-
-<p align="center">
-  English · <a href="./README.zh-CN.md">简体中文</a>
-</p>
-
-<p align="center">
-  <a href="#1-what-is-jeikcode">What is JeikCode</a> ·
-  <a href="#2-functional--architectural-comparison">Feature Comparison</a> ·
-  <a href="#3-native-codeexplore--repomap-deep-retrieval">CodeExplore</a> ·
-  <a href="#4-core-architectural-highlights">Highlights</a> ·
-  <a href="#5-installation--quick-start">Quick Start</a> ·
-  <a href="#6-keybindings--commands">Commands</a> ·
-  <a href="#7-multi-project-knowledge-packs">Knowledge Packs</a>
-</p>
-
-<p align="center">
-  <img src="https://img.shields.io/badge/version-6.0.26-blue.svg" alt="version">
-  <img src="https://img.shields.io/badge/rust-1.88%2B-orange.svg" alt="rust">
-  <img src="https://img.shields.io/badge/license-MIT-green.svg" alt="license">
-  <img src="https://img.shields.io/badge/platform-macOS%20%7C%20Linux%20%7C%20Windows%20%7C%20HarmonyOS-lightgrey.svg" alt="platform">
-  <a href="https://github.com/jeikl/jeikcode" target="_blank">
-    <img src="https://img.shields.io/github/stars/jeikl/jeikcode?style=social" alt="GitHub Stars"/>
-  </a>
-</p>
 
 ---
 

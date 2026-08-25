@@ -1,41 +1,32 @@
 <div align="center">
-  <img src="./assets/jeikcode-logo.svg" alt="JeikCode Logo" width="120" />
-<pre>
-       _      _ _     ____          _
-      | | ___(_) | __/ ___|___   __| | ___
-   _  | |/ _ \ | |/ / |   / _ \ / _` |/ _ \
-  | |_| |  __/ |   <| |__| (_) | (_| |  __/
-   \___/ \___|_|_|\_\\____\___/ \__,_|\___|
-</pre>
+  <img src="./assets/jeikcode-logo.svg" alt="JeikCode Logo" width="130" />
+  <h1>JeikCode</h1>
+  <p><strong>用 Rust 打造的极致高性能开源终端 AI 编码智能体 · Agentic AI Coding Assistant</strong></p>
+  <p>
+    <em>原生 CodeExplore 加权语义代码图谱 · 高命中 KV Cache 缓存保护 · OpenAI Responses & Anthropic 多协议原生支持</em>
+  </p>
+  <p>
+    <a href="./README.md">English</a> · 简体中文
+  </p>
+  <p>
+    <a href="#一jeikcode-是什么">定位与渊源</a> ·
+    <a href="#二主流-ai-coding-agent-功能与机制深度对比">机制对比</a> ·
+    <a href="#三原生-codeexplore-与-repomap-深度图谱检索">CodeExplore</a> ·
+    <a href="#四核心机制与体验亮点">核心亮点</a> ·
+    <a href="#五安装与快速上手">快速上手</a> ·
+    <a href="#六快捷键与常用命令">快捷键与命令</a> ·
+    <a href="#七多项目知识库配置">知识包配置</a>
+  </p>
+  <p>
+    <img src="https://img.shields.io/badge/version-6.0.26-blue.svg" alt="version">
+    <img src="https://img.shields.io/badge/rust-1.88%2B-orange.svg" alt="rust">
+    <img src="https://img.shields.io/badge/license-MIT-green.svg" alt="license">
+    <img src="https://img.shields.io/badge/platform-macOS%20%7C%20Linux%20%7C%20Windows%20%7C%20HarmonyOS-lightgrey.svg" alt="platform">
+    <a href="https://github.com/jeikl/jeikcode" target="_blank">
+      <img src="https://img.shields.io/github/stars/jeikl/jeikcode?style=social" alt="GitHub Stars"/>
+    </a>
+  </p>
 </div>
-
-<p align="center">
-  <strong>用 Rust 打造的极致高性能开源终端 AI 编码智能体 (Agentic AI Coding Assistant)</strong>
-</p>
-
-<p align="center">
-  <a href="./README.md">English</a> · 简体中文
-</p>
-
-<p align="center">
-  <a href="#一jeikcode-是什么">定位与渊源</a> ·
-  <a href="#二主流-ai-coding-agent-功能与机制深度对比">机制对比</a> ·
-  <a href="#三原生-codeexplore-与-repomap-深度图谱检索">CodeExplore</a> ·
-  <a href="#四核心机制与体验亮点">核心亮点</a> ·
-  <a href="#五安装与快速上手">快速上手</a> ·
-  <a href="#六快捷键与常用命令">快捷键与命令</a> ·
-  <a href="#七多项目知识库配置">知识包配置</a>
-</p>
-
-<p align="center">
-  <img src="https://img.shields.io/badge/version-6.0.26-blue.svg" alt="version">
-  <img src="https://img.shields.io/badge/rust-1.88%2B-orange.svg" alt="rust">
-  <img src="https://img.shields.io/badge/license-MIT-green.svg" alt="license">
-  <img src="https://img.shields.io/badge/platform-macOS%20%7C%20Linux%20%7C%20Windows%20%7C%20HarmonyOS-lightgrey.svg" alt="platform">
-  <a href="https://github.com/jeikl/jeikcode" target="_blank">
-    <img src="https://img.shields.io/github/stars/jeikl/jeikcode?style=social" alt="GitHub Stars"/>
-  </a>
-</p>
 
 ---
 

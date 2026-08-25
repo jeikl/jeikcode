@@ -12,7 +12,7 @@ Plugins are installable collections of skills, commands, agents, and hooks. Atom
 
 | Plugin | Best For | Key Features |
 |--------|----------|--------------|
-| **atomcode** | AtomCode usage & documentation Q&A | Offline docs index, install/config/troubleshooting answers, `/skills ask` command |
+| **atomcode** | AtomCode usage & documentation | Offline docs index, install/config/troubleshooting reference |
 
 ### Development & Code Quality
 

@@ -45,6 +45,11 @@ pub const BUNDLED_ASSETS: &[BundledFileEntry] = &[
         description: "系统与工具通用配置 (config.toml — 保留用户模型/账号)",
     },
     BundledFileEntry {
+        relative_path: "config_teachs.md",
+        content: include_str!("../assets/config_teachs.md"),
+        description: "Agent 友好配置文件教程与配置指南 (config_teachs.md)",
+    },
+    BundledFileEntry {
         relative_path: "builtin-tools.txt",
         content: include_str!("../../atomcode-capabilities/assets/builtin-tools.txt"),
         description: "内置工具清单 (builtin-tools.txt)",
@@ -241,6 +246,11 @@ pub fn prompt_interactive_config_sync(mut items: Vec<ConfigDiffItem>) -> Result<
     enable_raw_mode()?;
     let mut stdout = io::stdout();
 
+    // 核心修复 1: 清空进入交互模式前控制台缓冲区残留的按键事件（如输入 upgrade 命令时的回车残余）
+    while event::poll(std::time::Duration::from_millis(20)).unwrap_or(false) {
+        let _ = event::read();
+    }
+
     let render = |stdout: &mut io::Stdout, items: &[ConfigDiffItem], cursor: usize| -> Result<()> {
         crossterm::execute!(stdout, crossterm::cursor::Hide)?;
         // 清除行并重绘选项
@@ -270,8 +280,12 @@ pub fn prompt_interactive_config_sync(mut items: Vec<ConfigDiffItem>) -> Result<
     let mut confirmed = false;
 
     loop {
-        if let Event::Key(KeyEvent { code, modifiers, .. }) = event::read()? {
-            match code {
+        if let Event::Key(key_event) = event::read()? {
+            // 核心修复 2: 过滤 Windows 控制台产生的 Release 事件，防止启动命令时的回车释放事件瞬间触发确认
+            if key_event.kind == crossterm::event::KeyEventKind::Release {
+                continue;
+            }
+            match key_event.code {
                 KeyCode::Up | KeyCode::Char('k') => {
                     if cursor > 0 {
                         cursor -= 1;
@@ -307,7 +321,7 @@ pub fn prompt_interactive_config_sync(mut items: Vec<ConfigDiffItem>) -> Result<
                     confirmed = false;
                     break;
                 }
-                KeyCode::Char('c') if modifiers.contains(KeyModifiers::CONTROL) => {
+                KeyCode::Char('c') if key_event.modifiers.contains(KeyModifiers::CONTROL) => {
                     confirmed = false;
                     break;
                 }
@@ -343,4 +357,44 @@ pub fn prompt_interactive_config_sync(mut items: Vec<ConfigDiffItem>) -> Result<
     }
 
     Ok(())
+}
+
+/// 非交互式直接写入/更新全量内置资产（供 `atomcode setup --defaults` / `atomcode setup -y` 及自动化脚本使用）
+pub fn apply_all_bundled_assets(atomcode_home: &Path, force: bool) -> Result<usize> {
+    remove_stale_home_files(atomcode_home);
+    let mut applied_count = 0;
+
+    for entry in BUNDLED_ASSETS {
+        let target = atomcode_home.join(entry.relative_path);
+        if let Some(parent) = target.parent() {
+            let _ = fs::create_dir_all(parent);
+        }
+
+        if !target.exists() {
+            fs::write(&target, entry.content)?;
+            println!("  ✔ [新增] {}", entry.relative_path);
+            applied_count += 1;
+        } else if entry.relative_path == "config.toml" {
+            let existing_content = fs::read_to_string(&target).unwrap_or_default();
+            let merged = merge_user_config_preserving_models(&existing_content, entry.content);
+            if merged.trim() != existing_content.trim() || force {
+                fs::write(&target, &merged)?;
+                println!("  ✔ [更新] {} (已保留用户模型/账号配置)", entry.relative_path);
+                applied_count += 1;
+            }
+        } else if force {
+            fs::write(&target, entry.content)?;
+            println!("  ✔ [覆盖] {}", entry.relative_path);
+            applied_count += 1;
+        } else {
+            let existing_content = fs::read_to_string(&target).unwrap_or_default();
+            if existing_content.trim() != entry.content.trim() {
+                fs::write(&target, entry.content)?;
+                println!("  ✔ [同步] {}", entry.relative_path);
+                applied_count += 1;
+            }
+        }
+    }
+
+    Ok(applied_count)
 }

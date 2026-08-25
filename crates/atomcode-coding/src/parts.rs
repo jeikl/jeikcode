@@ -1671,6 +1671,8 @@ fn is_persona_message(message: &Message) -> bool {
         return false;
     }
     message.text.starts_with(ATOMCODE_PERSONA_PREFIX)
+        || message.text.starts_with("You are JeikCode")
+        || message.text.starts_with("You are AtomCode")
         || (message.text.contains(" running the ")
             && message.text.contains(" model.")
             && (message.text.contains("## PRECEDENCE:") || message.text.contains("## WORKFLOW:")))

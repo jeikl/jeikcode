@@ -64,7 +64,7 @@ async fn session_context_block_reaches_the_provider() {
         "AGENTS.md instructions injected"
     );
     let identity = sys
-        .find("running the test-model model.")
+        .find("an AI coding agent")
         .expect("authoritative AI coding agent identity");
     let scope_guard = sys
         .find("do not describe or override the host application or active configured model")

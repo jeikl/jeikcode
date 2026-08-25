@@ -1047,11 +1047,17 @@ enum Commands {
         #[arg(long)]
         dry_run: bool,
     },
-    /// Install seed files (skills/commands/hooks/MCP) to `~/.atomcode/`.
+    /// Install default configuration files (prompts, thesaurus, config.toml) and seed files to `~/.atomcode/`.
     Setup {
         /// Take over a stale lock AND force reinstall even if seeds are already present.
         #[arg(long)]
         force: bool,
+        /// Non-interactive: write all default configuration files (prompts, thesaurus, config.toml) without prompting.
+        #[arg(long, short = 'y')]
+        yes: bool,
+        /// Alias for --yes: write all default configuration files (prompts, thesaurus, config.toml with zh-CN).
+        #[arg(long)]
+        defaults: bool,
     },
     /// Build (or refresh) the workspace code graph index and save it under
     /// `.atomcode/codegraph/` so agent graph tools start fast.
@@ -1498,6 +1504,11 @@ async fn async_main() {
         match atomcode_updater::apply_pending_upgrade() {
             Ok(Some(applied)) => {
                 eprintln!("✓ Upgrading to {}...", applied.version);
+                // 开启自动更新时，后台无感更新自动全选同步所有非模型配置文件及提示词/词林/指南
+                let home = atomcode_config::config::Config::config_dir();
+                if let Err(e) = atomcode::config_sync::apply_all_bundled_assets(&home, false) {
+                    eprintln!("  ⚠ 自动更新配置同步警告: {e}");
+                }
                 // Pass the CURRENT version (before upgrade) to the re-exec'd child so the TUI
                 // can surface a welcome-screen confirmation exactly once.
                 std::env::set_var(UPGRADED_FROM_ENV, &current_version);
@@ -1869,9 +1880,9 @@ async fn run() -> Result<i32> {
                     .await;
                 return Ok(0);
             }
-            Commands::Setup { force } => {
+            Commands::Setup { force, yes, defaults } => {
                 HEADLESS_MODE.store(true, Ordering::Relaxed);
-                let exit_code = run_setup_command(force);
+                let exit_code = run_setup_command(force, yes || defaults);
                 telemetry
                     .shutdown(std::time::Duration::from_millis(500))
                     .await;
@@ -3114,10 +3125,9 @@ pub(crate) async fn run_native_headless(
     Ok((exit_code, captured))
 }
 
-/// Drive `atomcode_capabilities::setup::run` end-to-end and return the CLI exit code
-/// (0 on success, 1 on any setup error). `setup::run` is synchronous; we
-/// run it directly since `Commands::Setup` already runs outside the TUI loop.
-fn run_setup_command(force: bool) -> i32 {
+/// Drive `atomcode_capabilities::setup::run` and `atomcode::config_sync::apply_all_bundled_assets`
+/// end-to-end and return the CLI exit code (0 on success, 1 on any setup error).
+fn run_setup_command(force: bool, _non_interactive: bool) -> i32 {
     use atomcode_capabilities::setup;
 
     let project_root = match std::env::current_dir() {
@@ -3127,12 +3137,28 @@ fn run_setup_command(force: bool) -> i32 {
             return 1;
         }
     };
+
+    let home = atomcode_config::config::Config::config_dir();
+    println!("📦 正在安装与同步 AtomCode / JeikCode 默认配置到: {}", home.display());
+
+    // 1. 同步写入全量内置默认资产（prompts, 词林, 默认 config.toml, mcp.json, builtin-tools.txt, .codegraphignore 等）
+    match atomcode::config_sync::apply_all_bundled_assets(&home, force) {
+        Ok(count) => {
+            println!("  ✔ 已同步/写入 {} 项默认配置文件 (默认语言: zh-CN)", count);
+        }
+        Err(e) => {
+            eprintln!("  ⚠ 同步默认配置警告: {e}");
+        }
+    }
+
+    // 2. 安装 setup 种子（skills, commands, hooks 等）
     let mut opts = setup::RunOptions::new(project_root);
     opts.force = force;
 
     match setup::run(opts) {
         Ok(report) => {
             println!("{}", report.render_cli());
+            println!("✨ 初始化配置与技能安装完成！");
             0
         }
         Err(e) => {

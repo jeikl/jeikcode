@@ -1,4 +1,4 @@
-﻿//! Custom prompt loader and in-memory cache with hot-reloading for AtomCode.
+//! Custom prompt loader and in-memory cache with hot-reloading for AtomCode.
 //!
 //! Loads configuration from `$ATOMCODE_HOME/prompts/` (or `~/.atomcode/prompts/`):
 //! - `init.yaml` (**live**): identity, precedence, security, environment. Every key in

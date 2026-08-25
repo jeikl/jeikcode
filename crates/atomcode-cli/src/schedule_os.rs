@@ -123,7 +123,7 @@ impl Launchd {
 #[cfg(any(test, target_os = "macos"))]
 impl OsScheduler for Launchd {
     fn install(&self, task: &ScheduleTask) -> anyhow::Result<()> {
-        #[cfg(not(unix))]
+        #[cfg(all(not(test), not(unix)))]
         {
             anyhow::bail!("launchd is only available on macOS/Unix");
         }
@@ -663,7 +663,9 @@ mod tests {
                         status: {
                             #[cfg(unix)]
                             { std::os::unix::process::ExitStatusExt::from_raw(1) }
-                            #[cfg(not(unix))]
+                            #[cfg(windows)]
+                            { std::os::windows::process::ExitStatusExt::from_raw(1) }
+                            #[cfg(not(any(unix, windows)))]
                             { Default::default() }
                         },
                         stdout: vec![],

@@ -55,9 +55,20 @@ fn workspace_root() -> std::path::PathBuf {
 }
 
 #[test]
+#[cfg(unix)]
 fn shell_script_matches_rust() {
     let script = workspace_root().join("scripts/uninstall.sh");
-    let out = Command::new("sh")
+    let sh = match which::which("sh")
+        .ok()
+        .or_else(|| which::which("bash").ok())
+    {
+        Some(p) => p,
+        None => {
+            eprintln!("skipping: no sh or bash on PATH");
+            return;
+        }
+    };
+    let out = Command::new(sh)
         .arg(&script)
         .arg("--print-manifest")
         .output()

@@ -1,5 +1,5 @@
 {
-  "version": "6.0.21",
+  "version": "6.0.22",
   "released_at": "2026-08-25",
   "binaries": {
     "linux-x64": {
@@ -7,8 +7,8 @@
       "size": 54228304
     },
     "windows-x64": {
-      "sha256": "fddf54c2ef863d9badf064c4276713dccede0c1e1ac1af5a46c513b6ac0a0ac1",
-      "size": 63208448
+      "sha256": "84f66decc282bdf93d16923a599dc17969155a38e1abc09a5a6ca502f1824116",
+      "size": 63223296
     }
   }
 }

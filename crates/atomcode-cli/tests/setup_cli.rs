@@ -25,9 +25,34 @@ fn setup_succeeds_in_empty_dir() {
         String::from_utf8_lossy(&output.stdout),
     );
     let stdout = String::from_utf8_lossy(&output.stdout);
-    let ok = stdout.contains("Setup 完成") || stdout.contains("Setup complete");
+    let ok = stdout.contains("Setup 完成") || stdout.contains("Setup complete") || stdout.contains("安装完成");
     assert!(
         ok,
         "stdout did not contain a setup-success marker:\n{stdout}"
     );
+    assert!(user.path().join("config.toml").exists(), "config.toml must be created");
+    assert!(user.path().join("prompts/init.yaml").exists(), "prompts/init.yaml must be created");
+    assert!(user.path().join("thesaurus/computer_science.txt").exists(), "thesaurus must be created");
+    let cfg = std::fs::read_to_string(user.path().join("config.toml")).unwrap();
+    assert!(cfg.contains("language = \"zh-CN\""), "default language should be zh-CN: {cfg}");
+}
+
+#[test]
+fn setup_with_defaults_flag_succeeds_non_interactively() {
+    let dir = tempfile::tempdir().unwrap();
+    let user = tempfile::tempdir().unwrap();
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_atomcode"))
+        .args(["setup", "--defaults"])
+        .current_dir(dir.path())
+        .env("ATOMCODE_HOME", user.path())
+        .output()
+        .expect("run atomcode setup --defaults");
+    assert!(
+        output.status.success(),
+        "stderr: {}\nstdout: {}",
+        String::from_utf8_lossy(&output.stderr),
+        String::from_utf8_lossy(&output.stdout),
+    );
+    assert!(user.path().join("config.toml").exists());
+    assert!(user.path().join("prompts/rules.yaml").exists());
 }

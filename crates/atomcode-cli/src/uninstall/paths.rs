@@ -35,6 +35,7 @@ pub fn uninstall_manifest() -> UninstallManifest {
             "recent_dirs.txt",
             "codingplan_sync.json",
             "device_id",
+            "config_teachs.md",
         ],
         state_dirs: &["staged", "telemetry", "plugins", "commands", "skills", "prompts", "thesaurus"],
         state_prefixes: &["notice."],

@@ -55,9 +55,23 @@ ATOMCODE_VERSION=0.0.0-dev.2 ATOMCODE_PREFIX=$HOME/bin \
 
 ```bash
 atomcode --version    # 验证（等价命令: jeikcode --version）
-atomcode              # 首次启动: 自动写入词林/mcp.json/.codegraphignore/builtin-tools/prompts
+atomcode              # 首次启动: 若未配置模型则弹出交互式新手引导向导
 jeikcode              # 与 atomcode 同一二进制，命令完全等价
 ```
+
+### Agent 自动化 / 无人工交互一键初始化配置
+
+若您需要供自动化脚本或 Agent 初始化环境，可直接执行初始化命令：
+
+```bash
+# 一键自动写入全部默认配置文件 (prompts 提示词、词林、默认 config.toml(语言默认 zh-CN)、技能与工具)
+atomcode setup --defaults
+# 或简写
+atomcode setup -y
+```
+
+> **直接进入聊天界面逻辑**：
+> 运行 `atomcode setup --defaults` 后，如果 `~/.atomcode/config.toml` 中配置了模型（例如脚本写入了 `[providers.xxx]` 或 `[models]`），那么之后直接输入 `atomcode` 启动时，系统会**自动检测到可用模型并直接跳过引导向导，秒进正式的聊天 TUI 界面**！
 
 **开启自动无感更新**(可选,推荐服务器):
 

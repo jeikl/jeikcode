@@ -19,8 +19,8 @@ param(
 $ErrorActionPreference = "Stop"
 
 $Group2Files = @("auth.toml","mcp.json","config.toml","ATOMCODE.md")
-$Group3Files = @("history","input_history.txt","recent_dirs.txt","codingplan_sync.json","device_id")
-$Group3Dirs  = @("staged","telemetry","plugins","commands","skills")
+$Group3Files = @("history","input_history.txt","recent_dirs.txt","codingplan_sync.json","device_id","config_teachs.md")
+$Group3Dirs  = @("staged","telemetry","plugins","commands","skills","prompts","thesaurus")
 $Group3Prefixes = @("notice.")
 
 if ($PrintManifest) {

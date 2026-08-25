@@ -2,6 +2,7 @@
 # Model / provider / account tables are empty here — fill them via /provider
 # or keep your own [models] / [provider_accounts] on upgrade merge.
 
+language = "zh-CN"
 auto_update = false
 auto_commit = false
 keep_interrupted_context = true

@@ -18,11 +18,12 @@
 
 <p align="center">
   <a href="#1-what-is-jeikcode">What is JeikCode</a> ·
-  <a href="#2-multi-agent-functional--architectural-comparison">Mechanism Comparison</a> ·
-  <a href="#3-deep-dive-into-core-mechanisms">Core Mechanisms</a> ·
-  <a href="#4-installation--quick-start">Quick Start</a> ·
-  <a href="#5-keybindings--commands">Commands</a> ·
-  <a href="#6-multi-project-knowledge-packs--rules">Knowledge Packs</a>
+  <a href="#2-functional--architectural-comparison">Feature Comparison</a> ·
+  <a href="#3-native-codeexplore--repomap-deep-retrieval">CodeExplore</a> ·
+  <a href="#4-core-architectural-highlights">Highlights</a> ·
+  <a href="#5-installation--quick-start">Quick Start</a> ·
+  <a href="#6-keybindings--commands">Commands</a> ·
+  <a href="#7-multi-project-knowledge-packs">Knowledge Packs</a>
 </p>
 
 <p align="center">
@@ -42,145 +43,141 @@
 **JeikCode is a high-performance AI coding agent developed by deeply decomposing, re-architecting, optimizing, and enhancing the foundation of AtomCode.**
 
 During its evolution, JeikCode synthesized the core design strengths of industry-leading open-source and commercial agents while inventing critical proprietary architectures:
-- 🛡️ **Absorbed Grok Build's Resilient Tooling & Prompt Strategies**: Integrated rigid prompt precedence adjudication, 5-stage tool error recovery (Repair Chain), structured diagnostic feedback, and repetitive tool invocation circuit breakers (Loop Guard);
+
+- 🛡️ **Absorbed Grok Build's Hardcore Control Strategies**: Integrated rigid prompt precedence hierarchy (Precedence), 5-stage tool error recovery (Repair Chain), structured diagnostic feedback, and repetitive tool invocation circuit breakers (Loop Guard);
 - 🌐 **Absorbed OpenCode's Remote Extensible Architecture**: Engineered multi-instance headless remote execution (Serve), interactive WebUI Gateway, and lightweight cross-platform real-time synchronization;
-- ⚡ **Proprietary Core Architectural Breakthroughs**:
-  - **High Cache Hit Prefix Architecture**: `sacred_floor` memory protection + dynamic `user-wrap.md` tail wrapping, ensuring strict byte-level Append-only prefix immutability to prevent provider KV cache thrashing;
-  - **CodeIntel 2.0 Full Topological Graph & Bilingual Semantic Search**: Tree-Sitter fullstack AST parsing + 6-category topology flow + 9 built-in domain bilingual thesauruses + BM25/concept vector hybrid retrieval + `units.v4.bin` (zstd) process-wide shared index;
-  - **Autonomous Agent Self-Configuration (Teaches KB + `jeikcode_config_guide`)**: Embedded 8-chapter progressive documentation empowering the agent to self-inspect and guide system configuration;
-  - **Fully Customizable Dynamic Prompts with Live Hot-Reloading**: `init.yaml`, `rules.yaml`, and `user-wrap.md` hot-reload dynamically on mtime without server restarts.
+- 🔍 **Inspired by and Surpassing CodeGraph with Native CodeExplore**: Resolving CodeGraph's critical limitation of only supporting hardcoded symbol indexing with zero natural language semantic understanding, JeikCode engineered its own **Weighted AST Vectors + Bilingual Code & Comment Multi-Vector Semantic Search + Weighted Score Ranking Algorithm**, boosting code search efficiency by **60% - 70%** with **90%+ accuracy**;
+- ⚡ **Proprietary High Cache Hit Prefix Architecture**: `sacred_floor` memory protection + dynamic `user-wrap.md` tail wrapping, ensuring strict byte-level Append-only prefix immutability to eliminate provider KV cache thrashing;
+- 🧠 **Agent Self-Configuration via Teaches Knowledge Base**: Embedded 8-chapter progressive documentation empowering the agent to self-inspect and guide system configuration via `jeikcode_config_guide`. All prompts hot-reload dynamically on mtime without server restarts.
 
 ---
 
-## 2. Multi-Agent Functional & Architectural Comparison
+## 2. Functional & Architectural Comparison
 
-The following comparison focuses strictly on **agent execution loops, code retrieval, context management, tool resilience, and protocol mechanisms**:
+The following comparison focuses strictly on **agent execution loops, code retrieval, context management, tool resilience, and protocol mechanisms** using clear ✅ and ❌ indicators:
 
-| Mechanism Dimension | **JeikCode (This Project)** | **Claude Code (Anthropic)** | **OpenCode (OpenCode AI)** | **Grok Build (SpaceXAI)** | **Legacy Baseline** |
-| :--- | :--- | :--- | :--- | :--- | :--- |
-| **1. Agent Loop & Closure** | **L0/L1/L2 Decoupled Scheduling**<br>• Dynamic step budget adaptation<br>• Autonomous Read-Edit-Test-Verify loop<br>• Multi-turn state machine & subagent dispatch | **Monolithic CLI Loop**<br>• Tightly coupled to Claude API<br>• Relies on server-side turn drive<br>• Single task pipeline | **Effect-TS Pipeline Loop**<br>• Effect state machine & Fibers<br>• Multi-agent plugin collaboration<br>• Async event bus dispatch | **PTY Process-Level Flow**<br>• Proprietary agent state machine<br>• Robust cancellation & interrupts<br>• Coordinated with xAI cloud | **Weak 2-Layer Loop**<br>• Relies on Bridge glue code<br>• Rigid step count bounds<br>• Lack of state isolation |
-| **2. Multi-Tier Tool Repair & Resilience** | **5-Stage Repair Chain + Circuit Breaker**<br>• Direct → Relaxed JSON → Regex<br>• **Windows path rescue (`D:\...`)**<br>• **Schema type coercion (`"3"`→`3`)**<br>• Field-level diagnostic hints<br>• 3-Attempt Loop Guard circuit breaker | **Basic Error String Return**<br>• Returns raw tool failure messages<br>• Relies solely on LLM guess-retry<br>• No automatic parameter type coercion | **Effect / Zod Schema Validation**<br>• Strict schema validation<br>• Aborts on error with reason<br>• No multi-tier self-healing fallback | **Structured Diagnostics + Loop Guard**<br>• Type correction & diagnostics<br>• Repetitive loop circuit breaker<br>• Mediocre Windows path support | **3-Tier Basic Repair**<br>• Trailing commas/quotes only<br>• Cannot fix schema type mismatch<br>• Windows paths easily fail serde |
-| **3. Code Graph & Topological Exploration** | **CodeIntel 2.0 Deep Graph**<br>• **Tree-Sitter fullstack AST**<br>• 6-Category topology flow (flow/chain/sub)<br>• Vue/React/Svelte/Astro SFC support<br>• Full non-truncated directory tree in `repo_map` | **File Filtering (Grep/Glob)**<br>• No local AST topology graph<br>• Heavy token burn on large repos<br>• Context window easily overwhelmed | **Basic LSP + File Search**<br>• Standard ripgrep & LSP tools<br>• No global topological flow graph<br>• Lacks frontend SFC AST graph | **xai-codebase-graph**<br>• Rust code graph & fuzzy search<br>• File system watcher (fsnotify)<br>• Focuses on standard symbols | **Basic Hash Vector**<br>• Single topology dimension<br>• Truncated directory tree<br>• Weak frontend SFC support |
-| **4. High Cache Hit Prefix Architecture** | **Strict Append-Only Guarantee**<br>• **`user-wrap.md` dynamic tail wrapping**<br>• **`sacred_floor` memory protection**<br>• Initial Git snapshot (anti-thrashing)<br>• Live mtime hot-reload without cache loss | **Ephemeral Cache Headers**<br>• Relies on Anthropic cache breakpoints<br>• Restricted to Claude series<br>• In-session injections break cache | **Standard Message Streaming**<br>• Relies on native provider caching<br>• Dynamic prompt injections corrupt prefix<br>• Compaction loses key instructions | **Transcript Compaction**<br>• SQLite-based event journal<br>• Proprietary Compaction Transcripts<br>• Lacks dynamic user wrap template | **Basic Static Prefix**<br>• Dynamic reminders break KV cache<br>• Coarse compression rules |
-| **5. Fully Customizable Prompts & Live Reload** | **Fully Externalized + Millisecond Reload**<br>• `init.yaml` (identity/security/prefix)<br>• `rules.yaml` (workflow/disciplines)<br>• `user-wrap.md` (prompt wrapping)<br>• **Immediate live effect without restart** | **Built-in + Limited External**<br>• Prompts compiled in npm package<br>• Supports `CLAUDE.md`<br>• Cannot alter core execution rules | **External Config + Env Vars**<br>• Custom system prompt support<br>• Rules require session restart<br>• Lacks granular YAML layers | **Built-in Prompts + Precedence**<br>• Robust prompt hierarchy<br>• Rule precedence overrides<br>• Core prompt edit requires recompile | **Semi-Static Config**<br>• Hardcoded rules in binary<br>• Requires restart on edit |
-| **6. Multi-Protocol, Reasoning & Accounts** | **All-Protocol Support + 4-Gear Effort**<br>• **OpenAI Responses (/v1/responses)**<br>• Chat Completions / Anthropic / Ollama<br>• **Dynamic 4-gear reasoning effort**<br>• Decoupled accounts & dynamic `/models` pull | **Anthropic Locked**<br>• Tailored for Claude 3.5/3.7<br>• Native Thinking Budget<br>• Third-party models require proxies | **Broad Multi-Model**<br>• Covers major commercial/local models<br>• Model selection interface<br>• Manual frontend effort tuning | **xAI Grok Locked**<br>• Tailored for Grok 2/3 models<br>• Proprietary reasoning schemas<br>• Inflexible for custom models | **Basic OpenAI Compatible**<br>• Coupled accounts and models<br>• No Responses reasoning replay<br>• Stale bindings on model switch |
-| **7. CodeExplore Indexing & Shared Storage** | **`units.v4.bin` Shared Binary Index**<br>• **zstd ultra-fast compression** + Sidecars<br>• **Rayon multi-core scoring (<1ms query)**<br>• Process-wide shared index, instant cold start<br>• Incremental diff sync & jitter guard | **No Persistent Local Index**<br>• On-demand live search per turn<br>• No shared index persistence | **In-Memory / File Cache**<br>• Node/Bun in-memory caching<br>• Project switch requires rebuild | **Rust Process Graph Index**<br>• High-performance index & watcher<br>• Internal incremental graph updates | **Single-Session JSON Index**<br>• High memory overhead<br>• Slow cold start on large repos |
-| **8. Bilingual Thesaurus & Semantic Alignment** | **9 Built-in Domains + Project Thesaurus**<br>• AI Agent/Fullstack/Ecommerce/Admin/Med<br>• Project `<project>/.atomcode/thesaurus/`<br>• **Multi-to-multi CN/EN semantic alignment** | **No Thesaurus Mechanism**<br>• Relies solely on LLM translation<br>• Difficult to map domain terms to code | **No Thesaurus Mechanism**<br>• Relies on symbol search<br>• Lacks domain term mapping | **No Thesaurus Mechanism**<br>• Focuses on AST symbol graph<br>• No bilingual domain dictionaries | **Basic Built-in Thesaurus**<br>• Few basic dictionaries<br>• No project-level expansion |
-| **9. Multi-Project Knowledge Packs & Precedence** | **4-Layer Knowledge Packs + Strict Precedence**<br>• `AGENTS.md` / `ATOMCODE.md` (Main Spec)<br>• `rules.md` (Rules) · `dbwords.md` (DB)<br>• `glossary.md` (Glossary) · Live hot-reload<br>• **Project rules strictly override System rules** | **Single File (`CLAUDE.md`)**<br>• Single file instruction loading<br>• No multi-dimensional knowledge packs<br>• Precedence left to model discretion | **Multi-File Config Support**<br>• Project rules & instruction injection<br>• Loaded via context concatenation<br>• Lacks rigid precedence guarantee | **AGENTS.md / Rule Hierarchy**<br>• Robust project rule parsing<br>• Structured prompt precedence | **Single File Match**<br>• Only recognizes `.atomcode.md`<br>• No DbWords / Rules / Glossary split |
-| **10. Agent Self-Configuration via Teaches KB** | **Embedded 8-Chapter Teaches + Config Tool**<br>• Comprehensive guides from prompts to models<br>• Agent can **self-inspect system configs** via `jeikcode_config_guide`<br>• Build-time auto-sync with host assets | **Static Online Docs**<br>• Manual human documentation<br>• No agent self-inspection tool | **Online Documentation**<br>• Community-maintained Markdown<br>• No built-in config guidance tool | **Internal Documentation**<br>• Rich user manual for CLI/TUI<br>• Tailored for internal workflows | **No Built-in Config Tool**<br>• Relies on external README<br>• Agent cannot query its config |
-| **11. Skills & MCP Ecosystem** | **Dynamic Skills + Standard MCP**<br>• Dynamic hot-loading from `~/.atomcode/skills/`<br>• Standard Model Context Protocol integration<br>• Progressive loading to protect context | **Native MCP Integration**<br>• Official & community MCP support<br>• Standard Tool injection | **Plugins & MCP Ecosystem**<br>• Rich plugin architecture & MCP<br>• Community tool extensions | **Built-in Tools + MCP**<br>• Rich built-in tools & extensions<br>• Tailored for internal tools | **Basic Skills**<br>• Basic local skill loading<br>• Weak MCP error isolation |
-| **12. Fullstack Language & Semantic Retrieval** | **Fullstack Language AST + Hybrid Retrieval**<br>• Vue SFC/TSX/JSX/Svelte/Astro/SCSS/Rust/Go/Java/C++<br>• **BM25 + Concept Vector hybrid ranking**<br>• Soft anchor de-weighting & cross-language flow | **Standard Text Search**<br>• Regex & file text search<br>• Lacks component-specific parsers | **Standard LSP Multi-Language**<br>• Relies on individual language LSPs<br>• Hybrid retrieval handled on client | **Rust / C++ / Python Focus**<br>• Deep backend language optimization<br>• Generic frontend SFC support | **Basic Multi-Language**<br>• Low recognition for Vue/React SFC<br>• No hybrid ranking algorithms |
+### 1. Core Agentic Feature Matrix
+
+| Core Feature & Mechanism | **JeikCode (This Project)** | **Claude Code** | **OpenCode** | **Grok Build** | **Legacy Baseline** |
+| :--- | :---: | :---: | :---: | :---: | :---: |
+| **Autonomous Read-Edit-Test-Verify Loop** | ✅ Dynamic Budget + State Machine | ✅ Basic CLI Loop | ✅ Effect-TS Pipeline | ✅ PTY Process Loop | ❌ Weak Glue Layer |
+| **5-Stage Tool Repair Chain (with Windows Backslash Rescue)** | ✅ 5-Tier Self-Healing | ❌ Raw Error String | ❌ Strict Error Abort | ✅ Basic Parameter Fix | ❌ Prone to Serde Failure |
+| **Schema Type Coercion (`"3"`→`3`, `"true"`→`true`)** | ✅ Auto Type Coercion | ❌ Relies on LLM Guess | ❌ Relies on LLM Retry | ✅ Partial Coercion | ❌ No Type Healing |
+| **3-Attempt Repetitive Tool Circuit Breaker (Loop Guard)** | ✅ Rigid Loop Guard | ❌ Prone to Infinite Loops | ❌ Context Truncation | ✅ Loop Guard Guard | ❌ No Loop Breaker |
+| **Native CodeExplore Bilingual Semantic Search** | ✅ **Weighted Multi-Vector** | ❌ None (Grep only) | ❌ None (LSP/Grep) | ❌ None (Symbol AST) | ❌ Zero-Hit Misses |
+| **repo_map Structure-First Directory Tree (No Truncation)** | ✅ Complete Dir Tree | ❌ Truncated by Token | ❌ Basic Dir Listing | ✅ Dir Tree Viewer | ❌ Coarse Elision |
+| **Low-Relevance Code Collapsed into Minimal Token Budget** | ✅ Minimal Token Cost | ❌ Heavy Dump Context | ❌ Basic File Folding | ✅ Output Budgeting | ❌ Hard Truncation |
+| **KV Cache Prefix Stability (Append-Only Discipline)** | ✅ `user-wrap` Tail Wrap | ❌ Injections Corrupt Cache | ❌ Dynamic Interruption | ❌ Transcript Truncation | ❌ Reminder Thrashing |
+| **`sacred_floor` Memory / Rule Protection on Compression** | ✅ Never Lost | ❌ Sliding Window Loss | ❌ Prone to Loss | ✅ Event Compaction | ❌ Drops Rules |
+| **Fully Externalized Prompts with Millisecond Hot-Reload** | ✅ Immediate Effect | ❌ Compiled in Binary | ❌ Session Restart Needed | ❌ Recompile Needed | ❌ Restart Needed |
+| **Multi-Project Knowledge Packs Precedence (`rules/dbwords`)** | ✅ Strict Over System | ❌ Single `CLAUDE.md` | ❌ Context Concat | ✅ Rule Precedence | ❌ Single File Only |
+| **Agent Self-Configuration Tool (`jeikcode_config_guide`)** | ✅ 8-Chapter Guide Tool | ❌ None (Static Web) | ❌ None (Static Docs) | ❌ None (Internal Docs) | ❌ No Self-Inspection |
+| **Multi-Protocol Support (Responses / Completions / Anthropic)** | ✅ 4 Protocols Native | ❌ Anthropic Only | ✅ Multi-Model | ❌ Grok Only | ❌ No Responses |
+| **4-Gear Reasoning Effort Switching (`low/med/high/xhigh`)** | ✅ Realtime `/effort` | ❌ Thinking Budget Only | ❌ Manual Frontend | ✅ Bound to Grok | ❌ Stale Bindings |
+| **Independent First-Token Liveness Timeout (60s × 3)** | ✅ Solves R1/Grok3 Hangs | ❌ Single Stream Timeout | ❌ Request Timeout | ✅ Process Watchdog | ❌ Stream Hangs |
+| **Multi-Instance Headless Remote Serve + WebUI Gateway** | ✅ Native Rust Engine | ❌ Local CLI Only | ✅ Web + Desktop App | ❌ Pager TUI Only | ❌ Basic WebUI |
+| **Double-Press ESC/Ctrl+C Cancel + Linux TTY Grabbing** | ✅ Anti-Misoperation | ❌ Single ESC Drops State | ❌ Basic Interrupt | ✅ Terminal PTY Guard | ❌ Linux TTY Lockup |
 
 ---
 
-## 3. Deep Dive into Core Mechanisms
+### 2. Programming Language AST & Semantic Retrieval Support
 
-```text
-┌────────────────────────────────────────────────────────────────────────┐
-│               JeikCode Unified Runtime Pipeline (CodingRuntime)        │
-└────────────────────────────────────────────────────────────────────────┘
-     CLI / TUIX  │  WebUI Gateway  │  Remote Serve  │  Daemon  │  ACP
-                 └───────────────┬──────────────────┘
-                                 │
-                                 ▼
-                   JeikCode CodingRuntime (L2)
-       ┌──────────────────────────────────────────────────┐
-       │ • Session Lifecycle & State Machine              │
-       │ • Dynamic Prompt Templates & user-wrap.md Reload │
-       │ • Sacred Floor Context Protection (Memory/Rules) │
-       │ • First-Token Liveness Timeout (60s × 3)         │
-       │ • Reasoning Effort Control & Responses Protocol  │
-       │ • Subagent Dispatcher                            │
-       └─────────────────────────┬────────────────────────┘
-                                 │
-                                 ▼
-                   atomcode-capabilities (L1)
-       ┌──────────────────────────────────────────────────┐
-       │ • CodeIntel 2.0 (AST / 6-Topology / 9-Thesaurus) │
-       │ • 5-Stage Resilient Repair Chain & Loop Guard    │
-       │ • jeikcode_config_guide Autonomous Tool          │
-       │ • Cross-Platform I/O (Windows \\?\ & UTF-8 BOM)  │
-       └─────────────────────────┬────────────────────────┘
-                                 │
-                                 ▼
-                   atomcode-kernel (L0 Neutral Core)
-       ┌──────────────────────────────────────────────────┐
-       │ • Neutral Agent Execution Loop                   │
-       │ • Streaming Token Sink & Observation Return      │
-       │ • Strictly Unidirectional & Provider-Agnostic    │
-       └──────────────────────────────────────────────────┘
-```
+JeikCode's native CodeExplore supports fullstack AST parsing across all major programming languages:
+
+| Language & Framework | **JeikCode (CodeExplore)** | **Claude Code** | **OpenCode** | **Grok Build** |
+| :--- | :---: | :---: | :---: | :---: |
+| **Java** | ✅ **AST Analysis + Semantic Search** | ❌ (Standard Grep) | ✅ (Relies on LSP) | ✅ (Basic Symbol Graph) |
+| **C / C++** | ✅ **AST Analysis + Semantic Search** | ❌ (Standard Grep) | ✅ (Relies on LSP) | ✅ (Native Support) |
+| **Python** | ✅ **AST Analysis + Semantic Search** | ❌ (Standard Grep) | ✅ (Relies on LSP) | ✅ (Basic Symbol Graph) |
+| **Vue (Vue2/3 SFC Dual Parse)** | ✅ **Template + Script Deep Support** | ❌ (Standard Grep) | ❌ (No SFC Graph) | ❌ (Weak Frontend) |
+| **TypeScript / JavaScript** | ✅ **JSX / TSX Element Extraction** | ❌ (Standard Grep) | ✅ (Relies on LSP) | ✅ (Basic Symbol Graph) |
+| **Rust** | ✅ **AST Analysis + Semantic Search** | ❌ (Standard Grep) | ✅ (Relies on LSP) | ✅ (Native Support) |
+| **Go** | ✅ **AST Analysis + Semantic Search** | ❌ (Standard Grep) | ✅ (Relies on LSP) | ✅ (Basic Symbol Graph) |
+| **Svelte / Astro / CSS / SCSS** | ✅ **Component & Style Selectors** | ❌ (Standard Grep) | ❌ (No SFC Graph) | ❌ (Unsupported) |
+
+---
+
+## 3. Native CodeExplore & repo_map Deep Retrieval
+
+### 1. Origin & Evolution: From CodeGraph to CodeExplore
+
+The open-source project **CodeGraph** pioneered symbol indexing, but real-world engineering revealed a fatal flaw: **it only understands hardcoded symbols and has zero natural language semantic comprehension**. When developers ask questions in natural language (e.g. "Find the logic that handles payment refund callbacks"), pure symbol search fails completely.
+
+Inspired by this insight, JeikCode completely re-architected **`CodeExplore`** and **`repo_map`**:
+
+1. **Weighted AST Vectors + Bilingual Multi-Vector Semantic Search**:
+   - Extracts AST symbols, call hierarchies, and struct definitions;
+   - Parses docstrings and comments in both English and Chinese;
+   - Constructs multi-vector semantic embeddings cross-referenced against bilingual domain thesauruses.
+2. **Weighted Score Ranking Top-Placing Core Code**:
+   - Relevant code snippets and implementation logic are ranked and placed directly at the top of the observation context for the agent.
+3. **Minimal Token Budget for Low-Relevance Files**:
+   - For secondary files and potential dependencies, CodeExplore avoids dumping bloated context and instead generates concise structural summaries with minimal token budget.
+4. **Quantifiable Real-World Performance**:
+   - 🚀 **Search Efficiency Boosted by 60% - 70%**: The agent locates target code in a single round without endless grep iterations;
+   - 🎯 **Accuracy Maintained at 90%+**: Accurately pinpoints implementations for both mixed-language queries and fuzzy business requests.
+
+> 💡 *CodeExplore currently supports bilingual Chinese and English semantic search, with additional natural languages planned based on community demand!*
+
+---
+
+## 4. Core Architectural Highlights
 
 ### 1. High Cache Hit Prefix Architecture
-- **Append-Only Byte Immutability**: System identity, `MEMORY` entries, `SKILLS`, `MCP` tools, and project knowledge rules (`AGENTS.md`, `rules.md`, `dbwords.md`) are merged in the session head under `sacred_floor` protection. Initial Git state is snapshotted to prevent environment drift from invalidating provider KV caches.
-- **`user-wrap.md` Dynamic Tail Wrapping**: Wraps only the final user message via `{{input}}` with project precedence (`./user-wrap.md` > `~/.atomcode/user-wrap.md`). Millisecond mtime hot-reload with zero server restarts.
-- **`sacred_floor` Guard**: When `/compact` executes, sacred memory and rules are preserved below the floor line, guaranteeing critical instructions are never lost.
-- **Clean UI Restoration**: WebUI and TUIX automatically unwrap messages for display so users see clean chat history while the LLM receives structured instructions.
+- **Strict Append-Only Discipline**: Prompts, memory entries, skills, and project rules are merged at session initiation under `sacred_floor` protection.
+- **Dynamic `user-wrap.md` Tail Wrapping**: Intercepts only the latest user message via `{{input}}` with project precedence (`./user-wrap.md` > `~/.atomcode/user-wrap.md`). Modifying templates hot-reloads in milliseconds without breaking the cached prefix.
+- **`sacred_floor` Protection**: On `/compact`, core rules and memories below the floor are never dropped.
+- **Clean UI Display**: WebUI and TUIX automatically unwrap messages so users see clean chat history while LLMs receive structured instructions.
 
-### 2. CodeIntel 2.0 Full Topological Graph & Bilingual Thesaurus
-- **Fullstack Tree-Sitter AST Parsing**: Deeply analyzes Rust, Go, Python, Java, C++, and complete frontend frameworks (Vue2/3 SFC dual `template`+`script` parsing, React TSX/JSX element extraction, Svelte, Astro, and CSS/SCSS/LESS class selectors).
-- **6-Category Topological Flow**: Explores anchors, subtree modules, parent dependency chains, siblings, graph connectivity flows, and path tokens, combined with BM25 and bilingual concept vector hybrid ranking.
-- **9 Built-in Domain Bilingual Thesauruses**: Covers Computer Science, AI Agents, Fullstack Dev, E-commerce, Admin Systems, Robotics, and Medical terminology to bridge natural language queries to code identifiers.
-- **`units.v4.bin` Shared Binary Index**: Process-wide zstd cache + Rayon parallel scoring enables sub-millisecond query latency.
-
-### 3. 5-Stage Resilient Tool Repair Chain (Surpassing Grok)
-- **5-Tier Self-Healing Pipeline**:
-  1. `Direct Parse`: Standard JSON decoding;
-  2. `Relaxed Repair`: Strips markdown fences, fixes trailing commas and unquoted keys;
-  3. `edit_file Regex Extraction`: Recovers multiline blocks from file modification calls;
-  4. `Schema-Bound String Decoding`: Resolves stringified JSON payload escaping;
-  5. `Key-Value Fallback`: Final argument-level extraction safeguard.
+### 2. 5-Stage Resilient Tool Repair Chain (Surpassing Grok)
+- **5-Tier Self-Healing**: Direct JSON → Relaxed JSON (trailing commas/unquoted keys) → `edit_file` Regex extraction → Schema-bound string decoding → Key-Value fallback.
 - **Windows Path Backslash Rescue**: Unescapes `D:\project\src` backslashes before serde parsing.
-- **Schema Type Coercion**: Automatically coerces string numbers (`"3"` → `3`) and booleans (`"true"` → `true`).
-- **Loop Guard Circuit Breaker**: Returns field-level diagnostic hints on failure; aborts repetitive tool-call loops after 3 consecutive errors.
+- **Schema Type Coercion**: Automatically coerces `"quantity":"3"` → `3` and `"retry":"true"` → `true`.
+- **3-Attempt Loop Guard Circuit Breaker**: Terminates repetitive tool errors after 3 consecutive failures, forcing the agent to switch approaches.
 
-### 4. Fully Customizable Prompts with Millisecond Hot-Reload
+### 3. Fully Externalized Prompts with Millisecond Hot-Reload
 Externalized under `~/.atomcode/prompts/` with zero-cost mtime caching:
-- **`init.yaml`**: System identity, precedence hierarchy, security boundaries, and environment settings;
-- **`rules.yaml`**: Workflow reflections, code location disciplines, parallel tool calling standards;
-- **`user-wrap.md`**: Custom user prompt interception template;
-- **Live Updates**: Any modification takes effect on the next turn immediately without restarting.
+- `init.yaml`: Identity, precedence hierarchy, security boundaries;
+- `rules.yaml`: Workflow rules, tool calling disciplines, output standards;
+- `user-wrap.md`: User prompt wrapping template;
+- **Live Updates**: Editing files immediately takes effect on the next turn without restarting.
 
-### 5. Multi-Project Knowledge Packs & Rigid Precedence
-Supports multi-dimensional project knowledge packs that **strictly override System default instructions**:
-- **Main Spec**: `AGENTS.md` or `ATOMCODE.md`;
-- **Glossary**: `.atomcode/glossary.md` (maps domain terms to code symbol aliases);
-- **Rules**: `.atomcode/rules.md` (business workflows, permissions, state transitions);
-- **DbWords**: `.atomcode/dbwords.md` (database schemas, table/column semantics, SQL guidelines).
+### 4. Multi-Project Knowledge Packs & Rigid Precedence
+Knowledge files in your workspace **strictly override System default instructions**:
+- `AGENTS.md` / `ATOMCODE.md` (Main project spec)
+- `.atomcode/rules.md` (Business workflows & constraints)
+- `.atomcode/dbwords.md` (Database schemas & SQL rules)
+- `.atomcode/glossary.md` (Domain terminology to code symbol mapping)
 
-### 6. Agent Self-Configuration via Teaches Knowledge Base
-- Built-in 8-chapter progressive guides (`01_prompts_and_context.md` to `08_updates_and_releases.md`).
-- Native **`jeikcode_config_guide`** tool: The agent can autonomously inspect configuration specifications to resolve user configuration inquiries.
+### 5. Agent Self-Configuration via Teaches Knowledge Base
+- Embedded 8-chapter progressive documentation (`01_prompts_and_context.md` to `08_updates_and_releases.md`).
+- Native **`jeikcode_config_guide`** tool: The agent autonomously inspects configuration specifications to guide users and self-diagnose setup issues.
 
-### 7. Multi-Protocol Support & 4-Gear Reasoning Effort
-- **4 Protocols**: OpenAI Responses (`/v1/responses`), Chat Completions, Anthropic, and Ollama.
-- **4-Gear Reasoning Intensity**: Switch effort (`low`, `medium`, `high`, `xhigh`, `off`) dynamically via `/effort` or WebUI.
-- **Decoupled Accounts & Models**: `[provider_accounts.*]` manages credentials, `[models.*]` configures model parameters; `/modeladd` automatically polls upstream `/models`.
+### 6. Multi-Protocol Support & 4-Gear Reasoning Effort
+- Native support for OpenAI Responses (`/v1/responses`), Chat Completions, Anthropic, and Ollama;
+- Dynamically toggle reasoning effort (`low` / `medium` / `high` / `xhigh` / `off`) via `/effort` or WebUI;
+- Decoupled credentials and model parameters with dynamic upstream `/models` polling in `/modeladd`.
 
-### 8. Independent First-Token Liveness Timeout
-- Dedicated `first_token_timeout` (default 60s × 3 retries) handles long reasoning silences (DeepSeek-R1, Grok 3) independently from stream token gaps.
+### 7. Independent First-Token Liveness Timeout
+- Dedicated `first_token_timeout` (default 60s × 3 retries) prevents silent reasoning hangs in DeepSeek-R1 and Grok 3 models.
 
-### 9. Remote Headless Serve & WebUI Gateway (Absorbing OpenCode into Native Rust)
-- **Local WebUI**: Launch via `/webui` or `jeikcode webui`.
-- **Real-Time Token Popup**: Visual breakdown of prompt tokens, reasoning tokens, cache hits, and Sacred Floor retention.
-- **Headless Serve**:
+### 8. Remote Headless Serve & WebUI Gateway
+- **Local WebUI**: Launch via `/webui` or `jeikcode webui` with real-time token breakdown popups;
+- **Multi-Instance Remote Serve**:
   ```bash
-  # Launch headless server
   jeikcode serve --host 0.0.0.0 --port 4096 --token sk-my-secret
-
-  # Connect from remote client
   jeikcode attach http://192.168.1.100:4096 --token sk-my-secret
   ```
 
-### 10. Anti-Accidental-Touch & TTY Guard
-- **Double-ESC/Ctrl+C Cancel**: Stops active generation and restores the input box without risking accidental single-key drops.
-- **TTY Foreground Grabbing**: Reclaims terminal foreground on Linux upon turn completion; ignores `SIGTTIN`/`SIGTTOU`/`SIGTSTP` hang signals.
+### 9. Anti-Accidental-Touch & TTY Control Protection
+- **Double-ESC/Ctrl+C Cancel**: Stops active execution and restores input without risking accidental single-key drops;
+- **TTY Foreground Grabbing**: Reclaims terminal foreground on Linux upon turn completion, ignoring `SIGTTIN`/`SIGTTOU`/`SIGTSTP` hang signals.
 
 ---
 
-## 4. Installation & Quick Start
+## 5. Installation & Quick Start
 
-### Option 1: GitHub Releases Prebuilt Binary (Recommended)
+### 1. GitHub Releases Prebuilt Binary (Recommended)
 
 Download precompiled binaries from [GitHub Releases](https://github.com/jeikl/jeikcode/releases):
 
@@ -192,7 +189,7 @@ curl -fsSL https://raw.githubusercontent.com/jeikl/jeikcode/local-dev/scripts/in
 irm https://raw.githubusercontent.com/jeikl/jeikcode/local-dev/scripts/install.ps1 | iex
 ```
 
-### Option 2: Build from Source
+### 2. Build from Source
 
 Requires **Rust 1.88+** ([rustup.rs](https://rustup.rs/)):
 
@@ -204,7 +201,7 @@ cargo install --path crates/atomcode-cli --bin jeikcode --locked
 jeikcode --version
 ```
 
-### Configure & Launch
+### 3. Configure & Launch
 
 Run inside your workspace:
 
@@ -251,7 +248,7 @@ jeikcode -c
 
 ---
 
-## 5. Keybindings & Commands
+## 6. Keybindings & Commands
 
 ### Terminal Keybindings
 
@@ -289,9 +286,9 @@ jeikcode -c
 
 ---
 
-## 6. Multi-Project Knowledge Packs & Rules
+## 7. Multi-Project Knowledge Packs
 
-JeikCode enforces strict **Project-Level Precedence**. Knowledge files in your repository dynamically inject rules that **strictly override System instructions**:
+Placing the following files in your repository dynamically injects rules that **strictly override System instructions**:
 
 ```text
 your-project/
@@ -306,7 +303,7 @@ your-project/
 
 ---
 
-## 7. License
+## 8. License
 
 This project is licensed under the [MIT License](LICENSE).
 

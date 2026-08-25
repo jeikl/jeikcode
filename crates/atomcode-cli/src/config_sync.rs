@@ -156,12 +156,23 @@ pub const BUNDLED_ASSETS: &[BundledFileEntry] = &[
     },
 ];
 
-/// Old prompt seed names that must be removed after the root_docs_ rename.
+/// 官方已废弃/重命名的历史遗留文件列表（需在升级时提示清理或移除）
 const STALE_HOME_FILES: &[&str] = &[
+    "thesaurus/ecommerce.txt",
     "prompts/prompts.md",
     "prompts/内置工具.yaml",
     "prompts/内置技能.yaml",
 ];
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DiffKind {
+    /// 新增文件（内置模板存在，本地缺失）
+    New,
+    /// 修改文件（本地存在，与内置模板内容有差异）
+    Modified,
+    /// 废弃/删除文件（旧版遗留文件，已被新版淘汰重命名）
+    Obsolete,
+}
 
 #[derive(Clone, Debug)]
 pub struct ConfigDiffItem {
@@ -169,7 +180,7 @@ pub struct ConfigDiffItem {
     pub description: String,
     pub target_path: PathBuf,
     pub new_content: String,
-    pub is_new_file: bool,
+    pub kind: DiffKind,
     pub selected: bool,
 }
 
@@ -211,11 +222,11 @@ pub fn merge_user_config_preserving_models(existing: &str, new_template: &str) -
     toml::to_string_pretty(&new_val).unwrap_or_else(|_| existing.to_string())
 }
 
-/// 扫描 ~/.atomcode 目录下所有涉及的内置非模型配置变更项
+/// 扫描 ~/.atomcode 目录下所有涉及的内置非模型配置变更项（新增、更新修改、废弃清理）
 pub fn scan_atomcode_config_diffs(atomcode_home: &Path) -> Vec<ConfigDiffItem> {
-    remove_stale_home_files(atomcode_home);
     let mut diffs = Vec::new();
 
+    // 1. 扫描内置官方资产：检测新增与修改更新
     for entry in BUNDLED_ASSETS {
         let target = atomcode_home.join(entry.relative_path);
         let bundled_content = entry.content;
@@ -226,7 +237,7 @@ pub fn scan_atomcode_config_diffs(atomcode_home: &Path) -> Vec<ConfigDiffItem> {
                 description: entry.description.to_string(),
                 target_path: target,
                 new_content: bundled_content.to_string(),
-                is_new_file: true,
+                kind: DiffKind::New,
                 selected: true, // 默认全选
             });
             continue;
@@ -242,22 +253,37 @@ pub fn scan_atomcode_config_diffs(atomcode_home: &Path) -> Vec<ConfigDiffItem> {
                     description: entry.description.to_string(),
                     target_path: target,
                     new_content: merged,
-                    is_new_file: false,
+                    kind: DiffKind::Modified,
                     selected: true, // 默认全选
                 });
             }
         } else {
-            // 对 prompts/*.yaml 等文件进行全文比对
+            // 对 prompts/*.yaml, thesaurus/*.txt, teaches/*.md 等文件进行全文比对
             if existing_content.trim() != bundled_content.trim() {
                 diffs.push(ConfigDiffItem {
                     relative_path: entry.relative_path.to_string(),
                     description: entry.description.to_string(),
                     target_path: target,
                     new_content: bundled_content.to_string(),
-                    is_new_file: false,
+                    kind: DiffKind::Modified,
                     selected: true, // 默认全选
                 });
             }
+        }
+    }
+
+    // 2. 扫描历史已知废弃或已被替换的旧文件（如 ecommerce.txt）
+    for stale_rel in STALE_HOME_FILES {
+        let stale_path = atomcode_home.join(stale_rel);
+        if stale_path.is_file() {
+            diffs.push(ConfigDiffItem {
+                relative_path: stale_rel.to_string(),
+                description: format!("废弃/旧版本遗留项 ({})", stale_rel),
+                target_path: stale_path,
+                new_content: String::new(),
+                kind: DiffKind::Obsolete,
+                selected: true, // 默认全选清理
+            });
         }
     }
 
@@ -302,7 +328,11 @@ pub fn prompt_interactive_config_sync(mut items: Vec<ConfigDiffItem>) -> Result<
         for (i, item) in items.iter().enumerate() {
             let pointer = if i == cursor { "👉 " } else { "   " };
             let checkbox = if item.selected { "[✔] " } else { "[ ] " };
-            let status = if item.is_new_file { " (新增文件)" } else { " (有更新)" };
+            let status = match item.kind {
+                DiffKind::New => " (新增文件)",
+                DiffKind::Modified => " (有更新/修改)",
+                DiffKind::Obsolete => " (已废弃/建议清理)",
+            };
             println!("\r{}{}{}{}\x1b[K", pointer, checkbox, item.description, status);
         }
         stdout.flush()?;
@@ -386,12 +416,23 @@ pub fn prompt_interactive_config_sync(mut items: Vec<ConfigDiffItem>) -> Result<
 
     let mut applied_count = 0;
     for item in items.into_iter().filter(|it| it.selected) {
-        if let Some(parent) = item.target_path.parent() {
-            let _ = fs::create_dir_all(parent);
-        }
-        if fs::write(&item.target_path, &item.new_content).is_ok() {
-            println!("  ✔ 已更新: {}", item.relative_path);
-            applied_count += 1;
+        match item.kind {
+            DiffKind::New | DiffKind::Modified => {
+                if let Some(parent) = item.target_path.parent() {
+                    let _ = fs::create_dir_all(parent);
+                }
+                if fs::write(&item.target_path, &item.new_content).is_ok() {
+                    let tag = if item.kind == DiffKind::New { "已新增" } else { "已更新" };
+                    println!("  ✔ {}: {}", tag, item.relative_path);
+                    applied_count += 1;
+                }
+            }
+            DiffKind::Obsolete => {
+                if fs::remove_file(&item.target_path).is_ok() {
+                    println!("  ✔ 已清理废弃项: {}", item.relative_path);
+                    applied_count += 1;
+                }
+            }
         }
     }
 

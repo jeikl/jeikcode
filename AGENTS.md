@@ -27,8 +27,9 @@ CLI / TUI / daemon / background / ACP / clix
 ## 2. 核心机制与开发不变量
 
 ### 2.1 提示词热重载与优先级裁决 (Precedence)
-- **动态生效 (Live)**：`prompts/init.yaml`（身份/环境）与 `prompts/rules.yaml`（工作流/工具纪律）基于 mtime 自动热重载，修改立即生效无须重启；
+- **动态生效 (Live)**：`prompts/init.yaml`（身份/环境）、`prompts/rules.yaml`（工作流/工具纪律）以及 `user-wrap.md`（提问包装模板）基于 mtime 自动热重载，修改立即生效无须重启；
 - **种子说明文件 (Seed Docs)**：`root_docs_*` 仅作为开发者参考文档，严禁加载进模型上下文；
+- **用户提问包装 (`user-wrap.md`)**：支持全局（`~/.atomcode/`）与项目级（`./.atomcode/` 或 `./`）配置，通过 `{{input}}` 动态包裹用户最后一条真实提问，项目级覆盖全局；
 - **项目级规则最高裁量权**：凡是带有结构化标记的项目规范（`=== ... (*.md) ===` 或 `-----**.md------`，如 `AGENTS.md`、`ATOMCODE.md`、`rules.md`、`dbwords.md` 等），在模型决策中**严格优先于 System 默认规则**。
 
 ### 2.2 KV Cache 前缀稳定性与上下文压缩保护 (Prompt Caching & Sacred Floor)

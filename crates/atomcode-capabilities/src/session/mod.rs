@@ -33,7 +33,9 @@ pub mod snapshot;
 pub mod status_reminder;
 pub mod transcript;
 mod usage_provider;
+pub mod user_wrap;
 pub use context::SessionContextHook;
+pub use user_wrap::UserWrapHook;
 pub use manager::{
     aggregate_session_cost, CatalogDiagnostic, CatalogDiagnosticKind, CatalogEntry,
     CatalogLocation, CatalogPresence, CatalogScan, DetachedUsageRecorder, ForkInfo, ImportInfo,

@@ -58,6 +58,7 @@
 | 配置项 | 项目路径 | 作用 |
 | :--- | :--- | :--- |
 | **项目级专属技能** | `<workspace>/.skills/<skill-name>/SKILL.md` | 当前项目专有的工程重构或测试工作流。 |
+| **项目级提问包装** | `<workspace>/.atomcode/user-wrap.md` 或 `user-wrap.md` | 当前项目专属的提问包装模板（`{{input}}` 占位符，覆盖全局）。 |
 | **项目级专属 MCP** | `<workspace>/.mcp.json` | 仅在当前项目生效的外部 MCP 工具服务。 |
 | **项目级专属词林** | `<workspace>/.atomcode/thesaurus/*.txt` | 当前项目特定业务名词的双语检索词林。 |
 | **项目级索引忽略** | `<workspace>/.codegraphignore` | 符号索引与图谱构建时忽略的特定文件或目录。 |
@@ -71,6 +72,7 @@
 my-project/
 ├── AGENTS.md                 # 核心架构边界与开发约束
 ├── .atomcode/
+│   ├── user-wrap.md          # 专属提问包装（如：用户提问：【{{input}}】...）
 │   ├── rules.md              # 业务流程与领域逻辑规范
 │   ├── dbwords.md            # 数据库核心表名与字段对照
 │   └── thesaurus/

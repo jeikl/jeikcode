@@ -639,6 +639,9 @@ async fn prepare_with_plugin_hooks_reusing_lease(
     hooks.push(Arc::new(
         SessionContextHook::new(&cfg.working_dir).with_extra_append(cfg.extra_system_append.clone()),
     ));
+    hooks.push(Arc::new(
+        atomcode_capabilities::session::UserWrapHook::new(&cfg.working_dir),
+    ));
     if opts.memory {
         hooks.push(Arc::new(MemoryHook::for_project(&cfg.working_dir)));
     }

@@ -149,6 +149,9 @@ fn build_coding_agent_from_tools(
             SessionContextHook::new(cfg.working_dir.clone())
                 .with_extra_append(cfg.extra_system_append.clone()),
         ))
+        .hook(Arc::new(
+            atomcode_capabilities::session::UserWrapHook::new(cfg.working_dir.clone()),
+        ))
         .hook(turn_execution_policy.clone())
         .hook(Arc::new(VerifyCadenceHook::with_execution_policy(
             cfg.working_dir.clone(),

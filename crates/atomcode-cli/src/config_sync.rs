@@ -60,6 +60,11 @@ pub const BUNDLED_ASSETS: &[BundledFileEntry] = &[
         description: "默认 MCP 服务器 (mcp.json)",
     },
     BundledFileEntry {
+        relative_path: "user-wrap.md",
+        content: include_str!("../../atomcode-capabilities/assets/user-wrap.md"),
+        description: "用户提问包装模板 (user-wrap.md — 支持 {{input}} 动态占位符)",
+    },
+    BundledFileEntry {
         relative_path: ".codegraphignore",
         content: include_str!("../../atomcode-capabilities/assets/.codegraphignore"),
         description: "代码图谱忽略规则 (.codegraphignore)",

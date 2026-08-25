@@ -183,11 +183,12 @@ fn sync_user_home_assets_if_present() {
         }
     }
 
-    // 4. Standalone asset files: builtin-tools.txt, .codegraphignore, config_teachs.md
+    // 4. Standalone asset files: builtin-tools.txt, .codegraphignore, config_teachs.md, user-wrap.md
     for (src_rel, dest_rel) in [
         ("builtin-tools.txt", "crates/atomcode-capabilities/assets/builtin-tools.txt"),
         (".codegraphignore", "crates/atomcode-capabilities/assets/.codegraphignore"),
         ("config_teachs.md", "crates/atomcode-cli/assets/config_teachs.md"),
+        ("user-wrap.md", "crates/atomcode-capabilities/assets/user-wrap.md"),
     ] {
         let src = home.join(src_rel);
         if src.is_file() {

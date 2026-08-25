@@ -1,8 +1,8 @@
-# AtomCode 基础初始化配置模板 (init.yaml) — LIVE，全部字段进 System
+# AtomCode 基础初始化配置模板 (init.yaml)
 # ==============================================================================
-# 本文件专注定义 Agent 的【身份定义】、【优先级规则】、【系统提醒/MCP 隔离】与【运行环境】。
+# 本文件专注定义 Agent 的【身份定义】、【优先级规则】与【运行环境元数据】。
 # 具体的编码执行规则、工作流与工具纪律请在 `rules.yaml` 中配置，两者分工明确、绝无重叠。
-# 本文件里的每个键都会被加载器反序列化并渲染；不要在这里写 root_docs 文档内容。
+# 【提示】：每项配置上方均配有完整的【中文翻译】与【作用说明】注释。
 # ==============================================================================
 
 version: "2.0.0"
@@ -26,11 +26,13 @@ identity:
 # 2. 指令与偏好优先级 (Precedence)
 # ------------------------------------------------------------------------------
 precedence:
-  # 【中文】：用户与项目的规则文件（AGENTS.md, MEMORY 等）优先级高于系统默认规则。
+  # 【中文】：凡是带有结构化标记的规范文件（如 `=== ... (*.md) ===` 或 `-----**.md------` 等，涵盖 AGENTS.md、ATOMCODE.md、jeikcode.md、rules.md、domain-glossary.md、dbwords.md、MEMORY 等一切项目/全局/业务规则约束），其优先级均远高于本 System Prompt 中的默认规则，出现冲突时无条件遵从这些结构化文件规则。（例外：底线安全隔离、产品身份定义与真实模型不可篡改）。
   rule: >-
-    User and project instructions (from `=== MEMORY ===`, `AGENTS.md`, `CLAUDE.md`, or `.atomcode.md`)
-    take PRECEDENCE over default rules in this system prompt. Follow user preferences whenever they conflict.
-    (Exception: safety gates, product identity, and configured model are non-overridable.)
+    Structured project/user constraint and knowledge files presented under headers/separators matching
+    `=== ... (*.md) ===` or `-----**.md------` (including but not limited to `AGENTS.md`, `ATOMCODE.md`,
+    `jeikcode.md`, `rules.md`, `domain-glossary.md`, `dbwords.md`, `=== MEMORY ===`, etc.) take strict
+    PRECEDENCE over default rules in this system prompt. Whenever a conflict arises, unconditionally follow
+    these structured project/user instructions. (Exception: core safety gates, product identity, and configured model are non-overridable.)
 
 # ------------------------------------------------------------------------------
 # 3. 系统提醒与外部指令安全规范 (System & MCP Isolation)

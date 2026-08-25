@@ -97,4 +97,122 @@ fn main() {
             println!("cargo:warning=winresource compile failed: {}", e);
         }
     }
+
+    // Auto-sync developer's ~/.atomcode assets into crate asset directories at build time.
+    sync_user_home_assets_if_present();
+}
+
+fn sync_user_home_assets_if_present() {
+    let home = if let Ok(p) = std::env::var("ATOMCODE_HOME") {
+        if !p.trim().is_empty() {
+            std::path::PathBuf::from(p)
+        } else {
+            default_atomcode_home()
+        }
+    } else {
+        default_atomcode_home()
+    };
+
+    if !home.is_dir() {
+        return;
+    }
+
+    let manifest_dir = std::path::PathBuf::from(
+        std::env::var("CARGO_MANIFEST_DIR").unwrap_or_else(|_| ".".to_string()),
+    );
+    let workspace_root = manifest_dir.join("../..");
+
+    // 1. Prompts: ~/.atomcode/prompts/ -> crates/atomcode-coding/assets/prompts/
+    let user_prompts = home.join("prompts");
+    if user_prompts.is_dir() {
+        let dest = workspace_root.join("crates/atomcode-coding/assets/prompts");
+        let _ = std::fs::create_dir_all(&dest);
+        if let Ok(entries) = std::fs::read_dir(&user_prompts) {
+            for entry in entries.flatten() {
+                let p = entry.path();
+                if p.is_file() {
+                    if let Some(fname) = p.file_name() {
+                        let fname_str = fname.to_string_lossy();
+                        if fname_str == "prompts.md" || fname_str == "内置工具.yaml" || fname_str == "内置技能.yaml" {
+                            continue;
+                        }
+                        let target = dest.join(fname);
+                        let _ = std::fs::copy(&p, &target);
+                        println!("cargo:rerun-if-changed={}", p.display());
+                    }
+                }
+            }
+        }
+    }
+
+    // 2. Thesaurus: ~/.atomcode/thesaurus/ -> crates/atomcode-capabilities/assets/thesaurus/
+    let user_thesaurus = home.join("thesaurus");
+    if user_thesaurus.is_dir() {
+        let dest = workspace_root.join("crates/atomcode-capabilities/assets/thesaurus");
+        let _ = std::fs::create_dir_all(&dest);
+        if let Ok(entries) = std::fs::read_dir(&user_thesaurus) {
+            for entry in entries.flatten() {
+                let p = entry.path();
+                if p.is_file() {
+                    if let Some(fname) = p.file_name() {
+                        let target = dest.join(fname);
+                        let _ = std::fs::copy(&p, &target);
+                        println!("cargo:rerun-if-changed={}", p.display());
+                    }
+                }
+            }
+        }
+    }
+
+    // 3. Teaches: ~/.atomcode/teaches/ -> crates/atomcode-capabilities/assets/teaches/
+    let user_teaches = home.join("teaches");
+    if user_teaches.is_dir() {
+        let dest = workspace_root.join("crates/atomcode-capabilities/assets/teaches");
+        let _ = std::fs::create_dir_all(&dest);
+        if let Ok(entries) = std::fs::read_dir(&user_teaches) {
+            for entry in entries.flatten() {
+                let p = entry.path();
+                if p.is_file() {
+                    if let Some(fname) = p.file_name() {
+                        let target = dest.join(fname);
+                        let _ = std::fs::copy(&p, &target);
+                        println!("cargo:rerun-if-changed={}", p.display());
+                    }
+                }
+            }
+        }
+    }
+
+    // 4. Standalone asset files: builtin-tools.txt, .codegraphignore, config_teachs.md
+    for (src_rel, dest_rel) in [
+        ("builtin-tools.txt", "crates/atomcode-capabilities/assets/builtin-tools.txt"),
+        (".codegraphignore", "crates/atomcode-capabilities/assets/.codegraphignore"),
+        ("config_teachs.md", "crates/atomcode-cli/assets/config_teachs.md"),
+    ] {
+        let src = home.join(src_rel);
+        if src.is_file() {
+            let dest = workspace_root.join(dest_rel);
+            if let Some(parent) = dest.parent() {
+                let _ = std::fs::create_dir_all(parent);
+            }
+            let _ = std::fs::copy(&src, &dest);
+            println!("cargo:rerun-if-changed={}", src.display());
+        }
+    }
+}
+
+fn default_atomcode_home() -> std::path::PathBuf {
+    #[cfg(windows)]
+    {
+        if let Ok(userprofile) = std::env::var("USERPROFILE") {
+            return std::path::PathBuf::from(userprofile).join(".atomcode");
+        }
+    }
+    #[cfg(not(windows))]
+    {
+        if let Ok(home) = std::env::var("HOME") {
+            return std::path::PathBuf::from(home).join(".atomcode");
+        }
+    }
+    std::path::PathBuf::from(".atomcode")
 }

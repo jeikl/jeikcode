@@ -2,7 +2,7 @@ use std::fs;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use anyhow::Result;
-use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyModifiers};
+use crossterm::event::{self, Event, KeyCode, KeyModifiers};
 use crossterm::terminal::{disable_raw_mode, enable_raw_mode};
 
 /// 内置全量默认模板条目定义
@@ -108,6 +108,46 @@ pub const BUNDLED_ASSETS: &[BundledFileEntry] = &[
         relative_path: "thesaurus/web_http.txt",
         content: include_str!("../../atomcode-capabilities/assets/thesaurus/web_http.txt"),
         description: "词林 web_http.txt",
+    },
+    BundledFileEntry {
+        relative_path: "teaches/00_overview_index.md",
+        content: include_str!("../../atomcode-capabilities/assets/teaches/00_overview_index.md"),
+        description: "配置知识库索引 (teaches/00_overview_index.md)",
+    },
+    BundledFileEntry {
+        relative_path: "teaches/01_prompts_and_context.md",
+        content: include_str!("../../atomcode-capabilities/assets/teaches/01_prompts_and_context.md"),
+        description: "提示词与上下文指南 (teaches/01_prompts_and_context.md)",
+    },
+    BundledFileEntry {
+        relative_path: "teaches/02_models_and_providers.md",
+        content: include_str!("../../atomcode-capabilities/assets/teaches/02_models_and_providers.md"),
+        description: "模型与提供商指南 (teaches/02_models_and_providers.md)",
+    },
+    BundledFileEntry {
+        relative_path: "teaches/03_mcp_and_skills.md",
+        content: include_str!("../../atomcode-capabilities/assets/teaches/03_mcp_and_skills.md"),
+        description: "MCP与Skills指南 (teaches/03_mcp_and_skills.md)",
+    },
+    BundledFileEntry {
+        relative_path: "teaches/04_thesaurus_and_retrieval.md",
+        content: include_str!("../../atomcode-capabilities/assets/teaches/04_thesaurus_and_retrieval.md"),
+        description: "词林检索相关性指南 (teaches/04_thesaurus_and_retrieval.md)",
+    },
+    BundledFileEntry {
+        relative_path: "teaches/05_tools_and_timeouts.md",
+        content: include_str!("../../atomcode-capabilities/assets/teaches/05_tools_and_timeouts.md"),
+        description: "工具超时与策略指南 (teaches/05_tools_and_timeouts.md)",
+    },
+    BundledFileEntry {
+        relative_path: "teaches/06_directories_and_system.md",
+        content: include_str!("../../atomcode-capabilities/assets/teaches/06_directories_and_system.md"),
+        description: "系统目录与文件全景指南 (teaches/06_directories_and_system.md)",
+    },
+    BundledFileEntry {
+        relative_path: "teaches/07_project_constraints_and_rules.md",
+        content: include_str!("../../atomcode-capabilities/assets/teaches/07_project_constraints_and_rules.md"),
+        description: "项目约束与业务知识包指南 (teaches/07_project_constraints_and_rules.md)",
     },
 ];
 

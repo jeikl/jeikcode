@@ -1017,6 +1017,11 @@ impl NativeLiveWireProjector {
                     completion: meta.tokens.completion as usize,
                     total: (meta.tokens.prompt + meta.tokens.completion) as usize,
                 },
+                Kernel::Compacted { after_tokens, .. } => LiveWireEvent::Tokens {
+                    prompt: *after_tokens,
+                    completion: 0,
+                    total: *after_tokens,
+                },
                 Kernel::Error { message, .. } => LiveWireEvent::Error { message },
                 Kernel::Warning(message) => LiveWireEvent::Warning { message },
                 Kernel::RateLimited {
@@ -1040,7 +1045,6 @@ impl NativeLiveWireProjector {
                 | Kernel::TurnComplete { .. }
                 | Kernel::Cancelled
                 | Kernel::CompactionStarted { .. }
-                | Kernel::Compacted { .. }
                 | Kernel::CompactionFailed { .. } => return None,
                 Kernel::Steered { .. } => return None,
                 _ => return None,

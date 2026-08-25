@@ -253,6 +253,34 @@ function messageHasTools(m: Message): boolean {
   return m.parts.some((p) => p.kind === 'tool');
 }
 
+/** Estimate token count for a text chunk (CJK + code aware, ~3.5 chars/token). */
+function estimateTextTokens(text: string | null | undefined): number {
+  if (!text) return 0;
+  return Math.max(1, Math.ceil(text.length / 3.5));
+}
+
+/** Estimate token count for a single message. */
+function estimateMessageTokens(m: Message): number {
+  let len = 0;
+  for (const p of m.parts) {
+    if (p.kind === 'text' || p.kind === 'reasoning' || p.kind === 'notice' || p.kind === 'rate_limited') {
+      len += p.text.length;
+    } else if (p.kind === 'tool') {
+      len += (p.tool.name?.length ?? 0) + (p.tool.args?.length ?? 0) + (p.tool.output?.length ?? 0);
+    }
+  }
+  return Math.max(1, Math.ceil(len / 3.5));
+}
+
+/** Estimate total token usage across all messages in a session. */
+function estimateAllMessagesTokens(messages: Message[]): TokenUsage {
+  let total = 0;
+  for (const m of messages) {
+    total += estimateMessageTokens(m);
+  }
+  return { prompt: total, completion: 0, total };
+}
+
 /** Max attached images per message and per-image byte cap (raw file size). */
 const MAX_IMAGES = 6;
 const MAX_IMAGE_MB = 2;
@@ -1353,6 +1381,14 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
     else bottomRef.current?.scrollIntoView({ behavior: 'auto' });
   }, [messages, tokens]);
 
+  // 消息变化且当前无精确 tokens（如切会话、加载历史）时，自动根据消息内容实时估算 tokens
+  useEffect(() => {
+    if (!tokens && messages.length > 0) {
+      const est = estimateAllMessagesTokens(messages);
+      if (est.total > 0) setTokens(est);
+    }
+  }, [messages, tokens]);
+
   // Abort the live (/live) stream + cancel any pending reconnect timer if the
   // component unmounts while sync is on.
   useEffect(() => () => {
@@ -2231,6 +2267,7 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
             if (res.applied) {
               if (sessionId) await reloadSessionTranscript(sessionId);
               pushCommandNotice(t('cmd.compact.done', { n: res.removed_messages, before: res.before_tokens, after: res.after_tokens }));
+              setTokens({ prompt: res.after_tokens, completion: 0, total: res.after_tokens });
             } else {
               pushCommandNotice(t('cmd.compact.none'));
             }
@@ -2244,6 +2281,7 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
                 window: res.ctx_window, name: res.ctx_name,
               })
             );
+            setTokens({ prompt: res.used_tokens, completion: 0, total: res.used_tokens });
             return;
           }
           if (res.kind === 'whoami') {
@@ -2383,6 +2421,15 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
           pendingSelfEchoRef.current.splice(echoIdx, 1);
           break;
         }
+        const userDelta = estimateTextTokens(userText);
+        if (userDelta > 0) {
+          setTokens((prev) => {
+            const p = (prev?.prompt ?? 0) + userDelta;
+            const c = prev?.completion ?? 0;
+            const t = (prev?.total ?? 0) + userDelta;
+            return { prompt: p, completion: c, total: t };
+          });
+        }
         setMessages((prev) => {
           const last = prev[prev.length - 1];
           // Already the trailing user bubble.
@@ -2417,11 +2464,21 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
         break;
       }
 
-      case 'text':
+      case 'text': {
         appendToLastAssistant(event.content);
+        const textDelta = estimateTextTokens(event.content);
+        if (textDelta > 0) {
+          setTokens((prev) => {
+            const p = prev?.prompt ?? 0;
+            const c = (prev?.completion ?? 0) + textDelta;
+            const t = (prev?.total ?? 0) + textDelta;
+            return { prompt: p, completion: c, total: t };
+          });
+        }
         break;
+      }
 
-      case 'reasoning':
+      case 'reasoning': {
         // Thinking / chain-of-thought stream — collapsible block in the UI.
         setMessages((prev) => {
           if (prev.length === 0) return prev;
@@ -2432,7 +2489,17 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
             { ...last, parts: appendReasoningPart(last.parts, event.content) },
           ];
         });
+        const rDelta = estimateTextTokens(event.content);
+        if (rDelta > 0) {
+          setTokens((prev) => {
+            const p = prev?.prompt ?? 0;
+            const c = (prev?.completion ?? 0) + rDelta;
+            const t = (prev?.total ?? 0) + rDelta;
+            return { prompt: p, completion: c, total: t };
+          });
+        }
         break;
+      }
 
       case 'tool_start': {
         const argsStr = formatArgs(event.arguments);
@@ -2480,7 +2547,7 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
         });
         break;
 
-      case 'tool_result':
+      case 'tool_result': {
         updateToolInLastAssistant(event.id, {
           status: toolResultStatus(event.success, event.output),
           duration_ms: event.duration_ms,
@@ -2489,7 +2556,17 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
         });
         // 工具已执行完 → 其审批必已解决，清掉 /chat 残留的同 call_id 审批卡片。
         onPermissionResolved?.(event.id);
+        const toolDelta = estimateTextTokens(event.output);
+        if (toolDelta > 0) {
+          setTokens((prev) => {
+            const p = (prev?.prompt ?? 0) + toolDelta;
+            const c = prev?.completion ?? 0;
+            const t = (prev?.total ?? 0) + toolDelta;
+            return { prompt: p, completion: c, total: t };
+          });
+        }
         break;
+      }
 
       case 'tokens':
         setTokens({
@@ -2522,6 +2599,24 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
         activeIdRef.current = event.session_id;
         loadedForRef.current = event.session_id;
         onSessionId(event.session_id);
+        if (event.tokens) {
+          if (typeof event.tokens === 'number' && event.tokens > 0) {
+            setTokens((prev) => ({
+              prompt: prev?.prompt ?? 0,
+              completion: prev?.completion ?? (event.tokens as number),
+              total: Math.max(prev?.total ?? 0, event.tokens as number),
+            }));
+          } else if (typeof event.tokens === 'object') {
+            const tok = event.tokens as any;
+            if (typeof tok.total === 'number' && tok.total > 0) {
+              setTokens({
+                prompt: tok.prompt ?? tok.input ?? 0,
+                completion: tok.completion ?? tok.output ?? 0,
+                total: tok.total,
+              });
+            }
+          }
+        }
         const terminal = classifyChatDone({
           stopReason: event.stop_reason,
           message: event.message,
@@ -2865,6 +2960,16 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
     // 重置输入框高度：清空 value 不会复位之前 auto-resize 撑高的内联 height
     if (textareaRef.current) textareaRef.current.style.height = 'auto';
     setHistoryHint(null);
+
+    const userDelta = estimateTextTokens(text);
+    if (userDelta > 0) {
+      setTokens((prev) => {
+        const p = (prev?.prompt ?? 0) + userDelta;
+        const c = prev?.completion ?? 0;
+        const t = (prev?.total ?? 0) + userDelta;
+        return { prompt: p, completion: c, total: t };
+      });
+    }
 
     // Sync mode shares the native runtime, so an active-turn submit is an
     // authoritative steer. The legacy /chat path has no steer transport and

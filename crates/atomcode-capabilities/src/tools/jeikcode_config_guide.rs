@@ -24,6 +24,7 @@ const DOC_THESAURUS: &str = include_str!("../../assets/teaches/04_thesaurus_and_
 const DOC_TOOLS: &str = include_str!("../../assets/teaches/05_tools_and_timeouts.md");
 const DOC_DIRECTORIES: &str = include_str!("../../assets/teaches/06_directories_and_system.md");
 const DOC_PROJECT: &str = include_str!("../../assets/teaches/07_project_constraints_and_rules.md");
+const DOC_UPDATES: &str = include_str!("../../assets/teaches/08_updates_and_releases.md");
 
 #[derive(Default)]
 pub struct JeikcodeConfigGuideTool;
@@ -59,6 +60,7 @@ impl JeikcodeConfigGuideTool {
         map.insert("tools", self.load_document("05_tools_and_timeouts.md", DOC_TOOLS));
         map.insert("directories", self.load_document("06_directories_and_system.md", DOC_DIRECTORIES));
         map.insert("project", self.load_document("07_project_constraints_and_rules.md", DOC_PROJECT));
+        map.insert("updates", self.load_document("08_updates_and_releases.md", DOC_UPDATES));
         map
     }
 }
@@ -101,10 +103,13 @@ impl Tool for JeikcodeConfigGuideTool {
                         "project",
                         "constraints",
                         "rules",
+                        "updates",
+                        "upgrade",
+                        "release",
                         "all"
                     ],
                     "default": "overview",
-                    "description": "Category of configuration guide to retrieve: 'overview' (index map), 'prompts' (init.yaml / rules.yaml hot-reload & seed docs), 'models' (models, providers, reasoning effort/history, tokens), 'mcp' (mcp.json), 'skills' (SKILL.md & plugins), 'thesaurus' (词林 bilingual code search), 'tools' (bash timeout, output fold, coding knobs), 'directories' (full ~/.atomcode map), 'project' (AGENTS.md, ATOMCODE.md, rules.md, glossary.md, dbwords.md project constraints), 'all' (complete guide)."
+                    "description": "Category of configuration guide to retrieve: 'overview' (index map), 'prompts' (init.yaml / rules.yaml hot-reload & seed docs), 'models' (models, providers, reasoning effort/history, tokens), 'mcp' (mcp.json), 'skills' (SKILL.md & plugins), 'thesaurus' (词林 bilingual code search), 'tools' (bash timeout, output fold, coding knobs), 'directories' (full ~/.atomcode map), 'project' (AGENTS.md, ATOMCODE.md, rules.md, glossary.md, dbwords.md project constraints), 'updates' (default update source, /upgrade command, release build), 'all' (complete guide)."
                 }
             }
         })
@@ -141,6 +146,7 @@ impl Tool for JeikcodeConfigGuideTool {
             "tools" | "timeouts" => topic_map.get("tools").cloned().unwrap_or_default(),
             "directories" | "files" => topic_map.get("directories").cloned().unwrap_or_default(),
             "project" | "constraints" | "rules" => topic_map.get("project").cloned().unwrap_or_default(),
+            "updates" | "upgrade" | "release" => topic_map.get("updates").cloned().unwrap_or_default(),
             "all" => {
                 let mut combined = String::new();
                 for (doc_name, filename, embedded) in [
@@ -152,6 +158,7 @@ impl Tool for JeikcodeConfigGuideTool {
                     ("05_tools_and_timeouts.md", "05_tools_and_timeouts.md", DOC_TOOLS),
                     ("06_directories_and_system.md", "06_directories_and_system.md", DOC_DIRECTORIES),
                     ("07_project_constraints_and_rules.md", "07_project_constraints_and_rules.md", DOC_PROJECT),
+                    ("08_updates_and_releases.md", "08_updates_and_releases.md", DOC_UPDATES),
                 ] {
                     combined.push_str(&format!("<!-- START {} -->\n", doc_name));
                     combined.push_str(&self.load_document(filename, embedded));
@@ -170,6 +177,7 @@ impl Tool for JeikcodeConfigGuideTool {
                      - `tools`: Bash timeouts, output fold preview, coding round caps\n\
                      - `directories`: Full directory and file layout of `~/.atomcode`\n\
                      - `project`: Project constraints (AGENTS.md, ATOMCODE.md, rules.md, glossary.md, dbwords.md)\n\
+                     - `updates` / `upgrade`: Default update endpoints, manifest schema, self-update and cross-compilation release workflow\n\
                      - `all`: Complete comprehensive guide."
                 )
             }
@@ -283,4 +291,22 @@ mod tests {
         assert!(res.content.contains("dbwords.md"));
         assert!(res.content.contains("glossary.md"));
     }
+
+    #[tokio::test]
+    async fn guide_tool_updates_topic_returns_sources_and_workflow() {
+        let tool = JeikcodeConfigGuideTool::new();
+        let ctx = ToolContext {
+            working_dir: PathBuf::from("."),
+            cancel: tokio_util::sync::CancellationToken::new(),
+            progress: ProgressSink::noop(),
+            requester: None,
+        };
+        let res = tool.execute(r#"{"topic":"updates"}"#, &ctx).await;
+        assert!(!res.is_error);
+        assert!(res.content.contains("github.com/jeikl/jeikcode"));
+        assert!(res.content.contains("ATOMCODE_UPDATE_MANIFEST_URL"));
+        assert!(res.content.contains("ATOMCODE_UPDATE_DOWNLOAD_BASE"));
+        assert!(res.content.contains("/upgrade"));
+    }
 }
+

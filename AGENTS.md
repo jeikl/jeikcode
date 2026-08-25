@@ -51,7 +51,7 @@ CLI / TUI / daemon / background / ACP / clix
 
 `crates/atomcode-capabilities/assets/teaches/`（及宿主机 `~/.atomcode/teaches/`）中的渐进式模块化文档是编译后成品中 **`jeikcode_config_guide` 工具的直接知识源**：
 
-1. **同变同更硬性约束**：凡修改了 `~/.atomcode` 相关配置项、解析逻辑、参数默认值、超时机制、模型协议或目录结构，**必须同步修改对应的 `teaches/` 分类文档**（`01_prompts_and_context.md` 至 `07_project_constraints_and_rules.md`）；
+1. **同变同更硬性约束**：凡修改了 `~/.atomcode` 相关配置项、解析逻辑、参数默认值、超时机制、模型协议或目录结构，**必须同步修改对应的 `teaches/` 分类文档**（`01_prompts_and_context.md` 至 `08_updates_and_releases.md`）；
 2. **构建打包自动同步**：`crates/atomcode-cli/build.rs` 会在编译时自动抓取宿主机 `~/.atomcode` 最新资产注入成品，并保持配置更新的交互式勾选与用户模型保护机制。
 
 ---

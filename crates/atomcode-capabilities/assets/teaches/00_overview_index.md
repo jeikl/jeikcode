@@ -13,6 +13,7 @@
 | **05** | `tools` / `timeouts` | `teaches/05_tools_and_timeouts.md` | Bash 命令超时与静默终止、工具输出 64KB 折叠与白名单、Todo 清单策略、子代理并发与轮次、代理设置 |
 | **06** | `directories` / `files` | `teaches/06_directories_and_system.md` | `~/.atomcode/` 下所有目录与文件作用、生命周期、安全边界与运维清理建议 |
 | **07** | `project` / `rules` | `teaches/07_project_constraints_and_rules.md` | 项目级约束（AGENTS.md、ATOMCODE.md、.atomcode.user.md）、业务规则（rules.md）、名词表（glossary.md）、数据库结构（dbwords.md） |
+| **08** | `updates` / `upgrade` | `teaches/08_updates_and_releases.md` | 默认更新源配置（GitHub 主仓/latest.json）、自升级机制（/upgrade）、环境变量覆盖与 Windows/Linux 交叉编译发版流程 |
 
 ---
 
@@ -25,3 +26,4 @@
 - **想调整执行超时、大输出截断或网络代理**：优先查阅 `topic: "tools"`。
 - **想了解 `~/.atomcode` 某个未知目录/文件的作用**：优先查阅 `topic: "directories"`。
 - **想了解项目级约束规范与业务/数据库知识包**：优先查阅 `topic: "project"`。
+- **想了解自升级源、版本检查、/upgrade 命令或编译发版流程**：优先查阅 `topic: "updates"`。

@@ -1017,11 +1017,18 @@ impl NativeLiveWireProjector {
                     completion: meta.tokens.completion as usize,
                     total: (meta.tokens.prompt + meta.tokens.completion) as usize,
                 },
-                Kernel::Compacted { after_tokens, .. } => LiveWireEvent::Tokens {
-                    prompt: *after_tokens,
-                    completion: 0,
-                    total: *after_tokens,
-                },
+                Kernel::Compacted {
+                    bytes_after,
+                    committed: true,
+                    ..
+                } => {
+                    let after_tokens = (*bytes_after as f32 / 3.5).ceil() as usize;
+                    LiveWireEvent::Tokens {
+                        prompt: after_tokens,
+                        completion: 0,
+                        total: after_tokens,
+                    }
+                }
                 Kernel::Error { message, .. } => LiveWireEvent::Error { message },
                 Kernel::Warning(message) => LiveWireEvent::Warning { message },
                 Kernel::RateLimited {

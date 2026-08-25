@@ -1969,8 +1969,8 @@ async fn run() -> Result<i32> {
             }
             Commands::SyncConfig { auto } => {
                 if let Some(home) = dirs::home_dir().map(|h| h.join(".atomcode")) {
-                    if *auto {
-                        atomcode::config_sync::apply_all_bundled_assets(&home, false);
+                    if auto {
+                        let _ = atomcode::config_sync::apply_all_bundled_assets(&home, false);
                     } else {
                         let diffs = atomcode::config_sync::scan_atomcode_config_diffs(&home);
                         if !diffs.is_empty() {

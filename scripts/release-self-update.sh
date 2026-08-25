@@ -59,8 +59,16 @@ build_target x86_64-pc-windows-gnu         "atomcode-${VERSION}-windows-x64.exe"
 build_target x86_64-pc-windows-msvc        "atomcode-${VERSION}-windows-x64.exe"
 
 echo "==> 生成 latest.json"
-PYTHON_BIN="python3"
-command -v python3 >/dev/null 2>&1 || PYTHON_BIN="python"
+PYTHON_BIN="${PYTHON:-python3}"
+if ! command -v "$PYTHON_BIN" >/dev/null 2>&1; then
+    if command -v py >/dev/null 2>&1; then
+        PYTHON_BIN="py"
+    elif [ -f "/f/Python/Python312/python.exe" ]; then
+        PYTHON_BIN="/f/Python/Python312/python.exe"
+    else
+        PYTHON_BIN="python"
+    fi
+fi
 
 "$PYTHON_BIN" - "$VERSION" <<'PY'
 import hashlib, json, os, sys, datetime

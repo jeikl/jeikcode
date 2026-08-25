@@ -211,8 +211,6 @@ context_window = 32768
 # =============================================================================
 language = "zh-CN"              # 界面语言："zh-CN" | "en"
 auto_update = false             # 自动无感后台更新（true=开启, false=关闭）
-auto_update_interval_secs = 3600 # 自升级后台轮询检查周期（秒，默认 3600）
-codeintel_refresh_interval_secs = 5 # CodeIntel 代码图谱后台增量检测周期（秒，默认 5）
 auto_commit = false             # 每轮任务完成后自动 git commit
 keep_interrupted_context = true # 中断时保留模型已输出的部分上下文
 offline_mode = "off"            # 离线环境："off" (联网), "on" (纯离线), "auto" (自动降级)

@@ -33,14 +33,26 @@ pub struct Symbol {
 thread_local! {
     static SYM_QUERIES: RefCell<HashMap<Lang, Query>> = RefCell::new(HashMap::new());
     static CALL_QUERIES: RefCell<HashMap<Lang, Query>> = RefCell::new(HashMap::new());
+    static TS_PARSERS: RefCell<HashMap<Lang, Parser>> = RefCell::new(HashMap::new());
 }
 
 /// Parse `source` once. Shared by symbol outline and call extraction.
+/// Reuses a thread-local `Parser` per grammar to avoid allocating and setting language on every file.
 pub(crate) fn parse_source(source: &str, lang: Lang) -> Option<Tree> {
     let grammar = lang.grammar()?;
-    let mut parser = Parser::new();
-    parser.set_language(&grammar).ok()?;
-    parser.parse(source, None)
+    TS_PARSERS.with(|cell| {
+        let mut map = cell.borrow_mut();
+        let parser = match map.get_mut(&lang) {
+            Some(p) => p,
+            None => {
+                let mut p = Parser::new();
+                p.set_language(&grammar).ok()?;
+                map.insert(lang, p);
+                map.get_mut(&lang)?
+            }
+        };
+        parser.parse(source, None)
+    })
 }
 
 fn with_sym_query<R>(lang: Lang, f: impl FnOnce(&Query) -> R) -> Option<R> {

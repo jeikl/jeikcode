@@ -124,34 +124,45 @@ impl IndexDb {
         }
     }
 
-    /// Loads all cached `FileUnit` entries from SQLite.
+    /// Loads all cached `FileUnit` entries from SQLite in parallel.
     pub fn load_units(&self) -> HashMap<PathBuf, FileUnit> {
         let mut map = HashMap::new();
-        let conn = match self.conn.lock() {
-            Ok(c) => c,
-            Err(_) => return map,
-        };
-        let mut stmt = match conn.prepare("SELECT path, data FROM file_units") {
-            Ok(s) => s,
-            Err(_) => return map,
+        let raw_items: Vec<(String, Vec<u8>)> = {
+            let conn = match self.conn.lock() {
+                Ok(c) => c,
+                Err(_) => return map,
+            };
+            let mut stmt = match conn.prepare("SELECT path, data FROM file_units") {
+                Ok(s) => s,
+                Err(_) => return map,
+            };
+
+            let rows = match stmt.query_map([], |row| {
+                let path_str: String = row.get(0)?;
+                let blob: Vec<u8> = row.get(1)?;
+                Ok((path_str, blob))
+            }) {
+                Ok(r) => r,
+                Err(_) => return map,
+            };
+
+            rows.flatten().collect()
         };
 
-        let rows = match stmt.query_map([], |row| {
-            let path_str: String = row.get(0)?;
-            let blob: Vec<u8> = row.get(1)?;
-            Ok((path_str, blob))
-        }) {
-            Ok(r) => r,
-            Err(_) => return map,
-        };
+        use rayon::prelude::*;
+        let decompressed_units: Vec<(PathBuf, FileUnit)> = raw_items
+            .into_par_iter()
+            .filter_map(|(p, blob)| {
+                let decompressed = zstd::stream::decode_all(&blob[..]).ok()?;
+                let unit = bincode::deserialize::<FileUnit>(&decompressed).ok()?;
+                let norm_p = super::index::normalize_index_path(&PathBuf::from(p));
+                Some((norm_p, unit))
+            })
+            .collect();
 
-        for item in rows.flatten() {
-            if let Ok(decompressed) = zstd::stream::decode_all(&item.1[..]) {
-                if let Ok(unit) = bincode::deserialize::<FileUnit>(&decompressed) {
-                    let norm_p = super::index::normalize_index_path(&PathBuf::from(item.0));
-                    map.insert(norm_p, unit);
-                }
-            }
+        map.reserve(decompressed_units.len());
+        for (p, u) in decompressed_units {
+            map.insert(p, u);
         }
         map
     }
@@ -216,6 +227,64 @@ impl IndexDb {
         apply_unit_writes(&tx, upsert_units, deleted_paths)?;
 
         // Full graph snapshot — only for cold-start / first-build callers.
+        if let Ok(graph_bytes) = bincode::serialize(graph) {
+            if let Ok(compressed_graph) = zstd::stream::encode_all(&graph_bytes[..], 1) {
+                tx.execute(
+                    "INSERT INTO graph_meta (id, walk_fp, data)
+                     VALUES (1, ?, ?)
+                     ON CONFLICT(id) DO UPDATE SET
+                         walk_fp = excluded.walk_fp,
+                         data = excluded.data",
+                    params![walk_fp as i64, compressed_graph],
+                )?;
+            }
+        }
+
+        tx.commit()?;
+        drop(conn);
+        self.checkpoint();
+        Ok(())
+    }
+
+    /// Upsert prepared unit writes (pre-compressed) and delete obsolete records in a single transaction.
+    pub fn upsert_units_prepared(
+        &self,
+        prepared: &[PreparedUnitWrite],
+        deleted: &[PathBuf],
+    ) -> Result<(), rusqlite::Error> {
+        let mut conn = self.conn.lock().map_err(|_| {
+            rusqlite::Error::SqliteFailure(
+                rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_BUSY),
+                Some("lock poisoned".into()),
+            )
+        })?;
+
+        let tx = conn.transaction()?;
+        apply_prepared_unit_writes(&tx, prepared, deleted)?;
+        tx.commit()?;
+        drop(conn);
+        self.checkpoint();
+        Ok(())
+    }
+
+    /// Optimized version using pre-compressed unit blobs produced in parallel workers.
+    pub fn sync_incremental_prepared(
+        &self,
+        walk_fp: u64,
+        upsert_units: &[PreparedUnitWrite],
+        deleted_paths: &[PathBuf],
+        graph: &CodeGraph,
+    ) -> Result<(), rusqlite::Error> {
+        let mut conn = self.conn.lock().map_err(|_| {
+            rusqlite::Error::SqliteFailure(
+                rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_BUSY),
+                Some("lock poisoned".into()),
+            )
+        })?;
+
+        let tx = conn.transaction()?;
+        apply_prepared_unit_writes(&tx, upsert_units, deleted_paths)?;
+
         if let Ok(graph_bytes) = bincode::serialize(graph) {
             if let Ok(compressed_graph) = zstd::stream::encode_all(&graph_bytes[..], 1) {
                 tx.execute(
@@ -318,9 +387,42 @@ impl IndexDb {
     }
 }
 
+#[derive(Clone, Debug)]
+pub struct PreparedUnitWrite {
+    pub path: PathBuf,
+    pub mtime_ns: u128,
+    pub len: u64,
+    pub compressed_blob: Vec<u8>,
+}
+
+impl PreparedUnitWrite {
+    pub fn from_unit(path: PathBuf, unit: &FileUnit) -> Option<Self> {
+        let serialized = bincode::serialize(unit).ok()?;
+        let compressed_blob = zstd::stream::encode_all(&serialized[..], 1).ok()?;
+        Some(Self {
+            path,
+            mtime_ns: unit.mtime_ns,
+            len: unit.len,
+            compressed_blob,
+        })
+    }
+}
+
 fn apply_unit_writes(
     tx: &rusqlite::Transaction<'_>,
     upsert_units: &[(PathBuf, FileUnit)],
+    deleted_paths: &[PathBuf],
+) -> Result<(), rusqlite::Error> {
+    let prepared: Vec<PreparedUnitWrite> = upsert_units
+        .iter()
+        .filter_map(|(p, u)| PreparedUnitWrite::from_unit(p.clone(), u))
+        .collect();
+    apply_prepared_unit_writes(tx, &prepared, deleted_paths)
+}
+
+pub fn apply_prepared_unit_writes(
+    tx: &rusqlite::Transaction<'_>,
+    upsert_units: &[PreparedUnitWrite],
     deleted_paths: &[PathBuf],
 ) -> Result<(), rusqlite::Error> {
     {
@@ -343,20 +445,16 @@ fn apply_unit_writes(
                  data = excluded.data;",
         )?;
 
-        for (p, u) in upsert_units {
-            let norm_str = super::index::normalize_index_path(p)
+        for item in upsert_units {
+            let norm_str = super::index::normalize_index_path(&item.path)
                 .to_string_lossy()
                 .into_owned();
-            if let Ok(serialized) = bincode::serialize(u) {
-                if let Ok(compressed) = zstd::stream::encode_all(&serialized[..], 3) {
-                    ins_stmt.execute(params![
-                        norm_str,
-                        u.mtime_ns as i64,
-                        u.len as i64,
-                        compressed
-                    ])?;
-                }
-            }
+            ins_stmt.execute(params![
+                norm_str,
+                item.mtime_ns as i64,
+                item.len as i64,
+                item.compressed_blob
+            ])?;
         }
     }
     Ok(())

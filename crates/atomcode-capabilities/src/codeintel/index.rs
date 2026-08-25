@@ -590,18 +590,19 @@ fn extract_literals_from_line(line: &str, out: &mut Vec<String>) {
     let mut in_str = false;
     let mut quote_char = '"';
     let mut buf = String::new();
-    let chars: Vec<char> = line.chars().collect();
+    let bytes = line.as_bytes();
+    let len = bytes.len();
 
     let mut i = 0;
-    while i < chars.len() {
-        let ch = chars[i];
+    while i < len {
+        let b = bytes[i];
         if in_str {
-            if ch == '\\' && i + 1 < chars.len() {
-                buf.push(chars[i + 1]);
+            if b == b'\\' && i + 1 < len {
+                buf.push(bytes[i + 1] as char);
                 i += 2;
                 continue;
             }
-            if ch == quote_char {
+            if b as char == quote_char {
                 in_str = false;
                 let trimmed = buf.trim();
                 if trimmed.len() >= 2 && !is_trivial_literal(trimmed) {
@@ -609,18 +610,19 @@ fn extract_literals_from_line(line: &str, out: &mut Vec<String>) {
                 }
                 buf.clear();
             } else {
-                buf.push(ch);
+                buf.push(b as char);
             }
-        } else if ch == '"' || (ch == '\'' && !is_char_literal(&chars, i)) {
+        } else if b == b'"' || (b == b'\'' && !is_char_literal_bytes(bytes, i)) {
             in_str = true;
-            quote_char = ch;
+            quote_char = b as char;
         }
         i += 1;
     }
 }
 
-fn is_char_literal(chars: &[char], idx: usize) -> bool {
-    idx + 2 < chars.len() && chars[idx + 2] == '\''
+#[inline(always)]
+fn is_char_literal_bytes(bytes: &[u8], idx: usize) -> bool {
+    idx + 2 < bytes.len() && bytes[idx + 2] == b'\''
 }
 
 fn is_trivial_literal(s: &str) -> bool {
@@ -953,6 +955,81 @@ struct Walked {
 
 /// Walk `root` (assumed already canonical) for indexable source files + staleness inputs.
 fn collect_files(root: &Path) -> Vec<Walked> {
+    // Fast-path: If git repository, query `git ls-files -z --cached --others --exclude-standard`.
+    // Directly reads Git binary index within ~20-30ms for tens of thousands of files.
+    if root.join(".git").exists() {
+        if let Some(git_files) = collect_files_via_git(root) {
+            if !git_files.is_empty() {
+                return git_files;
+            }
+        }
+    }
+
+    collect_files_fallback(root)
+}
+
+fn collect_files_via_git(root: &Path) -> Option<Vec<Walked>> {
+    let mut cmd = std::process::Command::new("git");
+    cmd.args(&["ls-files", "-z", "--cached", "--others", "--exclude-standard"])
+        .current_dir(root);
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x08000000;
+        cmd.creation_flags(CREATE_NO_WINDOW);
+    }
+    let output = cmd.output().ok()?;
+    if !output.status.success() {
+        return None;
+    }
+
+    use rayon::prelude::*;
+    let raw = output.stdout;
+    let paths: Vec<&[u8]> = raw.split(|&b| b == 0).filter(|p| !p.is_empty()).collect();
+
+    let out: Vec<Walked> = paths
+        .into_par_iter()
+        .filter_map(|rel_bytes| {
+            let rel_str = std::str::from_utf8(rel_bytes).ok()?;
+            let full_p = root.join(rel_str);
+            let ext_ok = full_p
+                .extension()
+                .and_then(|e| e.to_str())
+                .map(is_indexed_ext)
+                .unwrap_or(false);
+            if !ext_ok {
+                return None;
+            }
+            if is_generated_source(&full_p) {
+                return None;
+            }
+            let md = std::fs::metadata(&full_p).ok()?;
+            if !md.is_file() {
+                return None;
+            }
+            let len = md.len();
+            if len > MAX_INDEX_FILE_BYTES {
+                return None;
+            }
+            let mtime_ns = md
+                .modified()
+                .ok()
+                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                .map(|d| d.as_nanos())
+                .unwrap_or(0);
+            let norm_path = normalize_index_path(&full_p);
+            Some(Walked {
+                path: norm_path,
+                mtime_ns,
+                len,
+            })
+        })
+        .collect();
+
+    Some(out)
+}
+
+fn collect_files_fallback(root: &Path) -> Vec<Walked> {
     let mut out = Vec::new();
     let mut builder = WalkBuilder::new(root);
     builder
@@ -1239,8 +1316,15 @@ fn persist_units_incremental(
     if upsert.is_empty() && deleted.is_empty() {
         return;
     }
+    use rayon::prelude::*;
+    // Pre-compress FileUnits in parallel workers before acquiring SQLite lock.
+    let prepared: Vec<super::index_db::PreparedUnitWrite> = upsert
+        .into_par_iter()
+        .filter_map(|(p, u)| super::index_db::PreparedUnitWrite::from_unit(p.clone(), u))
+        .collect();
+
     if let Ok(db) = super::index_db::IndexDb::open_shared(root) {
-        let _ = db.upsert_units(upsert, deleted);
+        let _ = db.upsert_units_prepared(&prepared, deleted);
     }
 }
 
@@ -1349,22 +1433,37 @@ pub fn init_workspace_index(
     let _g = idx.reconcile_workspace(&root, None, on_progress, ReparseBudget::Unlimited);
 
     let mut guard = idx.inner.lock().map_err(|e| e.to_string())?;
+    // Reconcile has already saved the updated database and updated dirindex / idf_stats internally.
     let changed = guard
         .last_stats
         .as_ref()
         .map(|s| s.reparsed > 0 || s.removed > 0)
         .unwrap_or(true);
     if changed {
-        if let Some(g) = guard.graph.as_ref() {
-            let path = save_disk_cache(&root, guard.walk_fp, &guard.units, g, &[], &[])
-                .map_err(|e| format!("failed to write {}: {e}", path_for_display(&cache_path)))?;
-            on_progress(&format!("Code graph: wrote {}", path_for_display(&path)));
-            let dirindex = super::retrieval::DirIndex::build(g);
-            persist_derived_sidecars(&root, Some(&dirindex), None);
-            let stats = super::retrieval::IdfStats::build(g);
-            persist_derived_sidecars(&root, None, Some(&stats));
-            guard.dirindex = Some(Arc::new(dirindex));
-            guard.idf_stats = Some(Arc::new(stats));
+        let (new_dirindex, new_idf_stats) = if let Some(g) = guard.graph.as_ref() {
+            let di = if guard.dirindex.is_none() {
+                let dirindex = super::retrieval::DirIndex::build(g);
+                persist_derived_sidecars(&root, Some(&dirindex), None);
+                Some(Arc::new(dirindex))
+            } else {
+                None
+            };
+            let idf = if guard.idf_stats.is_none() {
+                let stats = super::retrieval::IdfStats::build(g);
+                persist_derived_sidecars(&root, None, Some(&stats));
+                Some(Arc::new(stats))
+            } else {
+                None
+            };
+            (di, idf)
+        } else {
+            (None, None)
+        };
+        if let Some(di) = new_dirindex {
+            guard.dirindex = Some(di);
+        }
+        if let Some(idf) = new_idf_stats {
+            guard.idf_stats = Some(idf);
         }
     } else {
         on_progress("Code graph: unchanged, cache kept");
@@ -1893,9 +1992,9 @@ fn sync_units(
     let threads = std::thread::available_parallelism()
         .map(|n| n.get())
         .unwrap_or(4)
-        .clamp(1, 16);
+        .max(1);
     on_progress(&format!(
-        "Code graph: re-parsing {dirty_total} changed/new file(s) ({kept} unchanged{}) with {threads} threads...",
+        "Code graph: re-parsing {dirty_total} changed/new file(s) ({kept} unchanged{}) with {threads} threads (Rayon work-stealing)...",
         if deferred > 0 {
             format!(", {deferred} deferred")
         } else {
@@ -1903,35 +2002,33 @@ fn sync_units(
         }
     ));
 
-    // Chunk dirty list across worker threads. Progress is reported after each
-    // chunk joins (on_progress is not Sync, so workers cannot call it).
-    let chunk = (dirty_total + threads - 1) / threads;
-    let mut parsed: Vec<(PathBuf, Option<FileUnit>)> = Vec::with_capacity(dirty_total);
-    let mut finished = 0usize;
+    // Dynamic work-stealing parallel parse and in-worker Zstd level 1 compression.
+    // Eliminates static chunk long-tail stalls and prevents single-core serialization bottlenecks.
+    use rayon::prelude::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
-    std::thread::scope(|scope| {
-        let mut handles = Vec::new();
-        for piece in dirty.chunks(chunk.max(1)) {
-            let piece: Vec<&Walked> = piece.to_vec();
-            handles.push(scope.spawn(move || {
-                let mut out = Vec::with_capacity(piece.len());
-                for w in piece {
-                    let norm_p = normalize_index_path(&w.path);
-                    out.push((norm_p, parse_unit(w)));
-                }
-                out
-            }));
-        }
-        for h in handles {
-            if let Ok(chunk_out) = h.join() {
-                finished += chunk_out.len();
-                on_progress(&format!(
-                    "Code graph: re-parsed {finished}/{dirty_total} dirty files..."
+    let finished = AtomicUsize::new(0);
+    let step = (dirty_total / 6).max(500);
+
+    let (tx, rx) = std::sync::mpsc::channel::<String>();
+    let parsed: Vec<(PathBuf, Option<FileUnit>)> = dirty
+        .into_par_iter()
+        .map_with(tx, |tx, w| {
+            let norm_p = normalize_index_path(&w.path);
+            let unit = parse_unit(w);
+            let count = finished.fetch_add(1, Ordering::Relaxed) + 1;
+            if count % step == 0 || count == dirty_total {
+                let _ = tx.send(format!(
+                    "Code graph: re-parsed {count}/{dirty_total} dirty files..."
                 ));
-                parsed.extend(chunk_out);
             }
-        }
-    });
+            (norm_p, unit)
+        })
+        .collect();
+
+    while let Ok(msg) = rx.try_recv() {
+        on_progress(&msg);
+    }
 
     on_progress(&format!(
         "Code graph: finished parse of {dirty_total} dirty files ({threads} threads)."

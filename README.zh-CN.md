@@ -118,7 +118,7 @@ JeikCode 由此获得启蒙，彻底自研了原生的 **`CodeExplore`** 与 **`
    - 🚀 **检索效率提升 60% - 70%**：智能体在 1 轮内即可精准命中核心业务代码，无需反复 grep 试错；
    - 🎯 **检索准确率保持 90%+**：无论是中英文混合描述还是模糊业务需求，均能精准锁定实现位置。
 
-> 💡 *当前 CodeExplore 原生支持中英文双语检索，后续将根据社区反馈逐步拓展更多自然语言！*
+> 💡 *当前 CodeExplore 原生支持中英文双语检索，后续将根据实际工程需求持续拓展更多自然语言！*
 
 ---
 
@@ -304,10 +304,16 @@ your-project/
 
 ---
 
-## 八、开源许可证
+## 八、作者与维护者
+
+本项目由 **Jeik** 独立架构设计、深度重构开发与全权维护。
+
+---
+
+## 九、开源许可证
 
 本项目基于 [MIT License](LICENSE) 开源。
 
 <p align="center">
-  Crafted with Rust, Tree-Sitter, Ratatui, and Passion for Engineering Excellence.
+  Crafted with Rust, Tree-Sitter, Ratatui, and Passion for Engineering Excellence by Jeik.
 </p>

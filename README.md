@@ -118,7 +118,7 @@ Inspired by this insight, JeikCode completely re-architected **`CodeExplore`** a
    - 🚀 **Search Efficiency Boosted by 60% - 70%**: The agent locates target code in a single round without endless grep iterations;
    - 🎯 **Accuracy Maintained at 90%+**: Accurately pinpoints implementations for both mixed-language queries and fuzzy business requests.
 
-> 💡 *CodeExplore currently supports bilingual Chinese and English semantic search, with additional natural languages planned based on community demand!*
+> 💡 *CodeExplore currently supports bilingual Chinese and English semantic search, with additional natural languages planned for future updates!*
 
 ---
 
@@ -304,10 +304,16 @@ your-project/
 
 ---
 
-## 8. License
+## 8. Author & Maintainer
+
+Architected, engineered, and maintained by **Jeik**.
+
+---
+
+## 9. License
 
 This project is licensed under the [MIT License](LICENSE).
 
 <p align="center">
-  Crafted with Rust, Tree-Sitter, Ratatui, and Passion for Engineering Excellence.
+  Crafted with Rust, Tree-Sitter, Ratatui, and Passion for Engineering Excellence by Jeik.
 </p>

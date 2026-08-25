@@ -1,4 +1,4 @@
-﻿# JeikCode 升级与发版配置指南 (Updates & Releases Guide)
+# JeikCode 升级与发版配置指南 (Updates & Releases Guide)
 
 本文档详细说明 JeikCode 的自升级机制、默认更新源、环境变量覆盖、发版打包流程与交叉编译规范。
 
@@ -85,6 +85,12 @@ update_download_base = "https://github.com/jeikl/jeikcode/releases/download"
 
 # 是否在启动时自动静默应用更新 (默认 false，手动运行 /upgrade 随时可用)
 auto_update = false
+
+# 自升级后台轮询检查周期 (秒，默认 3600 秒 / 1 小时，可按需调为 600、1800 等)
+auto_update_interval_secs = 3600
+
+# CodeIntel 代码图谱后台增量检测与热刷新周期 (秒，默认 5 秒，可调 1~60 秒)
+codeintel_refresh_interval_secs = 5
 ```
 
 ### 3.2 环境变量临时覆盖

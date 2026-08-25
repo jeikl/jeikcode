@@ -509,6 +509,7 @@ fn is_stop_word(word: &str) -> bool {
 }
 
 /// Calculate hybrid similarity score (0.0 .. 100.0) combining Lexical + Thesaurus + Dense Vector Cosine.
+/// Enhanced with multi-term coverage bonus (2.5x for multi-concept hits) and generic term damping.
 pub fn calculate_text_similarity(tokens: &SearchTokens, target_text: &str) -> f64 {
     if target_text.is_empty() {
         return 0.0;
@@ -516,11 +517,13 @@ pub fn calculate_text_similarity(tokens: &SearchTokens, target_text: &str) -> f6
 
     let target_lower = target_text.to_ascii_lowercase();
     let mut lexical_score = 0.0;
+    let mut matched_distinct_concepts = 0usize;
 
     // 1. Exact Chinese phrase hit in target
     for phrase in &tokens.cjk_phrases {
         if phrase.len() >= 2 && target_text.contains(phrase) {
-            lexical_score += 25.0 * (phrase.chars().count() as f64).min(4.0) / 2.0;
+            lexical_score += 28.0 * (phrase.chars().count() as f64).min(4.0) / 2.0;
+            matched_distinct_concepts += 1;
         }
     }
 
@@ -528,30 +531,46 @@ pub fn calculate_text_similarity(tokens: &SearchTokens, target_text: &str) -> f6
     for word in &tokens.words {
         if target_lower.contains(word) {
             lexical_score += 20.0;
+            matched_distinct_concepts += 1;
         }
     }
 
     // 3. Expanded domain synonym hit
     for expanded in &tokens.expanded_terms {
         if target_lower.contains(expanded) {
-            lexical_score += 22.0;
+            lexical_score += 24.0;
+            matched_distinct_concepts += 1;
         }
     }
 
     // 4. Code identifier hit (e.g. "batchDeduct")
     for ident in &tokens.code_identifiers {
         if target_text.contains(ident) || target_lower.contains(&ident.to_ascii_lowercase()) {
-            lexical_score += 30.0;
+            lexical_score += 35.0;
+            matched_distinct_concepts += 1;
         }
     }
 
     // 5. Dense Vector Cosine Similarity
     let target_vec = compute_dense_embedding(target_text, &HashSet::new());
     let vector_cosine = cosine_similarity(&tokens.dense_vector, &target_vec);
-    let vector_score = vector_cosine * 70.0; // 0.0 .. 70.0 points from semantic vector
+    let vector_score = vector_cosine * 70.0;
 
-    // Hybrid combination
-    let total_score = lexical_score.min(60.0) + vector_score;
+    // Multi-term coverage multiplier: if query contains multiple concepts, rewarding full multi-term match
+    let total_query_concepts = tokens.cjk_phrases.len() + tokens.words.len();
+    let coverage_mult = if total_query_concepts >= 2 {
+        if matched_distinct_concepts >= 2 {
+            2.2 // Strong bonus when multiple concepts are satisfied
+        } else if matched_distinct_concepts == 1 {
+            0.55 // Damping when only a single generic word (e.g. "Performance") matched
+        } else {
+            1.0
+        }
+    } else {
+        1.0
+    };
+
+    let total_score = (lexical_score.min(75.0) + vector_score) * coverage_mult;
     total_score.min(100.0)
 }
 

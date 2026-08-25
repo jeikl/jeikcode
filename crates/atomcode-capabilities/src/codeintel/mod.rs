@@ -158,6 +158,22 @@ pub fn notify_code_index_file_changed(path: &Path, content: Option<&str>) {
     let _ = index.update_single_file(path, content);
 }
 
+/// Asynchronously prewarms the shared code index for `root` on a detached background thread.
+/// Completely non-blocking to startup, LLM streaming, and TUI events, ensuring cold-start
+/// queries execute in milliseconds.
+pub fn prewarm_code_index(root: &Path) {
+    let root_buf = canonical(root);
+    let index = shared_code_index();
+    std::thread::Builder::new()
+        .name("codeintel-prewarm".to_string())
+        .spawn(move || {
+            let _ = index.get(&root_buf);
+            let _ = index.get_idf_stats(&root_buf);
+            let _ = index.get_dirindex(&root_buf);
+        })
+        .ok();
+}
+
 /// Register graph/symbol tools according to the chosen [`CodeIntelMode`].
 /// All tools share the process-wide [`shared_code_index`].
 pub fn register_codeintel_tools_with_mode(reg: &mut ToolRegistry, mode: &CodeIntelMode) {

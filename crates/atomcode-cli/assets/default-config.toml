@@ -4,6 +4,8 @@
 
 language = "zh-CN"
 auto_update = false
+auto_update_interval_secs = 3600
+codeintel_refresh_interval_secs = 5
 auto_commit = false
 keep_interrupted_context = true
 offline_mode = "off"

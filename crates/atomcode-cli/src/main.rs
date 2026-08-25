@@ -2321,6 +2321,9 @@ async fn run() -> Result<i32> {
             dangerously_skip_permissions: cli.dangerously_skip_permissions,
         });
 
+        // Eagerly prewarm the CodeIntel index for the active working directory in background
+        atomcode_capabilities::codeintel::prewarm_code_index(&working_dir);
+
         // Headless mode: -p / --prompt-file triggers non-interactive execution.
         let exit_code = if let Some(prompt) = effective_prompt {
             let verbose = cli.verbose || force_verbose;

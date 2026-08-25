@@ -5,7 +5,8 @@
 //! struct / trait / …) is one "document" whose fields are name + signature +
 //! docstring + inline comments.
 
-use std::collections::HashMap;
+use rayon::prelude::*;
+use std::collections::{HashMap, HashSet};
 
 use serde::{Deserialize, Serialize};
 
@@ -134,30 +135,53 @@ impl Default for IdfStats {
 }
 
 impl IdfStats {
-    /// Build corpus statistics from the whole workspace graph.
+    /// Build corpus statistics from the whole workspace graph in parallel.
     pub fn build(graph: &CodeGraph) -> Self {
-        let mut stats = IdfStats::default();
-        let mut seen_file_terms: HashMap<String, u32> = HashMap::new();
-        for node in graph.nodes.values() {
-            stats.total_symbols += 1;
-            let ascii = symbol_ascii_terms(node);
-            let cjk = symbol_cjk_phrases(node);
-            stats.total_ascii_terms += ascii.len() as u64;
-            stats.total_cjk_phrases += cjk.len() as u64;
-            for t in ascii {
-                *seen_file_terms.entry(t).or_insert(0) += 1;
-            }
-            for p in cjk {
-                *seen_file_terms.entry(p.to_ascii_lowercase()).or_insert(0) += 1;
-            }
+        let total_symbols = graph.nodes.len() as u32;
+        let nodes: Vec<&SymbolNode> = graph.nodes.values().collect();
+        let (total_ascii, total_cjk, merged_df) = nodes
+            .into_par_iter()
+            .fold(
+                || (0u64, 0u64, HashMap::<String, u32>::new()),
+                |mut acc, node| {
+                    let ascii = symbol_ascii_terms(node);
+                    let cjk = symbol_cjk_phrases(node);
+                    acc.0 += ascii.len() as u64;
+                    acc.1 += cjk.len() as u64;
+                    let mut local_seen = HashSet::new();
+                    for t in ascii {
+                        if local_seen.insert(t.clone()) {
+                            *acc.2.entry(t).or_insert(0) += 1;
+                        }
+                    }
+                    for p in cjk {
+                        let pl = p.to_ascii_lowercase();
+                        if local_seen.insert(pl.clone()) {
+                            *acc.2.entry(pl).or_insert(0) += 1;
+                        }
+                    }
+                    acc
+                },
+            )
+            .reduce(
+                || (0, 0, HashMap::new()),
+                |mut a, b| {
+                    a.0 += b.0;
+                    a.1 += b.1;
+                    for (k, v) in b.2 {
+                        *a.2.entry(k).or_insert(0) += v;
+                    }
+                    a
+                },
+            );
+
+        IdfStats {
+            df: merged_df,
+            total_symbols,
+            total_ascii_terms: total_ascii,
+            total_cjk_phrases: total_cjk,
+            version: STATS_VERSION,
         }
-        // df is per-document: count each term once per symbol.
-        for (term, count) in seen_file_terms {
-            if count > 0 {
-                stats.df.insert(term, count.min(u32::MAX));
-            }
-        }
-        stats
     }
 
     /// Standard BM25 IDF with additive smoothing and high-frequency noise damping.

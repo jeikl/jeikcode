@@ -1440,26 +1440,32 @@ fn compose_graph(
         }
     }
     on_progress(&format!(
-        "Code graph: resolving {} call sites across {} symbols ({} files)...",
+        "Code graph: resolving {} call sites across {} symbols ({} files) in parallel...",
         raw_calls.len(),
         g.node_count(),
         units.len()
     ));
-    for (caller_file, rc) in raw_calls {
-        let caller = CodeGraph::make_id(&caller_file, &rc.caller_name, rc.caller_line);
-        if g.node(caller).is_none() {
-            continue;
-        }
-        if let Some(callee) = resolve_callee(&g, &rc.callee_name, &caller_file, root) {
-            g.add_edge(
+    let resolved_edges: Vec<(SymbolId, Edge)> = raw_calls
+        .into_par_iter()
+        .filter_map(|(caller_file, rc)| {
+            let caller = CodeGraph::make_id(&caller_file, &rc.caller_name, rc.caller_line);
+            if g.node(caller).is_none() {
+                return None;
+            }
+            let callee = resolve_callee(&g, &rc.callee_name, &caller_file, root)?;
+            Some((
                 caller,
                 Edge {
                     to: callee,
                     kind: EdgeKind::Calls,
                     line: rc.line,
                 },
-            );
-        }
+            ))
+        })
+        .collect();
+
+    for (caller, edge) in resolved_edges {
+        g.add_edge(caller, edge);
     }
     g
 }

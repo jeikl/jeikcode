@@ -245,6 +245,12 @@ impl Default for SubAgentConfig {
             max_rounds: 200,
         }
     }
+fn default_auto_update_interval_secs() -> u64 {
+    3600
+}
+
+fn default_codeintel_refresh_interval_secs() -> u64 {
+    5
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -304,6 +310,12 @@ pub struct Config {
     /// → defaults to `false` (safe).
     #[serde(default)]
     pub auto_update: bool,
+    /// Self-upgrade background check interval in seconds (default: 3600s / 1 hour).
+    #[serde(default = "default_auto_update_interval_secs")]
+    pub auto_update_interval_secs: u64,
+    /// CodeIntel graph background incremental refresh interval in seconds (default: 5s).
+    #[serde(default = "default_codeintel_refresh_interval_secs")]
+    pub codeintel_refresh_interval_secs: u64,
     /// Self-update source overrides (fork channel). When set, these take
     /// precedence over the built-in default release channel (this fork's
     /// `local-dev` branch) but LOSE to the env vars
@@ -648,6 +660,8 @@ impl Default for Config {
             notifications: Default::default(),
             network: Default::default(),
             auto_update: false,
+            auto_update_interval_secs: 3600,
+            codeintel_refresh_interval_secs: 5,
             update_manifest_url: None,
             update_download_base: None,
             telemetry: Default::default(),

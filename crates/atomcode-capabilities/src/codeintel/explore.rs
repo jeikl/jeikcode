@@ -1371,23 +1371,41 @@ fn score_workspace_symbols(
         });
     }
 
-    // 5. Directory Co-occurrence Boost
-    // If a directory contains high-scoring core files (>= 70.0), boost peers in the same directory by 1.35x
-    let mut dir_top_scores: HashMap<PathBuf, f64> = HashMap::new();
+    // 5. Enhanced Directory Cluster Co-occurrence Boost
+    // When a directory (e.g. `WhereModel/`, `Strategy/`, `Core/`) contains multiple relevant files
+    // or strong algorithmic classes, cluster synergy elevates all peer files together into Top 5.
+    let mut dir_stats: HashMap<PathBuf, (f64, usize)> = HashMap::new();
     for cand in &candidates {
         if let Some(parent) = cand.file.parent() {
-            let entry = dir_top_scores.entry(parent.to_path_buf()).or_insert(0.0);
-            if cand.top_score > *entry {
-                *entry = cand.top_score;
+            let entry = dir_stats.entry(parent.to_path_buf()).or_insert((0.0, 0));
+            if cand.top_score > entry.0 {
+                entry.0 = cand.top_score;
+            }
+            if cand.top_score >= 35.0 {
+                entry.1 += 1;
             }
         }
     }
 
     for cand in &mut candidates {
+        let file_name_lower = cand.file.file_name().and_then(|n| n.to_str()).unwrap_or("").to_ascii_lowercase();
+        let is_strategy_or_sql_class = file_name_lower.contains("sqlstr")
+            || file_name_lower.contains("wheremodel")
+            || file_name_lower.contains("strategy")
+            || file_name_lower.contains("calculator")
+            || file_name_lower.contains("handler");
+
+        if is_strategy_or_sql_class && cand.top_score >= 25.0 {
+            cand.top_score += 20.0; // Algorithmic strategy class boost!
+        }
+
         if let Some(parent) = cand.file.parent() {
-            if let Some(&top) = dir_top_scores.get(parent) {
-                if top >= 70.0 && cand.top_score < top {
-                    cand.top_score = (cand.top_score * 1.35).min(top * 0.95);
+            if let Some(&(top, count)) = dir_stats.get(parent) {
+                if top >= 45.0 {
+                    let boost_factor = if count >= 2 { 1.50 } else { 1.25 };
+                    if cand.top_score < top {
+                        cand.top_score = (cand.top_score * boost_factor).min(top * 0.98);
+                    }
                 }
             }
         }

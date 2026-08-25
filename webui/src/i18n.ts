@@ -296,7 +296,11 @@ const zh = {
 
   // Copy button
   'copy.copy': '复制',
+  'copy.copyLast': '复制最后回答',
+  'copy.copyAll': '复制全部正文',
   'copy.copied': '已复制',
+  'copy.copiedLast': '已复制最后回答',
+  'copy.copiedAll': '已复制全部正文',
   'copy.failed': '复制失败（浏览器权限或非 HTTPS）。请手动选择文本复制。',
 
   // Slash commands
@@ -638,7 +642,11 @@ const en: Record<MsgKey, string> = {
 
   // Copy button
   'copy.copy': 'Copy',
+  'copy.copyLast': 'Copy final response',
+  'copy.copyAll': 'Copy all responses',
   'copy.copied': 'Copied',
+  'copy.copiedLast': 'Copied final response',
+  'copy.copiedAll': 'Copied all',
   'copy.failed': 'Copy failed (clipboard permission or non-HTTPS). Select text manually.',
 
   // Slash commands

@@ -3597,30 +3597,48 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
           // the copy button can copy the entire LLM turn (not just one chunk).
           // system messages are transparent — they don't end an assistant turn.
           const turnTexts = new Map<number, string>();
+          // 计算每个回合的文本（区分最后回答与全部正文），供复制按钮使用。
+          const turnLastTexts = new Map<number, string>();
+          const turnAllTexts = new Map<number, string>();
           {
             let start = -1;
-            let parts: string[] = [];
+            let textParts: string[] = [];
+            let fallbackParts: string[] = [];
             for (let i = 0; i < messages.length; i++) {
               if (messages[i].role === 'assistant') {
                 if (start < 0) start = i;
-                const t = messageFullText(messages[i]);
-                if (t) parts.push(t);
+                for (const p of messages[i].parts) {
+                  if (p.kind === 'text' && p.text.trim()) {
+                    textParts.push(p.text);
+                  }
+                }
+                const raw = messageFullText(messages[i]);
+                if (raw) fallbackParts.push(raw);
               } else if (messages[i].role === 'user') {
                 // Only a user message ends the current assistant turn.
                 if (start >= 0) {
+                  const targetList = textParts.length > 0 ? textParts : fallbackParts;
+                  const lastText = targetList.length > 0 ? targetList[targetList.length - 1] : '';
+                  const allText = targetList.join('\n\n');
                   for (let j = start; j < i; j++) {
-                    turnTexts.set(j, parts.join('\n\n'));
+                    turnLastTexts.set(j, lastText);
+                    turnAllTexts.set(j, allText);
                   }
                   start = -1;
-                  parts = [];
+                  textParts = [];
+                  fallbackParts = [];
                 }
               }
               // role === 'system': transparent — do not flush the turn.
             }
             // Flush the last turn
             if (start >= 0) {
+              const targetList = textParts.length > 0 ? textParts : fallbackParts;
+              const lastText = targetList.length > 0 ? targetList[targetList.length - 1] : '';
+              const allText = targetList.join('\n\n');
               for (let j = start; j < messages.length; j++) {
-                turnTexts.set(j, parts.join('\n\n'));
+                turnLastTexts.set(j, lastText);
+                turnAllTexts.set(j, allText);
               }
             }
           }
@@ -3685,7 +3703,8 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
                 busy={busy}
                 lastIdx={lastIdx}
                 isLastInTurn={isLastInTurn}
-                turnText={turnTexts.get(origIdx) ?? ''}
+                turnLastText={turnLastTexts.get(origIdx) ?? ''}
+                turnAllText={turnAllTexts.get(origIdx) ?? ''}
                 searchRef={setMatchRef}
                 timeLabel={timeLabel}
                 timeFull={timeFull}
@@ -3869,8 +3888,10 @@ function AssistantMessageView({
   msg,
   isLast,
   busy,
+  lastIdx: _lastIdx,
   isLastInTurn,
-  turnText,
+  turnLastText,
+  turnAllText,
   searchRef,
   timeLabel,
   timeFull,
@@ -3883,7 +3904,8 @@ function AssistantMessageView({
   busy: boolean;
   lastIdx: number;
   isLastInTurn: boolean;
-  turnText: string;
+  turnLastText: string;
+  turnAllText: string;
   searchRef?: (el: HTMLElement | null) => void;
   timeLabel?: string;
   timeFull?: string;
@@ -3911,15 +3933,19 @@ function AssistantMessageView({
     (terse ? ' is-terse' : '') +
     (isActiveSearchMatch ? ' is-active-search-match' : '');
 
-  // Copy button: only shown on the last assistant message in a turn.
-  // Copies the entire turn's text (all assistant messages in this turn joined).
-  const [copied, setCopied] = useState(false);
+  // Copy buttons: only shown on the last assistant message in a turn.
+  // 1. 复制最后正文回答 (Copy final response)
+  // 2. 复制所有正文 (Copy all responses)
+  const [copiedLast, setCopiedLast] = useState(false);
+  const [copiedAll, setCopiedAll] = useState(false);
 
-  function handleCopy() {
-    void copyTextToClipboard(turnText).then((ok) => {
+  function handleCopyLast() {
+    const target = turnLastText || turnAllText;
+    if (!target) return;
+    void copyTextToClipboard(target).then((ok) => {
       if (ok) {
-        setCopied(true);
-        setTimeout(() => setCopied(false), 2000);
+        setCopiedLast(true);
+        setTimeout(() => setCopiedLast(false), 2000);
       } else {
         // Surface failure — silent .catch previously made the button look dead.
         window.alert(t('copy.failed'));
@@ -3927,15 +3953,28 @@ function AssistantMessageView({
     });
   }
 
-  const copyBtn = isLastInTurn && !isError && !streaming && turnText ? (
+  function handleCopyAll() {
+    const target = turnAllText || turnLastText;
+    if (!target) return;
+    void copyTextToClipboard(target).then((ok) => {
+      if (ok) {
+        setCopiedAll(true);
+        setTimeout(() => setCopiedAll(false), 2000);
+      } else {
+        window.alert(t('copy.failed'));
+      }
+    });
+  }
+
+  const copyBtn = isLastInTurn && !isError && !streaming && (turnLastText || turnAllText) ? (
     <div class="msg-actions msg-actions-left">
       <button
-        class={'msg-copy-btn' + (copied ? ' copied' : '')}
-        onClick={handleCopy}
-        title={copied ? t('copy.copied') : t('copy.copy')}
-        aria-label={copied ? t('copy.copied') : t('copy.copy')}
+        class={'msg-copy-btn' + (copiedLast ? ' copied' : '')}
+        onClick={handleCopyLast}
+        title={copiedLast ? t('copy.copiedLast') : t('copy.copyLast')}
+        aria-label={copiedLast ? t('copy.copiedLast') : t('copy.copyLast')}
       >
-        {copied ? (
+        {copiedLast ? (
           <svg width="14" height="14" viewBox="0 0 16 16" fill="none" aria-hidden="true">
             <path d="M3.5 8.5 6.5 11.5 12.5 4.5" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" />
           </svg>
@@ -3943,6 +3982,24 @@ function AssistantMessageView({
           <svg width="14" height="14" viewBox="0 0 16 16" fill="none" aria-hidden="true">
             <rect x="5" y="5" width="8.5" height="8.5" rx="1.5" stroke="currentColor" stroke-width="1.2" />
             <path d="M2.5 10.5V3.5A1.5 1.5 0 0 1 4 2h7" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" />
+          </svg>
+        )}
+      </button>
+      <button
+        class={'msg-copy-btn' + (copiedAll ? ' copied' : '')}
+        onClick={handleCopyAll}
+        title={copiedAll ? t('copy.copiedAll') : t('copy.copyAll')}
+        aria-label={copiedAll ? t('copy.copiedAll') : t('copy.copyAll')}
+      >
+        {copiedAll ? (
+          <svg width="14" height="14" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+            <path d="M3.5 8.5 6.5 11.5 12.5 4.5" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" />
+          </svg>
+        ) : (
+          <svg width="14" height="14" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+            <rect x="4.5" y="4.5" width="9" height="9" rx="1.5" stroke="currentColor" stroke-width="1.2" />
+            <path d="M2.5 10.5V3A1.5 1.5 0 0 1 4 1.5h6.5" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" />
+            <path d="M7 7.5h4M7 9.5h4M7 11.5h2.5" stroke="currentColor" stroke-width="1.1" stroke-linecap="round" />
           </svg>
         )}
       </button>

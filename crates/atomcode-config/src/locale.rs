@@ -5,9 +5,35 @@ use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum Locale {
-    #[serde(rename = "en")]
+    #[serde(
+        rename = "en",
+        alias = "EN",
+        alias = "english",
+        alias = "English",
+        alias = "en-US",
+        alias = "en_US"
+    )]
     En,
-    #[serde(rename = "zh_CN")]
+    #[serde(
+        rename = "zh_CN",
+        alias = "zh-CN",
+        alias = "zh_cn",
+        alias = "zh-cn",
+        alias = "zh",
+        alias = "ZH",
+        alias = "chinese",
+        alias = "Chinese",
+        alias = "简体中文",
+        alias = "zh_TW",
+        alias = "zh-TW",
+        alias = "zh_tw",
+        alias = "zh-tw",
+        alias = "zh_HK",
+        alias = "zh-HK",
+        alias = "zh_hk",
+        alias = "zh-hk",
+        alias = "繁體中文"
+    )]
     ZhCn,
 }
 
@@ -83,5 +109,10 @@ mod tests {
         assert_eq!(s, r#""zh_CN""#);
         let parsed: Locale = serde_json::from_str(r#""en""#).unwrap();
         assert_eq!(parsed, Locale::En);
+        let parsed_hyphen: Locale = serde_json::from_str(r#""zh-CN""#).unwrap();
+        assert_eq!(parsed_hyphen, Locale::ZhCn);
+        let toml_parsed: toml::Value = toml::from_str(r#"language = "zh-CN""#).unwrap();
+        let lang: Option<Locale> = toml_parsed.get("language").unwrap().clone().try_into().unwrap();
+        assert_eq!(lang, Some(Locale::ZhCn));
     }
 }

@@ -1,6 +1,6 @@
-# JeikCode / AtomCode 配置知识库导航索引 (Overview Index)
+# JeikCode 配置知识库导航索引 (Overview Index)
 
-本目录为 JeikCode / AtomCode 全局与工作区配置体系的渐进式分层指南，旨在以最低 Token 成本让 AI Agent 及开发者快速获取精准配置语法与参数。
+本目录为 JeikCode 全局与工作区配置体系的渐进式分层指南，旨在以最低 Token 成本让 AI Agent 及开发者快速获取精准配置语法与参数。
 
 ## 1. 核心指南模块速查表
 

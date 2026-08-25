@@ -441,22 +441,22 @@ pub struct PluginConfig {
     /// once per user. A subsequent `/plugin marketplace remove` is
     /// respected; the marker stays in place and the directory is NOT
     /// recreated. To force a re-bootstrap, delete the marker.
-    #[serde(default = "default_true")]
+    #[serde(default)]
     pub auto_install_default_skills: bool,
-    /// Per-startup sync: when true (default), every startup runs
+    /// Per-startup sync: when true, every startup runs
     /// `git pull --ff-only` on all installed marketplaces so plugins
     /// stay in sync with the remote. Failures (no network, fast-forward
     /// conflict from local edits) are warned and ignored — never block
     /// startup.
-    #[serde(default = "default_true")]
+    #[serde(default)]
     pub auto_update_marketplaces: bool,
 }
 
 impl Default for PluginConfig {
     fn default() -> Self {
         Self {
-            auto_install_default_skills: true,
-            auto_update_marketplaces: true,
+            auto_install_default_skills: false,
+            auto_update_marketplaces: false,
         }
     }
 }

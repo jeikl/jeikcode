@@ -75,11 +75,8 @@ const HOSTED_UPDATE_DOWNLOAD_BASE: &str =
 const HOSTED_DESKTOP_DOWNLOAD_URL: &str =
     "https://atomgit.com/atomgit_atomcode/atomCode-air-releases/releases";
 const HOSTED_RELAY_URL: &str = "https://relay-atomcode.atomgit.com";
-const HOSTED_MARKETPLACES: &[&str] = &[
-    "https://atomgit.com/atomgit_atomcode/atomcode-plugins-official.git",
-    "https://atomgit.com/atomgit_atomcode/atomcode-skills.git",
-];
-const HOSTED_AUTO_INSTALL: &[&str] = &["https://atomgit.com/atomgit_atomcode/atomcode-skills.git"];
+const HOSTED_MARKETPLACES: &[&str] = &[];
+const HOSTED_AUTO_INSTALL: &[&str] = &[];
 const HOSTED_TRUSTED_DOMAINS: &[&str] = &["atomgit.com", "gitcode.com"];
 /// Prefix for CodingPlan provider keys. User-visible: it is the selection id in
 /// the model picker's left column and the account label in its right one, so a

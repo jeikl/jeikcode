@@ -181,9 +181,17 @@ impl TuiSession {
                 PresentationRole::User => Role::User,
                 PresentationRole::Assistant => Role::Assistant,
             };
+            let text = if role == Role::User {
+                atomcode_capabilities::session::UserWrapHook::unwrap_input_for(
+                    std::path::Path::new(&view.meta.working_dir),
+                    &entry.text,
+                )
+            } else {
+                entry.text
+            };
             display_messages.push(DisplayMessage {
                 after_message,
-                message: message_with_role(role, entry.text),
+                message: message_with_role(role, text),
             });
         }
         Ok(Self {

@@ -2,7 +2,7 @@
 
 ## 1. MCP (Model Context Protocol) 外部工具集成
 
-JeikCode / AtomCode 支持连接任何遵循标准 MCP 协议的外部工具服务。
+JeikCode 支持连接任何遵循标准 MCP 协议的外部工具服务。
 
 ### 1.1 配置文件定位与优先级
 1. **工作区项目级**：`<workspace>/.mcp.json`（仅对当前项目生效，版本控制友好）。

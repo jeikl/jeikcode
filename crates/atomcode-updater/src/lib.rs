@@ -745,6 +745,9 @@ pub async fn run_upgrade(
         }
     }
 
+    // Purge any legacy upstream brand plugin directories on upgrade
+    purge_legacy_brand_plugins_on_upgrade();
+
     let backup = backup_path(&exe);
     // NOTE: `exe` was captured *before* `replace_binary` renamed the running
     // binary. On Windows, `current_exe()` would now return `.atomcode.rolling`
@@ -780,6 +783,24 @@ pub const PACKAGE_MANAGED: &str = "PACKAGE_MANAGED";
 /// job.
 pub const fn is_package_managed() -> bool {
     cfg!(feature = "distro-pm")
+}
+
+fn purge_legacy_brand_plugins_on_upgrade() {
+    let plugins_root = atomcode_config::config::Config::config_dir().join("plugins");
+    let mp_root = plugins_root.join("marketplaces");
+    for dirty_name in ["atomcode-skills", "atomcode-plugins-official"] {
+        let dirty_dir = mp_root.join(dirty_name);
+        if dirty_dir.exists() {
+            let _ = std::fs::remove_dir_all(&dirty_dir);
+        }
+    }
+    let installed_root = plugins_root.join("installed");
+    for dirty_plugin in ["atomcode", "atomcode-skills", "atomcode-workflows"] {
+        let dirty_dir = installed_root.join(dirty_plugin);
+        if dirty_dir.exists() {
+            let _ = std::fs::remove_dir_all(&dirty_dir);
+        }
+    }
 }
 
 // ============================================================================
@@ -1070,6 +1091,9 @@ pub fn apply_pending_upgrade() -> Result<Option<AppliedUpgrade>> {
 
     // Success — pointer is done, file moved into place by replace_binary.
     clear_pending_pointer();
+
+    // Purge any legacy upstream brand plugin directories on upgrade
+    purge_legacy_brand_plugins_on_upgrade();
 
     Ok(Some(AppliedUpgrade {
         version: pending.version,

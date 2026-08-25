@@ -98,7 +98,7 @@ firm_execution_discipline:
 
 ## 4. 热重载与缓存机制原理
 
-- **毫秒级 mtime 检验**：AtomCode 运行时内置 `PromptCacheState` 缓存，每轮对话启动前检查 `init.yaml` 和 `rules.yaml` 的文件修改时间戳（mtime）。
+- **毫秒级 mtime 检验**：JeikCode 运行时内置 `PromptCacheState` 缓存，每轮对话启动前检查 `init.yaml` 和 `rules.yaml` 的文件修改时间戳（mtime）。
 - **零开销复用**：文件未修改时直接使用内存缓存结构（0 解析成本）；文件被用户或脚本修改后，下一轮交互立即自动重新反序列化并注入 Persona。
 - **平滑后备**：若用户删除了 `init.yaml` 或 `rules.yaml`，系统平滑退回二进制内嵌的官方默认规则，不会产生运行时崩溃。
 

@@ -1254,6 +1254,8 @@ impl MessageInfo {
                 .collect()
         });
         if msg.role == Role::User {
+            let cwd = std::env::current_dir().unwrap_or_default();
+            content = atomcode_capabilities::session::UserWrapHook::unwrap_input_for(&cwd, &content);
             let (display, had_vision_marker) = strip_vision_marker(&content);
             if had_vision_marker {
                 content = display;

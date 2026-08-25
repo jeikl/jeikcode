@@ -87,6 +87,65 @@ impl UserWrapHook {
             format!("{template}\n\n{input}")
         }
     }
+
+    /// Extract the raw user input from a potentially wrapped message text
+    /// using the active `user-wrap.md` template for display purposes (UI/TUI/WebUI).
+    pub fn unwrap_input(&self, wrapped: &str) -> String {
+        Self::unwrap_input_for(&self.working_dir, wrapped)
+    }
+
+    /// Extract the raw user input from a potentially wrapped message text
+    /// for a given working directory.
+    pub fn unwrap_input_for(working_dir: &Path, wrapped: &str) -> String {
+        let Some(path) = Self::resolve_wrap_file_for(working_dir) else {
+            return wrapped.to_string();
+        };
+
+        let Ok(content) = std::fs::read_to_string(&path) else {
+            return wrapped.to_string();
+        };
+
+        let template = content.trim();
+        if template.is_empty() || template == "{{input}}" {
+            return wrapped.to_string();
+        }
+
+        if let Some((prefix, suffix)) = template.split_once("{{input}}") {
+            let mut text = wrapped;
+            if !prefix.is_empty() {
+                if let Some(rest) = text.strip_prefix(prefix) {
+                    text = rest;
+                } else if let Some(rest) = text.strip_prefix(prefix.trim_end()) {
+                    text = rest;
+                } else if let Some(rest) = text.strip_prefix(prefix.trim()) {
+                    text = rest;
+                } else {
+                    return wrapped.to_string();
+                }
+            }
+            if !suffix.is_empty() {
+                if let Some(rest) = text.strip_suffix(suffix) {
+                    text = rest;
+                } else if let Some(rest) = text.strip_suffix(suffix.trim_start()) {
+                    text = rest;
+                } else if let Some(rest) = text.strip_suffix(suffix.trim()) {
+                    text = rest;
+                } else {
+                    return wrapped.to_string();
+                }
+            }
+            text.to_string()
+        } else {
+            let prefix = format!("{template}\n\n");
+            if let Some(rest) = wrapped.strip_prefix(&prefix) {
+                rest.to_string()
+            } else if let Some(rest) = wrapped.strip_prefix(template) {
+                rest.trim_start().to_string()
+            } else {
+                wrapped.to_string()
+            }
+        }
+    }
 }
 
 #[async_trait]
@@ -108,17 +167,21 @@ mod tests {
         let temp = TempDir::new().unwrap();
         let hook = UserWrapHook::new(temp.path());
         assert_eq!(hook.wrap_input("hello world"), "hello world");
+        assert_eq!(hook.unwrap_input("hello world"), "hello world");
     }
 
     #[test]
-    fn test_wrap_input_with_template() {
+    fn test_wrap_and_unwrap_input_with_template() {
         let temp = TempDir::new().unwrap();
         let wrap_file = temp.path().join("user-wrap.md");
         std::fs::write(&wrap_file, "用户提问：【{{input}}】\n请严格遵守规则。").unwrap();
 
         let hook = UserWrapHook::new(temp.path());
-        let res = hook.wrap_input("你好");
-        assert_eq!(res, "用户提问：【你好】\n请严格遵守规则。");
+        let wrapped = hook.wrap_input("你好");
+        assert_eq!(wrapped, "用户提问：【你好】\n请严格遵守规则。");
+
+        let unwrapped = hook.unwrap_input(&wrapped);
+        assert_eq!(unwrapped, "你好");
     }
 
     #[test]
@@ -135,6 +198,7 @@ mod tests {
 
         let hook = UserWrapHook::new(temp.path());
         assert_eq!(hook.wrap_input("test"), "Project AtomCode: test");
+        assert_eq!(hook.unwrap_input("Project AtomCode: test"), "test");
     }
 
     #[test]
@@ -144,7 +208,9 @@ mod tests {
         std::fs::write(&wrap_file, "PREFIX HEADER").unwrap();
 
         let hook = UserWrapHook::new(temp.path());
-        assert_eq!(hook.wrap_input("query"), "PREFIX HEADER\n\nquery");
+        let wrapped = hook.wrap_input("query");
+        assert_eq!(wrapped, "PREFIX HEADER\n\nquery");
+        assert_eq!(hook.unwrap_input(&wrapped), "query");
     }
 
     #[tokio::test]
@@ -157,5 +223,6 @@ mod tests {
         let mut text = "original".to_string();
         hook.user_prompt_submit(&mut text).await.unwrap();
         assert_eq!(text, "Wrapped: [original]");
+        assert_eq!(hook.unwrap_input(&text), "original");
     }
 }

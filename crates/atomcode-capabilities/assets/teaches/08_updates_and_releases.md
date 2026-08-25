@@ -1,6 +1,6 @@
-# JeikCode / AtomCode 升级与发版配置指南 (Updates & Releases Guide)
+# JeikCode 升级与发版配置指南 (Updates & Releases Guide)
 
-本文档详细说明 JeikCode / AtomCode 的自升级机制、默认更新源、环境变量覆盖、发版打包流程与交叉编译规范。
+本文档详细说明 JeikCode 的自升级机制、默认更新源、环境变量覆盖、发版打包流程与交叉编译规范。
 
 ---
 

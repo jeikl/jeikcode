@@ -78,7 +78,7 @@ impl Tool for JeikcodeConfigGuideTool {
     }
 
     fn description(&self) -> &str {
-        "Primary configuration guide and knowledge tool for JeikCode / AtomCode. MUST be invoked whenever the user asks ANY question about JeikCode or AtomCode configurations, settings, system prompts, rules.yaml / init.yaml, project constraints (AGENTS.md, ATOMCODE.md, dbwords.md, rules.md, glossary.md), models & providers, reasoning effort/history, MCP servers, Skills, Cilin thesaurus, tool timeouts, or ~/.atomcode directory layout."
+        "Primary configuration guide and knowledge tool for JeikCode. MUST be invoked whenever the user asks ANY question about JeikCode configurations, settings, system prompts, rules.yaml / init.yaml, project constraints (AGENTS.md, ATOMCODE.md, dbwords.md, rules.md, glossary.md), models & providers, reasoning effort/history, MCP servers, Skills, Cilin thesaurus, tool timeouts, or ~/.atomcode directory layout."
     }
 
     fn parameters_schema(&self) -> serde_json::Value {
@@ -204,7 +204,7 @@ mod tests {
         };
         let res = tool.execute(r#"{"topic":"overview"}"#, &ctx).await;
         assert!(!res.is_error);
-        assert!(res.content.contains("JeikCode / AtomCode 配置知识库导航索引"));
+        assert!(res.content.contains("JeikCode 配置知识库导航索引"));
         assert!(res.content.contains("prompts"));
         assert!(res.content.contains("models"));
     }

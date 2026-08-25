@@ -498,7 +498,13 @@ impl SessionMeta {
                     && !message.synthetic
                     && !crate::reminder::is_system_reminder(&message.text)
             })
-            .map(|message| strip_leading_image_markers(message.text.trim()))
+            .map(|message| {
+                let unwrapped = crate::session::UserWrapHook::unwrap_input_for(
+                    std::path::Path::new(&self.working_dir),
+                    &message.text,
+                );
+                strip_leading_image_markers(unwrapped.trim()).to_string()
+            })
             .find(|text| !text.is_empty())
         else {
             return;

@@ -103,6 +103,9 @@ const BOOTSTRAP_MARKER_FILENAME: &str = ".plugin_bootstrap_v2";
 pub fn run_startup_hooks(config: &Config) -> Vec<PluginJobEvent> {
     let mut events = Vec::new();
 
+    // 1. Always purge any legacy brand advertising / upstream polluted plugins
+    purge_legacy_brand_plugins();
+
     // Early check: if git is not available, skip both auto-install and
     // auto-update entirely and emit a single friendly message instead of
     // per-marketplace spawn failures that confuse users on machines without
@@ -128,6 +131,77 @@ pub fn run_startup_hooks(config: &Config) -> Vec<PluginJobEvent> {
         events.extend(refresh_installed_marketplaces());
     }
     events
+}
+
+/// Automatically scan and purge legacy brand marketplace and plugin directories
+/// (e.g. `atomcode-skills`, `atomcode-plugins-official`, etc.) on startup and upgrade.
+pub fn purge_legacy_brand_plugins() {
+    let plugins_root = match super::paths::plugins_root() {
+        Some(p) => p,
+        None => return,
+    };
+
+    // 1. Purge legacy marketplaces
+    let mp_root = plugins_root.join("marketplaces");
+    for dirty_name in ["atomcode-skills", "atomcode-plugins-official"] {
+        let dirty_dir = mp_root.join(dirty_name);
+        if dirty_dir.exists() {
+            let _ = std::fs::remove_dir_all(&dirty_dir);
+            log_to_file(&format!("✓ Purged legacy brand marketplace `{dirty_name}`."));
+        }
+    }
+
+    // 2. Purge legacy installed plugin cache dirs
+    let installed_root = plugins_root.join("installed");
+    for dirty_plugin in ["atomcode", "atomcode-skills", "atomcode-workflows"] {
+        let dirty_dir = installed_root.join(dirty_plugin);
+        if dirty_dir.exists() {
+            let _ = std::fs::remove_dir_all(&dirty_dir);
+            log_to_file(&format!("✓ Purged legacy brand installed plugin `{dirty_plugin}`."));
+        }
+    }
+
+    // 3. Clean marketplaces.json
+    let mp_file = plugins_root.join("marketplaces.json");
+    if mp_file.is_file() {
+        if let Ok(content) = std::fs::read_to_string(&mp_file) {
+            if let Ok(mut json_val) = serde_json::from_str::<serde_json::Value>(&content) {
+                if let Some(arr) = json_val.as_array_mut() {
+                    let prev_len = arr.len();
+                    arr.retain(|item| {
+                        let name = item.get("name").and_then(|v| v.as_str()).unwrap_or("");
+                        let source = item.get("source").and_then(|v| v.as_str()).unwrap_or("");
+                        !name.contains("atomcode-skills")
+                            && !name.contains("atomcode-plugins-official")
+                            && !source.contains("atomgit.com/atomgit_atomcode")
+                    });
+                    if arr.len() != prev_len {
+                        let _ = std::fs::write(&mp_file, serde_json::to_string_pretty(&json_val).unwrap_or_default());
+                    }
+                }
+            }
+        }
+    }
+
+    // 4. Clean installed_plugins.json
+    let inst_file = plugins_root.join("installed_plugins.json");
+    if inst_file.is_file() {
+        if let Ok(content) = std::fs::read_to_string(&inst_file) {
+            if let Ok(mut json_val) = serde_json::from_str::<serde_json::Value>(&content) {
+                if let Some(arr) = json_val.as_array_mut() {
+                    let prev_len = arr.len();
+                    arr.retain(|item| {
+                        let plugin = item.get("plugin").and_then(|v| v.as_str()).unwrap_or("");
+                        let mp = item.get("marketplace").and_then(|v| v.as_str()).unwrap_or("");
+                        !plugin.contains("atomcode") && !mp.contains("atomcode")
+                    });
+                    if arr.len() != prev_len {
+                        let _ = std::fs::write(&inst_file, serde_json::to_string_pretty(&json_val).unwrap_or_default());
+                    }
+                }
+            }
+        }
+    }
 }
 
 fn bootstrap_marker_path() -> std::path::PathBuf {

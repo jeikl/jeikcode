@@ -1,6 +1,6 @@
 # 06 - 系统目录与全局文件全景指南 (Directories & System Files)
 
-AtomCode / JeikCode 统一将全局运行时数据与用户级配置保存在 `~/.atomcode/` 根目录下。
+JeikCode 统一将全局运行时数据与用户级配置保存在 `~/.atomcode/` 根目录下。
 
 ---
 

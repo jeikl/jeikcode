@@ -1022,7 +1022,7 @@ impl NativeLiveWireProjector {
                     committed: true,
                     ..
                 } => {
-                    let after_tokens = (*bytes_after as f32 / 3.5).ceil() as usize;
+                    let after_tokens = (bytes_after as f32 / 3.5).ceil() as usize;
                     LiveWireEvent::Tokens {
                         prompt: after_tokens,
                         completion: 0,

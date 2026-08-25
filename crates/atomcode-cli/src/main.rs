@@ -1548,7 +1548,7 @@ async fn async_main() {
     std::panic::set_hook(Box::new(|info| {
         write_crash_log(info);
         restore_terminal_if_tui();
-        eprintln!("\nAtomCode crashed: {}", info);
+        eprintln!("\nJeikCode crashed: {}", info);
         if let Some(location) = info.location() {
             eprintln!(
                 "  at {}:{}:{}",
@@ -1557,14 +1557,14 @@ async fn async_main() {
                 location.column()
             );
         }
-        eprintln!("\nPlease report this at: https://atomgit.com/atomgit_atomcode/atomcode/issues");
+        eprintln!("\nPlease report this at: https://github.com/jeikl/jeikcode/issues");
     }));
 
     match run().await {
         Ok(code) => std::process::exit(code),
         Err(e) => {
             restore_terminal_if_tui();
-            eprintln!("\nAtomCode error: {:#}", e);
+            eprintln!("\nJeikCode error: {:#}", e);
             std::process::exit(1);
         }
     }
@@ -1750,7 +1750,7 @@ async fn run() -> Result<i32> {
                         eprintln!("login setup failed: {:#}", e);
                     }
                 }
-                println!("\n  Starting AtomCode...\n");
+                println!("\n  Starting JeikCode...\n");
                 HEADLESS_MODE.store(false, Ordering::Relaxed);
                 // Fall through to TUI startup below
             }
@@ -1761,7 +1761,7 @@ async fn run() -> Result<i32> {
                 idle_timeout,
             } => {
                 HEADLESS_MODE.store(true, Ordering::Relaxed);
-                eprintln!("Starting AtomCode daemon on {host}:{port}...");
+                eprintln!("Starting JeikCode daemon on {host}:{port}...");
                 eprintln!("Press Ctrl+C to stop.");
                 // Run the bundled server IN-PROCESS (same `run_server` the webui uses),
                 // instead of re-exec'ing into a separate `atomcode-daemon` binary that
@@ -3158,7 +3158,7 @@ fn run_setup_command(force: bool, _non_interactive: bool) -> i32 {
     };
 
     let home = atomcode_config::config::Config::config_dir();
-    println!("📦 正在安装与同步 AtomCode / JeikCode 默认配置到: {}", home.display());
+    println!("📦 正在安装与同步 JeikCode 默认配置到: {}", home.display());
 
     // 1. 同步写入全量内置默认资产（prompts, 词林, 默认 config.toml, mcp.json, builtin-tools.txt, .codegraphignore 等）
     match atomcode::config_sync::apply_all_bundled_assets(&home, force) {
@@ -4189,7 +4189,7 @@ fn write_crash_log(info: &std::panic::PanicHookInfo<'_>) {
         .unwrap_or(0);
     // `force_capture` ignores RUST_BACKTRACE and always resolves frames.
     let bt = std::backtrace::Backtrace::force_capture();
-    let _ = writeln!(f, "\n==== AtomCode panic @ unix:{ts} thread:{thread} ====");
+    let _ = writeln!(f, "\n==== JeikCode panic @ unix:{ts} thread:{thread} ====");
     let _ = writeln!(f, "location: {loc}");
     let _ = writeln!(f, "message : {msg}");
     let _ = writeln!(f, "backtrace:\n{bt}");

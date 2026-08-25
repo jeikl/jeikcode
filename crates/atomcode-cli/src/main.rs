@@ -938,6 +938,12 @@ enum Commands {
         #[arg(long)]
         force: bool,
     },
+    /// Hidden internal command to run interactive or automatic config sync after binary upgrade
+    #[command(hide = true, name = "__sync_config")]
+    SyncConfig {
+        #[arg(long)]
+        auto: bool,
+    },
     /// Roll back to the previous version (swap with .bak on disk)
     Rollback,
     /// Hidden alias for `atomcode login` — kept so existing scripts /
@@ -1960,6 +1966,19 @@ async fn run() -> Result<i32> {
                     .shutdown(std::time::Duration::from_millis(500))
                     .await;
                 return Ok(code);
+            }
+            Commands::SyncConfig { auto } => {
+                if let Some(home) = dirs::home_dir().map(|h| h.join(".atomcode")) {
+                    if *auto {
+                        atomcode::config_sync::apply_all_bundled_assets(&home, false);
+                    } else {
+                        let diffs = atomcode::config_sync::scan_atomcode_config_diffs(&home);
+                        if !diffs.is_empty() {
+                            let _ = atomcode::config_sync::prompt_interactive_config_sync(diffs);
+                        }
+                    }
+                }
+                return Ok(0);
             }
             other => {
                 let result = handle_command(other, &telemetry).await.map(|_| 0);
@@ -3295,6 +3314,9 @@ async fn handle_command(cmd: Commands, telemetry: &std::sync::Arc<Telemetry>) ->
             // handle_command is called, so this arm is unreachable.
             unreachable!("Codingplan is handled inline in run() before handle_command")
         }
+        Commands::SyncConfig { .. } => {
+            unreachable!("SyncConfig is handled inline in run() before handle_command")
+        }
         Commands::Telemetry { .. } => {
             unreachable!("Telemetry is handled inline in run() before handle_command")
         }
@@ -3943,7 +3965,7 @@ async fn run_upgrade_cli(force: bool) -> Result<()> {
             UpgradeEvent::Done {
                 version,
                 backup,
-                exe: _,
+                exe,
             } => {
                 println!(
                     "\n✓ Upgraded to {} (previous version kept at {})",
@@ -3952,11 +3974,18 @@ async fn run_upgrade_cli(force: bool) -> Result<()> {
                 );
                 println!("  Run `atomcode` to start the new version.");
 
-                // 🔍 升级后扫描 ~/.atomcode 全量非模型配置变更并进行多选交互
-                if let Some(home) = dirs::home_dir().map(|h| h.join(".atomcode")) {
-                    let diffs = atomcode::config_sync::scan_atomcode_config_diffs(&home);
-                    if !diffs.is_empty() {
-                        let _ = atomcode::config_sync::prompt_interactive_config_sync(diffs);
+                // 🔍 由替换后的新版本二进制拉起差异扫描与交互多选（加载新二进制的内置资产）
+                let spawned = std::process::Command::new(&exe)
+                    .arg("__sync_config")
+                    .status();
+
+                if spawned.is_err() {
+                    // Fallback to in-process sync if spawning new binary fails
+                    if let Some(home) = dirs::home_dir().map(|h| h.join(".atomcode")) {
+                        let diffs = atomcode::config_sync::scan_atomcode_config_diffs(&home);
+                        if !diffs.is_empty() {
+                            let _ = atomcode::config_sync::prompt_interactive_config_sync(diffs);
+                        }
                     }
                 }
             }

@@ -73,7 +73,7 @@ The following comparison objectively presents the mechanisms and functional stre
 | **Multi-Project Knowledge Packs Precedence (`rules/dbwords`)** | ✅ **4-Tier Packs Strict Over System** | ✅ **Supports `CLAUDE.md` Project Spec** | ✅ **Context Injection & Rules** | ✅ **Project Rule Configurations** | ❌ Single File Only |
 | **Agent Self-Configuration Tool (`jeikcode_config_guide`)** | ✅ **8-Chapter Teaches & Self-Check** | ❌ Relies on Official Web Docs | ❌ Relies on Community Web Docs | ❌ Relies on Internal User Manual | ❌ No Self-Inspection |
 | **MCP (Model Context Protocol) & Skills Ecosystem** | ✅ **Native MCP + Dynamic Skills** | ✅ **Deep MCP & Skills/Hooks** | ✅ **Rich Plugin & MCP Ecosystem** | ✅ **Built-in Tools & MCP Support** | ⚠️ Basic Local Skills |
-| **Multi-Protocol Support (Responses / Completions / Anthropic)** | ✅ **4 Major Protocols Supported** | ⚠️ Claude Protocol Focused | ✅ **Broad Multi-Model Protocols** | ⚠️ xAI Grok Protocol Focused | ❌ No Responses |
+| **Multi-Protocol Support (Responses / Completions / Anthropic)** | ✅ **3 Major Protocols Native** | ⚠️ Claude Protocol Focused | ✅ **Standard & Custom Protocols** | ⚠️ xAI Grok Protocol Focused | ❌ No Responses |
 | **4-Gear Reasoning Effort Switching (`low/med/high/xhigh`)** | ✅ **Realtime `/effort` & WebUI** | ✅ **Integrated Claude 3.7 Thinking** | ⚠️ Frontend Panel Manual Setting | ✅ **Integrated Grok Reasoning** | ❌ Stale Bindings |
 | **Independent First-Token Liveness Timeout (60s × 3)** | ✅ **Solves R1/Grok3 Silent Hangs** | ⚠️ Unified Stream Request Timeout | ⚠️ Unified Effect Timeout | ✅ Process Watchdog & Signals | ❌ Stream Hangs |
 | **Multi-Instance Headless Remote Serve + WebUI Gateway** | ✅ **Native Rust Serve + Web Console** | ❌ Terminal CLI Focused | ✅ **Web Console + Desktop App** | ❌ Terminal Pager TUI Mode | ⚠️ Basic WebUI |
@@ -154,8 +154,8 @@ Knowledge files in your workspace **strictly override System default instruction
 - Embedded 8-chapter progressive documentation (`01_prompts_and_context.md` to `08_updates_and_releases.md`).
 - Native **`jeikcode_config_guide`** tool: The agent autonomously inspects configuration specifications to guide users and self-diagnose setup issues.
 
-### 6. Multi-Protocol Support & 4-Gear Reasoning Effort
-- Native support for OpenAI Responses (`/v1/responses`), Chat Completions, Anthropic, and Ollama;
+### 6. 3 Major Protocol Adapters & 4-Gear Reasoning Effort
+- Native support for the 3 major model protocol standards: OpenAI Responses (`/v1/responses`), OpenAI Chat Completions, and Anthropic Messages (with Ollama local compatibility);
 - Dynamically toggle reasoning effort (`low` / `medium` / `high` / `xhigh` / `off`) via `/effort` or WebUI;
 - Decoupled credentials and model parameters with dynamic upstream `/models` polling in `/modeladd`.
 

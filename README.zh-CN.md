@@ -73,7 +73,7 @@
 | **多项目知识包体系 (`rules/dbwords/glossary`)** | ✅ **4 层知识包且严格优先于 System** | ✅ **支持 `CLAUDE.md` 项目指令** | ✅ **支持项目规则与上下文拼接** | ✅ **支持项目级规则配置** | ❌ 仅单文件匹配 |
 | **智能体自配置与排障工具 (`jeikcode_config_guide`)** | ✅ **内置 8 模块知识库与自检工具** | ❌ 依赖官方静态在线文档 | ❌ 依赖社区在线文档站 | ❌ 依赖内部专有使用手册 | ❌ 无自查工具 |
 | **MCP (Model Context Protocol) 与 Skills 生态** | ✅ **原生 MCP + 动态 Skills 挂载** | ✅ **深度集成 MCP 与 Skills/Hooks** | ✅ **丰富的插件体系与 MCP 生态** | ✅ **内置 Tools 与 MCP 扩展** | ⚠️ 仅基础本地 Skills |
-| **多协议支持 (Responses / Completions / Anthropic)** | ✅ **4 大主流协议原生支持** | ⚠️ 深度绑定 Claude 官方协议 | ✅ **覆盖主流商业/开源模型协议** | ⚠️ 深度绑定 xAI Grok 协议 | ❌ 缺少 Responses 协议 |
+| **多协议支持 (Responses / Completions / Anthropic)** | ✅ **三大主流协议原生支持** | ⚠️ 深度绑定 Claude 官方协议 | ✅ **支持主流协议与自定义扩展协议** | ⚠️ 深度绑定 xAI Grok 协议 | ❌ 缺少 Responses 协议 |
 | **4 档思考努力程度实时切换 (`low/med/high/xhigh`)** | ✅ **随时通过 `/effort` 或 WebUI** | ✅ **深度集成 Claude 3.7 Thinking** | ⚠️ 前端面板手动配置思考参数 | ✅ **深度集成 Grok 推理档位** | ❌ 切换易残留旧绑定 |
 | **独立首 Token 活性超时守护 (解决长推理假死)** | ✅ **60s × 3 独立计时防挂起** | ⚠️ 全局统一 Stream 请求超时 | ⚠️ Effect 统一请求超时 | ✅ 进程级看门狗与中断协同 | ❌ 易触发流超时假死 |
 | **多实例远程无头服务 (Serve) + WebUI Gateway** | ✅ **纯 Rust 高并发 Serve + Web 控制台** | ❌ 纯终端 CLI (专为 CLI 打造) | ✅ **具备 Web 控制台与桌面端应用** | ❌ 纯终端 Pager TUI 模式 | ⚠️ 仅简单本地 WebUI |
@@ -154,8 +154,8 @@ JeikCode 由此获得启蒙，彻底自研了原生的 **`CodeExplore`** 与 **`
 - 内置 8 大模块化知识库（`01_prompts_and_context.md` 至 `08_updates_and_releases.md`）；
 - 原生提供 **`jeikcode_config_guide`** 工具，智能体可自主调阅规范并指导用户排查配置。
 
-### 6. 全协议模型适配与 4 档思考努力度
-- 原生支持 OpenAI Responses（`/v1/responses`）、Chat Completions、Anthropic 与 Ollama 四大协议；
+### 6. 三大主流协议适配与 4 档思考努力度
+- 原生支持三大主流模型协议标准：OpenAI Responses（`/v1/responses`）、OpenAI Chat Completions 与 Anthropic Messages（并具备本地 Ollama 兼容适配）；
 - 随时通过 `/effort` 切换 4 档思考努力程度（`low` / `medium` / `high` / `xhigh` / `off`）；
 - 账号凭据与模型参数彻底解耦，打开 `/modeladd` 自动拉取上游 `/models` 列表。
 

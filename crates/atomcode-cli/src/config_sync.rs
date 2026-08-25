@@ -90,9 +90,9 @@ pub const BUNDLED_ASSETS: &[BundledFileEntry] = &[
         description: "词林 computer_science.txt",
     },
     BundledFileEntry {
-        relative_path: "thesaurus/ecommerce.txt",
-        content: include_str!("../../atomcode-capabilities/assets/thesaurus/ecommerce.txt"),
-        description: "词林 ecommerce.txt",
+        relative_path: "thesaurus/ailaierp.txt",
+        content: include_str!("../../atomcode-capabilities/assets/thesaurus/ailaierp.txt"),
+        description: "词林 ailaierp.txt (Ailai ERP与电商)",
     },
     BundledFileEntry {
         relative_path: "thesaurus/fullstack_dev.txt",

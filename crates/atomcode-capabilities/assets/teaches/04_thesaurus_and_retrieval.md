@@ -1,4 +1,4 @@
-# 04 - 词林体系与代码检索相关性配置指南 (Thesaurus & Code Retrieval)
+﻿# 04 - 词林体系与代码检索相关性配置指南 (Thesaurus & Code Retrieval)
 
 ## 1. 词林（Thesaurus）机制与作用
 
@@ -46,7 +46,7 @@
 | `agent_core.txt` | AI Agent / 智能体核心 | 提示词, 系统指令, 工具调用 = prompt, tool_call, function_call |
 | `ai_agent.txt` | 大模型交互与运行流 | 流式输出, 轮次循环, 记忆 = stream, turn_loop, memory, context |
 | `computer_science.txt` | 计算机体系与基础算法 | 事务, 锁, 队列, 堆栈, 协程 = transaction, lock, queue, stack, coroutine |
-| `ecommerce.txt` | 电商与交易支付系统 | 订单, 购物车, 库存, 防超卖 = order, cart, stock, inventory, oversell |
+| `ailaierp.txt` | Ailai ERP、零售与企业电商 CRM | 订单, 金客, 三水, 报表, 业绩, 基本盘, 首单, 复购, 提成 = order, jinke, sanshui, report, stat, performance, base, first_order, repurchase, commission |
 | `fullstack_dev.txt` | 全栈开发与 Web 架构 | 控制器, 路由, 拦截器, 持久层 = controller, route, interceptor, repository |
 | `medical.txt` | 医疗与健康信息化 | 患者, 就诊, 病历, 处方 = patient, visit, emr, diagnosis, prescription |
 | `robotics.txt` | 机器人与具身智能 | 位姿, 机械臂, 运动学, 避障 = pose, manipulator, kinematics, navigation |
@@ -65,3 +65,4 @@
 ```
 
 保存后，`code_explore` 工具在执行中文检索时将自动关联 `risk_control`、`points_mall` 等英文代码路径。
+

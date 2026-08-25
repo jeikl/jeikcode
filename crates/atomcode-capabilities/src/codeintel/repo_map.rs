@@ -590,6 +590,7 @@ fn symbol_kind_label(kind: &super::graph::SymbolKind) -> &'static str {
         SymbolKind::Enum => "enum",
         SymbolKind::Constant => "const",
         SymbolKind::Variable => "var",
+        SymbolKind::Property => "prop",
         SymbolKind::Module => "mod",
         SymbolKind::Import => "import",
         SymbolKind::TypeAlias => "type",

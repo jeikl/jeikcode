@@ -39,8 +39,7 @@ pub fn symbol_ascii_terms(node: &SymbolNode) -> Vec<String> {
     terms
 }
 
-/// CJK phrases present in a symbol's text. Only consecutive CJK runs ≥2 chars
-/// are kept (single characters are too noisy for BM25 tf).
+/// CJK phrases present in a symbol's text with 2-gram and 3-gram sliding windows.
 pub fn symbol_cjk_phrases(node: &SymbolNode) -> Vec<String> {
     let text: Vec<char> = symbol_text(node).chars().collect();
     let mut phrases = Vec::new();
@@ -51,9 +50,24 @@ pub fn symbol_cjk_phrases(node: &SymbolNode) -> Vec<String> {
             while i < text.len() && is_cjk(text[i]) {
                 i += 1;
             }
-            let run: String = text[start..i].iter().collect();
-            if run.chars().count() >= 2 {
-                phrases.push(run);
+            let run_chars = &text[start..i];
+            let run_len = run_chars.len();
+            if run_len >= 2 {
+                let full_run: String = run_chars.iter().collect();
+                phrases.push(full_run);
+
+                // 2-gram sliding window
+                for w in 0..run_len - 1 {
+                    let bi: String = run_chars[w..=w + 1].iter().collect();
+                    phrases.push(bi);
+                }
+                // 3-gram sliding window
+                if run_len >= 3 {
+                    for w in 0..run_len - 2 {
+                        let tri: String = run_chars[w..=w + 2].iter().collect();
+                        phrases.push(tri);
+                    }
+                }
             }
         } else {
             i += 1;
@@ -76,6 +90,18 @@ pub fn symbol_text(node: &SymbolNode) -> String {
     for c in &node.inline_comments {
         s.push(' ');
         s.push_str(c);
+    }
+    for sc in &node.comments {
+        s.push(' ');
+        s.push_str(&sc.text);
+    }
+    for lit in &node.string_literals {
+        s.push(' ');
+        s.push_str(lit);
+    }
+    for sql in &node.sql_predicates {
+        s.push(' ');
+        s.push_str(&sql.raw_clause);
     }
     s
 }
@@ -134,12 +160,21 @@ impl IdfStats {
         stats
     }
 
-    /// Standard BM25 IDF with additive smoothing (never negative, 0 for terms
-    /// seen in every document).
+    /// Standard BM25 IDF with additive smoothing and high-frequency noise damping.
     pub fn idf(&self, term: &str) -> f64 {
         let df = self.df.get(term).copied().unwrap_or(0) as f64;
         let n = self.total_symbols as f64;
-        ((n - df + 0.5) / (df + 0.5)).ln().max(0.0)
+        if n <= 1.0 {
+            return 1.0;
+        }
+        let ratio = df / n;
+        let damping = if ratio > 0.20 {
+            (1.0 - ratio).max(0.15)
+        } else {
+            1.0
+        };
+        let raw_idf = ((n - df + 0.5) / (df + 0.5)).ln().max(0.0);
+        raw_idf * damping
     }
 
     /// Average document length (ascii terms + cjk phrases).
@@ -192,6 +227,10 @@ mod tests {
             signature: None,
             docstring: doc.map(|s| s.into()),
             inline_comments: vec![],
+            comments: vec![],
+            sql_predicates: vec![],
+            string_literals: vec![],
+            metrics: Default::default(),
         }
     }
 
@@ -209,7 +248,7 @@ mod tests {
 
         let stats = IdfStats::build(&graph);
         assert_eq!(stats.total_symbols, 11);
-        // "handle_tool_call" appears in 10 symbols → low idf (clamped to 0).
+        // "handle_tool_call" appears in 10 symbols → low idf.
         let common_idf = stats.idf("handle_tool_call");
         // "sampler_turn" appears in 1 symbol → high idf.
         let rare_idf = stats.idf("sampler_turn");
@@ -226,7 +265,8 @@ mod tests {
         n.id = 1;
         graph.add_symbol(n);
         let stats = IdfStats::build(&graph);
-        assert!(stats.df.contains_key("主循环处理"), "cjk phrase must be indexed");
-        assert_eq!(stats.idf("主循环处理"), stats.idf("主循环处理"));
+        assert!(stats.df.contains_key("主循环处理"), "full cjk phrase must be indexed");
+        assert!(stats.df.contains_key("主循环"), "2-gram cjk sub-phrase must be indexed");
+        assert!(stats.df.contains_key("循环"), "2-gram cjk sub-phrase must be indexed");
     }
 }

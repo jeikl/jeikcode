@@ -118,7 +118,7 @@ mod tests {
     #[test]
     fn bm25_ranks_sampler_turn_above_handle_tool_call_for_sampler_query() {
         let mut graph = CodeGraph::new();
-        let mut a = SymbolNode {
+        let a = SymbolNode {
             id: 1,
             name: "sampler_turn".into(),
             kind: SymbolKind::Function,
@@ -128,10 +128,10 @@ mod tests {
             end_line: 20,
             signature: None,
             docstring: Some("run a turn via the sampler".into()),
-            inline_comments: vec![],
+            ..Default::default()
         };
         graph.add_symbol(a.clone());
-        let mut b = SymbolNode {
+        let b = SymbolNode {
             id: 2,
             name: "handle_tool_call".into(),
             kind: SymbolKind::Function,
@@ -141,12 +141,12 @@ mod tests {
             end_line: 40,
             signature: None,
             docstring: Some("dispatch a tool call".into()),
-            inline_comments: vec![],
+            ..Default::default()
         };
         graph.add_symbol(b.clone());
         // Make the corpus larger so idf of "sampler" is not 0.
         for i in 0..20u64 {
-            let mut n = SymbolNode {
+            let n = SymbolNode {
                 id: 100 + i,
                 name: "handle_tool_call".into(),
                 kind: SymbolKind::Function,
@@ -155,8 +155,7 @@ mod tests {
                 start_line: 1,
                 end_line: 5,
                 signature: None,
-                docstring: None,
-                inline_comments: vec![],
+                ..Default::default()
             };
             graph.add_symbol(n);
         }

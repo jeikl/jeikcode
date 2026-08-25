@@ -44,7 +44,7 @@ impl DynamicThesaurus {
                 let p = entry.path();
                 if p.is_file() {
                     let ext = p.extension().and_then(|e| e.to_str()).unwrap_or("");
-                    if ext == "txt" || ext == "dict" {
+                    if ext == "txt" || ext == "dict" || ext == "md" {
                         if let Ok(content) = std::fs::read_to_string(&p) {
                             let content = super::strip_utf8_bom(&content);
                             self.parse_and_append(content);
@@ -151,6 +151,20 @@ impl DynamicThesaurus {
 持久层, 数据访问 = dao, repository, mapper, orm
 事务, 提交, 回滚 = transaction, tx, commit, rollback
 缓存, 预热 = cache, redis, warm_up
+基本盘, 基本盘业绩, 核心盘 = base, basic, base_performance, base_amount, base_total_amount, send_amount_base, total_amount_base
+业绩, 业绩统计, 达成业绩, 销售业绩, 考评业绩 = performance, achievement, sales_amount, sales_performance, stat_performance, daily_performance
+每日, 每日业绩, 日报, 每日统计 = daily, daily_performance, daily_stat, day
+月度, 月度业绩, 月报 = monthly, monthly_performance, month_stat
+首单, 首购, 首单激活 = first_order, first_deal, activate_first_order
+复购, 二次购买, 复购转化率 = repurchase, repeat_purchase, repurchase_rate
+金客, 黄金客户, 铂金客户, 金客赠品, 金客快照 = jinke, golden_customer, gold_customer, jinke_gift, jinke_snapshot, customer_grade
+三水, 三水项目, 三水一调, 三水二调 = sanshui, sanshui_project, sanshui_first, sanshui_second
+自营, TM自营, 天猫自营 = self_operated, tm_self, tmall_self
+爆款, 爆品, 爆款业绩 = hot_product, bk_order, bk_performance, bk_order_type, bk_total_amount
+取消单, 退货单, 签收, 未签收, 未发货 = cancel_order, return_order, sign_amount, not_sign_amount, not_send_amount, deliver_status
+报表, 统计, 数据报表, 看板 = report, stat, statistics, board, dashboard
+工作台, 首页看板 = workbench, console, home_board, home_statistics
+美莱, 艾莱 = ailai, meilai, erp
 "#;
         self.parse_and_append(DEFAULTS);
     }
@@ -354,6 +368,9 @@ pub fn compute_dense_embedding(text: &str, expanded: &HashSet<String>) -> Vec<f3
         (&['试', '败', '错'], &["retry", "error", "fail", "backoff", "reopen"], 64),
         (&['环', '轮', '转'], &["loop", "turn", "round", "cycle", "driver"], 65),
         (&['配', '置', '档'], &["config", "setting", "patch", "yaml", "manifest"], 66),
+        (&['基', '盘'], &["base", "basic", "core"], 67),
+        (&['绩', '效'], &["performance", "achievement", "stat"], 68),
+        (&['爆', '热'], &["bk", "hot", "popular"], 69),
     ];
 
     for (cjk_chars, en_stems, dim) in CONCEPT_ROOTS {

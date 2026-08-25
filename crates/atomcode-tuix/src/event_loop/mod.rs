@@ -7014,6 +7014,27 @@ mod tool_format_tests {
     }
 
     #[test]
+    fn format_tool_detail_code_explore_formats_query_and_path() {
+        let args = r#"{"path":"sources/ERP.API","query":"\u57fa\u672c\u76d8 \u4e1a\u7ee9 \u8ba1\u7b97 DailyPerformance"}"#;
+        let out = format_tool_detail("code_explore", args);
+        assert_eq!(out, "基本盘 业绩 计算 DailyPerformance in sources/ERP.API");
+    }
+
+    #[test]
+    fn format_tool_detail_code_explore_query_only() {
+        let args = r#"{"query":"BaseTotalAmount"}"#;
+        let out = format_tool_detail("code_explore", args);
+        assert_eq!(out, "BaseTotalAmount");
+    }
+
+    #[test]
+    fn format_tool_detail_repo_map_with_focus() {
+        let args = r#"{"path":"src","focus":"auth"}"#;
+        let out = format_tool_detail("repo_map", args);
+        assert_eq!(out, "src (focus: auth)");
+    }
+
+    #[test]
     fn format_tool_detail_invalid_json_returns_empty() {
         let out = format_tool_detail("read_file", "not json");
         assert_eq!(out, "");
@@ -23334,6 +23355,35 @@ pub(crate) fn format_tool_detail(name: &str, args_json: &str) -> String {
                 sym
             } else {
                 format!("{} in {}", sym, file)
+            }
+        }
+        "code_explore" => {
+            let q = get_str("query").unwrap_or_default();
+            let p = get_str("path").unwrap_or_default();
+            if q.is_empty() {
+                crate::width::truncate_with_ellipsis(&p, 100)
+            } else if p.is_empty() {
+                crate::width::truncate_with_ellipsis(&q, 100)
+            } else {
+                let detail = format!("{q} in {p}");
+                crate::width::truncate_with_ellipsis(&detail, 150)
+            }
+        }
+        "repo_map" => {
+            let p = get_str("path").unwrap_or_default();
+            let focus = get_str("focus").unwrap_or_default();
+            if focus.is_empty() {
+                if p.is_empty() {
+                    ".".to_string()
+                } else {
+                    crate::width::truncate_with_ellipsis(&p, 100)
+                }
+            } else if p.is_empty() || p == "." {
+                let detail = format!("focus: {focus}");
+                crate::width::truncate_with_ellipsis(&detail, 100)
+            } else {
+                let detail = format!("{p} (focus: {focus})");
+                crate::width::truncate_with_ellipsis(&detail, 120)
             }
         }
         "glob" => get_str("pattern")

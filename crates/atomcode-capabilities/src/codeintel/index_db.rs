@@ -386,8 +386,7 @@ mod tests {
             start_line: 10,
             end_line: 20,
             signature: Some("fn test_symbol()".to_string()),
-            docstring: None,
-            inline_comments: Vec::new(),
+            ..Default::default()
         };
         graph.add_symbol(node.clone());
 

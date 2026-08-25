@@ -235,8 +235,8 @@ fn seed_fork_defaults() {
         "admin_system.txt",
         "agent_core.txt",
         "ai_agent.txt",
+        "ailaierp.txt",
         "computer_science.txt",
-        "ecommerce.txt",
         "fullstack_dev.txt",
         "medical.txt",
         "robotics.txt",
@@ -277,8 +277,8 @@ static THESAURUS_ASSETS: std::sync::LazyLock<std::collections::HashMap<&'static 
         m.insert("admin_system.txt", include_str!("../../assets/thesaurus/admin_system.txt"));
         m.insert("agent_core.txt", include_str!("../../assets/thesaurus/agent_core.txt"));
         m.insert("ai_agent.txt", include_str!("../../assets/thesaurus/ai_agent.txt"));
+        m.insert("ailaierp.txt", include_str!("../../assets/thesaurus/ailaierp.txt"));
         m.insert("computer_science.txt", include_str!("../../assets/thesaurus/computer_science.txt"));
-        m.insert("ecommerce.txt", include_str!("../../assets/thesaurus/ecommerce.txt"));
         m.insert("fullstack_dev.txt", include_str!("../../assets/thesaurus/fullstack_dev.txt"));
         m.insert("medical.txt", include_str!("../../assets/thesaurus/medical.txt"));
         m.insert("robotics.txt", include_str!("../../assets/thesaurus/robotics.txt"));
@@ -1032,21 +1032,47 @@ fn has_genuine_match_anchor(tokens: &SearchTokens, node: &SymbolNode) -> bool {
         }
     }
 
+    // 8. Check structured comments
+    for sc in &node.comments {
+        let sc_lower = sc.text.to_ascii_lowercase();
+        if tokens.cjk_phrases.iter().any(|p| sc.text.contains(p))
+            || tokens.expanded_terms.iter().any(|t| sc_lower.contains(t))
+        {
+            return true;
+        }
+    }
+
+    // 9. Check SQL predicates and string literals
+    for sql in &node.sql_predicates {
+        let sql_lower = sql.raw_clause.to_ascii_lowercase();
+        if tokens.cjk_phrases.iter().any(|p| sql.raw_clause.contains(p))
+            || tokens.expanded_terms.iter().any(|t| sql_lower.contains(t))
+            || tokens.words.iter().any(|w| w.len() >= 3 && sql_lower.contains(w))
+        {
+            return true;
+        }
+    }
+    for lit in &node.string_literals {
+        let lit_lower = lit.to_ascii_lowercase();
+        if tokens.cjk_phrases.iter().any(|p| lit.contains(p))
+            || tokens.expanded_terms.iter().any(|t| lit_lower.contains(t))
+            || tokens.words.iter().any(|w| w.len() >= 3 && lit_lower.contains(w))
+        {
+            return true;
+        }
+    }
+
     false
 }
 
 /// Score all symbols across files using multi-field similarity & graph topology.
-///
 /// `bm25_scores` is the opt-in BM25 lexical recall (symbol id → raw BM25 score).
-/// Two effects:
-/// 1. SOFT-ANCHOR: a symbol that fails the semantic-anchor gate is NOT dropped —
-///    it gets a 0.3 decay instead, so naming-plain core files (run_loop.rs /
-///    turn.rs / tool_calls.rs) still reach the corpus; pure noise is filtered
-///    by the `text_match` threshold below (relevance floor, separate from the
-///    semantic gate).
-/// 2. RRF-FUSION: the BM25 score contributes a bounded bonus (0..25) to the
-///    final raw score, so lexical recall is a real ranking signal, not just a
-///    rescue set.
+///
+/// 4-Stage Hybrid Scoring Architecture:
+/// 1. Multi-channel text similarity (branch comments, SQL predicates, docstrings, names)
+/// 2. AST role & Active logic multipliers (core SQL/logic 1.5x, enums 1.3x, DTO dampening)
+/// 3. BM25 / Concept vector fusion & Graph centrality
+/// 4. Directory co-occurrence boost (boosting peers in algorithmic directories)
 fn score_workspace_symbols(
     graph: &CodeGraph,
     tokens: &SearchTokens,
@@ -1149,46 +1175,101 @@ fn score_workspace_symbols(
             name_bonus += 30.0;
         }
 
-        // Project name de-inflation: if symbol name is just the repo name itself, de-prioritize
+        // Project name de-inflation
         if project_tokens.contains(&node_name_lower) && !tokens.raw_query.eq_ignore_ascii_case(&node.name) {
             name_bonus *= 0.2;
         }
 
-        let doc_sim = node
-            .docstring
-            .as_ref()
-            .map(|d| calculate_text_similarity(tokens, d))
-            .unwrap_or(0.0);
-        let inline_sim = node
-            .inline_comments
-            .iter()
-            .map(|c| calculate_text_similarity(tokens, c))
-            .fold(0.0f64, f64::max);
+        // 1. Structural comment matching
+        let mut branch_comment_sim = 0.0f64;
+        let mut doc_sim = 0.0f64;
+        let mut plain_inline_sim = 0.0f64;
+
+        if let Some(doc) = &node.docstring {
+            doc_sim = doc_sim.max(calculate_text_similarity(tokens, doc));
+        }
+        for c in &node.inline_comments {
+            plain_inline_sim = plain_inline_sim.max(calculate_text_similarity(tokens, c));
+        }
+        for sc in &node.comments {
+            let sim = calculate_text_similarity(tokens, &sc.text);
+            match sc.scope {
+                super::graph::CommentScope::BranchInline { .. } => {
+                    branch_comment_sim = branch_comment_sim.max(sim);
+                }
+                super::graph::CommentScope::Docstring
+                | super::graph::CommentScope::MethodHeader => {
+                    doc_sim = doc_sim.max(sim);
+                }
+                super::graph::CommentScope::PropertyDoc
+                | super::graph::CommentScope::PlainInline => {
+                    plain_inline_sim = plain_inline_sim.max(sim);
+                }
+            }
+        }
+
+        // 2. SQL predicates & String literals matching
+        let mut sql_sim = 0.0f64;
+        for sql in &node.sql_predicates {
+            sql_sim = sql_sim.max(calculate_text_similarity(tokens, &sql.raw_clause));
+            for f in &sql.target_fields {
+                sql_sim = sql_sim.max(calculate_text_similarity(tokens, f));
+            }
+        }
+        for lit in &node.string_literals {
+            sql_sim = sql_sim.max(calculate_text_similarity(tokens, lit));
+        }
 
         let path_sim = path_sims.get(&node.file).copied().unwrap_or(0.0);
 
-        let text_match = (name_sim + name_bonus) * 0.50 + doc_sim * 0.25 + inline_sim * 0.15 + path_sim * 0.10;
-        if text_match < 8.0 {
+        // 3. Multi-channel text similarity
+        let text_match = (name_sim + name_bonus) * 0.15
+            + branch_comment_sim * 0.35
+            + sql_sim * 0.30
+            + doc_sim * 0.20
+            + plain_inline_sim * 0.10
+            + path_sim * 0.05;
+
+        let has_strong_anchor = branch_comment_sim >= 20.0
+            || sql_sim >= 20.0
+            || doc_sim >= 25.0
+            || (name_sim + name_bonus) >= 30.0;
+
+        if text_match < 2.5 && !has_strong_anchor && !bm25_scores.contains_key(&node.id) {
             return None;
         }
 
         let callers_cnt = graph.callers(node.id).map(|v| v.len()).unwrap_or(0);
         let callees_cnt = graph.callees(node.id).map(|v| v.len()).unwrap_or(0);
-        let graph_mass = ((callers_cnt + callees_cnt) as f64).min(10.0);
+        let graph_mass = ((callers_cnt + callees_cnt) as f64).min(12.0);
 
+        // 4. AST Role & Active Logic weighting
         let kind_weight = match node.kind {
-            SymbolKind::Function | SymbolKind::Method | SymbolKind::Middleware | SymbolKind::RouteEndpoint => 1.0,
+            SymbolKind::SqlStatement => 1.50,
+            _ if node.metrics.has_sql_or_qs || branch_comment_sim >= 20.0 => 1.45,
+            SymbolKind::Enum => 1.30,
+            SymbolKind::Function | SymbolKind::Method | SymbolKind::Middleware | SymbolKind::RouteEndpoint => {
+                if node.metrics.is_active_logic { 1.25 } else { 1.0 }
+            }
             SymbolKind::Class | SymbolKind::Struct | SymbolKind::Interface | SymbolKind::Trait => 0.95,
             SymbolKind::PluginDeclaration => 1.05,
-            SymbolKind::SqlStatement => 0.95,
             SymbolKind::ConfigProperty | SymbolKind::UiElement => 0.85,
             SymbolKind::Constant | SymbolKind::Variable => 0.75,
+            _ if node.metrics.is_pure_dto => 0.45,
             _ => 0.7,
         };
 
-        // RRF-style BM25 fusion: normalized BM25 score contributes a bounded 0..25
-        // bonus (position-based weighting, so lexical recall is a real ranking
-        // signal rather than a rescue set).
+        let active_bonus = if node.metrics.is_active_logic {
+            let b = (node.metrics.branch_count as f64 * 6.0).min(18.0);
+            let s = if node.metrics.has_sql_or_qs { 15.0 } else { 0.0 };
+            b + s
+        } else if node.metrics.is_pure_dto && name_sim < 60.0 {
+            -10.0
+        } else {
+            0.0
+        };
+
+        // RRF-style BM25 fusion
         let bm25_bonus = if bm25_max > 0.0 {
             let norm = bm25_scores.get(&node.id).copied().unwrap_or(0.0) / bm25_max;
             norm * 25.0
@@ -1196,10 +1277,6 @@ fn score_workspace_symbols(
             0.0
         };
 
-        // Semantic concept-vector path (opt-in, ATOMCODE_EXPLORE_CONCEPT=1):
-        // Chinese query ↔ English code cosine similarity, bounded 0..20 bonus.
-        // Symbol vectors come from the CodeIndex-shared cache when available
-        // (built once for the whole graph), else computed per-symbol.
         let concept_bonus = if !query_concept_vec.is_empty() {
             let sim = match concept_vectors.and_then(|m| m.get(&node.id)) {
                 Some(v) => super::retrieval::concept_cosine(query_concept_vec, v),
@@ -1214,19 +1291,17 @@ fn score_workspace_symbols(
             0.0
         };
 
-        // anchor_decay × text_match, plus BM25/概念向量 bonus, times kind weight.
-        let raw_score =
-            (text_match * anchor_decay + graph_mass * 1.0 + bm25_bonus + concept_bonus) * kind_weight;
+        let raw_score = ((text_match * anchor_decay + graph_mass * 1.0 + active_bonus + bm25_bonus + concept_bonus) * kind_weight).max(0.0);
 
-        if raw_score >= 12.0 {
+        if raw_score >= 10.0 || (has_strong_anchor && raw_score >= 5.0) {
             Some((
                 node.file.clone(),
                 ScoredSymbol {
                     node: node.clone(),
                     total_score: raw_score,
                     name_score: name_sim + name_bonus,
-                    doc_score: doc_sim,
-                    inline_score: inline_sim,
+                    doc_score: doc_sim.max(branch_comment_sim),
+                    inline_score: plain_inline_sim.max(sql_sim),
                     graph_mass,
                 },
             ))
@@ -1294,6 +1369,28 @@ fn score_workspace_symbols(
             top_score: adjusted_score,
             symbols: syms,
         });
+    }
+
+    // 5. Directory Co-occurrence Boost
+    // If a directory contains high-scoring core files (>= 70.0), boost peers in the same directory by 1.35x
+    let mut dir_top_scores: HashMap<PathBuf, f64> = HashMap::new();
+    for cand in &candidates {
+        if let Some(parent) = cand.file.parent() {
+            let entry = dir_top_scores.entry(parent.to_path_buf()).or_insert(0.0);
+            if cand.top_score > *entry {
+                *entry = cand.top_score;
+            }
+        }
+    }
+
+    for cand in &mut candidates {
+        if let Some(parent) = cand.file.parent() {
+            if let Some(&top) = dir_top_scores.get(parent) {
+                if top >= 70.0 && cand.top_score < top {
+                    cand.top_score = (cand.top_score * 1.35).min(top * 0.95);
+                }
+            }
+        }
     }
 
     // Sort production files ahead of test files and peripheral scripts
@@ -2653,8 +2750,7 @@ mod tests {
             start_line: 10,
             end_line: 50,
             signature: None,
-            docstring: None,
-            inline_comments: Vec::new(),
+            ..Default::default()
         };
         let node2 = SymbolNode {
             id: 2,
@@ -2665,8 +2761,7 @@ mod tests {
             start_line: 60,
             end_line: 80,
             signature: None,
-            docstring: None,
-            inline_comments: Vec::new(),
+            ..Default::default()
         };
         let node3 = SymbolNode {
             id: 3,
@@ -2677,8 +2772,7 @@ mod tests {
             start_line: 100,
             end_line: 200,
             signature: None,
-            docstring: None,
-            inline_comments: Vec::new(),
+            ..Default::default()
         };
 
         graph.add_symbol(node1);
@@ -2709,8 +2803,7 @@ mod tests {
                 start_line: (10 + i * 10) as usize,
                 end_line: (20 + i * 10) as usize,
                 signature: None,
-                docstring: None,
-                inline_comments: Vec::new(),
+                ..Default::default()
             };
             graph.add_symbol(node.clone());
             nodes.push(node);
@@ -2760,8 +2853,7 @@ mod tests {
                 start_line: 1,
                 end_line: 10,
                 signature: None,
-                docstring: None,
-                inline_comments: Vec::new(),
+                ..Default::default()
             };
             candidates.push(FileCandidate {
                 file: node.file.clone(),
@@ -2824,8 +2916,7 @@ mod tests {
             start_line: 18,
             end_line: 70,
             signature: None,
-            docstring: None,
-            inline_comments: Vec::new(),
+            ..Default::default()
         };
         let target_id = target.id;
         graph.add_symbol(target.clone());
@@ -2841,8 +2932,7 @@ mod tests {
                 start_line: 1,
                 end_line: 5,
                 signature: None,
-                docstring: None,
-                inline_comments: Vec::new(),
+                ..Default::default()
             };
             graph.add_symbol(node.clone());
             caller_ids.push(node.id);
@@ -2860,8 +2950,7 @@ mod tests {
                 start_line: 80 + i as usize * 10,
                 end_line: 90 + i as usize * 10,
                 signature: None,
-                docstring: None,
-                inline_comments: Vec::new(),
+                ..Default::default()
             };
             graph.add_symbol(node.clone());
             callee_ids.push(node.id);
@@ -2912,8 +3001,7 @@ mod tests {
             start_line: 182,
             end_line: 210,
             signature: None,
-            docstring: None,
-            inline_comments: Vec::new(),
+            ..Default::default()
         };
         graph.add_symbol(node.clone());
         let candidates = vec![FileCandidate {
@@ -2961,8 +3049,7 @@ mod tests {
             start_line: 10,
             end_line: 40,
             signature: None,
-            docstring: None,
-            inline_comments: Vec::new(),
+            ..Default::default()
         };
         let func_candidates = vec![FileCandidate {
             file: func_node.file.clone(),
@@ -2996,8 +3083,7 @@ mod tests {
             start_line: 18,
             end_line: 70,
             signature: None,
-            docstring: None,
-            inline_comments: Vec::new(),
+            ..Default::default()
         };
         graph.add_symbol(hit_node.clone());
         // A sibling in the SAME dir that the query never surfaced (no shared term):
@@ -3012,8 +3098,7 @@ mod tests {
             start_line: 98,
             end_line: 130,
             signature: None,
-            docstring: None,
-            inline_comments: Vec::new(),
+            ..Default::default()
         };
         graph.add_symbol(sibling_node.clone());
         // An unrelated file in a FAR directory: MUST NOT appear.
@@ -3026,8 +3111,7 @@ mod tests {
             start_line: 10,
             end_line: 40,
             signature: None,
-            docstring: None,
-            inline_comments: Vec::new(),
+            ..Default::default()
         };
         graph.add_symbol(far_node.clone());
 
@@ -3073,8 +3157,7 @@ mod tests {
             start_line: 182,
             end_line: 210,
             signature: None,
-            docstring: None,
-            inline_comments: Vec::new(),
+            ..Default::default()
         };
         graph.add_symbol(in_scope_node.clone());
         // File OUTSIDE the scope: the capabilities-layer repair implementation that a
@@ -3088,8 +3171,7 @@ mod tests {
             start_line: 18,
             end_line: 70,
             signature: None,
-            docstring: None,
-            inline_comments: Vec::new(),
+            ..Default::default()
         };
         graph.add_symbol(out_of_scope_node.clone());
 
@@ -3426,8 +3508,7 @@ mod tests {
             start_line: line,
             end_line: line + 4,
             signature: None,
-            docstring: None,
-            inline_comments: Vec::new(),
+            ..Default::default()
         }
     }
 
@@ -3634,6 +3715,353 @@ mod tests {
             "foreign skip must be explicit:\n{out}"
         );
         let _ = Visibility::Public;
+    }
+
+    #[test]
+    fn test_codeintel_2_0_branch_comment_and_sql_boost() {
+        let mut graph = CodeGraph::new();
+
+        // 1. Core SQL class with branch inline comment and SQL predicate
+        let mut core_sql_node = SymbolNode {
+            id: 1,
+            name: "RelationOrderNo".to_string(),
+            kind: SymbolKind::Method,
+            visibility: super::super::graph::Visibility::Public,
+            file: PathBuf::from("sources/ERP.API/Apis/Ailai.Order/Models/Data/WhereModel/DailyPerformanceStatSqlStr.cs"),
+            start_line: 45,
+            end_line: 85,
+            signature: Some("private string RelationOrderNo(DailyPerformanceRequest req)".to_string()),
+            docstring: None,
+            inline_comments: vec!["//总业绩(基本盘)".to_string()],
+            comments: vec![super::super::graph::StructuredComment {
+                text: "//总业绩(基本盘)".to_string(),
+                scope: super::super::graph::CommentScope::BranchInline {
+                    branch_kind: "switch_case".to_string(),
+                },
+                line: 58,
+            }],
+            sql_predicates: vec![super::super::graph::SqlPredicate {
+                raw_clause: "AND po.BKOrderType IN (0,2)".to_string(),
+                target_fields: vec!["BKOrderType".to_string()],
+                line: 59,
+            }],
+            string_literals: vec!["AND po.BKOrderType IN (0,2)".to_string()],
+            metrics: super::super::graph::AstMetrics {
+                cyclomatic_complexity: 5,
+                branch_count: 4,
+                has_sql_or_qs: true,
+                is_pure_dto: false,
+                is_active_logic: true,
+            },
+        };
+        graph.add_symbol(core_sql_node.clone());
+
+        // 2. Pure DTO containing "Performance" in name but no logic
+        let mut dto_node = SymbolNode {
+            id: 2,
+            name: "PerformanceIndexData".to_string(),
+            kind: SymbolKind::Class,
+            visibility: super::super::graph::Visibility::Public,
+            file: PathBuf::from("sources/ERP.API/Apis/Ailai.Statistics/Models/Data/Workbenchs/PerformanceIndexData.cs"),
+            start_line: 10,
+            end_line: 40,
+            signature: Some("public class PerformanceIndexData".to_string()),
+            docstring: Some("/// 工作台考评数据".to_string()),
+            inline_comments: vec![],
+            comments: vec![],
+            sql_predicates: vec![],
+            string_literals: vec![],
+            metrics: super::super::graph::AstMetrics {
+                cyclomatic_complexity: 1,
+                branch_count: 0,
+                has_sql_or_qs: false,
+                is_pure_dto: true,
+                is_active_logic: false,
+            },
+        };
+        graph.add_symbol(dto_node.clone());
+
+        let dt = super::super::bilingual_nlp::DynamicThesaurus::default();
+        let tokens = super::super::bilingual_nlp::parse_bilingual_query_with_thesaurus("基本盘业绩 计算", &dt);
+        let parsed_query = super::super::bilingual_nlp::parse_field_qualified_query("基本盘业绩 计算");
+        let project_tokens = HashSet::new();
+        let bm25_scores = HashMap::new();
+
+        let candidates = score_workspace_symbols(
+            &graph,
+            &tokens,
+            &parsed_query,
+            &project_tokens,
+            None,
+            &bm25_scores,
+            &tokens.dense_vector,
+            None,
+        );
+
+        assert!(!candidates.is_empty(), "Must score candidates");
+        assert_eq!(
+            candidates[0].file,
+            core_sql_node.file,
+            "DailyPerformanceStatSqlStr must rank #1 ahead of DTO noise. Actual order: {:?}",
+            candidates.iter().map(|c| (&c.file, c.top_score)).collect::<Vec<_>>()
+        );
+        assert!(
+            candidates[0].top_score > 60.0,
+            "Core SQL score must be > 60, was {}",
+            candidates[0].top_score
+        );
+    }
+
+    #[test]
+    fn test_codeintel_2_0_daily_ailai_performance_search() {
+        let mut graph = CodeGraph::new();
+
+        // 1. 核心 SQL 组装类：DailyPerformanceStatSqlStr.cs (负责每日美莱业绩统计的核心 SQL 生成)
+        let core_sql_node = SymbolNode {
+            id: 101,
+            name: "DailyPerformanceStatSqlStr".to_string(),
+            kind: SymbolKind::Class,
+            visibility: super::super::graph::Visibility::Public,
+            file: PathBuf::from("sources/ERP.API/Apis/Ailai.Order/Models/Data/WhereModel/DailyPerformanceStatSqlStr.cs"),
+            start_line: 15,
+            end_line: 120,
+            signature: Some("public class DailyPerformanceStatSqlStr".to_string()),
+            docstring: Some("/// 每日业绩统计SQL组装策略".to_string()),
+            inline_comments: vec!["// 美莱每日业绩汇总计算".to_string(), "// 总业绩(基本盘)".to_string()],
+            comments: vec![
+                super::super::graph::StructuredComment {
+                    text: "/// 每日业绩统计SQL组装策略".to_string(),
+                    scope: super::super::graph::CommentScope::Docstring,
+                    line: 14,
+                },
+                super::super::graph::StructuredComment {
+                    text: "// 美莱每日业绩汇总计算".to_string(),
+                    scope: super::super::graph::CommentScope::BranchInline {
+                        branch_kind: "switch_case".to_string(),
+                    },
+                    line: 48,
+                },
+            ],
+            sql_predicates: vec![
+                super::super::graph::SqlPredicate {
+                    raw_clause: "AND po.BKOrderType IN (0,2) AND po.OrderDate >= @StartDate".to_string(),
+                    target_fields: vec!["BKOrderType".to_string(), "OrderDate".to_string()],
+                    line: 50,
+                },
+            ],
+            string_literals: vec!["AND po.BKOrderType IN (0,2)".to_string(), "美莱业绩统计".to_string()],
+            metrics: super::super::graph::AstMetrics {
+                cyclomatic_complexity: 8,
+                branch_count: 6,
+                has_sql_or_qs: true,
+                is_pure_dto: false,
+                is_active_logic: true,
+            },
+        };
+        graph.add_symbol(core_sql_node.clone());
+
+        // 2. 实体/DTO 类：DailyPerformanceEntity.cs
+        let entity_node = SymbolNode {
+            id: 102,
+            name: "DailyPerformanceEntity".to_string(),
+            kind: SymbolKind::Class,
+            visibility: super::super::graph::Visibility::Public,
+            file: PathBuf::from("sources/ERP.API/Apis/Ailai.Order/Models/Data/DailyPerformanceEntity.cs"),
+            start_line: 10,
+            end_line: 60,
+            signature: Some("public class DailyPerformanceEntity".to_string()),
+            docstring: Some("/// 美莱每日业绩数据实体".to_string()),
+            inline_comments: vec![],
+            comments: vec![super::super::graph::StructuredComment {
+                text: "/// 美莱每日业绩数据实体".to_string(),
+                scope: super::super::graph::CommentScope::Docstring,
+                line: 9,
+            }],
+            sql_predicates: vec![],
+            string_literals: vec![],
+            metrics: super::super::graph::AstMetrics {
+                cyclomatic_complexity: 1,
+                branch_count: 0,
+                has_sql_or_qs: false,
+                is_pure_dto: true,
+                is_active_logic: false,
+            },
+        };
+        graph.add_symbol(entity_node.clone());
+
+        // 3. 噪音干扰项：无关工作台考评 DTO
+        let noise_node = SymbolNode {
+            id: 103,
+            name: "PerformanceIndexData".to_string(),
+            kind: SymbolKind::Class,
+            visibility: super::super::graph::Visibility::Public,
+            file: PathBuf::from("sources/ERP.API/Apis/Ailai.Statistics/Models/Data/Workbenchs/PerformanceIndexData.cs"),
+            start_line: 10,
+            end_line: 50,
+            signature: Some("public class PerformanceIndexData".to_string()),
+            docstring: Some("/// 工作台考评数据".to_string()),
+            inline_comments: vec![],
+            comments: vec![],
+            sql_predicates: vec![],
+            string_literals: vec![],
+            metrics: super::super::graph::AstMetrics {
+                cyclomatic_complexity: 1,
+                branch_count: 0,
+                has_sql_or_qs: false,
+                is_pure_dto: true,
+                is_active_logic: false,
+            },
+        };
+        graph.add_symbol(noise_node.clone());
+
+        let dt = super::super::bilingual_nlp::DynamicThesaurus::new();
+        let query_text = "每日美莱业绩";
+        let tokens = super::super::bilingual_nlp::parse_bilingual_query_with_thesaurus(query_text, &dt);
+        let parsed_query = super::super::bilingual_nlp::parse_field_qualified_query(query_text);
+        let project_tokens = HashSet::new();
+        let bm25_scores = HashMap::new();
+
+        let candidates = score_workspace_symbols(
+            &graph,
+            &tokens,
+            &parsed_query,
+            &project_tokens,
+            None,
+            &bm25_scores,
+            &tokens.dense_vector,
+            None,
+        );
+
+        assert!(!candidates.is_empty(), "必须召回相关文件");
+
+        // 核心 SQL 类必须稳居第一
+        assert_eq!(
+            candidates[0].file,
+            core_sql_node.file,
+            "核心 SQL 组装类 DailyPerformanceStatSqlStr.cs 必须排在第 1 位！实际第一位: {:?}",
+            candidates[0].file
+        );
+        assert!(
+            candidates[0].top_score >= 80.0,
+            "核心类得分必须高权（>= 80.0），实际得分: {:.2}",
+            candidates[0].top_score
+        );
+    }
+
+    #[test]
+    fn test_codeintel_2_0_jinke_and_sanshui_search() {
+        let mut graph = CodeGraph::new();
+
+        // 1. 金客业务控制器/服务
+        let jinke_node = SymbolNode {
+            id: 201,
+            name: "CustomerIntroAttachmentController".to_string(),
+            kind: SymbolKind::Class,
+            visibility: super::super::graph::Visibility::Public,
+            file: PathBuf::from("sources/ERP.API/Apis/Ailai.Customer/Controllers/CustomerIntroAttachmentController.cs"),
+            start_line: 20,
+            end_line: 200,
+            signature: Some("public class CustomerIntroAttachmentController : ControllerBase".to_string()),
+            docstring: Some("/// 金客赠品跟进考核所需客户侧数据".to_string()),
+            inline_comments: vec!["// 获取金客赠品跟进考核所需客户侧数据".to_string()],
+            comments: vec![
+                super::super::graph::StructuredComment {
+                    text: "/// 金客赠品跟进考核所需客户侧数据".to_string(),
+                    scope: super::super::graph::CommentScope::Docstring,
+                    line: 19,
+                },
+                super::super::graph::StructuredComment {
+                    text: "// 获取金客赠品跟进考核所需客户侧数据".to_string(),
+                    scope: super::super::graph::CommentScope::BranchInline {
+                        branch_kind: "if_condition".to_string(),
+                    },
+                    line: 175,
+                },
+            ],
+            sql_predicates: vec![],
+            string_literals: vec!["JinkeGiftFollowAssessment".to_string()],
+            metrics: super::super::graph::AstMetrics {
+                cyclomatic_complexity: 5,
+                branch_count: 4,
+                has_sql_or_qs: false,
+                is_pure_dto: false,
+                is_active_logic: true,
+            },
+        };
+        graph.add_symbol(jinke_node.clone());
+
+        // 2. 三水项目分配服务
+        let sanshui_node = SymbolNode {
+            id: 202,
+            name: "CustomerBaseData".to_string(),
+            kind: SymbolKind::Class,
+            visibility: super::super::graph::Visibility::Public,
+            file: PathBuf::from("sources/ERP.API/Apis/Ailai.Customer/Models/Data/CustomerBaseData.cs"),
+            start_line: 50,
+            end_line: 4000,
+            signature: Some("public class CustomerBaseData : ICustomerBaseData".to_string()),
+            docstring: Some("/// 客户资源分配与三水项目二调统计".to_string()),
+            inline_comments: vec!["// 三水项目工号分配与二调流转".to_string(), "case ProjectTraceRequest.PageTypeEnum.三水一调:".to_string()],
+            comments: vec![super::super::graph::StructuredComment {
+                text: "// 三水项目工号分配与二调流转".to_string(),
+                scope: super::super::graph::CommentScope::BranchInline {
+                    branch_kind: "switch_case".to_string(),
+                },
+                line: 2756,
+            }],
+            sql_predicates: vec![super::super::graph::SqlPredicate {
+                raw_clause: "WHERE o.CustomerId = cb.CustomerId AND o.OrderSource <> 9".to_string(),
+                target_fields: vec!["CustomerId".to_string(), "OrderSource".to_string()],
+                line: 677,
+            }],
+            string_literals: vec!["三水一调".to_string(), "三水二调".to_string()],
+            metrics: super::super::graph::AstMetrics {
+                cyclomatic_complexity: 12,
+                branch_count: 10,
+                has_sql_or_qs: true,
+                is_pure_dto: false,
+                is_active_logic: true,
+            },
+        };
+        graph.add_symbol(sanshui_node.clone());
+
+        let dt = super::super::bilingual_nlp::DynamicThesaurus::new();
+        let project_tokens = HashSet::new();
+        let bm25_scores = HashMap::new();
+
+        // 搜索 "金客赠品跟进"
+        let q1 = "金客赠品跟进";
+        let tokens1 = super::super::bilingual_nlp::parse_bilingual_query_with_thesaurus(q1, &dt);
+        let parsed_q1 = super::super::bilingual_nlp::parse_field_qualified_query(q1);
+        let cands1 = score_workspace_symbols(
+            &graph,
+            &tokens1,
+            &parsed_q1,
+            &project_tokens,
+            None,
+            &bm25_scores,
+            &tokens1.dense_vector,
+            None,
+        );
+        assert!(!cands1.is_empty());
+        assert_eq!(cands1[0].file, jinke_node.file, "搜索金客必须命中 CustomerIntroAttachmentController");
+
+        // 搜索 "三水一调 分配"
+        let q2 = "三水一调 分配";
+        let tokens2 = super::super::bilingual_nlp::parse_bilingual_query_with_thesaurus(q2, &dt);
+        let parsed_q2 = super::super::bilingual_nlp::parse_field_qualified_query(q2);
+        let cands2 = score_workspace_symbols(
+            &graph,
+            &tokens2,
+            &parsed_q2,
+            &project_tokens,
+            None,
+            &bm25_scores,
+            &tokens2.dense_vector,
+            None,
+        );
+        assert!(!cands2.is_empty());
+        assert_eq!(cands2[0].file, sanshui_node.file, "搜索三水一调必须命中 CustomerBaseData");
     }
 }
 

@@ -1,4 +1,4 @@
-# JeikCode 升级与发版配置指南 (Updates & Releases Guide)
+﻿# JeikCode 升级与发版配置指南 (Updates & Releases Guide)
 
 本文档详细说明 JeikCode 的自升级机制、默认更新源、环境变量覆盖、发版打包流程与交叉编译规范。
 
@@ -26,7 +26,7 @@ JeikCode 采用集中式端点解析机制（位于 `crates/atomcode-config/src/
 升级检查器通过解析 `latest.json` 匹配本地当前平台 Target：
 ```json
 {
-  "version": "6.0.26",
+  "version": "6.0.27",
   "released_at": "2026-08-25",
   "binaries": {
     "windows-x64": {
@@ -130,12 +130,13 @@ cargo build --release --target x86_64-unknown-linux-musl --bin atomcode
 ### 4.4 归档与 GitHub 发版
 ```powershell
 # 1. 复制产物至 dist/ 目录并生成哈希
-Copy-Item .\target\release\atomcode.exe .\dist\atomcode-6.0.26-windows-x64.exe -Force
+Copy-Item .\target\release\atomcode.exe .\dist\atomcode-6.0.27-windows-x64.exe -Force
 Copy-Item .\target\release\atomcode.exe .\dist\atomcode-windows-x64.exe -Force
-Copy-Item .\target\x86_64-unknown-linux-musl\release\atomcode .\dist\atomcode-6.0.26-linux-x64 -Force
+Copy-Item .\target\x86_64-unknown-linux-musl\release\atomcode .\dist\atomcode-6.0.27-linux-x64 -Force
 Copy-Item .\target\x86_64-unknown-linux-musl\release\atomcode .\dist\atomcode-linux-x64 -Force
 
 # 2. 更新 latest.json 与 RELEASE_NOTES
 # 3. 使用 gh CLI 快速发布 Release
-gh release create 6.0.26 .\dist\atomcode-6.0.26-windows-x64.exe .\dist\atomcode-windows-x64.exe .\dist\atomcode-6.0.26-linux-x64 .\dist\atomcode-linux-x64 --repo jeikl/jeikcode --title "6.0.26" --notes-file .\dist\RELEASE_NOTES_6.0.26.md
+gh release create 6.0.27 .\dist\atomcode-6.0.27-windows-x64.exe .\dist\atomcode-windows-x64.exe .\dist\atomcode-6.0.27-linux-x64 .\dist\atomcode-linux-x64 --repo jeikl/jeikcode --title "6.0.27" --notes-file .\dist\RELEASE_NOTES_6.0.27.md
 ```
+

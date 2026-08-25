@@ -169,26 +169,82 @@ fn strip_multiline_prefix(s: &str) -> String {
     t.trim().to_string()
 }
 
-/// Attach extracted comments to symbol nodes by physical line proximity.
-pub fn bind_comments_to_symbols(
+use super::graph::{CommentScope, StructuredComment};
+
+/// Attach extracted comments to symbol nodes by physical line proximity, inspecting source context.
+pub fn bind_comments_to_symbols_with_source(
     symbols: &mut [SymbolNode],
     comments: &[CommentBlock],
+    source: &str,
 ) {
+    let source_lines: Vec<&str> = source.lines().collect();
     for sym in symbols.iter_mut() {
         let sym_start = sym.start_line;
         let sym_end = sym.end_line;
 
         let mut leading_docs = Vec::new();
         let mut inline_comments = Vec::new();
+        let mut structured_comments = Vec::new();
 
         for cb in comments {
-            // 1. Leading comment: ended right before symbol starts (within 2 lines)
+            // 1. Leading comment: ended right before symbol starts (within 3 lines)
             if cb.end_line < sym_start && sym_start <= cb.end_line + 3 {
                 leading_docs.push(cb.text.clone());
+                let scope = match sym.kind {
+                    super::graph::SymbolKind::Property
+                    | super::graph::SymbolKind::ConfigProperty
+                    | super::graph::SymbolKind::Variable => CommentScope::PropertyDoc,
+                    super::graph::SymbolKind::Method
+                    | super::graph::SymbolKind::Function => CommentScope::MethodHeader,
+                    _ => CommentScope::Docstring,
+                };
+                structured_comments.push(StructuredComment {
+                    text: cb.text.clone(),
+                    scope,
+                    line: cb.start_line,
+                });
             }
             // 2. Inline body comment: contained inside symbol body
             else if cb.start_line >= sym_start && cb.end_line <= sym_end {
                 inline_comments.push(cb.text.clone());
+
+                let line_idx = cb.start_line.saturating_sub(1);
+                let line_text = source_lines.get(line_idx).copied().unwrap_or("");
+                let prev_line_text = if line_idx > 0 {
+                    source_lines.get(line_idx - 1).copied().unwrap_or("")
+                } else {
+                    ""
+                };
+
+                let is_branch = line_text.contains("case ")
+                    || line_text.contains("if ")
+                    || line_text.contains("if(")
+                    || line_text.contains("else if")
+                    || line_text.contains("elif ")
+                    || line_text.contains("switch")
+                    || line_text.contains("match ")
+                    || line_text.contains("=>")
+                    || prev_line_text.contains("case ")
+                    || prev_line_text.contains("switch");
+
+                let scope = if is_branch {
+                    let kind = if line_text.contains("case ") || prev_line_text.contains("case ") {
+                        "switch_case".to_string()
+                    } else if line_text.contains("if") {
+                        "if_condition".to_string()
+                    } else {
+                        "branch".to_string()
+                    };
+                    CommentScope::BranchInline { branch_kind: kind }
+                } else {
+                    CommentScope::PlainInline
+                };
+
+                structured_comments.push(StructuredComment {
+                    text: cb.text.clone(),
+                    scope,
+                    line: cb.start_line,
+                });
             }
         }
 
@@ -196,7 +252,16 @@ pub fn bind_comments_to_symbols(
             sym.docstring = Some(leading_docs.join("\n"));
         }
         sym.inline_comments = inline_comments;
+        sym.comments = structured_comments;
     }
+}
+
+/// Attach extracted comments to symbol nodes by physical line proximity.
+pub fn bind_comments_to_symbols(
+    symbols: &mut [SymbolNode],
+    comments: &[CommentBlock],
+) {
+    bind_comments_to_symbols_with_source(symbols, comments, "");
 }
 
 #[cfg(test)]

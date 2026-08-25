@@ -24,6 +24,7 @@ pub enum SymbolKind {
     Enum,
     Constant,
     Variable,
+    Property,
     Module,
     Import,
     TypeAlias,
@@ -45,6 +46,43 @@ pub enum Visibility {
     Unknown,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum CommentScope {
+    BranchInline { branch_kind: String },
+    Docstring,
+    MethodHeader,
+    PropertyDoc,
+    PlainInline,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct StructuredComment {
+    pub text: String,
+    pub scope: CommentScope,
+    pub line: usize,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct SqlPredicate {
+    pub raw_clause: String,
+    pub target_fields: Vec<String>,
+    pub line: usize,
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct AstMetrics {
+    #[serde(default)]
+    pub cyclomatic_complexity: usize,
+    #[serde(default)]
+    pub branch_count: usize,
+    #[serde(default)]
+    pub has_sql_or_qs: bool,
+    #[serde(default)]
+    pub is_pure_dto: bool,
+    #[serde(default)]
+    pub is_active_logic: bool,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct SymbolNode {
     pub id: SymbolId,
@@ -59,6 +97,64 @@ pub struct SymbolNode {
     pub docstring: Option<String>,
     #[serde(default)]
     pub inline_comments: Vec<String>,
+    #[serde(default)]
+    pub comments: Vec<StructuredComment>,
+    #[serde(default)]
+    pub sql_predicates: Vec<SqlPredicate>,
+    #[serde(default)]
+    pub string_literals: Vec<String>,
+    #[serde(default)]
+    pub metrics: AstMetrics,
+}
+
+impl Default for SymbolNode {
+    fn default() -> Self {
+        Self {
+            id: 0,
+            name: String::new(),
+            kind: SymbolKind::Other("unknown".to_string()),
+            visibility: Visibility::Unknown,
+            file: PathBuf::new(),
+            start_line: 0,
+            end_line: 0,
+            signature: None,
+            docstring: None,
+            inline_comments: Vec::new(),
+            comments: Vec::new(),
+            sql_predicates: Vec::new(),
+            string_literals: Vec::new(),
+            metrics: AstMetrics::default(),
+        }
+    }
+}
+
+impl SymbolNode {
+    pub fn new(
+        id: SymbolId,
+        name: String,
+        kind: SymbolKind,
+        visibility: Visibility,
+        file: PathBuf,
+        start_line: usize,
+        end_line: usize,
+    ) -> Self {
+        Self {
+            id,
+            name,
+            kind,
+            visibility,
+            file,
+            start_line,
+            end_line,
+            signature: None,
+            docstring: None,
+            inline_comments: Vec::new(),
+            comments: Vec::new(),
+            sql_predicates: Vec::new(),
+            string_literals: Vec::new(),
+            metrics: AstMetrics::default(),
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -401,18 +497,15 @@ mod tests {
     use std::path::PathBuf;
 
     fn node(id: SymbolId, name: &str, file: &str) -> SymbolNode {
-        SymbolNode {
+        SymbolNode::new(
             id,
-            name: name.into(),
-            kind: SymbolKind::Function,
-            visibility: Visibility::Unknown,
-            file: PathBuf::from(file),
-            start_line: 1,
-            end_line: 2,
-            signature: None,
-            docstring: None,
-            inline_comments: Vec::new(),
-        }
+            name.into(),
+            SymbolKind::Function,
+            Visibility::Unknown,
+            PathBuf::from(file),
+            1,
+            2,
+        )
     }
 
     // a → b → c

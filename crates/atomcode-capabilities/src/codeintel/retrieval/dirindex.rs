@@ -161,8 +161,7 @@ mod tests {
                 start_line: 1,
                 end_line: 5,
                 signature: None,
-                docstring: None,
-                inline_comments: vec![],
+                ..Default::default()
             };
             g.add_symbol(n);
         };

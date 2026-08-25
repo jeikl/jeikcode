@@ -96,7 +96,8 @@ fn classify_symbol_kind(ts: &str) -> SymbolKind {
         "enum_item" | "enum_declaration" | "enum_specifier" | "enum_member_declaration" => {
             SymbolKind::Enum
         }
-        "const_item" | "const_declaration" | "property_declaration" | "event_declaration"
+        "property_declaration" | "field_declaration" => SymbolKind::Property,
+        "const_item" | "const_declaration" | "event_declaration"
         | "delegate_declaration" => SymbolKind::Constant,
         "let_declaration" | "variable_declaration" | "static_item" => SymbolKind::Variable,
         "mod_item" | "module" | "namespace_declaration" | "file_scoped_namespace_declaration" => {
@@ -183,8 +184,7 @@ fn parse_yaml_config(path: &Path, source: &str) -> Option<(Vec<SymbolNode>, Vec<
                     start_line: line_num,
                     end_line: (line_num + 3).min(lines.len()),
                     signature: Some(trimmed.to_string()),
-                    docstring: None,
-                    inline_comments: Vec::new(),
+                    ..Default::default()
                 });
             }
         } else if trimmed.starts_with("- ") {
@@ -199,8 +199,7 @@ fn parse_yaml_config(path: &Path, source: &str) -> Option<(Vec<SymbolNode>, Vec<
                     start_line: line_num,
                     end_line: line_num,
                     signature: Some(trimmed.to_string()),
-                    docstring: None,
-                    inline_comments: Vec::new(),
+                    ..Default::default()
                 });
             }
         }
@@ -236,8 +235,7 @@ fn parse_toml_config(path: &Path, source: &str) -> Option<(Vec<SymbolNode>, Vec<
                     start_line: line_num,
                     end_line: line_num,
                     signature: Some(trimmed.to_string()),
-                    docstring: None,
-                    inline_comments: Vec::new(),
+                    ..Default::default()
                 });
             }
         } else if let Some(eq_pos) = trimmed.find('=') {
@@ -252,8 +250,7 @@ fn parse_toml_config(path: &Path, source: &str) -> Option<(Vec<SymbolNode>, Vec<
                     start_line: line_num,
                     end_line: line_num,
                     signature: Some(trimmed.to_string()),
-                    docstring: None,
-                    inline_comments: Vec::new(),
+                    ..Default::default()
                 });
             }
         }
@@ -286,7 +283,7 @@ fn parse_markdown_doc(path: &Path, source: &str) -> Option<(Vec<SymbolNode>, Vec
                     end_line: (line_num + 5).min(lines.len()),
                     signature: Some(trimmed.to_string()),
                     docstring: Some(title.to_string()),
-                    inline_comments: Vec::new(),
+                    ..Default::default()
                 });
             }
         }
@@ -324,8 +321,7 @@ fn parse_json_config(path: &Path, source: &str) -> Option<(Vec<SymbolNode>, Vec<
                     start_line: line_num,
                     end_line: line_num,
                     signature: Some(trimmed.to_string()),
-                    docstring: None,
-                    inline_comments: Vec::new(),
+                    ..Default::default()
                 });
             }
         }
@@ -397,15 +393,16 @@ fn parse_file(path: &Path, source: &str) -> Option<(Vec<SymbolNode>, Vec<RawCall
             file: path.to_path_buf(),
             start_line: s.start_line,
             end_line: s.end_line,
-            signature: None,
-            docstring: None,
-            inline_comments: Vec::new(),
+            ..Default::default()
         })
         .collect();
 
-    // Extract comment blocks and bind to symbol nodes by physical line proximity
+    // Extract comment blocks and bind to symbol nodes by physical line proximity with source inspection
     let comment_blocks = super::comment_index::extract_comment_blocks(source);
-    super::comment_index::bind_comments_to_symbols(&mut nodes, &comment_blocks);
+    super::comment_index::bind_comments_to_symbols_with_source(&mut nodes, &comment_blocks, source);
+
+    // Enrich micro-structures (string literals, SQL/QS clauses, AST metrics)
+    enrich_symbol_microstructure(&mut nodes, source);
 
     Some((nodes, calls))
 }
@@ -465,9 +462,7 @@ fn parse_sfc(
                     file: path.to_path_buf(),
                     start_line: s.start_line,
                     end_line: s.end_line,
-                    signature: None,
-                    docstring: None,
-                    inline_comments: Vec::new(),
+                    ..Default::default()
                 });
             }
         }
@@ -486,9 +481,7 @@ fn parse_sfc(
                     file: path.to_path_buf(),
                     start_line: l,
                     end_line: s.end_line + start_line - 1,
-                    signature: None,
-                    docstring: None,
-                    inline_comments: Vec::new(),
+                    ..Default::default()
                 });
             }
         }
@@ -505,9 +498,165 @@ fn parse_sfc(
     // Bind comments across the whole file (both blocks).
     let mut comment_blocks = super::comment_index::extract_comment_blocks(source);
     comment_blocks.sort_by_key(|b| b.start_line);
-    super::comment_index::bind_comments_to_symbols(&mut nodes, &comment_blocks);
+    super::comment_index::bind_comments_to_symbols_with_source(&mut nodes, &comment_blocks, source);
+
+    // Enrich micro-structures (string literals, SQL/QS clauses, AST metrics)
+    enrich_symbol_microstructure(&mut nodes, source);
 
     Some((nodes, calls))
+}
+
+fn enrich_symbol_microstructure(nodes: &mut [SymbolNode], source: &str) {
+    let lines: Vec<&str> = source.lines().collect();
+
+    for sym in nodes.iter_mut() {
+        let sym_start = sym.start_line.saturating_sub(1);
+        let sym_end = sym.end_line.min(lines.len());
+        if sym_start >= lines.len() || sym_start > sym_end {
+            continue;
+        }
+
+        let sym_lines = &lines[sym_start..sym_end];
+        let mut literals = Vec::new();
+        let mut sqls = Vec::new();
+        let mut branches = 0usize;
+
+        for (idx, &line) in sym_lines.iter().enumerate() {
+            let line_num = sym.start_line + idx;
+            let trimmed = line.trim();
+
+            // Branch detection
+            if trimmed.contains("case ")
+                || trimmed.contains("if ")
+                || trimmed.contains("if(")
+                || trimmed.contains("else if")
+                || trimmed.contains("elif ")
+                || trimmed.contains("switch")
+                || trimmed.contains("match ")
+                || trimmed.contains("=>")
+            {
+                branches += 1;
+            }
+
+            // String literal extraction (double quote and single quote)
+            extract_literals_from_line(trimmed, &mut literals);
+
+            // SQL / QS predicate detection
+            if is_sql_or_qs_clause(trimmed) {
+                let fields = extract_sql_fields(trimmed);
+                sqls.push(super::graph::SqlPredicate {
+                    raw_clause: trimmed.to_string(),
+                    target_fields: fields,
+                    line: line_num,
+                });
+            }
+        }
+
+        literals.sort();
+        literals.dedup();
+
+        let has_sql = !sqls.is_empty();
+        let is_dto = matches!(
+            sym.kind,
+            SymbolKind::Property | SymbolKind::ConfigProperty | SymbolKind::Variable
+        ) || (sym.kind == SymbolKind::Class
+            && branches == 0
+            && !has_sql
+            && sym_lines
+                .iter()
+                .all(|l| !l.contains("while") && !l.contains("for")));
+
+        let is_active = (branches >= 1
+            || has_sql
+            || matches!(
+                sym.kind,
+                SymbolKind::Function | SymbolKind::Method | SymbolKind::SqlStatement
+            ))
+            && !is_dto;
+
+        sym.metrics = super::graph::AstMetrics {
+            cyclomatic_complexity: 1 + branches,
+            branch_count: branches,
+            has_sql_or_qs: has_sql,
+            is_pure_dto: is_dto,
+            is_active_logic: is_active,
+        };
+        sym.string_literals = literals;
+        sym.sql_predicates = sqls;
+    }
+}
+
+fn extract_literals_from_line(line: &str, out: &mut Vec<String>) {
+    let mut in_str = false;
+    let mut quote_char = '"';
+    let mut buf = String::new();
+    let chars: Vec<char> = line.chars().collect();
+
+    let mut i = 0;
+    while i < chars.len() {
+        let ch = chars[i];
+        if in_str {
+            if ch == '\\' && i + 1 < chars.len() {
+                buf.push(chars[i + 1]);
+                i += 2;
+                continue;
+            }
+            if ch == quote_char {
+                in_str = false;
+                let trimmed = buf.trim();
+                if trimmed.len() >= 2 && !is_trivial_literal(trimmed) {
+                    out.push(trimmed.to_string());
+                }
+                buf.clear();
+            } else {
+                buf.push(ch);
+            }
+        } else if ch == '"' || (ch == '\'' && !is_char_literal(&chars, i)) {
+            in_str = true;
+            quote_char = ch;
+        }
+        i += 1;
+    }
+}
+
+fn is_char_literal(chars: &[char], idx: usize) -> bool {
+    idx + 2 < chars.len() && chars[idx + 2] == '\''
+}
+
+fn is_trivial_literal(s: &str) -> bool {
+    const TRIVIAL: &[&str] = &[
+        "", " ", "\n", "\t", "true", "false", "null", "undefined", "0", "1", "utf-8", "utf8",
+    ];
+    TRIVIAL.contains(&s) || s.chars().all(|c| c.is_ascii_punctuation())
+}
+
+fn is_sql_or_qs_clause(line: &str) -> bool {
+    let upper = line.to_ascii_uppercase();
+    (upper.contains("SELECT ") && upper.contains("FROM "))
+        || (upper.contains("WHERE ") || upper.contains(" AND ") || upper.contains(" OR "))
+        || (upper.contains("EXISTS(") || upper.contains("EXISTS ("))
+        || (upper.contains(" IN (") || upper.contains(" IN("))
+        || (upper.contains("BETWEEN ") && upper.contains(" AND "))
+        || (upper.contains("JOIN ") && upper.contains(" ON "))
+        || line.contains(".Where(")
+        || line.contains(".Select(")
+        || line.contains(".OrderBy(")
+        || line.contains("SugarParameter")
+        || line.contains("SqlSugar")
+}
+
+fn extract_sql_fields(line: &str) -> Vec<String> {
+    let mut fields = Vec::new();
+    for token in line.split(|c: char| !c.is_ascii_alphanumeric() && c != '.' && c != '_') {
+        let t = token.trim();
+        if let Some(pos) = t.find('.') {
+            let field = &t[pos + 1..];
+            if field.len() >= 3 && !field.chars().all(|c| c.is_ascii_digit()) {
+                fields.push(field.to_string());
+            }
+        }
+    }
+    fields
 }
 
 /// Extract a `<tag>…</tag>` block's body + its 1-based start line.
@@ -612,9 +761,7 @@ fn parse_css_styles(path: &Path, source: &str) -> Option<(Vec<SymbolNode>, Vec<R
                             file: path.to_path_buf(),
                             start_line: line_num,
                             end_line: line_num,
-                            signature: None,
-                            docstring: None,
-                            inline_comments: Vec::new(),
+                            ..Default::default()
                         });
                     }
                 }
@@ -638,9 +785,7 @@ fn parse_css_styles(path: &Path, source: &str) -> Option<(Vec<SymbolNode>, Vec<R
                                 file: path.to_path_buf(),
                                 start_line: line_num,
                                 end_line: line_num,
-                                signature: None,
-                                docstring: None,
-                                inline_comments: Vec::new(),
+                                ..Default::default()
                             });
                         }
                     }
@@ -704,8 +849,7 @@ fn parse_xml_mapper(path: &Path, source: &str) -> Option<(Vec<SymbolNode>, Vec<R
                                     start_line: line_num,
                                     end_line: (line_num + 5).min(lines.len()),
                                     signature: Some(trimmed.to_string()),
-                                    docstring: None,
-                                    inline_comments: Vec::new(),
+                                    ..Default::default()
                                 });
                             }
                         }

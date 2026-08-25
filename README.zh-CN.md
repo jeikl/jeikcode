@@ -17,13 +17,12 @@
 </p>
 
 <p align="center">
-  <a href="#快速开始">快速开始</a> ·
-  <a href="#多方-ai-coding-agent-深度对比">四方对比</a> ·
-  <a href="#核心架构与技术突破">架构突破</a> ·
-  <a href="#核心功能特性">功能特性</a> ·
-  <a href="#安装指南">安装指南</a> ·
-  <a href="#快捷键与命令">快捷键与命令</a> ·
-  <a href="#项目级知识库与规则">知识库与规则</a>
+  <a href="#一jeikcode-是什么">定位与渊源</a> ·
+  <a href="#二多方-ai-coding-agent-功能与机制深度对比">机制对比</a> ·
+  <a href="#三10-大核心硬核机制深度拆解">核心机制</a> ·
+  <a href="#四安装与快速上手">快速上手</a> ·
+  <a href="#五快捷键与常用命令">快捷键与命令</a> ·
+  <a href="#六多项目知识库与规则最高裁量权">知识包配置</a>
 </p>
 
 <p align="center">
@@ -38,32 +37,43 @@
 
 ---
 
-**JeikCode** 是一款运行在终端里的新一代极速、高自主性 AI 编程智能体。采用纯 **Rust** 构建，具备毫秒级冷启动、极致内存控制与零运行时依赖。只要用自然语言输入任务，JeikCode 就会自主阅读代码拓扑、探索语义图谱、批量修改代码、执行测试并自我验证修复，全程闭环推进工程交付。
+## 一、JeikCode 是什么？
 
-无论是作为日常主力终端 Agent，还是作为无头服务集成到 CI/CD、WebUI 与 IDE 中，JeikCode 都提供了对标甚至超越 **Claude Code**、**OpenCode** 与 **Grok Build** 的卓越工程体验。
+**JeikCode 是基于 AtomCode 基础进行深度拆解开发、架构重构和优化增强的高性能 AI 编程智能体。**
+
+在设计与演进过程中，JeikCode 融合了业内顶级开源与商业 Agent 的核心优势，并完成了关键架构创新：
+- 🛡️ **吸收 Grok Build 的硬核容错与提示词策略**：引入强大的提示词优先级裁决（Precedence）、多层工具容错自愈修复链（Repair Chain）、结构化诊断回喂与防死循环调用熔断（Loop Guard）；
+- 🌐 **吸收 OpenCode 的远程扩展架构**：构建了强大的多实例远程无头运行（Serve）、Web 控制台网关（WebUI Gateway）与轻量化跨端实时同步；
+- ⚡ **自主研发核心架构突破**：
+  - **高前缀命中率缓存架构（High Cache Hit Prefix Architecture）**：`sacred_floor` 记忆防压缩保护 + `user-wrap.md` 动态末尾包裹，保证会话前缀字节级 Append-only 不可变，彻底解决 LLM 服务商 KV 缓存击穿痛点；
+  - **CodeIntel 2.0 全景图谱与双语词林检索**：Tree-Sitter 全栈 AST 分析 + 6 类拓扑流向 + 9 大内置中英双语领域词林 + BM25/向量混合召回 + `units.v4.bin` (zstd) 进程级共享索引；
+  - **智能体自配置体系（Teaches 知识库 + `jeikcode_config_guide`）**：内置 8 大模块化知识库，赋予 Agent 原生自查与指导系统配置的能力；
+  - **提示词全量自配置与毫秒级热重载**：`init.yaml`、`rules.yaml` 与 `user-wrap.md` 无需重启即刻生效。
 
 ---
 
-## 🌟 多方 AI Coding Agent 深度对比
+## 二、多方 AI Coding Agent 功能与机制深度对比
 
-为清晰展现各主流开源与商业 AI Coding Agent 的机制差异，下表基于对各框架底层架构、源码实现（含兄弟项目代码深度扫描）及实测表现整理：
+以下对比完全聚焦于 **Agent 核心功能、代码检索、上下文管理、工具容错与模型协议等纯技术机制**：
 
-| 对比维度 | **JeikCode (本项目)** | **Claude Code (Anthropic)** | **OpenCode (OpenCode AI)** | **Grok Build (SpaceXAI)** | **早期 AtomCode (基线)** |
+| 机制与功能维度 | **JeikCode (本项目)** | **Claude Code (Anthropic)** | **OpenCode (OpenCode AI)** | **Grok Build (SpaceXAI)** | **早期 AtomCode (基线)** |
 | :--- | :--- | :--- | :--- | :--- | :--- |
-| **开发语言与运行时** | **纯 Rust 原生编译**<br>• 内存占用 <30MB<br>• 毫秒级启动、零 GC 抖动<br>• 单一自包含二进制 | **TypeScript / Node.js**<br>• 内存占用 ~200MB+<br>• 依赖 V8/Node 运行环境<br>• npm 全局安装 | **TypeScript / Bun / Effect**<br>• 内存占用 ~150MB<br>• 依赖 Bun / Effect-TS 栈<br>• SQLite 会话持久化 | **纯 Rust 多 Crate 架构**<br>• 内存占用 <50MB<br>• 76+ Crate 复杂单体<br>• 依赖 DotSlash / protoc | **Rust 早期架构**<br>• 单会话基础运行<br>• 缺少深层图谱与分层隔离 |
-| **核心架构分层** | **严格 L0/L1/L2 解耦**<br>• L0: 纯净 Kernel 循环<br>• L1: 复用能力与图谱工具<br>• L2: Coding 状态机与生命周期<br>• Drivers: TUI / WebUI / Serve / ACP | **单体 CLI 管道**<br>• 紧密围绕 Claude API 闭环<br>• 流程硬编码于 TS 脚本中<br>• 单一终端交互模式 | **五层单体模块**<br>• Schema → Protocol → Core → Server → Client<br>• 跨进程 Effect 管道交互 | **单体 Pager 体系**<br>• PTY 管道与 Pager TUI<br>• 围绕 xAI 专有后端高度定制<br>• 深度绑定内部中间件 | **双层弱解耦**<br>• Core + Bridge 遗留依赖<br>• 业务逻辑与驱动轻度耦合 |
-| **KV Cache 与上下文保护** | **全流程 Append-only 保证**<br>• `user-wrap.md` 动态末尾包裹<br>• `sacred_floor` 记忆永不压缩<br>• 初态 Git 快照防止缓存击穿<br>• 毫秒级 mtime 提示词热重载 | **Ephemeral Cache 机制**<br>• 依赖 Anthropic 缓存标头<br>• 仅限 Claude 系列生效<br>• 缺少本地模板动态包装 | **基础消息数组**<br>• 依赖各模型服务商原生缓存<br>• 动态 Prompt 插入易破坏前缀<br>• 上下文压缩可能截断关键规则 | **Transcript 压缩流**<br>• 基于 SQLite 的日志追踪<br>• 依赖专用 Compaction Transcripts<br>• 无本地动态 user-wrap 机制 | **基础静态前缀**<br>• 动态 Reminder 会产生前缀扰动<br>• 压缩策略较粗糙 |
-| **代码图谱与全景检索** | **CodeIntel 2.0 深度图谱**<br>• Tree-Sitter 全栈 AST 分析<br>• 6 类拓扑全景 (连通/父链/子树等)<br>• **9 领域中英双语词林对齐**<br>• BM25 + 概念向量混合检索<br>• `zstd` 二进制索引共享缓存 | **传统搜索 (Grep/Glob/View)**<br>• 无本地 AST 依赖图谱<br>• 大仓探索极度消耗 Token<br>• 缺少领域语义词林映射 | **文件检索 + 基础 LSP**<br>• 依赖标准 ripgrep 与 LSP<br>• 缺少全局拓扑流向分析<br>• 无中文多对多概念词典 | **xai-codebase-graph**<br>• Rust 实现代码图谱与模糊搜索<br>• 支持文件变更通知 (fsnotify)<br>• 无领域双语对齐词林 | **基础词林与哈希向量**<br>• 单会话独立索引，冷启动慢<br>• 探索工具容易产生零命中<br>• 目录树易被折叠截断 |
-| **工具容错与修复机制** | **五级修复链 + 3次熔断防御**<br>• 宽松 JSON 修复 + 正则提取<br>• Windows 反斜杠路径抢救<br>• Schema 类型自动强转 (`"3"`→`3`)<br>• 结构化诊断反馈回喂<br>• 循环重复调用熔断 (Loop Guard) | **基础错误反馈**<br>• 模型解析失败直接返回报错<br>• 容易陷入重复同构错误调用<br>• 依赖模型自我纠偏 | **Effect Schema 校验**<br>• 基于 Zod / Effect 强类型检查<br>• 校验失败中断并返回原因<br>• 缺少多级自动降级抢救链 | **结构化诊断 + Loop Guard**<br>• 具备参数类型纠偏与熔断<br>• 针对 Grok 模型调用做了优化<br>• Windows 路径兼容性一般 | **三层基础修复**<br>• 基础尾逗号/引号修复<br>• 缺少 Schema 类型层自愈能力<br>• 容易因 Windows 路径报错 |
-| **首 Token 活性与超时守护** | **独立双臂超时机制**<br>• **First-Token 独立计时 (60s×3)**<br>• 完美适配 DeepSeek-R1 / O1 / Grok 3 深度思考静默<br>• 编译测试 900s 专属超时 | **统一 Stream 超时**<br>• 依靠全局请求超时控制<br>• 超长推理模型可能误判中断 | **请求级 Timeout**<br>• 由 Effect 运行时超时控制<br>• 难以细分首 Token 与流间隙 | **PTY / 进程级看门狗**<br>• 具备完善的进程级中断控制<br>• 与 xAI 后端专有协议协同 | **单一流空闲超时**<br>• 首 Token 等待时间过长时会触发全局超时挂起 |
-| **模型生态与思考档位** | **完全解耦，支持全协议**<br>• **OpenAI Responses (/v1/responses)**<br>• Chat Completions / Anthropic / Ollama<br>• **思考档位实时切换 (4档/自定义)**<br>• 动态拉取上游 `/models` 列表<br>• 视觉代答分流 (Vision Preprocessor) | **高度绑定 Anthropic**<br>• 专为 Claude 3.5/3.7 设计<br>• 深度集成 Thinking Budget<br>• 接入第三方模型需代理转换 | **广泛多模型支持**<br>• 支持 OpenAI / Anthropic / Gemini / OpenRouter / Ollama<br>• 具备模型选择界面<br>• 需在前端手动配置参数 | **高度绑定 xAI Grok**<br>• 围绕 Grok 2/3 模型定制<br>• 深度集成专有推理解析<br>• 不便于任意私有化模型接入 | **基础 OpenAI 兼容**<br>• 账号与模型未完全解耦<br>• 不支持 Responses 协议思考回传<br>• 切换模型可能残留旧绑定 |
-| **交互形态与终端体验** | **多元驱动与防误触设计**<br>• TUI: **双击 ESC/Ctrl+C 防误触**<br>• Linux 回合结束主动夺回 TTY<br>• **WebUI Gateway** (实时Token详情)<br>• **无头 Remote Serve 多实例**<br>• ACP 协议集成 | **纯 Terminal CLI**<br>• 交互精炼简洁<br>• 无原生 Web 界面<br>• 缺少防误触二次确认设计 | **全平台客户端矩阵**<br>• Terminal TUI<br>• Desktop 桌面应用 (Tauri/Electron)<br>• Web Console + Slack Bot<br>• 界面丰富但体积较大 | **Pager 风格终端 TUI**<br>• 优秀的终端文本滚动与 Diff<br>• 深度定制的按键绑定<br>• 缺少独立轻量 WebUI | **基础 TUI**<br>• 单击 ESC/Ctrl+C 易误触中断<br>• Linux 下偶发 TTY 挂起或无法输入 |
-| **系统配置与自更新** | **Teaches 知识库 + 无感更新**<br>• 内置 8 模块渐进式文档<br>• `jeikcode_config_guide` 智能体自查<br>• **GitHub Releases 单步无感升级**<br>• 交互式配置差异安全合并 | **npm 全局升级**<br>• `npm update -g @anthropic-ai/claude-code`<br>• 静态在线文档 | **多渠道包管理升级**<br>• Homebrew / Scoop / npm / Nix<br>• 在线文档站 | **源码同步 / DotSlash**<br>• 依赖单体仓库同步或脚本安装<br>• 在线专有文档 | **基础二进制替换**<br>• 依赖特定源，升级需手动覆盖<br>• 无内置配置自检工具 |
-| **开源度与私有化** | **100% 开源 (MIT)**<br>• 允许完全自由商用、二次修改<br>• 完全本地私有部署，零隐私外泄 | **部分闭源**<br>• npm 发行为混淆代码<br>• 核心后端调度位于云端 | **100% 开源 (MIT)**<br>• 社区活跃，插件生态丰富 | **官方同步开源**<br>• 部分基础设施依赖 xAI 专有云 | **开源 (MIT)** |
+| **1. Agent Loop 调度与闭环** | **L0/L1/L2 三层解耦调度**<br>• 动态步数预算自适应调节<br>• 读改测自闭环验证回路<br>• 多轮状态机与子代理解耦 | **单体 CLI 执行循环**<br>• 针对 Claude API 紧耦合<br>• 依赖服务端交互推进<br>• 单一任务推进通道 | **Effect-TS 管道调度**<br>• 基于 Effect 状态机与 Fiber<br>• 具备多 Agent 协作插件<br>• 异步事件总线分发 | **PTY 进程级执行流**<br>• 专有 Agent 状态机推进<br>• 具备完善的取消与中断处理<br>• 与 xAI 云端紧密协同 | **双层弱解耦循环**<br>• 依赖 Bridge 层胶水代码<br>• 步数控制相对机械<br>• 缺少深层状态隔离 |
+| **2. 工具参数多级容错与修复链** | **五级修复链 + 3次熔断防御**<br>• 直解析 → 宽松 JSON → 正则捕获<br>• **Windows 路径反斜杠救赎 (`D:\...`)**<br>• **Schema 类型强转 (`"3"`→`3`)**<br>• 字段级结构化诊断提示回喂<br>• 同工具 3 次失败 Loop Guard 熔断 | **基础错误字符串回传**<br>• 工具执行失败返回原始报错<br>• 依赖模型自身多轮猜测重试<br>• 无本地参数自动强转抢救 | **Effect / Zod Schema 校验**<br>• 严格类型校验，失败即中断<br>• 依靠提示词要求模型纠正<br>• 无多级自愈降级链路 | **结构化诊断 + Loop Guard**<br>• 具备参数类型修正与诊断回喂<br>• 具备防重复调用熔断机制<br>• Windows 路径兼容处理较弱 | **三层基础修复**<br>• 仅修复基础尾逗号与引号<br>• 无法处理 Schema 类型错配<br>• Windows 路径容易反序列化失败 |
+| **3. 代码图谱与全景拓扑探索** | **CodeIntel 2.0 深度图谱**<br>• **Tree-Sitter 全栈 AST 分析**<br>• 6 类拓扑流向 (连通/父链/子树等)<br>• Vue/React/Svelte/Astro SFC 支持<br>• `repo_map` 首轮完整目录树不截断 | **文件过滤搜索 (Grep/Glob)**<br>• 无本地 AST 依赖拓扑图谱<br>• 大仓探索极度依赖反复 Grep<br>• 易超出上下文窗口限制 | **基础 LSP + 文件搜索**<br>• 依赖标准 ripgrep 与 LSP 工具<br>• 无全局拓扑连通流向分析<br>• 缺少前端组件专属 AST 图谱 | **xai-codebase-graph**<br>• Rust 实现代码图谱与模糊搜索<br>• 支持文件变更通知 (fsnotify)<br>• 侧重于通用代码符号索引 | **基础词林与哈希向量**<br>• 拓扑维度单一，易产生零命中<br>• 目录树易被强制折叠截断<br>• 前端 SFC 组件解析能力薄弱 |
+| **4. 上下文稳定前缀与超高缓存命中** | **全流程 Append-only 保证**<br>• **`user-wrap.md` 动态末尾包裹**<br>• **`sacred_floor` 记忆永不压缩**<br>• 初态 Git 快照防止缓存击穿<br>• 提示词热重载不破坏系统前缀 | **Ephemeral 临时缓存标头**<br>• 依赖 Anthropic 缓存断点指令<br>• 仅限 Claude 系列生效<br>• 中途动态注入容易破坏命中 | **标准消息数组流**<br>• 依赖各服务商原生缓存机制<br>• 动态 Prompt 插入易打乱前缀<br>• 上下文压缩容易丢失关键设定 | **Transcript Compaction**<br>• 基于 SQLite 的日志追踪流<br>• 专有 Compaction Transcripts 机制<br>• 无本地动态 user-wrap 机制 | **基础静态前缀**<br>• 动态 Reminder 插入破坏前缀缓存<br>• 上下文压缩策略较粗糙 |
+| **5. 提示词全量自配置与动态热重载** | **完全外置 + 毫秒级 mtime 热重载**<br>• `init.yaml` (身份/安全/前缀)<br>• `rules.yaml` (工作流/执行纪律)<br>• `user-wrap.md` (提问包装模板)<br>• 修改文件**立即生效，无需重启** | **内置提示词 + 部分外置**<br>• 核心 Prompt 固化在 npm 包内<br>• 支持 CLAUDE.md 项目指令<br>• 无法深度修改底层执行纪律 | **外置配置 + 环境变量**<br>• 支持自定义 System Prompt<br>• 规则修改需重新加载会话<br>• 缺少细粒度 YAML 规则分层 | **内置提示词 + 优先级配置**<br>• 拥有成熟的系统提示词层级<br>• 支持规则优先级覆盖<br>• 修改核心提示词需重新构建 | **半静态配置**<br>• 部分规则硬编码于二进制中<br>• 提示词修改需要重启应用 |
+| **6. 模型协议、思考档位与账号解耦** | **全协议适配 + 四档思考努力度**<br>• **OpenAI Responses (/v1/responses)**<br>• Chat Completions / Anthropic / Ollama<br>• **思考档位随时切换 (4档/自定义)**<br>• 账号与模型解耦，动态拉取 `/models` | **高度绑定 Anthropic**<br>• 深度绑定 Claude 3.5/3.7 系列<br>• 原生集成 Thinking Budget<br>• 切换第三方模型需复杂代理 | **广泛多模型支持**<br>• 覆盖主流商业与本地模型<br>• 提供模型选择界面<br>• 思考参数需在前端手动调节 | **高度绑定 xAI Grok**<br>• 围绕 Grok 2/3 模型定制<br>• 深度集成专有推理解析<br>• 不便于任意私有化模型接入 | **基础 OpenAI 兼容**<br>• 账号与模型未解耦<br>• 不支持 Responses 协议思考回传<br>• 切换模型容易产生残留旧绑定 |
+| **7. CodeExplore 索引性能与共享存储** | **`units.v4.bin` 共享二进制缓存**<br>• **zstd 极速压缩** + Sidecar 落盘<br>• **Rayon 多核并行打分**，查询 <1ms<br>• 进程级共享索引，大仓秒级冷启动<br>• 增量更新与抖动防重排 | **无本地持久化索引**<br>• 每次按需执行实时搜索<br>• 无全局索引落盘与共享机制 | **内存/文件临时缓存**<br>• 基于 Node/Bun 内存缓存<br>• 多项目切换需重新构建索引 | **Rust 进程级图谱索引**<br>• 具备高性能索引与文件监听<br>• 支持内部图谱增量更新 | **单会话 JSON 索引**<br>• 单会话独立索引，内存开销大<br>• 冷启动缓慢，大仓易卡顿 |
+| **8. 图谱词林中英双语对齐与高度自定义** | **9 领域内置词林 + 项目专属词林**<br>• 覆盖 AI Agent/全栈/电商/管理/医疗等<br>• 项目级 `<project>/.atomcode/thesaurus/`<br>• **多对多中英文语义双向映射** | **无词林机制**<br>• 依赖 LLM 自身的自然语言理解<br>• 中文业务词难以精准定位英文代码 | **无词林机制**<br>• 依赖符号搜索与 LLM 泛化能力<br>• 缺少业务术语到符号的字典映射 | **无词林机制**<br>• 侧重于代码语法符号图谱分析<br>• 无多领域中英双语概念对齐 | **基础内置词林**<br>• 仅包含少数基础词典<br>• 不支持项目级独立词林扩展 |
+| **9. 多项目 MD 知识包与规则最高裁量权** | **4 层多知识包 + 项目级最高裁量权**<br>• `AGENTS.md` / `ATOMCODE.md` (主规范)<br>• `rules.md` (业务规则) · `dbwords.md` (库表)<br>• `glossary.md` (业务词表) · 每轮热重载<br>• **结构化规则严格优先于 System 提示词** | **单文件约定 (CLAUDE.md)**<br>• 仅加载单个 `CLAUDE.md` 文件<br>• 无多维度业务知识包拆分<br>• 规则优先级由模型自行权衡 | **多文件配置支持**<br>• 支持项目规则与说明注入<br>• 规则由上下文拼接加载<br>• 无结构化分级最高裁量权保障 | **AGENTS.md / 规则层级**<br>• 具备完善的项目规则解析<br>• 具备结构化提示词优先级机制 | **单文件匹配**<br>• 只认单个 `.atomcode.md`<br>• 无 DbWords / Rules / Glossary 拆分 |
+| **10. 智能体自配置与内置 Teaches 知识库** | **内置 8 模块 Teaches + `jeikcode_config_guide`**<br>• 涵盖提示词/模型/图谱/更新等全套知识<br>• 智能体可**自主调用工具排查系统配置**<br>• 编译期与宿主机资产自动同步 | **静态在线文档**<br>• 依赖用户手动查阅官方手册<br>• 智能体无原生配置自检工具 | **在线文档站**<br>• 社区维护的 Markdown 文档<br>• 智能体无内置配置指导工具 | **内置专有文档**<br>• 包含丰富的用户使用手册<br>• 针对内部环境与命令行规范 | **无内置自查工具**<br>• 依赖外部 README 说明<br>• 遇到配置疑问无法自主检索 |
+| **11. Skills 与 MCP 生态集成** | **动态 Skill 挂载 + MCP 标准协议**<br>• `~/.atomcode/skills/` 动态热加载<br>• 标准 MCP (Model Context Protocol) 接入<br>• 渐进式工具加载，不污染核心上下文 | **MCP 深度支持**<br>• 支持官方与社区 MCP Server<br>• 标准 Tool 注入 | **插件与 MCP 生态**<br>• 拥有丰富的插件机制与 MCP 集成<br>• 支持社区扩展工具 | **内置 Tools + MCP**<br>• 支持丰富的内置工具集与扩展<br>• 适配内部工具生态 | **基础 Skills**<br>• 仅支持基础本地 Skill 加载<br>• MCP 隔离与容错较弱 |
+| **12. 多语言全栈适配与中英文语义检索** | **全栈语言覆盖 + 双路混合召回**<br>• Vue SFC/TSX/JSX/Svelte/Astro/SCSS/Rust/Go/Java/C++<br>• **BM25 词频 + 概念向量双路并行检索**<br>• 锚点软降权与跨语言代码流动追踪 | **通用文本检索**<br>• 基于文件正则与文本匹配<br>• 缺少组件化语言专用解析器 | **标准 LSP 多语言支持**<br>• 依靠各语言 LSP Server<br>• 混合检索依赖客户端实现 | **Rust / C++ / Python 重点优化**<br>• 针对后端语言语法深度优化<br>• 前端复杂 SFC 组件支持一般 | **基础多语言**<br>• 前端 Vue/React SFC 识别率低<br>• 缺少 BM25 与概念向量混合评分 |
 
 ---
 
-## 🚀 核心架构与 30 天技术突破（v6.0.0 ~ v6.0.26）
+## 三、10 大核心硬核机制深度拆解
 
 ```text
 ┌────────────────────────────────────────────────────────────────────────┐
@@ -78,7 +88,7 @@
        │ • 会话生命周期与状态机 (Session Machine)            │
        │ • 动态 Prompt 模板与 user-wrap.md 热重载          │
        │ • Sacred Floor 上下文压缩保护 (Memory / Rules)    │
-       │ • First-Token 活性超时守护与重试                   │
+       │ • First-Token 活性超时守护 (60s × 3)              │
        │ • 思考档位 (Reasoning Effort) 与 Responses 协议   │
        │ • 子代理调度 (Subagent Dispatcher)                │
        └─────────────────────────┬────────────────────────┘
@@ -101,70 +111,78 @@
        └──────────────────────────────────────────────────┘
 ```
 
-### 1. KV Cache 前缀稳定性与动态用户包装 (`user-wrap.md`)
-- **前缀字节级不可变**：将 `MEMORY`、`SKILLS`、`MCP` 以及项目约束（`AGENTS.md`、`rules.md`、`dbwords.md`）紧凑合并在会话首部，受 `sacred_floor` 严格保护，在 `/compact` 压缩时绝不丢失。
-- **`user-wrap.md` 模板插值**：通过 `{{input}}` 动态包裹用户最后一条真实提问（支持全局 `~/.atomcode/user-wrap.md` 与项目级 `./user-wrap.md` 就近覆盖），毫秒级 mtime 热重载，既能注入业务规范，又完全不击穿服务商的 KV 缓存。
-- **UI 纯净还原**：WebUI 与 TUIX 自动对历史消息执行 unwrap，用户看到的永远是清爽的原始提问，而模型接收的是经过严密防护的完整指令。
+### 1. 高前缀命中率缓存架构（High Cache Hit Prefix Architecture）
+- **前缀字节级不可变性**：JeikCode 严格遵守 Append-only 规则。系统角色定义、`MEMORY` 记忆条目、`SKILLS` 技能描述、`MCP` 工具集以及项目约束（`AGENTS.md`、`rules.md`、`dbwords.md`）紧凑合并在会话首部，并在会话初记录 Git 快照，防止环境差异破坏缓存。
+- **`user-wrap.md` 动态末尾包裹**：通过 `{{input}}` 插值仅对末尾真实用户消息动态包装，完全不扰动已缓存的系统前缀与历史轮次。
+- **`sacred_floor` 保护区**：执行 `/compact` 上下文压缩时，底层的核心规则与记忆条目受 `sacred_floor` 保护，永不被截断丢弃。
+- **UI 纯净还原**：WebUI 与 TUIX 自动对输入执行 unwrap 还原，用户看到的是干净的提问，而大模型接收的是严密包裹的工程指令。
 
-### 2. CodeIntel 2.0 全景图谱与双语词林检索
-- **全语言 Tree-Sitter 支持**：深度解析 Rust、Go、Python、Java、C++，以及前端全栈（Vue2/3 SFC、React TSX/JSX、Svelte、Astro、CSS/SCSS/LESS、HTML、YAML/JSON 插件）。
-- **6 类图谱拓扑全景**：以锚定点为核心，联动探索子树、父链、兄弟模块、图连通流向与路径关联词，杜绝传统 Grep 的盲目漫游。
-- **9 领域双语词林**：内置计算机科学、AI Agent、Web开发、全栈工程、电商系统、后台管理、医疗、机器人等领域词林，实现自然语言到代码符号的多对多对齐。
-- **`units.v4.bin` 共享索引**：进程级 zstd 压缩缓存 + Rayon 多核并行打分，大仓秒级加载，查询耗时 <1ms。
+### 2. CodeIntel 2.0 全景图谱与双语词林
+- **全栈语言 Tree-Sitter AST 解析**：不仅支持 Rust、Go、Python、Java、C++，更深度适配前端全栈体系（Vue2/3 SFC `template`+`script` 双解析、React TSX/JSX 元素提取、Svelte、Astro、CSS/SCSS/LESS 类选择器、HTML）。
+- **6 类图谱拓扑全景**：以锚定点为基准，全景式呈现锚定文件、子树模块、父链依赖、兄弟同级、图连通流向与路径关联词，辅以 BM25 词频与中英双语概念向量混合打分。
+- **9 大领域中英双语词林**：内置计算机科学、AI Agent、Web 开发、全栈工程、电商系统、后台管理、医疗、机器人等领域词林，实现中文业务提问与英文代码符号的多对多对齐。
+- **`units.v4.bin` 共享二进制索引**：进程级 zstd 压缩缓存 + Rayon 多核并行打分，大仓秒级冷启动，单次检索耗时 <1ms。
 
-### 3. 五级工具参数容错与循环熔断防御（超越 Grok）
-- **五级自愈修复链**：直解析 → 宽松 JSON 修复（处理尾逗号、未加引号 key、Markdown 代码块标记）→ `edit_file` 专用正则提取 → Schema 绑定字符串化解码 → Key-Value 兜底。
-- **Windows 路径反斜杠救赎**：在 Serde 反序列化前抢救 `D:\project\test` 单反斜杠，避免转义污染。
-- **Schema 类型层强制纠偏**：自动将 `"quantity":"3"` 纠正为数值 `3`，`"retry":"true"` 纠正为布尔 `true`。
-- **失败诊断与熔断保护**：调用失败回喂字段级 Schema 提示；同一工具连续失败 3 次触发 **Loop Guard 熔断**，强令模型调整思路。
+### 3. 五级工具参数容错与 3 次熔断防御（吸收 Grok 并超越）
+- **五级自愈修复链**：
+  1. `直解析`：标准 JSON 解析；
+  2. `宽松 JSON 修复`：自动补全尾逗号、未加引号 key、去除 Markdown 代码块包裹标记；
+  3. `edit_file 正则提取`：专门抢救编辑工具输出的复杂多行代码块；
+  4. `Schema 绑定字符串解码`：纠正转义嵌套的字符串化 JSON；
+  5. `Key-Value 兜底`：最终参数名提取保底。
+- **Windows 路径反斜杠抢救**：在 Serde 反序列化前精准识别并转义 `D:\project\src` 单反斜杠，避免 Windows 路径被误认为控制字符。
+- **Schema 类型层自动强转**：将 `"quantity":"3"` 自动强转为数值 `3`，`"retry":"true"` 强转为布尔 `true`。
+- **结构化诊断回喂与 Loop Guard**：失败时回喂字段级 Schema 提示（如 `file_path: string`）；同一工具连续 3 次失败触发 **Loop Guard 熔断**，终止无效重试并强制模型更换解决路径。
 
-### 4. 首 Token 活性超时守护（First-Token Liveness Timeout）
-- 针对 DeepSeek-R1、Grok 3 等深度思考模型在吐出首个 Token 前长达数十秒的推理静默，建立**独立的 `first_token_timeout` 计时器**（默认 60s × 3 次自动重试）。与流间隙超时互补，彻底告别假死等待。
+### 4. 提示词全量自配置与毫秒级热重载
+所有核心系统提示词完全外置于 `~/.atomcode/prompts/`，运行时采用基于 mtime 的零开销缓存检验：
+- **`init.yaml`**：定义 Agent 身份、优先级规则、安全隔离与环境配置；
+- **`rules.yaml`**：定义工作流反射、代码定位纪律、并发工具调用规范与输出标准；
+- **`user-wrap.md`**：自定义提问包裹结构（项目级优先于全局级）；
+- **动态生效**：修改上述任意文件，下一轮对话**立即生效，无需重启 Agent**。
 
-### 5. 全协议思考档位与模型账号解耦
-- **四大协议原生适配**：支持 OpenAI Responses（`/v1/responses`）、Chat Completions、Anthropic 与 Ollama。
-- **4 档思考努力程度**：随时通过 `/effort` 或 WebUI 切换 low / medium / high / xhigh。
-- **模型与凭证彻底解耦**：`[provider_accounts.*]` 管理凭据，`[models.*]` 管理模型参数；打开 `/modeladd` 或 `/provider` 自动拉取上游 `/models` 列表并智能获焦。
+### 5. 多项目 MD 知识包体系（Knowledge Packs）与最高裁量权
+支持多维度项目级知识库，每次用户回合热重载，**结构化项目规则严格优先于 System 默认规则**：
+- **主工程规范**：`AGENTS.md` 或 `ATOMCODE.md`；
+- **业务词表 (`Glossary`)**：`.atomcode/glossary.md`，指导 Agent 将业务词扩展为代码符号；
+- **业务规则 (`Rules`)**：`.atomcode/rules.md`，明确权限、审批流与业务约束；
+- **数据库词典 (`DbWords`)**：`.atomcode/dbwords.md`，明确表结构、字段含义与 SQL 规则。
 
-### 6. 渐进式 Teaches 知识库与智能体自查
-- 内置 8 大模块化知识库（`01_prompts_and_context.md` 至 `08_updates_and_releases.md`），编译期与宿主机资产自动同步。
-- 原生内置 `jeikcode_config_guide` 工具，智能体遇到配置或使用疑问时可自主调阅规范。
+### 6. 智能体自配置与内置 Teaches 知识库
+- 内置 8 大模块化渐进指南（`01_prompts_and_context.md` 至 `08_updates_and_releases.md`），打包期与宿主机配置资产双向同步。
+- 原生提供 **`jeikcode_config_guide`** 工具：当 Agent 或用户遇到配置疑问时，Agent 可自主调阅对应章节知识库，提供权威的配置指导与排错建议。
 
----
+### 7. 全协议模型适配与 4 档思考努力度
+- **四协议原生适配**：支持 OpenAI Responses（`/v1/responses`）、Chat Completions、Anthropic 与 Ollama。
+- **思考档位灵活调节**：支持 4 档思考努力程度（`reasoning_effort`: `low` / `medium` / `high` / `xhigh`），随时通过 `/effort` 或 WebUI 切换。
+- **账号与模型彻底解耦**：`[provider_accounts.*]` 维护凭据，`[models.*]` 维护模型参数；打开 `/modeladd` 或 `/provider` 自动拉取上游 `/models` 列表并智能获焦。
 
-## 🛠️ 核心功能特性
+### 8. 独立首 Token 活性超时守护（First-Token Liveness Timeout）
+- 针对 DeepSeek-R1、Grok 3 等深度思考模型在生成首个 Token 前长达数十秒的推理静默，建立**独立的 `first_token_timeout` 计时器**（默认 60s × 3 次自动重试），与常规流间隙超时互补，彻底告别假死挂起。
 
-### 1. 终端 TUIX 极速体验
-- **防误触设计**：严格双击 `ESC` 或 `Ctrl+C` 取消正在执行的回合并返回输入框。
-- **TTY 前台控制权保护**：Linux 回合结束后主动夺回 TTY 前台，彻底忽略挂起信号，防止键盘锁死。
-- **多行输入与代码高亮**：支持 `\` + `Enter` 或 `Shift+Enter` 换行，支持 `base16-ocean.dark` 语法高亮与 Markdown 实时渲染。
-- **剪贴板图片直贴**：支持 `Alt+V` / `Ctrl+Alt+V` / `/paste` 直接发送截图给多模态模型。
-
-### 2. WebUI Gateway 与远程服务
+### 9. 远程无头服务 (Serve) 与 WebUI Gateway（吸收 OpenCode 并原生 Rust 化）
 - **本地 WebUI**：输入 `/webui` 或 `jeikcode webui`，即可在浏览器中开启可视化控制台。
 - **实时 Token 详情浮层**：清晰展示提示词 Token、推理 Token、缓存命中 Token 与 Sacred Floor 保护状态。
-- **远程无头服务 (Serve)**：
+- **多实例远程 Serve**：
   ```bash
-  # 在指定端口启动服务（支持多实例并行）
+  # 启动多实例无头服务
   jeikcode serve --host 0.0.0.0 --port 4096 --token sk-my-secret
 
-  # 从另一台机器连接
+  # 客户端从局域网直连
   jeikcode attach http://192.168.1.100:4096 --token sk-my-secret
   ```
 
-### 3. 多模式自主执行
-- **Plan 模式 (`/plan`)**：只读探索模式，智能体只分析图谱、提出方案，不修改任何文件。
-- **Build 模式 (`/build`)**：全功能执行模式，自主编辑、编译、测试与修复。
-- **Goal 模式 (`/goal <目标>`)**：设定最终完成准则，智能体跨轮次自动迭代推进，直至达成目标。
-- **后台会话 (`/bg`)**：长任务脱机后台执行，前端 TUI 继续处理其他任务。
+### 10. 终端防误触与 TTY 前台控制权保护
+- **防误触设计**：严格双击 `ESC` 或 `Ctrl+C` 取消当前思考与执行回合并恢复输入框，防止单次误触丢失会话。
+- **TTY 前台控制权夺回**：Linux 回合结束后主动夺回 TTY 控制权，彻底忽略 `SIGTTIN`/`SIGTTOU`/`SIGTSTP` 挂起信号，杜绝终端键盘锁死。
 
 ---
 
-## 📦 安装指南
+## 四、安装与快速上手
 
-### 方式 1：GitHub Releases 预编译二进制（推荐）
+### 1. 一键安装预编译包（推荐）
 
-前往 [GitHub Releases](https://github.com/jeikl/jeikcode/releases) 下载对应系统的预编译包：
+前往 [GitHub Releases](https://github.com/jeikl/jeikcode/releases) 下载对应系统的预编译二进制：
 
 ```bash
 # Linux / macOS 一键安装
@@ -174,35 +192,24 @@ curl -fsSL https://raw.githubusercontent.com/jeikl/jeikcode/local-dev/scripts/in
 irm https://raw.githubusercontent.com/jeikl/jeikcode/local-dev/scripts/install.ps1 | iex
 ```
 
-### 方式 2：从源码编译安装
+### 2. 从源码编译安装
 
-需要安装 **Rust 1.88+**（[rustup.rs](https://rustup.rs/)）：
+环境需求：**Rust 1.88+**（[rustup.rs](https://rustup.rs/)）
 
 ```bash
 git clone https://github.com/jeikl/jeikcode.git
 cd jeikcode
 
-# 编译并安装到 Cargo bin 目录
+# 编译并安装二进制到 Cargo bin 目录
 cargo install --path crates/atomcode-cli --bin jeikcode --locked
 
 # 验证安装
 jeikcode --version
 ```
 
----
+### 3. 配置模型与快速启动
 
-## 🏁 快速开始
-
-### 1. 启动与配置模型
-
-进入任意代码工程目录直接启动：
-
-```bash
-cd /path/to/your/project
-jeikcode
-```
-
-首次运行会引导配置首个模型 Provider。配置文件保存在 `~/.atomcode/config.toml`：
+在项目目录下直接运行 `jeikcode`，首次启动会引导配置 Provider。配置文件位于 `~/.atomcode/config.toml`：
 
 ```toml
 default_provider = "deepseek"
@@ -223,49 +230,45 @@ protocol         = "chat_completions"
 reasoning_effort = "high"
 ```
 
-### 2. 常用命令行参数
-
+常用命令：
 ```bash
-# 启动并在指定目录工作
+# 进入指定目录启动
 jeikcode -C /path/to/project
 
-# 指定使用的模型
+# 指定运行模型
 jeikcode --model deepseek-reasoner
 
-# 单次 Headless 模式（输出结果至 stdout，适合脚本/CI）
-jeikcode -p "排查并修复 OAuth 登录回调 404 错误"
+# Headless 模式（适合脚本与自动化 CI）
+jeikcode -p "排查并修复 OAuth 回调 404 错误"
 
-# 从文件加载提示词
-jeikcode --prompt-file task.md
-
-# 恢复上一会话
+# 继续上一会话
 jeikcode -c
 ```
 
 ---
 
-## ⌨️ 快捷键与命令
+## 五、快捷键与常用命令
 
-### 1. 终端快捷键
+### 1. 终端核心快捷键
 
 | 快捷键 | 功能说明 |
 | :--- | :--- |
-| `Enter` | 发送当前输入内容 |
+| `Enter` | 发送当前输入消息 |
 | `\` + `Enter` | 换行（全终端通用兼容） |
 | `Shift+Enter` / `Alt+Enter` | 换行（需终端协议支持） |
-| `Esc` ×2 / `Ctrl+C` ×2 | **双击防误触取消**：终止当前思考/执行并返回输入框 |
-| `Alt+V` / `Ctrl+Alt+V` | 从剪贴板粘贴图片附件 |
+| `Esc` ×2 / `Ctrl+C` ×2 | **双击防误触取消**：终止当前执行并恢复输入框 |
+| `Alt+V` / `Ctrl+Alt+V` | 粘贴剪贴板截图为多模态图片附件 |
 | `Ctrl+Up` / `Ctrl+Down` | 向上 / 向下滚动对话区域 |
 | `PageUp` / `PageDown` | 翻页滚动对话 |
-| `Ctrl+L` | 清屏并保持上下文 |
+| `Ctrl+L` | 清屏并保留上下文 |
 
 ### 2. 常用斜杠命令
 
 | 命令分类 | 斜杠命令 | 详细功能 |
 | :--- | :--- | :--- |
-| **模式与自主** | `/plan` | 切换至只读探索模式 |
+| **模式与自主** | `/plan` | 切换至只读探索模式（只调研不修改代码） |
 | | `/build` | 切换至代码修改执行模式 |
-| | `/goal <目标>` | 设定目标并开启多轮自主攻坚模式 |
+| | `/goal <目标>` | 设定完成准则，开启多轮自主攻坚模式 |
 | | `/review` | 针对当前 Git 改动执行全方位代码审查 |
 | | `/effort` | 切换思考努力程度（low / medium / high / xhigh / off） |
 | **会话与后台** | `/resume` | 交互式恢复或切换历史会话 |
@@ -282,55 +285,26 @@ jeikcode -c
 
 ---
 
-## 📚 项目级知识库与规则
+## 六、多项目知识库与规则最高裁量权
 
-JeikCode 具备业内领先的**项目级规则最高裁量权**。只要在工程中放置以下规范文件，JeikCode 会在运行时动态合并注入，且**严格优先于默认 System 规则**：
+JeikCode 具备业内领先的**多知识包加载与项目级规则最高裁量权**。在项目中放置以下 Markdown 文件，系统会在每轮交互前热重载并紧凑合并至前缀首部，**其约束效力严格优先于 System 默认规则**：
 
-| 文件规范 | 存放路径 | 核心用途 |
-| :--- | :--- | :--- |
-| **主工程规范** | `AGENTS.md` 或 `ATOMCODE.md` | 项目架构定义、代码规范、测试准则 |
-| **业务词表 (Glossary)** | `.atomcode/glossary.md` | 业务专有名词映射为代码符号别名 |
-| **业务规则 (Rules)** | `.atomcode/rules.md` | 核心业务流、权限审批、状态机约束 |
-| **数据库词典 (DbWords)**| `.atomcode/dbwords.md` | 表结构、字段含义与 SQL 编写规范 |
-| **动态提问模板** | `user-wrap.md` | 自定义提问包装结构（含 `{{input}}`） |
-
----
-
-## 🛡️ 架构安全与权限模型
-
-1. **高危命令强制确认**：`rm -rf`、`git push --force`、`DROP TABLE` 等破坏性操作必须用户显式授权。
-2. **跨目录读取限制**：对工作区之外的绝对路径访问实行严格的风险分级提示。
-3. **源码删除防呆**：执行源码文件的删除操作绝不自动放行。
-4. **即时文件回滚**：每一轮文件编辑均在内存中记录快照，随时可通过 `/undo` 一键回退。
-
----
-
-## 🤝 参与贡献与开发
-
-欢迎参与 JeikCode 的开发与建设！
-
-```bash
-# 克隆仓库
-git clone https://github.com/jeikl/jeikcode.git
-cd jeikcode
-
-# 运行代码格式化与静态检查
-cargo fmt --all
-cargo clippy --all
-
-# 运行核心单测
-cargo test --workspace
+```text
+your-project/
+  ├── AGENTS.md                  # 主工程规范 (技术栈、规范、测试要求)
+  ├── user-wrap.md               # 项目级提问动态包裹模板 (含 {{input}})
+  └── .atomcode/
+      ├── rules.md               # 业务规则与审批约束
+      ├── dbwords.md             # 数据库表结构与字段语义
+      ├── glossary.md            # 业务专有名词到代码符号的映射表
+      └── thesaurus/             # 项目级专属领域词林 (*.txt)
 ```
 
-- **新增工具**：在 `crates/atomcode-capabilities/src/tools/` 下实现 `Tool` trait；
-- **新增检索与词林**：在 `crates/atomcode-capabilities/src/codeintel/` 扩展解析与领域词典；
-- **扩展配置指南**：同步更新 `crates/atomcode-capabilities/assets/teaches/`。
-
 ---
 
-## 📄 开源许可证
+## 七、开源许可证与社区
 
-本项目基于 [MIT License](LICENSE) 开源。
+本项目基于 [MIT License](LICENSE) 开源，允许完全自由的商业与私有化使用。
 
 <p align="center">
   Crafted with Rust, Tree-Sitter, Ratatui, and Passion for Engineering Excellence.

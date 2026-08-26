@@ -911,10 +911,11 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
         ) {
           return;
         }
-        // Ignore the immediate not_active done if the race lost; poll will finish.
+        // Ignore synthetic done events from clean idle/watch disconnects.
         if (
           event.type === 'done' &&
-          (event as { stop_reason?: string }).stop_reason === 'not_active'
+          ((event as { stop_reason?: string }).stop_reason === 'not_active' ||
+            (event as { stop_reason?: string }).stop_reason === 'watch_closed')
         ) {
           return;
         }
@@ -1090,9 +1091,11 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
         if (abortRef.current) {
           return;
         }
+        // Ignore synthetic done events from clean idle/watch disconnects.
         if (
           event.type === 'done' &&
-          (event as { stop_reason?: string }).stop_reason === 'not_active'
+          ((event as { stop_reason?: string }).stop_reason === 'not_active' ||
+            (event as { stop_reason?: string }).stop_reason === 'watch_closed')
         ) {
           return;
         }

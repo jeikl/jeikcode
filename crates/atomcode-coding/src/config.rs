@@ -301,6 +301,10 @@ pub struct CodingRuntimeConfig {
     pub tool_output_max_bytes: Option<usize>,
     /// Tool names exempt from output folding (`[tools.tool_output] no_fold_tools`).
     pub tool_output_no_fold_tools: Vec<String>,
+    /// Optional shared, pre-warmed MCP registry (e.g. from daemon AppState cache).
+    /// When provided and `mcp == true`, the runtime reuses this pre-connected
+    /// registry directly rather than spawning fresh MCP client child processes.
+    pub shared_mcp_registry: Option<Arc<atomcode_capabilities::mcp::McpRegistry>>,
 }
 
 pub fn lsp_settings_from_config(
@@ -424,6 +428,7 @@ impl CodingRuntimeConfig {
                 .and_then(|v| v.trim().parse::<usize>().ok())
                 .or(config.tools.tool_output.max_bytes),
             tool_output_no_fold_tools: config.tools.tool_output.no_fold_tools.clone(),
+            shared_mcp_registry: None,
         }
     }
 

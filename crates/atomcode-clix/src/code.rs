@@ -176,6 +176,7 @@ pub async fn code(args: CodeArgs) -> Result<()> {
         session,
         skill_dirs: None,
         plugin_skill_dirs: Vec::new(),
+        shared_mcp_registry: None,
         mcp: !args.no_mcp,
         memory: !args.no_memory,
         web: !args.no_web,

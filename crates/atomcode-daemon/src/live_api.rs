@@ -473,6 +473,7 @@ pub(crate) fn chat_runtime_config(
             .and_then(|v| v.trim().parse::<usize>().ok())
             .or(config.tools.tool_output.max_bytes),
         tool_output_no_fold_tools: config.tools.tool_output.no_fold_tools.clone(),
+        shared_mcp_registry: None,
     }
 }
 
@@ -575,6 +576,12 @@ pub(crate) async fn run_chat_turn_v2(
         task,
         ..
     } = runtime;
+    // Wait for initial MCP tools to be published to the mounted kernel catalog
+    // before the first turn. When a shared MCP registry is supplied, this returns
+    // immediately; otherwise it gives background connections time to complete.
+    let _ = handle
+        .wait_mcp_ready(atomcode_capabilities::mcp::CONNECT_TIMEOUT)
+        .await;
     // VL 预处理后的文本已包含图片描述，原图不再发给 kernel
     // （非视觉模型的 provider adapter 会因原图而报 400 错误）
     let user_images = if text_carries_vl_caption(&user_text) {

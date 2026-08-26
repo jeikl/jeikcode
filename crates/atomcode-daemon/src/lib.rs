@@ -4995,8 +4995,35 @@ async fn process_chat_request(
     // Run turn(s) in a background task on the native kernel stack; the
     // downstream native-event → ChatEvent projector shapes the HTTP stream.
     {
+        let shared_mcp_reg = {
+            let mut cache = _mcp_cache.write().await;
+            if let Some(cached) = cache.get_mut(&working_dir) {
+                cached.last_used = std::time::Instant::now();
+                Some(cached.registry.clone())
+            } else {
+                let reg = Arc::new(McpRegistry::from_config_background(&working_dir));
+                if cache.len() >= MCP_CACHE_MAX {
+                    if let Some(oldest_key) = cache
+                        .iter()
+                        .min_by_key(|(_, value)| value.last_used)
+                        .map(|(key, _)| key.clone())
+                    {
+                        cache.remove(&oldest_key);
+                    }
+                }
+                cache.insert(
+                    working_dir.clone(),
+                    CachedMcpRegistry {
+                        registry: reg.clone(),
+                        last_used: std::time::Instant::now(),
+                    },
+                );
+                Some(reg)
+            }
+        };
         let mut runtime_cfg =
             live_api::chat_runtime_config(&config, &provider_name, &working_dir, telemetry.clone());
+        runtime_cfg.shared_mcp_registry = shared_mcp_reg;
         runtime_cfg.extra_system_append = req.extra_system_append.clone();
         runtime_cfg.session_display_name = req.session_title.clone();
         runtime_cfg.dangerously_skip_permissions = approval_mode
@@ -5625,6 +5652,36 @@ fn build_mcp_server_rows(
         });
     }
     servers
+}
+
+/// Get or lazily initialize the shared per-project MCP registry.
+pub(crate) async fn get_or_init_project_mcp_registry(
+    state: &AppState,
+    project_dir: &std::path::Path,
+) -> Arc<McpRegistry> {
+    let mut cache = state.mcp_cache.write().await;
+    if let Some(cached) = cache.get_mut(project_dir) {
+        cached.last_used = std::time::Instant::now();
+        return cached.registry.clone();
+    }
+    let registry = Arc::new(McpRegistry::from_config_background(project_dir));
+    if cache.len() >= MCP_CACHE_MAX {
+        if let Some(oldest_key) = cache
+            .iter()
+            .min_by_key(|(_, value)| value.last_used)
+            .map(|(key, _)| key.clone())
+        {
+            cache.remove(&oldest_key);
+        }
+    }
+    cache.insert(
+        project_dir.to_path_buf(),
+        CachedMcpRegistry {
+            registry: registry.clone(),
+            last_used: std::time::Instant::now(),
+        },
+    );
+    registry
 }
 
 /// Replace the daemon fallback registry and invalidate the per-project cache

@@ -80,7 +80,7 @@ pub enum SessionMode {
 
 /// Capability inputs for [`prepare`] — what to wire beyond the always-on core
 /// (fs/bash tools + codeintel). Defaults = the full production-parity agent.
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct PrepareOptions {
     pub session: SessionMode,
     /// Skill dirs in LOW→HIGH priority order; `None` = the standard home+project
@@ -93,6 +93,9 @@ pub struct PrepareOptions {
     /// source-neutral; the driver discovers installed-plugin directories and
     /// feeds them in.
     pub plugin_skill_dirs: Vec<(PathBuf, String)>,
+    /// Optional shared MCP registry instance. If provided, this registry is reused
+    /// instead of spawning new background MCP client processes.
+    pub shared_mcp_registry: Option<Arc<McpRegistry>>,
     /// Connect MCP servers from `<working_dir>/.mcp.json` (+ global config).
     pub mcp: bool,
     /// Inject `memory.md` (global + project) at session start. KEEP THIS CONSISTENT
@@ -115,12 +118,30 @@ pub struct PrepareOptions {
     pub rate_limit_source: Option<Arc<dyn RateLimitWindowSource>>,
 }
 
+impl std::fmt::Debug for PrepareOptions {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PrepareOptions")
+            .field("session", &self.session)
+            .field("skill_dirs", &self.skill_dirs)
+            .field("plugin_skill_dirs", &self.plugin_skill_dirs)
+            .field("shared_mcp_registry", &self.shared_mcp_registry.is_some())
+            .field("mcp", &self.mcp)
+            .field("memory", &self.memory)
+            .field("web", &self.web)
+            .field("review", &self.review)
+            .field("request_user_input", &self.request_user_input)
+            .field("rate_limit_source", &self.rate_limit_source.is_some())
+            .finish()
+    }
+}
+
 impl Default for PrepareOptions {
     fn default() -> Self {
         Self {
             session: SessionMode::Fresh,
             skill_dirs: None,
             plugin_skill_dirs: Vec::new(),
+            shared_mcp_registry: None,
             mcp: true,
             memory: true,
             web: true,
@@ -514,7 +535,9 @@ async fn prepare_with_plugin_hooks_reusing_lease(
     // the session candidate path. `mount()` publishes each connected server's tools
     // atomically for the next turn, then publishes once more when the initial pass
     // reaches its bounded terminal state.
-    let (mcp_registry, mcp_connect_rx) = if opts.mcp {
+    let (mcp_registry, mcp_connect_rx) = if let Some(shared) = opts.shared_mcp_registry.clone() {
+        (Some(shared), None)
+    } else if opts.mcp {
         let (event_tx, event_rx) = tokio::sync::mpsc::unbounded_channel();
         (
             Some(Arc::new(McpRegistry::from_config_background_with_events(
@@ -841,10 +864,11 @@ fn session_lease(
 ) -> io::Result<SessionLease> {
     match reuse_lease.filter(|lease| lease.id() == id) {
         Some(lease) => {
-            manager
-                .validate_active_lease(lease)
-                .map_err(io::Error::from)?;
-            Ok(lease.clone())
+            if manager.validate_active_lease(lease).is_ok() {
+                Ok(lease.clone())
+            } else {
+                manager.acquire_lease(id).map_err(Into::into)
+            }
         }
         None => manager.acquire_lease(id).map_err(Into::into),
     }

@@ -144,6 +144,7 @@ async fn start_native_runtime_with_session_bootstrap(
         skill_dirs: None,
         plugin_skill_dirs: crate::gather_plugin_skill_dirs_for(&cfg.working_dir),
         mcp: cfg.mcp,
+        shared_mcp_registry: cfg.shared_mcp_registry.clone(),
         memory: true,
         web: true,
         review: true,

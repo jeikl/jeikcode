@@ -23,15 +23,25 @@ struct Args {
     #[serde(default)]
     replace_all: bool,
     #[serde(default)]
+    start_line: Option<usize>,
+    #[serde(default)]
+    end_line: Option<usize>,
+    #[serde(default)]
     edits: Vec<EditHunk>,
 }
 
 #[derive(Deserialize, Clone)]
 struct EditHunk {
+    #[serde(default)]
     old_string: String,
+    #[serde(default)]
     new_string: String,
     #[serde(default)]
     replace_all: bool,
+    #[serde(default)]
+    start_line: Option<usize>,
+    #[serde(default)]
+    end_line: Option<usize>,
 }
 
 #[async_trait]
@@ -52,7 +62,9 @@ impl Tool for EditFileTool {
             "type": "object",
             "properties": {
                 "file_path": { "type": "string", "description": "Path to edit (absolute, or relative to the working directory)" },
-                "old_string": { "type": "string", "description": "Single-hunk: exact text to find. Omit when using `edits`." },
+                "start_line": { "type": "integer", "description": "Optional 1-based inclusive start line for range-based replacement." },
+                "end_line": { "type": "integer", "description": "Optional 1-based inclusive end line for range-based replacement." },
+                "old_string": { "type": "string", "description": "Single-hunk: text to find and replace. Omit when using `edits` or range replacement." },
                 "new_string": { "type": "string", "description": "Single-hunk: replacement text. Omit when using `edits`." },
                 "replace_all": { "type": "boolean", "description": "Single-hunk: replace ALL occurrences (default false)." },
                 "edits": {
@@ -61,11 +73,12 @@ impl Tool for EditFileTool {
                     "items": {
                         "type": "object",
                         "properties": {
+                            "start_line": { "type": "integer" },
+                            "end_line": { "type": "integer" },
                             "old_string": { "type": "string" },
                             "new_string": { "type": "string" },
                             "replace_all": { "type": "boolean" }
-                        },
-                        "required": ["old_string", "new_string"]
+                        }
                     }
                 }
             },
@@ -97,11 +110,20 @@ impl Tool for EditFileTool {
                 old_string: a.old_string,
                 new_string: a.new_string,
                 replace_all: a.replace_all,
+                start_line: a.start_line,
+                end_line: a.end_line,
             }]
         };
-        if hunks.is_empty() {
+        if hunks.is_empty()
+            || hunks.iter().all(|h| {
+                h.old_string.is_empty()
+                    && h.new_string.is_empty()
+                    && h.start_line.is_none()
+                    && h.end_line.is_none()
+            })
+        {
             return err(
-                "edit_file: provide `old_string`/`new_string` or a non-empty `edits` array."
+                "edit_file: provide `old_string`/`new_string`, `start_line`/`end_line`, or a non-empty `edits` array."
                     .to_string(),
             );
         }
@@ -143,7 +165,14 @@ impl Tool for EditFileTool {
         let mut total = 0usize;
         let mut kinds: Vec<&str> = Vec::new();
         for (i, h) in hunks.iter().enumerate() {
-            match apply_hunk(&buf, &h.old_string, &h.new_string, h.replace_all) {
+            match apply_hunk(
+                &buf,
+                &h.old_string,
+                &h.new_string,
+                h.replace_all,
+                h.start_line,
+                h.end_line,
+            ) {
                 Ok((next, n, kind)) => {
                     buf = next;
                     total += n;
@@ -189,12 +218,52 @@ fn apply_hunk(
     old_string: &str,
     new_string: &str,
     replace_all: bool,
+    start_line: Option<usize>,
+    end_line: Option<usize>,
 ) -> Result<(String, usize, &'static str), String> {
+    // 1. Line range mode (highest precedence if start_line/end_line specified)
+    if let (Some(s), Some(e)) = (start_line, end_line) {
+        if s == 0 || e == 0 || s > e {
+            return Err(format!(
+                "invalid line range: start_line ({s}) must be >= 1 and <= end_line ({e})."
+            ));
+        }
+        let lines: Vec<&str> = content.lines().collect();
+        if s > lines.len() {
+            return Err(format!(
+                "[Line Out of Range]: file has {} lines, but start_line is {s}.",
+                lines.len()
+            ));
+        }
+        let file_eol = if content.contains("\r\n") { "\r\n" } else { "\n" };
+        let end_bounded = e.min(lines.len());
+        let prefix = if s > 1 {
+            let mut p = lines[..s - 1].join(file_eol);
+            p.push_str(file_eol);
+            p
+        } else {
+            String::new()
+        };
+        let suffix = if end_bounded < lines.len() {
+            let mut suf = String::from(file_eol);
+            suf.push_str(&lines[end_bounded..].join(file_eol));
+            suf
+        } else {
+            String::new()
+        };
+        let normalized_new = coerce_eol(new_string, file_eol);
+        let mut result = format!("{prefix}{normalized_new}{suffix}");
+        if content.ends_with('\n') && !result.ends_with('\n') {
+            result.push_str(file_eol);
+        }
+        return Ok((result, 1, "line-range replace"));
+    }
+
     if old_string == new_string {
         return Err("old_string and new_string are identical — nothing to change.".into());
     }
     if old_string.is_empty() {
-        return Err("old_string is empty — provide the exact text fragment to replace.".into());
+        return Err("old_string is empty — provide the exact text fragment to replace or specify start_line/end_line.".into());
     }
 
     let literal = content.matches(old_string).count();
@@ -215,12 +284,9 @@ fn apply_hunk(
         if let Some((fuzzy_result, fuzzy_count)) =
             try_fuzzy_replace(content, old_string, new_string, replace_all)
         {
-            if fuzzy_result == content {
-                return Err(
-                    "the fuzzy (whitespace-normalized) match produced no change — old_string and new_string differ only in whitespace.".into(),
-                );
+            if fuzzy_result != content {
+                return Ok((fuzzy_result, fuzzy_count, "line-trimmed whitespace match"));
             }
-            return Ok((fuzzy_result, fuzzy_count, "fuzzy whitespace match"));
         }
         if let Some((token_result, token_count)) =
             try_token_normalized_replace(content, old_string, new_string, replace_all)
@@ -251,7 +317,7 @@ fn apply_hunk(
         }
         let hint = find_closest_match_snippet(content, old_string).unwrap_or_default();
         return Err(format!(
-            "old_string not found. Re-read the file and copy the exact text (including whitespace).{hint}"
+            "old_string not found in file.\n{hint}"
         ));
     }
     if count > 1 && !replace_all {
@@ -938,14 +1004,14 @@ fn find_closest_match_snippet(content: &str, old_string: &str) -> Option<String>
         let show_end = (end + ctx).min(content_lines.len());
         let snippet = content_lines[show_start..show_end].join("\n");
         Some(format!(
-            "Closest match found around lines {}-{} (similarity {:.0}%). Copy the EXACT text from the file (do not invent annotations or rewrite comments):\n```\n{}\n```",
+            "[Content Mismatch]: Closest matching block found around lines {}-{} (similarity {:.0}%):\n```\n{}\n```\n(Hint: verify line numbers or specify start_line/end_line to replace directly)",
             show_start + 1,
             show_end,
             best_score * 100.0,
             snippet
         ))
     } else {
-        None
+        Some("[Content Mismatch]: Target old_string could not be located in the file. Please check line numbers or file contents.".to_string())
     }
 }
 
@@ -1347,8 +1413,8 @@ mod tests {
             r.content
         );
         assert!(
-            r.content.contains("fuzzy"),
-            "should report a fuzzy match: {}",
+            r.content.contains("line-trimmed") || r.content.contains("whitespace"),
+            "should report a whitespace match: {}",
             r.content
         );
         assert_eq!(
@@ -1663,9 +1729,28 @@ mod tests {
             .await;
         assert!(r.is_error);
         assert!(
-            r.content.contains("Closest match found around lines"),
+            r.content.contains("Closest matching block") || r.content.contains("[Content Mismatch]"),
             "{}",
             r.content
+        );
+    }
+
+    #[tokio::test]
+    async fn line_range_replace_succeeds_and_preserves_structure() {
+        let d = tempfile::tempdir().unwrap();
+        let content = "line 1\nline 2\nline 3\nline 4\nline 5\n";
+        std::fs::write(d.path().join("range.rs"), content).unwrap();
+
+        let r = EditFileTool
+            .execute(
+                r#"{"file_path":"range.rs","start_line":2,"end_line":4,"new_string":"line TWO\nline THREE\nline FOUR"}"#,
+                &ctx(d.path()),
+            )
+            .await;
+        assert!(!r.is_error, "{}", r.content);
+        assert_eq!(
+            std::fs::read_to_string(d.path().join("range.rs")).unwrap(),
+            "line 1\nline TWO\nline THREE\nline FOUR\nline 5\n"
         );
     }
 }

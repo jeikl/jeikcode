@@ -15,6 +15,13 @@ max_timeout_secs = 1800         # 长命令最高上限（秒）：编译、测�
 silent_kill_secs = 60           # 静默终止（秒）：短命令若无任何 stdout/stderr 输出持续超过该时间，自动触发空闲 kill
 ```
 
+Windows 上 `bash` 工具支持可选的 `shell` 调用参数：
+
+- `"shell": "default"`：默认行为，使用 Git Bash/MSYS2；未安装时回退到 `cmd.exe`。
+- `"shell": "powershell"`：直接启动 PowerShell，并通过 UTF-16LE `EncodedCommand` 传递脚本，不经过 Bash/cmd 二次解析。访问 UNC 或隐藏共享时应配合单引号和 `-LiteralPath`，例如 `Get-ChildItem -LiteralPath '\\192.168.5.50\erp_code$'`。
+
+原生 PowerShell 模式只解决解释器边界与参数保真问题；工具的超时、取消、进程树回收及危险/写入型命令审批策略保持不变。
+
 ---
 
 ## 2. 工具大输出折叠与预览策略 (`[tools.tool_output]`)

@@ -978,6 +978,19 @@ pub struct CachedMcpRegistry {
 /// Maximum number of per-project MCP registries to cache.
 const MCP_CACHE_MAX: usize = 5;
 
+fn seed_project_mcp_cache(
+    project_dir: PathBuf,
+    registry: Arc<McpRegistry>,
+) -> HashMap<PathBuf, CachedMcpRegistry> {
+    HashMap::from([(
+        project_dir,
+        CachedMcpRegistry {
+            registry,
+            last_used: std::time::Instant::now(),
+        },
+    )])
+}
+
 /// Get default working directory
 fn default_working_dir() -> PathBuf {
     std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
@@ -4823,9 +4836,9 @@ async fn process_chat_request(
     cancel_token: CancellationToken,
     operation_id: String,
     active_chats: ActiveChatRegistry,
-    // CodingRuntime builds its own MCP; this per-project cache is warmed by
-    // the /context, /compact and /live paths, not the chat turn.
-    _mcp_cache: Arc<RwLock<HashMap<PathBuf, CachedMcpRegistry>>>,
+    // Daemon-owned, per-project MCP connections shared by all short-lived
+    // `/chat` runtimes. Each runtime only mounts adapters/catalog entries.
+    mcp_cache: Arc<RwLock<HashMap<PathBuf, CachedMcpRegistry>>>,
     telemetry: Arc<Telemetry>,
     pending_permissions: permission_bridge::PermissionResponders,
     pending_user_inputs: permission_bridge::UserInputResponders,
@@ -4995,7 +5008,8 @@ async fn process_chat_request(
     // Run turn(s) in a background task on the native kernel stack; the
     // downstream native-event → ChatEvent projector shapes the HTTP stream.
     {
-        let shared_mcp_reg = Some(get_or_init_project_mcp_registry_from_cache(&_mcp_cache, &working_dir).await);
+        let shared_mcp_reg =
+            Some(get_or_init_project_mcp_registry_from_cache(&mcp_cache, &working_dir).await);
         let mut runtime_cfg =
             live_api::chat_runtime_config(&config, &provider_name, &working_dir, telemetry.clone());
         runtime_cfg.shared_mcp_registry = shared_mcp_reg;
@@ -5583,7 +5597,7 @@ async fn mcp_status(State(state): State<AppState>) -> Json<McpStatusResponse> {
     let statuses = merge_configured_mcp_statuses(statuses, &configured_names);
 
     // Fetch the tool list once (was previously re-fetched per connected server).
-    let tools = registry.list_all_tools().await;
+    let tools = registry.list_all_tools_cached().await;
     let servers = build_mcp_server_rows(statuses, &tools);
     Json(McpStatusResponse {
         servers,
@@ -5630,6 +5644,28 @@ fn build_mcp_server_rows(
 }
 
 /// Get or lazily initialize the shared per-project MCP registry from cache map.
+fn spawn_mcp_registry_warmup(registry: Arc<McpRegistry>) {
+    tokio::spawn(async move {
+        tokio::select! {
+            _ = registry.wait_until_initial_connections_done() => {}
+            _ = registry.wait_for_cancellation() => return,
+        }
+        let statuses = registry.server_statuses().await;
+        let tools = registry.list_all_tools_cached().await;
+        println!(
+            "\x1b[36m[MCP-Daemon 2/4]\x1b[0m MCP 服务器初始化完成，连接状态: {:?}",
+            statuses
+                .iter()
+                .map(|(server, status)| format!("{server}: {status:?}"))
+                .collect::<Vec<_>>()
+        );
+        println!(
+            "\x1b[36m[MCP-Daemon 3/4]\x1b[0m 成功发现 {} 个活动 MCP 工具",
+            tools.len()
+        );
+    });
+}
+
 pub(crate) async fn get_or_init_project_mcp_registry_from_cache(
     mcp_cache: &Arc<RwLock<HashMap<PathBuf, CachedMcpRegistry>>>,
     project_dir: &std::path::Path,
@@ -5644,30 +5680,16 @@ pub(crate) async fn get_or_init_project_mcp_registry_from_cache(
         project_dir.display()
     );
     let registry = Arc::new(McpRegistry::from_config_background(project_dir));
-    let reg_clone = registry.clone();
-    tokio::spawn(async move {
-        reg_clone.wait_until_initial_connections_done().await;
-        let statuses = reg_clone.server_statuses().await;
-        let tools = reg_clone.list_all_tools().await;
-        println!(
-            "\x1b[36m[MCP-Daemon 2/4]\x1b[0m MCP 服务器初始化完成，连接状态: {:?}",
-            statuses
-                .iter()
-                .map(|(s, st)| format!("{s}: {:?}", st))
-                .collect::<Vec<_>>()
-        );
-        println!(
-            "\x1b[36m[MCP-Daemon 3/4]\x1b[0m 成功发现 {} 个活动 MCP 工具",
-            tools.len()
-        );
-    });
+    spawn_mcp_registry_warmup(registry.clone());
     if cache.len() >= MCP_CACHE_MAX {
         if let Some(oldest_key) = cache
             .iter()
             .min_by_key(|(_, value)| value.last_used)
             .map(|(key, _)| key.clone())
         {
-            cache.remove(&oldest_key);
+            if let Some(evicted) = cache.remove(&oldest_key) {
+                evicted.registry.cancel_pending_work();
+            }
         }
     }
     cache.insert(
@@ -5697,6 +5719,7 @@ pub(crate) async fn replace_project_mcp_registry(
     project_dir: &std::path::Path,
     replacement: Arc<McpRegistry>,
 ) {
+    spawn_mcp_registry_warmup(replacement.clone());
     let mut cache = state.mcp_cache.write().await;
     if !cache.contains_key(project_dir) && cache.len() >= MCP_CACHE_MAX {
         if let Some(oldest_key) = cache
@@ -5704,17 +5727,32 @@ pub(crate) async fn replace_project_mcp_registry(
             .min_by_key(|(_, value)| value.last_used)
             .map(|(key, _)| key.clone())
         {
-            cache.remove(&oldest_key);
+            if let Some(evicted) = cache.remove(&oldest_key) {
+                evicted.registry.cancel_pending_work();
+            }
         }
     }
-    cache.insert(
+    let stale_cached = cache.insert(
         project_dir.to_path_buf(),
         CachedMcpRegistry {
             registry: replacement.clone(),
             last_used: std::time::Instant::now(),
         },
     );
-    *state.mcp_registry.write().await = replacement;
+    drop(cache);
+    let stale_fallback = {
+        let mut fallback = state.mcp_registry.write().await;
+        std::mem::replace(&mut *fallback, replacement.clone())
+    };
+    for stale in stale_cached
+        .map(|cached| cached.registry)
+        .into_iter()
+        .chain(std::iter::once(stale_fallback))
+    {
+        if !Arc::ptr_eq(&stale, &replacement) {
+            stale.cancel_pending_work();
+        }
+    }
 }
 
 async fn mcp_reload(State(state): State<AppState>) -> Json<serde_json::Value> {
@@ -6713,7 +6751,10 @@ pub async fn run_server(opts: ServerOpts) -> anyhow::Result<()> {
 
     // Initialize MCP registry from project working directory config
     // This reads both $ATOMCODE_HOME/mcp.json (user-level) and <project>/.mcp.json (project-level)
-    let mcp_registry = McpRegistry::from_config_background(&project_state.working_dir);
+    let initial_mcp_project = project_state.working_dir.clone();
+    let mcp_registry = Arc::new(McpRegistry::from_config_background(&initial_mcp_project));
+    spawn_mcp_registry_warmup(mcp_registry.clone());
+    let initial_mcp_cache = seed_project_mcp_cache(initial_mcp_project, mcp_registry.clone());
 
     // Step 7: Build AppState (R1.4)
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
@@ -6725,8 +6766,8 @@ pub async fn run_server(opts: ServerOpts) -> anyhow::Result<()> {
     let state = AppState {
         project: project_store,
         active_chats: ActiveChatRegistry::default(),
-        mcp_registry: Arc::new(RwLock::new(Arc::new(mcp_registry))),
-        mcp_cache: Arc::new(RwLock::new(HashMap::new())),
+        mcp_registry: Arc::new(RwLock::new(mcp_registry)),
+        mcp_cache: Arc::new(RwLock::new(initial_mcp_cache)),
         login_sessions: Arc::new(RwLock::new(HashMap::new())),
         login_start_lock: Arc::new(Mutex::new(())),
         daemon_instance_id: Arc::from(uuid::Uuid::new_v4().to_string()),
@@ -7767,7 +7808,7 @@ mod tests {
         state.mcp_cache.write().await.insert(
             working_dir.clone(),
             CachedMcpRegistry {
-                registry: stale,
+                registry: stale.clone(),
                 last_used: std::time::Instant::now(),
             },
         );
@@ -7786,6 +7827,66 @@ mod tests {
         assert!(Arc::ptr_eq(&cached, &replacement));
         let current = state.mcp_registry.read().await;
         assert!(Arc::ptr_eq(&*current, &replacement));
+        assert!(
+            tokio::time::timeout(
+                std::time::Duration::from_millis(20),
+                stale.wait_for_cancellation(),
+            )
+            .await
+            .is_ok(),
+            "an explicitly replaced registry must cancel its pending work"
+        );
+    }
+
+    #[test]
+    fn initial_mcp_cache_reuses_the_daemon_fallback_registry() {
+        let registry = Arc::new(McpRegistry::new());
+        let project = PathBuf::from("project");
+        let cache = seed_project_mcp_cache(project.clone(), registry.clone());
+
+        assert!(Arc::ptr_eq(
+            &cache.get(&project).expect("seeded project").registry,
+            &registry,
+        ));
+    }
+
+    #[tokio::test]
+    async fn project_mcp_cache_eviction_cancels_the_oldest_registry() {
+        let cache = Arc::new(RwLock::new(HashMap::new()));
+        let oldest = Arc::new(McpRegistry::new());
+        {
+            let mut entries = cache.write().await;
+            entries.insert(
+                PathBuf::from("oldest"),
+                CachedMcpRegistry {
+                    registry: oldest.clone(),
+                    last_used: std::time::Instant::now() - std::time::Duration::from_secs(60),
+                },
+            );
+            for index in 1..MCP_CACHE_MAX {
+                entries.insert(
+                    PathBuf::from(format!("recent-{index}")),
+                    CachedMcpRegistry {
+                        registry: Arc::new(McpRegistry::new()),
+                        last_used: std::time::Instant::now(),
+                    },
+                );
+            }
+        }
+
+        let project = tempfile::tempdir().unwrap();
+        let _new = get_or_init_project_mcp_registry_from_cache(&cache, project.path()).await;
+
+        assert!(
+            tokio::time::timeout(
+                std::time::Duration::from_millis(20),
+                oldest.wait_for_cancellation(),
+            )
+            .await
+            .is_ok(),
+            "evicting an MCP registry must cancel its pending connection work"
+        );
+        assert_eq!(cache.read().await.len(), MCP_CACHE_MAX);
     }
 
     #[tokio::test(flavor = "current_thread")]

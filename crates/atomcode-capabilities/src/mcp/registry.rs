@@ -6,7 +6,7 @@ use std::time::Duration;
 
 use anyhow::Result;
 use futures::stream::{FuturesUnordered, StreamExt};
-use tokio::sync::{mpsc, watch, RwLock};
+use tokio::sync::{mpsc, watch, Mutex, RwLock};
 
 use super::client::{McpClient, McpToolInfo};
 use super::config::{load_mcp_config, McpServerConfig};
@@ -152,6 +152,13 @@ pub struct McpRegistry {
     /// Current initialize-time instructions, keyed by the configured server name.
     /// This is live connection state: it is never copied into session persistence.
     server_instructions: Arc<std::sync::RwLock<BTreeMap<String, String>>>,
+    /// Last successful tools/list result per connected server. Tool schemas are
+    /// connection-scoped, not turn-scoped, so shared daemon registries reuse this
+    /// snapshot instead of issuing tools/list for every `/chat` runtime.
+    tool_cache: Arc<RwLock<BTreeMap<String, Vec<McpToolInfo>>>>,
+    /// Collapses concurrent first-discovery requests from status polling and a
+    /// newly-created runtime into one tools/list pass.
+    tool_discovery_lock: Arc<Mutex<()>>,
 }
 
 impl McpRegistry {
@@ -170,6 +177,8 @@ impl McpRegistry {
             auto_approved_tools: Arc::new(std::sync::RwLock::new(HashSet::new())),
             tool_aliases: Arc::new(std::sync::RwLock::new(BTreeMap::new())),
             server_instructions: Arc::new(std::sync::RwLock::new(BTreeMap::new())),
+            tool_cache: Arc::new(RwLock::new(BTreeMap::new())),
+            tool_discovery_lock: Arc::new(Mutex::new(())),
         }
     }
 
@@ -190,6 +199,8 @@ impl McpRegistry {
                 auto_approved_tools: Arc::new(std::sync::RwLock::new(HashSet::new())),
                 tool_aliases: Arc::new(std::sync::RwLock::new(BTreeMap::new())),
                 server_instructions: Arc::new(std::sync::RwLock::new(BTreeMap::new())),
+                tool_cache: Arc::new(RwLock::new(BTreeMap::new())),
+                tool_discovery_lock: Arc::new(Mutex::new(())),
             },
             rx,
         )
@@ -674,9 +685,15 @@ impl McpRegistry {
         };
         self.record_server_instructions(&config.name, initialization.instructions.as_deref());
 
+        // A reconnect/replacement may expose a different schema under the same
+        // server name. Serialize the connection swap with tool discovery so no
+        // caller can cache the old client's schema after the replacement commits.
+        let _discovery = self.tool_discovery_lock.lock().await;
+        self.tool_cache.write().await.remove(&config.name);
         let mut servers = self.servers.write().await;
         servers.insert(config.name.clone(), Arc::from(client));
         drop(servers);
+        drop(_discovery);
         let mut timeouts = self.server_timeouts_ms.write().await;
         timeouts.insert(config.name.clone(), config.timeout_ms());
         let mut failed = self.failed_servers.write().await;
@@ -702,8 +719,45 @@ impl McpRegistry {
         Duration::from_millis(configured_ms.saturating_add(5_000))
     }
 
-    /// Get all available tools from all connected servers.
+    async fn cached_tools_snapshot(&self) -> Vec<McpToolInfo> {
+        let cache = self.tool_cache.read().await;
+        let mut tools: Vec<McpToolInfo> = cache.values().flatten().cloned().collect();
+        tools.sort_by(|left, right| {
+            (&left.server_name, &left.tool_name).cmp(&(&right.server_name, &right.tool_name))
+        });
+        tools
+    }
+
+    async fn cached_tools_for_connected_servers(&self) -> Option<Vec<McpToolInfo>> {
+        let connected: Vec<String> = self.servers.read().await.keys().cloned().collect();
+        let cache = self.tool_cache.read().await;
+        if !connected.iter().all(|server| cache.contains_key(server)) {
+            return None;
+        }
+        drop(cache);
+        Some(self.cached_tools_snapshot().await)
+    }
+
+    /// Return the stable connection-scoped tool snapshot, discovering it once
+    /// when necessary. Concurrent callers share the same discovery pass.
+    pub async fn list_all_tools_cached(&self) -> Vec<McpToolInfo> {
+        if let Some(tools) = self.cached_tools_for_connected_servers().await {
+            return tools;
+        }
+        let _discovery = self.tool_discovery_lock.lock().await;
+        if let Some(tools) = self.cached_tools_for_connected_servers().await {
+            return tools;
+        }
+        self.discover_all_tools().await
+    }
+
+    /// Force-refresh all available tools from all connected servers.
     pub async fn list_all_tools(&self) -> Vec<McpToolInfo> {
+        let _discovery = self.tool_discovery_lock.lock().await;
+        self.discover_all_tools().await
+    }
+
+    async fn discover_all_tools(&self) -> Vec<McpToolInfo> {
         // Never hold the registry lock across an .await: list_tools can be slow and
         // status/reload should remain responsive.
         let server_snapshot: Vec<(String, Arc<dyn McpClient>)> = {
@@ -729,9 +783,10 @@ impl McpRegistry {
                         .write()
                         .unwrap_or_else(|poisoned| poisoned.into_inner())
                         .remove(&server_name);
+                    let mut server_tools = Vec::with_capacity(result.tools.len());
                     for tool in result.tools {
                         let read_only = tool.is_read_only();
-                        all_tools.push(McpToolInfo {
+                        server_tools.push(McpToolInfo {
                             server_name: server_name.clone(),
                             tool_name: tool.name,
                             description: tool.description,
@@ -739,8 +794,14 @@ impl McpRegistry {
                             read_only,
                         });
                     }
+                    all_tools.extend(server_tools.iter().cloned());
+                    self.tool_cache
+                        .write()
+                        .await
+                        .insert(server_name, server_tools);
                 }
                 Err(e) => {
+                    self.tool_cache.write().await.remove(&server_name);
                     let message = format!("tools/list failed: {}", e);
                     self.status_overrides
                         .write()
@@ -766,6 +827,13 @@ impl McpRegistry {
 
     /// Get tools from a single connected server.
     pub async fn list_tools_for_server(&self, server_name: &str) -> Vec<McpToolInfo> {
+        if let Some(tools) = self.tool_cache.read().await.get(server_name).cloned() {
+            return tools;
+        }
+        let _discovery = self.tool_discovery_lock.lock().await;
+        if let Some(tools) = self.tool_cache.read().await.get(server_name).cloned() {
+            return tools;
+        }
         let client = {
             let servers = self.servers.read().await;
             servers.get(server_name).map(Arc::clone)
@@ -786,7 +854,7 @@ impl McpRegistry {
                     .write()
                     .unwrap_or_else(|poisoned| poisoned.into_inner())
                     .remove(server_name);
-                result
+                let tools: Vec<McpToolInfo> = result
                     .tools
                     .into_iter()
                     .map(|tool| {
@@ -799,9 +867,15 @@ impl McpRegistry {
                             read_only,
                         }
                     })
-                    .collect()
+                    .collect();
+                self.tool_cache
+                    .write()
+                    .await
+                    .insert(server_name.to_string(), tools.clone());
+                tools
             }
             Err(e) => {
+                self.tool_cache.write().await.remove(server_name);
                 let message = format!("tools/list failed: {}", e);
                 self.status_overrides
                     .write()
@@ -916,6 +990,11 @@ impl McpRegistry {
         wait_for_true(&mut ready).await;
     }
 
+    /// Whether every configured server has reached an initial terminal state.
+    pub fn initial_connections_complete(&self) -> bool {
+        *self.initial_ready.borrow()
+    }
+
     fn finish_initial_connections(&self) {
         self.initial_ready.send_replace(true);
     }
@@ -946,6 +1025,8 @@ impl McpRegistry {
             auto_approved_tools: self.auto_approved_tools.clone(),
             tool_aliases: self.tool_aliases.clone(),
             server_instructions: self.server_instructions.clone(),
+            tool_cache: self.tool_cache.clone(),
+            tool_discovery_lock: self.tool_discovery_lock.clone(),
         })
     }
 }
@@ -1136,6 +1217,10 @@ mod tests {
         barrier: Arc<tokio::sync::Barrier>,
     }
 
+    struct CountingListClient {
+        calls: Arc<std::sync::atomic::AtomicUsize>,
+    }
+
     struct BlockingCallClient {
         entered: Arc<tokio::sync::Notify>,
         release: Arc<tokio::sync::Notify>,
@@ -1196,6 +1281,35 @@ mod tests {
 
         fn server_name(&self) -> &str {
             &self.name
+        }
+
+        fn status(&self) -> ServerStatus {
+            ServerStatus::Connected
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl McpClient for CountingListClient {
+        async fn initialize(&mut self) -> Result<super::super::types::InitializeResult> {
+            anyhow::bail!("not used")
+        }
+
+        async fn list_tools(&self) -> Result<super::super::types::ListToolsResult> {
+            self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            tokio::time::sleep(Duration::from_millis(10)).await;
+            Ok(super::super::types::ListToolsResult { tools: Vec::new() })
+        }
+
+        async fn call_tool(
+            &self,
+            _tool_name: &str,
+            _arguments: serde_json::Value,
+        ) -> Result<super::super::types::CallToolResult> {
+            anyhow::bail!("not used")
+        }
+
+        fn server_name(&self) -> &str {
+            "counting"
         }
 
         fn status(&self) -> ServerStatus {
@@ -1461,6 +1575,27 @@ mod tests {
             result.is_ok(),
             "sequential tools/list would deadlock on the first server"
         );
+    }
+
+    #[tokio::test]
+    async fn cached_tool_discovery_runs_once_for_shared_registry() {
+        let registry = McpRegistry::new();
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        registry.servers.write().await.insert(
+            "counting".to_string(),
+            Arc::new(CountingListClient {
+                calls: Arc::clone(&calls),
+            }),
+        );
+        registry.finish_initial_connections();
+
+        let (first, second) = tokio::join!(
+            registry.list_all_tools_cached(),
+            registry.list_all_tools_cached(),
+        );
+        assert!(first.is_empty());
+        assert!(second.is_empty());
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
     }
 
     #[tokio::test]

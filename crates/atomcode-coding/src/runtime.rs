@@ -1237,6 +1237,15 @@ impl CodingRuntimeHandle {
     /// Explicit headless readiness policy. Interactive callers should let MCP
     /// connect in the background and observe new tools from the next turn.
     pub async fn wait_mcp_ready(&self, timeout: std::time::Duration) -> Result<(), RuntimeError> {
+        self.wait_mcp_ready_status(timeout).await.map(|_| ())
+    }
+
+    /// Status-preserving variant used by drivers that need to distinguish a
+    /// caller-owned timeout from successful MCP catalog publication.
+    pub async fn wait_mcp_ready_status(
+        &self,
+        timeout: std::time::Duration,
+    ) -> Result<bool, RuntimeError> {
         let state = self.state.load(Ordering::Acquire);
         let (done, result) = oneshot::channel();
         self.tx
@@ -1999,7 +2008,7 @@ pub enum CodingRuntimeControl {
     WaitMcpReady {
         generation: u64,
         timeout: std::time::Duration,
-        done: oneshot::Sender<Result<(), RuntimeError>>,
+        done: oneshot::Sender<Result<bool, RuntimeError>>,
     },
     McpStatus {
         generation: u64,
@@ -3786,7 +3795,8 @@ fn spawn_runtime_owner_with_optional_agent(
                         // Waiting for supplemental MCP readiness must not stop the
                         // runtime owner from processing cancel/reload/shutdown.
                         tokio::spawn(async move {
-                            if !*readiness.borrow_and_update() {
+                            let mut ready = *readiness.borrow_and_update();
+                            if !ready {
                                 let wait = async {
                                     while !*readiness.borrow_and_update() {
                                         if readiness.changed().await.is_err() {
@@ -3794,9 +3804,10 @@ fn spawn_runtime_owner_with_optional_agent(
                                         }
                                     }
                                 };
-                                let _ = tokio::time::timeout(timeout, wait).await;
+                                ready = tokio::time::timeout(timeout, wait).await.is_ok()
+                                    && *readiness.borrow();
                             }
-                            let _ = done.send(Ok(()));
+                            let _ = done.send(Ok(ready));
                         });
                     }
                     Some(CodingRuntimeControl::McpStatus {
@@ -6027,8 +6038,10 @@ fn reject_runtime_control(
         | CodingRuntimeControl::Cancel { done, .. }
         | CodingRuntimeControl::PauseGoal { done, .. }
         | CodingRuntimeControl::SetMode { done, .. }
-        | CodingRuntimeControl::WaitMcpReady { done, .. }
         | CodingRuntimeControl::QueueLocalContext { done, .. } => {
+            let _ = done.send(Err(RuntimeError::Unavailable));
+        }
+        CodingRuntimeControl::WaitMcpReady { done, .. } => {
             let _ = done.send(Err(RuntimeError::Unavailable));
         }
         CodingRuntimeControl::Snapshot { done, .. } => {

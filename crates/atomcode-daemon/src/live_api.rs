@@ -576,11 +576,35 @@ pub(crate) async fn run_chat_turn_v2(
         task,
         ..
     } = runtime;
-    // Quick readiness poll for MCP tools (50ms). When shared MCP registry is supplied,
-    // tools are already mounted immediately so this finishes instantly without blocking.
-    let _ = handle
-        .wait_mcp_ready(std::time::Duration::from_millis(50))
-        .await;
+    // The non-sync `/chat` path creates a short-lived runtime for every turn.
+    // Its first provider request must not race a cold shared daemon registry.
+    // Bound the wait so one stalled MCP server cannot block chat forever.
+    match handle
+        .wait_mcp_ready_status(atomcode_capabilities::mcp::CONNECT_TIMEOUT)
+        .await
+    {
+        Ok(true) => {}
+        Ok(false) => {
+            tracing::warn!("MCP catalog was not ready before the chat timeout");
+            send_chat_runtime_error(
+                &runtime_event_tx,
+                "MCP 工具目录初始化超时，本次消息未发送；请检查 MCP 状态后重试。",
+            );
+            let _ = handle.shutdown().await;
+            let _ = task.await;
+            return;
+        }
+        Err(error) => {
+            tracing::warn!(?error, "MCP readiness wait failed");
+            send_chat_runtime_error(
+                &runtime_event_tx,
+                format!("MCP 工具目录初始化失败，本次消息未发送：{error}"),
+            );
+            let _ = handle.shutdown().await;
+            let _ = task.await;
+            return;
+        }
+    }
     // VL 预处理后的文本已包含图片描述，原图不再发给 kernel
     // （非视觉模型的 provider adapter 会因原图而报 400 错误）
     let user_images = if text_carries_vl_caption(&user_text) {

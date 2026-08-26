@@ -12,6 +12,7 @@
 use super::{err, ok};
 use async_trait::async_trait;
 use atomcode_kernel::tool::{RiskLevel, Tool, ToolContext, ToolResult};
+use base64::Engine;
 use serde::Deserialize;
 use serde_json::json;
 use std::borrow::Cow;
@@ -42,6 +43,23 @@ struct Args {
     command: String,
     #[serde(default)]
     timeout: Option<u64>,
+    #[serde(default)]
+    shell: ShellMode,
+}
+
+#[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+enum ShellMode {
+    #[default]
+    Default,
+    Powershell,
+}
+
+fn command_for_policy(args: &Args) -> Cow<'_, str> {
+    match args.shell {
+        ShellMode::Default => Cow::Borrowed(&args.command),
+        ShellMode::Powershell => Cow::Owned(format!("powershell -Command {}", args.command)),
+    }
 }
 
 #[async_trait]
@@ -68,6 +86,12 @@ impl Tool for BashTool {
             "type": "object",
             "properties": {
                 "command": { "type": "string", "description": "The shell command to run" },
+                "shell": {
+                    "type": "string",
+                    "enum": ["default", "powershell"],
+                    "default": "default",
+                    "description": "Interpreter selection. `default` uses the platform shell (Git Bash/MSYS2 or cmd.exe on Windows). `powershell` launches PowerShell directly with an encoded command, bypassing Bash/cmd quoting and variable expansion. Use it for native Windows operations and UNC paths; quote paths inside the PowerShell script and use `-LiteralPath`, e.g. Get-ChildItem -LiteralPath '\\\\server\\share$'."
+                },
                 "timeout": {
                     "type": "integer",
                     "description": "REQUIRED seconds before the command is killed. Pick by job kind — do NOT omit.\n\
@@ -89,7 +113,7 @@ BAD: timeout=900 on git status or ls"
         // Parse the command out of args; a parse failure is conservatively Risky.
         match serde_json::from_str::<Args>(args) {
             Ok(a) => {
-                if check_destructive_command(&a.command).is_some() {
+                if check_destructive_command(&command_for_policy(&a)).is_some() {
                     RiskLevel::Risky
                 } else {
                     RiskLevel::Safe
@@ -105,7 +129,12 @@ BAD: timeout=900 on git status or ls"
     /// `# comment`, added whitespace) keeps the grant instead of re-prompting every turn.
     fn always_grant_scope(&self, args: &str) -> String {
         match serde_json::from_str::<Args>(args) {
-            Ok(a) => normalize_command_for_grant(&a.command),
+            Ok(a) => match a.shell {
+                ShellMode::Default => normalize_command_for_grant(&a.command),
+                ShellMode::Powershell => {
+                    format!("powershell:{}", normalize_command_for_grant(&a.command))
+                }
+            },
             Err(_) => args.to_string(),
         }
     }
@@ -115,7 +144,7 @@ BAD: timeout=900 on git status or ls"
     fn parallel_safe(&self, args: &str) -> bool {
         serde_json::from_str::<Args>(args)
             .ok()
-            .map(|a| is_read_only_bash(&a.command))
+            .map(|a| a.shell == ShellMode::Default && is_read_only_bash(&a.command))
             .unwrap_or(false)
     }
     async fn execute(&self, args: &str, ctx: &ToolContext) -> ToolResult {
@@ -155,7 +184,7 @@ BAD: timeout=900 on git status or ls"
         #[cfg(not(unix))]
         let effective_command = a.command.clone();
 
-        let mut cmd = match build_command(&effective_command) {
+        let mut cmd = match build_command(&effective_command, a.shell) {
             Ok(c) => c,
             Err(reason) => return err(reason),
         };
@@ -369,9 +398,12 @@ fn shell_tool_description(
              printf '\\n'. Chain steps with &&. For multi-line text (e.g. a multi-line commit \
              message) write it to a temp file and pass the file (e.g. git commit -F msg.txt).\n\
              Default to ONE shell — cmd.exe — and do NOT randomly switch between shells mid-task. \
-             Do NOT use git-bash forms like `cmd //c`. Use PowerShell (`pwsh -Command ...`) ONLY \
-             when a task genuinely needs a PowerShell-only feature, never as a substitute for a \
-             cmd.exe builtin. Always quote paths \
+             Do NOT use git-bash forms like `cmd //c`. When a task genuinely needs PowerShell, \
+             set this tool's `shell` argument to `powershell`; do NOT nest `pwsh -Command` or \
+             `powershell -Command` inside cmd.exe. Native PowerShell mode uses EncodedCommand, so \
+             UNC backslashes and a trailing `$` reach PowerShell unchanged. Quote the path inside \
+             the script and use `-LiteralPath`, for example \
+             `Get-ChildItem -LiteralPath '\\\\server\\share$'`. Always quote paths \
              containing spaces, e.g. `if exist \"C:\\Program Files\"` — an unquoted spaced path \
              splits into two tokens and reports a false \"not found\".\n\
              The dedicated file tools above (read_file / grep / glob / list_directory) also \
@@ -386,7 +418,11 @@ fn shell_tool_description(
              quoting, heredocs and `printf` all work as on Linux.\n\
              PATHS: bash treats `\\` as an escape, so a Windows path like `C:\\Windows` is \
              mangled — use forward slashes (`C:/Windows`) or POSIX form (`/c/Windows`). \
-             Relative paths work (the working directory is already set).\n\
+             Relative paths work (the working directory is already set). For UNC shares, prefer \
+             bash-native `//server/share$`, or set this tool's `shell` argument to `powershell` \
+             and run `Get-ChildItem -LiteralPath '\\\\server\\share$'`. Native PowerShell mode \
+             uses EncodedCommand and does not pass through Bash, so backslashes and `$` are not \
+             consumed by an outer shell. Do NOT nest `pwsh -Command` inside Bash.\n\
              Windows-native tools (where, reg, tasklist, sc) are still callable by name. Do \
              NOT emit cmd.exe builtins (`dir`, `type`, `copy`, `%VAR%`) — use their bash \
              equivalents (`ls`, `cat`, `cp`, `$VAR`) or the dedicated file tools above.\n\
@@ -554,8 +590,33 @@ fn sudo_opts_have_askpass_or_noninteractive(rest: &str) -> bool {
     false
 }
 
+fn powershell_encoded_command(command: &str) -> String {
+    let utf16_le: Vec<u8> = command.encode_utf16().flat_map(u16::to_le_bytes).collect();
+    base64::engine::general_purpose::STANDARD.encode(utf16_le)
+}
+
+fn build_powershell_command(command: &str) -> tokio::process::Command {
+    #[cfg(windows)]
+    let executable = "powershell.exe";
+    #[cfg(not(windows))]
+    let executable = "pwsh";
+    let mut cmd = tokio::process::Command::new(executable);
+    let encoded = powershell_encoded_command(command);
+    cmd.args([
+        "-NoLogo",
+        "-NoProfile",
+        "-NonInteractive",
+        "-EncodedCommand",
+        &encoded,
+    ]);
+    cmd
+}
+
 #[cfg(unix)]
-fn build_command(command: &str) -> Result<tokio::process::Command, String> {
+fn build_command(command: &str, shell_mode: ShellMode) -> Result<tokio::process::Command, String> {
+    if shell_mode == ShellMode::Powershell {
+        return Ok(build_powershell_command(command));
+    }
     // Prefer bash for the bash-isms models emit; the OS PATH resolves it. If bash is
     // absent the spawn fails and the model sees a clear error (it can retry with sh).
     // HarmonyOS / OpenHarmony does NOT ship bash — fall back to sh (mksh).
@@ -899,7 +960,10 @@ fn rewrite_nul_redirect(command: &str) -> Cow<'_, str> {
 /// the command contains bash constructs that neither bash (absent) nor cmd.exe can handle
 /// safely — the caller surfaces that as a clear tool error so the model can rewrite.
 #[cfg(windows)]
-fn build_command(command: &str) -> Result<tokio::process::Command, String> {
+fn build_command(command: &str, shell_mode: ShellMode) -> Result<tokio::process::Command, String> {
+    if shell_mode == ShellMode::Powershell {
+        return Ok(build_powershell_command(command));
+    }
     if let Some(bash) = detect_windows_bash() {
         // Bash available (Git Bash / WSL / MSYS2) — route through it, unifying with
         // the Unix path. `bash -c "<script>"` honors bash quoting exactly as the model
@@ -1914,6 +1978,29 @@ pub fn check_destructive_command(command: &str) -> Option<String> {
     }
     // Windows (cmd.exe / PowerShell) destructive patterns (cmd is already lowercased).
     if cmd.contains("powershell") || cmd.contains("pwsh") {
+        if [
+            "remove-item",
+            "remove-itemproperty",
+            "clear-content",
+            "set-content",
+            "add-content",
+            "out-file",
+            "new-item",
+            "copy-item",
+            "move-item",
+            "rename-item",
+            "set-item",
+            "set-itemproperty",
+            "format-volume",
+            "remove-partition",
+            "stop-computer",
+            "restart-computer",
+        ]
+        .iter()
+        .any(|command| cmd.contains(command))
+        {
+            return Some("mutating PowerShell command".to_string());
+        }
         let web_dl = [
             "invoke-webrequest",
             "downloadstring",
@@ -2978,11 +3065,76 @@ mod tests {
             schema.contains("BAD") && schema.contains("omit timeout"),
             "schema must show omit-timeout as BAD: {schema}"
         );
+        assert!(
+            schema.contains("powershell")
+                && schema.contains("LiteralPath")
+                && schema.contains("share$"),
+            "schema must expose the native PowerShell mode and UNC guidance: {schema}"
+        );
         let desc = shell_tool_description(false, false, false);
         assert!(
             desc.contains("timeout=900") && desc.contains("timeout=30"),
             "tool description must repeat the timeout routing: {desc}"
         );
+    }
+
+    #[test]
+    fn powershell_encoded_command_round_trips_unc_and_special_characters() {
+        let script = r#"Get-ChildItem -LiteralPath '\\192.168.5.50\erp code$'"#;
+        let encoded = powershell_encoded_command(script);
+        let bytes = base64::engine::general_purpose::STANDARD
+            .decode(encoded)
+            .expect("valid base64");
+        assert_eq!(bytes.len() % 2, 0);
+        let utf16: Vec<u16> = bytes
+            .chunks_exact(2)
+            .map(|pair| u16::from_le_bytes([pair[0], pair[1]]))
+            .collect();
+        assert_eq!(String::from_utf16(&utf16).unwrap(), script);
+    }
+
+    #[test]
+    fn native_powershell_mode_keeps_destructive_classification_and_grant_scope() {
+        let destructive = json!({
+            "command": "Remove-Item -LiteralPath 'C:\\\\important' -Recurse -Force",
+            "shell": "powershell"
+        })
+        .to_string();
+        assert_eq!(BashTool.risk(&destructive), RiskLevel::Risky);
+        assert!(BashTool
+            .always_grant_scope(&destructive)
+            .starts_with("powershell:"));
+        assert!(!BashTool.parallel_safe(&destructive));
+
+        let write = json!({
+            "command": "Set-Content -LiteralPath 'C:\\\\important.txt' -Value changed",
+            "shell": "powershell"
+        })
+        .to_string();
+        assert_eq!(BashTool.risk(&write), RiskLevel::Risky);
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn native_powershell_mode_preserves_literal_windows_path() {
+        let project = tempfile::tempdir().unwrap();
+        let share = project.path().join("erp code$");
+        std::fs::create_dir(&share).unwrap();
+        std::fs::write(share.join("visible.txt"), b"ok").unwrap();
+        let literal = share.to_string_lossy().replace('\'', "''");
+        let args = json!({
+            "command": format!(
+                "Get-ChildItem -LiteralPath '{}' | Select-Object -ExpandProperty Name",
+                literal
+            ),
+            "shell": "powershell",
+            "timeout": 30
+        })
+        .to_string();
+
+        let result = BashTool.execute(&args, &ctx(project.path())).await;
+        assert!(!result.is_error, "{}", result.content);
+        assert!(result.content.contains("visible.txt"), "{}", result.content);
     }
 
     #[test]

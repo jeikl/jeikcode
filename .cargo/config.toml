@@ -1,3 +1,7 @@
+[target.x86_64-pc-windows-gnu]
+linker = "gcc"
+ar = "ar"
+
 [target.x86_64-unknown-linux-musl]
 linker = "E:/code/jeikcode/tools/zig-cc.cmd"
 ar = "E:/code/jeikcode/tools/zig-ar.cmd"

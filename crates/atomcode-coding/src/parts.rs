@@ -172,6 +172,7 @@ pub struct SessionBinding {
 
 struct McpWorkGuard {
     registry: Option<Arc<McpRegistry>>,
+    owns_registry: bool,
     publication_enabled: Arc<std::sync::atomic::AtomicBool>,
 }
 
@@ -179,8 +180,10 @@ impl Drop for McpWorkGuard {
     fn drop(&mut self) {
         self.publication_enabled
             .store(false, std::sync::atomic::Ordering::Release);
-        if let Some(registry) = &self.registry {
-            registry.cancel_pending_work();
+        if self.owns_registry {
+            if let Some(registry) = &self.registry {
+                registry.cancel_pending_work();
+            }
         }
     }
 }
@@ -535,20 +538,22 @@ async fn prepare_with_plugin_hooks_reusing_lease(
     // the session candidate path. `mount()` publishes each connected server's tools
     // atomically for the next turn, then publishes once more when the initial pass
     // reaches its bounded terminal state.
-    let (mcp_registry, mcp_connect_rx) = if let Some(shared) = opts.shared_mcp_registry.clone() {
-        (Some(shared), None)
-    } else if opts.mcp {
-        let (event_tx, event_rx) = tokio::sync::mpsc::unbounded_channel();
-        (
-            Some(Arc::new(McpRegistry::from_config_background_with_events(
-                &cfg.working_dir,
-                Some(event_tx),
-            ))),
-            Some(event_rx),
-        )
-    } else {
-        (None, None)
-    };
+    let (mcp_registry, mcp_connect_rx, owns_mcp_registry) =
+        if let Some(shared) = opts.shared_mcp_registry.clone() {
+            (Some(shared), None, false)
+        } else if opts.mcp {
+            let (event_tx, event_rx) = tokio::sync::mpsc::unbounded_channel();
+            (
+                Some(Arc::new(McpRegistry::from_config_background_with_events(
+                    &cfg.working_dir,
+                    Some(event_tx),
+                ))),
+                Some(event_rx),
+                true,
+            )
+        } else {
+            (None, None, false)
+        };
     let mcp_tool_names = Arc::new(std::sync::RwLock::new(Vec::new()));
 
     // Session binding: the id's single owner.
@@ -785,6 +790,7 @@ async fn prepare_with_plugin_hooks_reusing_lease(
     let mcp_publication_enabled = Arc::new(std::sync::atomic::AtomicBool::new(true));
     let mcp_work_guard = McpWorkGuard {
         registry: mcp_registry.clone(),
+        owns_registry: owns_mcp_registry,
         publication_enabled: Arc::clone(&mcp_publication_enabled),
     };
 
@@ -978,20 +984,24 @@ impl CodingParts {
             let catalog_ready = self.mcp_catalog_ready.clone();
             let mut connect_rx = self.mcp_connect_rx.take();
             tokio::spawn(async move {
-                // If the MCP registry already has connected servers/tools (e.g. from shared daemon cache),
-                // publish them immediately so the first turn has them mounted with 0ms delay.
-                publish_ready_mcp_tools(
-                    Arc::clone(&mcp_registry),
-                    tool_registry.clone(),
-                    base_names.clone(),
-                    Arc::clone(&mcp_tool_names),
-                    catalog_publisher.clone(),
-                    Arc::clone(&publish_lock),
-                    Arc::clone(&publication_enabled),
-                )
-                .await;
-                catalog_ready.send_replace(true);
-
+                // A pre-warmed shared daemon registry can publish immediately.
+                // A cold registry must not report catalog readiness after an empty
+                // preliminary pass: wait until every configured server reaches an
+                // initial terminal state, then publish one authoritative snapshot.
+                if mcp_registry.initial_connections_complete() {
+                    publish_ready_mcp_tools(
+                        Arc::clone(&mcp_registry),
+                        tool_registry.clone(),
+                        base_names.clone(),
+                        Arc::clone(&mcp_tool_names),
+                        catalog_publisher.clone(),
+                        Arc::clone(&publish_lock),
+                        Arc::clone(&publication_enabled),
+                    )
+                    .await;
+                    catalog_ready.send_replace(true);
+                    return;
+                }
                 let readiness_registry = Arc::clone(&mcp_registry);
                 let initial_readiness = async move {
                     readiness_registry
@@ -1020,9 +1030,7 @@ impl CodingParts {
                             )
                             .await;
                             catalog_ready.send_replace(true);
-                            if connect_rx.is_none() {
-                                break;
-                            }
+                            break;
                         }
                         event = async {
                             match connect_rx.as_mut() {
@@ -1079,8 +1087,10 @@ impl CodingParts {
     pub(crate) async fn withdraw_mcp_tools(&mut self) {
         self.mcp_publication_enabled
             .store(false, std::sync::atomic::Ordering::Release);
-        if let Some(registry) = &self.mcp_registry {
-            registry.cancel_pending_work();
+        if self._mcp_work_guard.owns_registry {
+            if let Some(registry) = &self.mcp_registry {
+                registry.cancel_pending_work();
+            }
         }
         let _publish_guard = self.mcp_publish_lock.lock().await;
         match self.mcp_tool_names.write() {
@@ -1155,7 +1165,7 @@ async fn publish_ready_mcp_tools(
     // Discovery is network I/O. Keep it outside the publication lock so a
     // fail-closed withdrawal is never delayed by an MCP server timeout.
     let tool_infos = tokio::select! {
-        tools = mcp_registry.list_all_tools() => tools,
+        tools = mcp_registry.list_all_tools_cached() => tools,
         _ = mcp_registry.wait_for_cancellation() => return,
     };
     let adapters: Vec<Arc<dyn atomcode_kernel::tool::Tool>> = tool_infos
@@ -2161,6 +2171,49 @@ mod tests {
             "MCP readiness must not block the session candidate prepare path"
         );
         assert!(prepared.unwrap().is_ok());
+    }
+
+    #[tokio::test]
+    async fn cold_shared_registry_does_not_publish_empty_catalog_as_ready() {
+        let project = tempfile::tempdir().unwrap();
+        let cfg = CodingAgentConfig::new("k", "http://localhost", "m", project.path());
+        let shared = Arc::new(McpRegistry::new());
+        let mut opts = io_free_opts();
+        opts.mcp = true;
+        opts.shared_mcp_registry = Some(shared);
+
+        let mut parts = prepare(&cfg, opts).await.unwrap();
+        let mut readiness = parts.mcp_readiness_receiver();
+        let _mounted = parts.mount();
+        tokio::task::yield_now().await;
+
+        assert!(
+            !*readiness.borrow_and_update(),
+            "an empty preliminary publication must not report MCP readiness"
+        );
+    }
+
+    #[tokio::test]
+    async fn dropping_runtime_parts_does_not_cancel_shared_registry() {
+        let project = tempfile::tempdir().unwrap();
+        let cfg = CodingAgentConfig::new("k", "http://localhost", "m", project.path());
+        let shared = Arc::new(McpRegistry::new());
+        let mut opts = io_free_opts();
+        opts.mcp = true;
+        opts.shared_mcp_registry = Some(shared.clone());
+
+        let parts = prepare(&cfg, opts).await.unwrap();
+        drop(parts);
+
+        assert!(
+            tokio::time::timeout(
+                std::time::Duration::from_millis(20),
+                shared.wait_for_cancellation(),
+            )
+            .await
+            .is_err(),
+            "a short-lived runtime must not cancel its daemon-owned shared registry"
+        );
     }
 
     #[tokio::test]

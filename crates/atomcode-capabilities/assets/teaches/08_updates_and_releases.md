@@ -124,6 +124,8 @@ cd webui && npm run build
 cargo build --release --bin atomcode
 ```
 
+项目的 `.cargo/config.toml` 会让 `x86_64-pc-windows-gnu` 使用 PATH 中的完整 MinGW-w64 `gcc`/`ar`，而不是 Rustup 自带的精简 linker。构建机须安装完整 MinGW-w64（例如 WinLibs UCRT/POSIX），并确保其 `bin` 目录位于 PATH；可用 `where gcc` 与 `Test-Path <mingw-root>\x86_64-w64-mingw32\lib\libktmw32.a` 检查。缺少该库时，Windows 测试目标会在链接阶段报 `cannot find -lktmw32`。
+
 ### 4.3 Windows 下交叉编译 Linux musl 静态二进制
 利用内置 Zig 工具链与 `.cargo/config.toml` 配置：
 ```powershell

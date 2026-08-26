@@ -1,14 +1,14 @@
 {
   "version": "6.0.30",
-  "release_date": "2026-08-26",
-  "downloads": {
+  "released_at": "2026-08-26",
+  "binaries": {
     "linux-x64": {
-      "url": "https://github.com/jeikl/jeikcode/releases/download/v6.0.30/jeikcode-6.0.30-linux-x64.tar.gz",
-      "sha256": "9a0a7793d8581a0b29621d22e8a8dda2c9a04d0365cd7c883a1f19c36adb5b4e"
+      "sha256": "180abec1c0d9a99d08de8d289f525cca8b2cd1b2152fdc60724144aa6298db62",
+      "size": 53662808
     },
     "windows-x64": {
-      "url": "https://github.com/jeikl/jeikcode/releases/download/v6.0.30/jeikcode-6.0.30-windows-x64.zip",
-      "sha256": "1a608295fb95f20ff05eec9e13c6d4d4045bbf6ea9981c8bc34216ac4ab4b6e3"
+      "sha256": "38f1f90a978931c8ec549554ee0e63695f7410ffd894b95518c3f1b171de0177",
+      "size": 63440384
     }
   }
 }

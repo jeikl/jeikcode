@@ -201,9 +201,9 @@ fn target_tag(os: &str, arch: &str) -> Option<&'static str> {
 /// what `scripts/release.sh` publishes to `dist/<version>/`.
 pub fn binary_filename(version: &str, target: &str) -> String {
     if target.starts_with("windows") {
-        format!("jeikcode-{}-{}.zip", version, target)
+        format!("jeikcode-{}-{}.exe", version, target)
     } else {
-        format!("jeikcode-{}-{}.tar.gz", version, target)
+        format!("jeikcode-{}-{}", version, target)
     }
 }
 

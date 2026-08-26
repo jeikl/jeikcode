@@ -54,9 +54,9 @@ build_target() { # <rust-target> <versioned-asset>
 # target key 与 updater detect_target() 完全一致; 本 fork 仅发布两个平台.
 # Linux: musl+zig（本机 .cargo/config.toml 已配），静态链到 linux-x64 资产名.
 # Windows: gnu（WinLibs）；若本机还有 msvc target 则后写覆盖.
-build_target x86_64-unknown-linux-musl     "jeikcode-${VERSION}-linux-x64.tar.gz"
-build_target x86_64-pc-windows-gnu         "jeikcode-${VERSION}-windows-x64.zip"
-build_target x86_64-pc-windows-msvc        "jeikcode-${VERSION}-windows-x64.zip"
+build_target x86_64-unknown-linux-musl     "jeikcode-${VERSION}-linux-x64"
+build_target x86_64-pc-windows-gnu         "jeikcode-${VERSION}-windows-x64.exe"
+build_target x86_64-pc-windows-msvc        "jeikcode-${VERSION}-windows-x64.exe"
 
 echo "==> 生成 latest.json"
 PYTHON_BIN="${PYTHON:-python3}"

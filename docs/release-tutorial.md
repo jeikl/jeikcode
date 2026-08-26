@@ -72,14 +72,14 @@ git add -A && git commit -m "release: 0.0.0-dev.2" && git push origin local-dev
 
 ```bash
 # 用 gh(推荐)
-gh release create 0.0.0-dev.2 dist/* --title "0.0.0-dev.2"
+gh release create 6.0.30 dist/* --title "v6.0.30"
 
-# 或用网页: 仓库 → Releases → Draft a new release → tag 0.0.0-dev.2
-# 把 dist/ 下所有 atomcode-* 文件拖上去
+# 或用网页: 仓库 → Releases → Draft a new release → tag 6.0.30
+# 把 dist/ 下所有 jeikcode-* 文件与 sha256 拖上去
 ```
 
-> **关键**:Release 的 **tag 名必须与版本号一致**(如 `0.0.0-dev.2`),因为
-> updater 的下载 URL 是 `https://github.com/jeikl/jeikcode/releases/download/<version>/atomcode-<version>-<target>`。
+> **关键**:Release 的 **tag 名必须与版本号一致**(如 `6.0.30`),因为
+> updater 的下载 URL 是 `https://github.com/jeikl/jeikcode/releases/download/<version>/jeikcode-<version>-<target>(\.exe)`。
 
 ### 4. 推送 latest.json 到 local-dev 分支
 

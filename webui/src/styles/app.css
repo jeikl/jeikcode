@@ -1655,6 +1655,17 @@ body {
   white-space: nowrap;
   color: var(--app-brand-text);
 }
+.sidebar-brand-version {
+  font-size: 11px;
+  font-weight: 500;
+  color: var(--app-text-muted, #888);
+  background: var(--app-chip-bg, rgba(125, 125, 125, 0.1));
+  padding: 1px 5px;
+  border-radius: 4px;
+  line-height: normal;
+  letter-spacing: 0.02em;
+  user-select: none;
+}
 
 /* --- Sidebar actions: New chat + Skills (filled rows) --- */
 .sidebar-actions {

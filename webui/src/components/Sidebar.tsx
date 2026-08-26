@@ -1170,6 +1170,7 @@ export function Sidebar({
       <div class="sidebar-brand-row">
         <span class="sidebar-brand">
 <span class="sidebar-brand-name">JeikCode</span>
+          <span class="sidebar-brand-version">v{typeof __APP_VERSION__ !== "undefined" ? __APP_VERSION__ : "6.0.30"}</span>
         </span>
         <span class="sidebar-brand-btns">
           <button

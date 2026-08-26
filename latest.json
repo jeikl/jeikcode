@@ -1,14 +1,14 @@
 {
-  "version": "6.0.29",
-  "release_date": "2026-08-25",
+  "version": "6.0.30",
+  "release_date": "2026-08-26",
   "downloads": {
     "linux-x64": {
-      "url": "https://github.com/jeikl/jeikcode/releases/download/v6.0.29/atomcode-6.0.29-linux-x64.tar.gz",
-      "sha256": "1abcd75cdad821b0095bee4aaac0d86e6512ede511bf8877c7601a4b03c1dd7d"
+      "url": "https://github.com/jeikl/jeikcode/releases/download/v6.0.30/jeikcode-6.0.30-linux-x64.tar.gz",
+      "sha256": "5b7bdfd3852c3d119dd30826f53b3c221bd311a43ab6c7d39947010db17e90e4"
     },
     "windows-x64": {
-      "url": "https://github.com/jeikl/jeikcode/releases/download/v6.0.29/atomcode-6.0.29-windows-x64.zip",
-      "sha256": "6e71d1398812c7e95eb3567eb7a485521a2a515c13984eda4fc861cc853bb7a0"
+      "url": "https://github.com/jeikl/jeikcode/releases/download/v6.0.30/jeikcode-6.0.30-windows-x64.zip",
+      "sha256": "572341aac1d8050776edb2c4ccfbd0bea6841439a4ed8d5d2b1c2ea9ffd796ad"
     }
   }
 }

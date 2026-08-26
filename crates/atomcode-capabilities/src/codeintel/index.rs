@@ -1140,12 +1140,51 @@ pub fn disk_cache_path_bin(root: &Path) -> PathBuf {
     super::canonical(root).join(DISK_CACHE_REL_BIN)
 }
 
-fn top_component(p: &Path, root: &Path) -> Option<std::ffi::OsString> {
+fn top_component_str<'a>(p: &'a Path, root: &Path) -> Option<&'a str> {
     p.strip_prefix(root)
         .ok()?
         .components()
-        .next()
-        .map(|c| c.as_os_str().to_os_string())
+        .next()?
+        .as_os_str()
+        .to_str()
+}
+
+fn top_component(p: &Path, root: &Path) -> Option<std::ffi::OsString> {
+    top_component_str(p, root).map(std::ffi::OsString::from)
+}
+
+/// Fast resolver context pre-computing caller path properties (eliminates allocations per candidate).
+struct ResolveContext<'a> {
+    caller_file: &'a Path,
+    caller_parent: Option<&'a Path>,
+    caller_top: Option<&'a str>,
+    root: &'a Path,
+}
+
+impl<'a> ResolveContext<'a> {
+    fn new(caller_file: &'a Path, root: &'a Path) -> Self {
+        Self {
+            caller_file,
+            caller_parent: caller_file.parent(),
+            caller_top: top_component_str(caller_file, root),
+            root,
+        }
+    }
+
+    #[inline(always)]
+    fn score(&self, n: &SymbolNode) -> i32 {
+        if n.file == self.caller_file {
+            4
+        } else if self.caller_parent.is_some() && n.file.parent() == self.caller_parent {
+            2
+        } else if self.caller_top.is_some()
+            && top_component_str(&n.file, self.root) == self.caller_top
+        {
+            1
+        } else {
+            0
+        }
+    }
 }
 
 /// Resolve a callee name to a symbol id, preferring closer candidates (production
@@ -1159,24 +1198,45 @@ fn resolve_callee(
     caller_file: &Path,
     root: &Path,
 ) -> Option<SymbolId> {
-    let score = |n: &SymbolNode| -> i32 {
-        if n.file == caller_file {
-            4
-        } else if n.file.parent().is_some() && n.file.parent() == caller_file.parent() {
-            2
-        } else {
-            let a = top_component(&n.file, root);
-            if a.is_some() && a == top_component(caller_file, root) {
-                1
-            } else {
-                0
+    let ctx = ResolveContext::new(caller_file, root);
+    resolve_callee_with_ctx(g, callee, &ctx)
+}
+
+#[inline(always)]
+fn resolve_callee_with_ctx(
+    g: &CodeGraph,
+    callee: &str,
+    ctx: &ResolveContext,
+) -> Option<SymbolId> {
+    let candidates = g.find_by_name(callee);
+    if candidates.is_empty() {
+        return None;
+    }
+    // Fast path: unique symbol globally.
+    if candidates.len() == 1 {
+        return Some(candidates[0].id);
+    }
+    // Optimization for super-hot common names (>64 candidates like toString, get, save):
+    // Prioritize same-file or same-directory candidates first without scanning full 1000+ candidates.
+    if candidates.len() > 64 {
+        for n in &candidates {
+            if n.file == ctx.caller_file {
+                return Some(n.id);
             }
         }
-    };
+        if ctx.caller_parent.is_some() {
+            for n in &candidates {
+                if n.file.parent() == ctx.caller_parent {
+                    return Some(n.id);
+                }
+            }
+        }
+    }
+
     let mut best: Option<&SymbolNode> = None;
     let mut best_score = i32::MIN;
-    for n in g.find_by_name(callee) {
-        let s = score(n);
+    for n in candidates {
+        let s = ctx.score(n);
         let better = match best {
             None => true,
             Some(b) => {
@@ -1188,6 +1248,9 @@ fn resolve_callee(
         if better {
             best = Some(n);
             best_score = s;
+            if s == 4 {
+                break; // Score 4 is maximum possible score (same-file), early exit!
+            }
         }
     }
     best.map(|n| n.id)
@@ -1393,9 +1456,12 @@ fn save_disk_cache(
     if incremental {
         persist_units_incremental(root, changed_units, deleted_paths);
     } else if let Ok(db) = super::index_db::IndexDb::open_shared(root) {
-        let upsert_vec: Vec<(PathBuf, FileUnit)> =
-            units.iter().map(|(p, u)| (p.clone(), u.clone())).collect();
-        let _ = db.upsert_units(&upsert_vec, &[]);
+        use rayon::prelude::*;
+        let prepared: Vec<super::index_db::PreparedUnitWrite> = units
+            .par_iter()
+            .filter_map(|(p, u)| super::index_db::PreparedUnitWrite::from_unit(p.clone(), u))
+            .collect();
+        let _ = db.upsert_units_prepared(&prepared, &[]);
         let _ = db.save_graph_only(walk_fp, _graph);
     }
     cleanup_legacy_sidecars(root);
@@ -1526,46 +1592,67 @@ fn compose_graph(
     units: &HashMap<PathBuf, FileUnit>,
     on_progress: &dyn Fn(&str),
 ) -> CodeGraph {
+    let t_start = Instant::now();
     let mut g = CodeGraph::new();
-    let mut raw_calls: Vec<(PathBuf, RawCall)> = Vec::new();
+    let mut raw_calls_by_file: Vec<(&Path, &[RawCall])> = Vec::with_capacity(units.len());
+    let mut total_calls = 0;
     for (path, unit) in units {
         for n in &unit.nodes {
             g.add_symbol(n.clone());
         }
         g.file_mtimes
             .insert(path.clone(), (unit.mtime_ns / 1_000_000_000) as u64);
-        for c in &unit.calls {
-            raw_calls.push((path.clone(), c.clone()));
+        if !unit.calls.is_empty() {
+            total_calls += unit.calls.len();
+            raw_calls_by_file.push((path.as_path(), &unit.calls));
         }
     }
+    let t_syms = t_start.elapsed();
     on_progress(&format!(
-        "Code graph: resolving {} call sites across {} symbols ({} files) in parallel...",
-        raw_calls.len(),
+        "Code graph: resolving {} call sites across {} symbols ({} files) in parallel (symbols loaded in {:?})...",
+        total_calls,
         g.node_count(),
-        units.len()
+        units.len(),
+        t_syms
     ));
-    let resolved_edges: Vec<(SymbolId, Edge)> = raw_calls
+
+    let t_resolve = Instant::now();
+    let resolved_edges: Vec<(SymbolId, Edge)> = raw_calls_by_file
         .into_par_iter()
-        .filter_map(|(caller_file, rc)| {
-            let caller = CodeGraph::make_id(&caller_file, &rc.caller_name, rc.caller_line);
-            if g.node(caller).is_none() {
-                return None;
+        .flat_map(|(caller_file, calls)| {
+            let ctx = ResolveContext::new(caller_file, root);
+            let mut edges = Vec::with_capacity(calls.len());
+            for rc in calls {
+                let caller = CodeGraph::make_id(caller_file, &rc.caller_name, rc.caller_line);
+                if g.node(caller).is_none() {
+                    continue;
+                }
+                if let Some(callee) = resolve_callee_with_ctx(&g, &rc.callee_name, &ctx) {
+                    edges.push((
+                        caller,
+                        Edge {
+                            to: callee,
+                            kind: EdgeKind::Calls,
+                            line: rc.line,
+                        },
+                    ));
+                }
             }
-            let callee = resolve_callee(&g, &rc.callee_name, &caller_file, root)?;
-            Some((
-                caller,
-                Edge {
-                    to: callee,
-                    kind: EdgeKind::Calls,
-                    line: rc.line,
-                },
-            ))
+            edges
         })
         .collect();
 
+    let resolve_dur = t_resolve.elapsed();
+    let edge_count = resolved_edges.len();
     for (caller, edge) in resolved_edges {
         g.add_edge(caller, edge);
     }
+    on_progress(&format!(
+        "Code graph: resolved {} call edges in {:?} (total graph composition: {:?})",
+        edge_count,
+        resolve_dur,
+        t_start.elapsed()
+    ));
     g
 }
 
@@ -2849,6 +2936,7 @@ impl CodeIndex {
                 removed,
                 kept
             ));
+            let t_save = Instant::now();
             let first_or_large = kept == 0;
             let (ch, del): (&[(PathBuf, FileUnit)], &[PathBuf]) = if first_or_large {
                 (&[], &[])
@@ -2856,12 +2944,14 @@ impl CodeIndex {
                 (&changed_units, &deleted_paths)
             };
             match save_disk_cache(root, fp, &units, g.as_ref(), ch, del) {
-                Ok(p) => on_progress(&format!("Code graph: saved {}", path_for_display(&p))),
+                Ok(p) => on_progress(&format!("Code graph: saved {} in {:?}", path_for_display(&p), t_save.elapsed())),
                 Err(e) => on_progress(&format!("Code graph: disk save skipped ({e})")),
             }
         } else if need_compose {
             if let Ok(db) = super::index_db::IndexDb::open_shared(root) {
+                let t_save = Instant::now();
                 let _ = db.save_graph_only(fp, g.as_ref());
+                on_progress(&format!("Code graph: saved graph snapshot in {:?}", t_save.elapsed()));
             }
         }
 

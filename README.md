@@ -18,7 +18,7 @@
     <a href="#七多项目知识库配置">知识包配置</a>
   </p>
   <p>
-    <img src="https://img.shields.io/badge/version-6.0.29-blue.svg" alt="version">
+    <img src="https://img.shields.io/badge/version-6.0.30-blue.svg" alt="version">
     <img src="https://img.shields.io/badge/rust-1.88%2B-orange.svg" alt="rust">
     <img src="https://img.shields.io/badge/license-MIT-green.svg" alt="license">
     <img src="https://img.shields.io/badge/platform-macOS%20%7C%20Linux%20%7C%20Windows%20%7C%20HarmonyOS-lightgrey.svg" alt="platform">

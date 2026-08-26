@@ -672,11 +672,36 @@ export function Sidebar({
   function refreshMcpStatus() {
     if (mcpLoading) return;
     setMcpLoading(true);
+    console.log('%c[MCP-WebUI 1/3]%c 正在从服务端拉取 MCP 状态...', 'color: #3b82f6; font-weight: bold;', 'color: inherit;');
     getMcpStatus()
-      .then(setMcpStatus)
+      .then((status) => {
+        setMcpStatus(status);
+        console.log(
+          '%c[MCP-WebUI 2/3]%c 成功获取 MCP 服务器状态:',
+          'color: #10b981; font-weight: bold;',
+          'color: inherit;',
+          status.servers.map((s) => ({
+            name: s.name,
+            status: s.status,
+            tools: s.tool_count,
+            error: s.error,
+          }))
+        );
+        const connectedTools = status.servers
+          .filter((s) => s.status === 'connected')
+          .reduce((acc, s) => acc + (s.tool_count || 0), 0);
+        console.log(
+          `%c[MCP-WebUI 3/3]%c MCP 统计: ${status.servers.length} 个服务配置, 已就绪 ${connectedTools} 个工具`,
+          'color: #8b5cf6; font-weight: bold;',
+          'color: inherit;'
+        );
+      })
       // On a transient error keep whatever we had; only fall back to empty if we
       // never got a result, so a blip doesn't wipe a populated panel.
-      .catch(() => setMcpStatus((cur) => cur ?? { servers: [] }))
+      .catch((err) => {
+        console.warn('%c[MCP-WebUI Error]%c 拉取 MCP 状态失败:', 'color: #ef4444; font-weight: bold;', 'color: inherit;', err);
+        setMcpStatus((cur) => cur ?? { servers: [] });
+      })
       .finally(() => setMcpLoading(false));
   }
   useEffect(() => {

@@ -4995,32 +4995,7 @@ async fn process_chat_request(
     // Run turn(s) in a background task on the native kernel stack; the
     // downstream native-event → ChatEvent projector shapes the HTTP stream.
     {
-        let shared_mcp_reg = {
-            let mut cache = _mcp_cache.write().await;
-            if let Some(cached) = cache.get_mut(&working_dir) {
-                cached.last_used = std::time::Instant::now();
-                Some(cached.registry.clone())
-            } else {
-                let reg = Arc::new(McpRegistry::from_config_background(&working_dir));
-                if cache.len() >= MCP_CACHE_MAX {
-                    if let Some(oldest_key) = cache
-                        .iter()
-                        .min_by_key(|(_, value)| value.last_used)
-                        .map(|(key, _)| key.clone())
-                    {
-                        cache.remove(&oldest_key);
-                    }
-                }
-                cache.insert(
-                    working_dir.clone(),
-                    CachedMcpRegistry {
-                        registry: reg.clone(),
-                        last_used: std::time::Instant::now(),
-                    },
-                );
-                Some(reg)
-            }
-        };
+        let shared_mcp_reg = Some(get_or_init_project_mcp_registry_from_cache(&_mcp_cache, &working_dir).await);
         let mut runtime_cfg =
             live_api::chat_runtime_config(&config, &provider_name, &working_dir, telemetry.clone());
         runtime_cfg.shared_mcp_registry = shared_mcp_reg;
@@ -5654,17 +5629,38 @@ fn build_mcp_server_rows(
     servers
 }
 
-/// Get or lazily initialize the shared per-project MCP registry.
-pub(crate) async fn get_or_init_project_mcp_registry(
-    state: &AppState,
+/// Get or lazily initialize the shared per-project MCP registry from cache map.
+pub(crate) async fn get_or_init_project_mcp_registry_from_cache(
+    mcp_cache: &Arc<RwLock<HashMap<PathBuf, CachedMcpRegistry>>>,
     project_dir: &std::path::Path,
 ) -> Arc<McpRegistry> {
-    let mut cache = state.mcp_cache.write().await;
+    let mut cache = mcp_cache.write().await;
     if let Some(cached) = cache.get_mut(project_dir) {
         cached.last_used = std::time::Instant::now();
         return cached.registry.clone();
     }
+    println!(
+        "\x1b[36m[MCP-Daemon 1/4]\x1b[0m 正在加载工作区 MCP 配置: {}",
+        project_dir.display()
+    );
     let registry = Arc::new(McpRegistry::from_config_background(project_dir));
+    let reg_clone = registry.clone();
+    tokio::spawn(async move {
+        reg_clone.wait_until_initial_connections_done().await;
+        let statuses = reg_clone.server_statuses().await;
+        let tools = reg_clone.list_all_tools().await;
+        println!(
+            "\x1b[36m[MCP-Daemon 2/4]\x1b[0m MCP 服务器初始化完成，连接状态: {:?}",
+            statuses
+                .iter()
+                .map(|(s, st)| format!("{s}: {:?}", st))
+                .collect::<Vec<_>>()
+        );
+        println!(
+            "\x1b[36m[MCP-Daemon 3/4]\x1b[0m 成功发现 {} 个活动 MCP 工具",
+            tools.len()
+        );
+    });
     if cache.len() >= MCP_CACHE_MAX {
         if let Some(oldest_key) = cache
             .iter()
@@ -5682,6 +5678,14 @@ pub(crate) async fn get_or_init_project_mcp_registry(
         },
     );
     registry
+}
+
+/// Get or lazily initialize the shared per-project MCP registry.
+pub(crate) async fn get_or_init_project_mcp_registry(
+    state: &AppState,
+    project_dir: &std::path::Path,
+) -> Arc<McpRegistry> {
+    get_or_init_project_mcp_registry_from_cache(&state.mcp_cache, project_dir).await
 }
 
 /// Replace the daemon fallback registry and invalidate the per-project cache

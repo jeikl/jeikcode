@@ -576,11 +576,10 @@ pub(crate) async fn run_chat_turn_v2(
         task,
         ..
     } = runtime;
-    // Wait for initial MCP tools to be published to the mounted kernel catalog
-    // before the first turn. When a shared MCP registry is supplied, this returns
-    // immediately; otherwise it gives background connections time to complete.
+    // Quick readiness poll for MCP tools (50ms). When shared MCP registry is supplied,
+    // tools are already mounted immediately so this finishes instantly without blocking.
     let _ = handle
-        .wait_mcp_ready(atomcode_capabilities::mcp::CONNECT_TIMEOUT)
+        .wait_mcp_ready(std::time::Duration::from_millis(50))
         .await;
     // VL 预处理后的文本已包含图片描述，原图不再发给 kernel
     // （非视觉模型的 provider adapter 会因原图而报 400 错误）

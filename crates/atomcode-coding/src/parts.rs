@@ -968,9 +968,7 @@ impl CodingParts {
         }
 
         let (mounted, publisher) = self.registry.mount_updatable(&refs);
-        if let (Some(mcp_registry), Some(mut connect_rx)) =
-            (self.mcp_registry.clone(), self.mcp_connect_rx.take())
-        {
+        if let Some(mcp_registry) = self.mcp_registry.clone() {
             let tool_registry = self.registry.clone();
             let base_names = self.tool_names.clone();
             let mcp_tool_names = Arc::clone(&self.mcp_tool_names);
@@ -978,7 +976,22 @@ impl CodingParts {
             let publish_lock = Arc::clone(&self.mcp_publish_lock);
             let publication_enabled = Arc::clone(&self.mcp_publication_enabled);
             let catalog_ready = self.mcp_catalog_ready.clone();
+            let mut connect_rx = self.mcp_connect_rx.take();
             tokio::spawn(async move {
+                // If the MCP registry already has connected servers/tools (e.g. from shared daemon cache),
+                // publish them immediately so the first turn has them mounted with 0ms delay.
+                publish_ready_mcp_tools(
+                    Arc::clone(&mcp_registry),
+                    tool_registry.clone(),
+                    base_names.clone(),
+                    Arc::clone(&mcp_tool_names),
+                    catalog_publisher.clone(),
+                    Arc::clone(&publish_lock),
+                    Arc::clone(&publication_enabled),
+                )
+                .await;
+                catalog_ready.send_replace(true);
+
                 let readiness_registry = Arc::clone(&mcp_registry);
                 let initial_readiness = async move {
                     readiness_registry
@@ -1007,9 +1020,16 @@ impl CodingParts {
                             )
                             .await;
                             catalog_ready.send_replace(true);
-                            break;
+                            if connect_rx.is_none() {
+                                break;
+                            }
                         }
-                        event = connect_rx.recv() => {
+                        event = async {
+                            match connect_rx.as_mut() {
+                                Some(rx) => rx.recv().await,
+                                None => std::future::pending().await,
+                            }
+                        } => {
                             match event {
                                 Some(McpConnectEvent::Connected { name }) => {
                                     publish_connected_mcp_server(
@@ -2116,10 +2136,11 @@ mod tests {
         .unwrap();
         let cfg = CodingAgentConfig::new("k", "http://localhost", "m", project.path());
         let opts = PrepareOptions {
-            session: SessionMode::Disabled,
-            skill_dirs: Some(vec![]),
+            session: SessionMode::Fresh,
+            skill_dirs: None,
             plugin_skill_dirs: Vec::new(),
-            mcp: true,
+            shared_mcp_registry: None,
+            mcp: false,
             memory: false,
             web: false,
             review: false,
@@ -2187,6 +2208,7 @@ mod tests {
             session: SessionMode::Disabled,
             skill_dirs: Some(vec![]),
             plugin_skill_dirs: Vec::new(),
+            shared_mcp_registry: None,
             mcp: false,
             memory: false,
             web: false,

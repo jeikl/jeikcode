@@ -44,15 +44,10 @@ fn main() {
         if dirty { "+dirty" } else { "" }
     );
 
-    // Embed icon when targeting Windows. Gated on CARGO_CFG_TARGET_OS
-    // (the *build target*, not the host) so cross-compile from macOS
-    // fires this while native mac/linux builds skip it.
-    // Only embed the icon/manifest on the `atomcode` bin. `jeikcode` shares
-    // this build.rs; embedding twice produces "rsrc merge failure: multiple
-    // non-default manifests". The install/upgrade path copies atomcode → jeikcode.
+    // Embed icon when targeting Windows.
     let bin_name = std::env::var("CARGO_BIN_NAME").unwrap_or_default();
     if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("windows")
-        && (bin_name.is_empty() || bin_name == "atomcode")
+        && (bin_name.is_empty() || bin_name == "atomcode" || bin_name == "jeikcode")
     {
         let icon = "assets/atomcode.ico";
         println!("cargo:rerun-if-changed={}", icon);

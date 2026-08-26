@@ -1115,6 +1115,14 @@ fn fingerprint(files: &[Walked]) -> u64 {
     h.finish()
 }
 
+/// Granular phase timing metrics for index performance visualization.
+#[derive(Debug, Clone, Default)]
+pub struct IndexPhaseTimings {
+    pub parse_ast: Duration,
+    pub compose_graph: Duration,
+    pub save_disk: Duration,
+}
+
 /// Result of [`init_workspace_index`] / a successful index refresh.
 #[derive(Debug, Clone)]
 pub struct IndexReport {
@@ -1128,6 +1136,8 @@ pub struct IndexReport {
     pub elapsed: Duration,
     /// True when the disk cache was a perfect walk_fp hit (no re-parse).
     pub cache_hit: bool,
+    /// Granular phase breakdown
+    pub phases: IndexPhaseTimings,
 }
 
 /// Absolute path of the on-disk codegraph cache for `root`.
@@ -1461,8 +1471,7 @@ fn save_disk_cache(
             .par_iter()
             .filter_map(|(p, u)| super::index_db::PreparedUnitWrite::from_unit(p.clone(), u))
             .collect();
-        let _ = db.upsert_units_prepared(&prepared, &[]);
-        let _ = db.save_graph_only(walk_fp, _graph);
+        let _ = db.sync_incremental_prepared(walk_fp, &prepared, &[], _graph);
     }
     cleanup_legacy_sidecars(root);
     Ok(db_path)
@@ -1551,6 +1560,7 @@ pub fn init_workspace_index(
         kept: stats.kept,
         elapsed: t0.elapsed(),
         cache_hit: stats.cache_hit,
+        phases: stats.phases.clone(),
     })
 }
 
@@ -1562,6 +1572,7 @@ pub struct RefreshStats {
     pub cache_hit: bool,
     pub reparsed_files: Vec<PathBuf>,
     pub removed_files: Vec<PathBuf>,
+    pub phases: IndexPhaseTimings,
 }
 
 fn parse_unit(w: &Walked) -> Option<FileUnit> {
@@ -2890,6 +2901,8 @@ impl CodeIndex {
         let need_compose = prev_graph.is_none();
         let cache_hit = reparsed == 0 && removed == 0 && prev_graph.is_some();
 
+        let t_compose = Instant::now();
+        let mut compose_dur = Duration::ZERO;
         let g = if can_patch {
             on_progress(&format!(
                 "Code graph: incremental patch - reparsed {reparsed}, removed {removed}, kept {kept}."
@@ -2901,6 +2914,7 @@ impl CodeIndex {
             for (path, unit) in &changed_units {
                 patch_graph_with_unit(&mut g, path, unit, root);
             }
+            compose_dur = t_compose.elapsed();
             Arc::new(g)
         } else if need_compose {
             if kept == 0 && reparsed > 0 {
@@ -2919,7 +2933,9 @@ impl CodeIndex {
                     "Code graph: unit update - reparsed {reparsed}, removed {removed}, kept {kept}."
                 ));
             }
-            Arc::new(compose_graph(root, &units, on_progress))
+            let res = Arc::new(compose_graph(root, &units, on_progress));
+            compose_dur = t_compose.elapsed();
+            res
         } else {
             prev_graph.expect("need_compose false => graph present")
         };
@@ -2927,6 +2943,7 @@ impl CodeIndex {
         // Only rewrite SQLite when file units actually changed. Composing the
         // in-memory graph from an existing db must NOT touch the files on disk
         // (that was the "restart = rebuild three index files" bug).
+        let mut save_dur = Duration::ZERO;
         if reparsed > 0 || removed > 0 {
             on_progress(&format!(
                 "Code graph: ready ({} symbols, {} files; reparsed {}, removed {}, kept {}).",
@@ -2944,18 +2961,24 @@ impl CodeIndex {
                 (&changed_units, &deleted_paths)
             };
             match save_disk_cache(root, fp, &units, g.as_ref(), ch, del) {
-                Ok(p) => on_progress(&format!("Code graph: saved {} in {:?}", path_for_display(&p), t_save.elapsed())),
+                Ok(p) => {
+                    save_dur = t_save.elapsed();
+                    on_progress(&format!("Code graph: saved {} in {:?}", path_for_display(&p), save_dur));
+                }
                 Err(e) => on_progress(&format!("Code graph: disk save skipped ({e})")),
             }
         } else if need_compose {
             if let Ok(db) = super::index_db::IndexDb::open_shared(root) {
                 let t_save = Instant::now();
                 let _ = db.save_graph_only(fp, g.as_ref());
-                on_progress(&format!("Code graph: saved graph snapshot in {:?}", t_save.elapsed()));
+                save_dur = t_save.elapsed();
+                on_progress(&format!("Code graph: saved graph snapshot in {:?}", save_dur));
             }
         }
 
         let reparsed_files: Vec<PathBuf> = changed_units.iter().map(|(p, _)| p.clone()).collect();
+        // Time spent from `started` up to graph composition is the parse & scan phase
+        let parse_dur = started.elapsed().saturating_sub(compose_dur);
         let stats = RefreshStats {
             reparsed,
             removed,
@@ -2963,6 +2986,11 @@ impl CodeIndex {
             cache_hit,
             reparsed_files: reparsed_files.clone(),
             removed_files: deleted_paths.clone(),
+            phases: IndexPhaseTimings {
+                parse_ast: parse_dur,
+                compose_graph: compose_dur,
+                save_disk: save_dur,
+            },
         };
         let kind = if cache_hit {
             "hit"

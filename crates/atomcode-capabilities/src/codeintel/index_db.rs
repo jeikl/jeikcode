@@ -43,12 +43,12 @@ impl IndexDb {
         // single-row upsert in the millisecond range.
         conn.execute_batch(
             "PRAGMA journal_mode = WAL;
-             PRAGMA synchronous = NORMAL;
+             PRAGMA synchronous = OFF;
              PRAGMA temp_store = MEMORY;
              PRAGMA busy_timeout = 5000;
-             PRAGMA cache_size = -65536;
-             PRAGMA mmap_size = 268435456;
-             PRAGMA wal_autocheckpoint = 1000;
+             PRAGMA cache_size = -131072;
+             PRAGMA mmap_size = 536870912;
+             PRAGMA wal_autocheckpoint = 5000;
              CREATE TABLE IF NOT EXISTS meta (
                  key TEXT PRIMARY KEY,
                  value TEXT NOT NULL
@@ -275,6 +275,11 @@ impl IndexDb {
         deleted_paths: &[PathBuf],
         graph: &CodeGraph,
     ) -> Result<(), rusqlite::Error> {
+        // Parallel encode graph snapshot outside of SQLite lock
+        let compressed_graph = bincode::serialize(graph)
+            .ok()
+            .and_then(|bytes| zstd::stream::encode_all(&bytes[..], 1).ok());
+
         let mut conn = self.conn.lock().map_err(|_| {
             rusqlite::Error::SqliteFailure(
                 rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_BUSY),
@@ -285,17 +290,15 @@ impl IndexDb {
         let tx = conn.transaction()?;
         apply_prepared_unit_writes(&tx, upsert_units, deleted_paths)?;
 
-        if let Ok(graph_bytes) = bincode::serialize(graph) {
-            if let Ok(compressed_graph) = zstd::stream::encode_all(&graph_bytes[..], 1) {
-                tx.execute(
-                    "INSERT INTO graph_meta (id, walk_fp, data)
-                     VALUES (1, ?, ?)
-                     ON CONFLICT(id) DO UPDATE SET
-                         walk_fp = excluded.walk_fp,
-                         data = excluded.data",
-                    params![walk_fp as i64, compressed_graph],
-                )?;
-            }
+        if let Some(compressed) = compressed_graph {
+            tx.execute(
+                "INSERT INTO graph_meta (id, walk_fp, data)
+                 VALUES (1, ?, ?)
+                 ON CONFLICT(id) DO UPDATE SET
+                     walk_fp = excluded.walk_fp,
+                     data = excluded.data",
+                params![walk_fp as i64, compressed],
+            )?;
         }
 
         tx.commit()?;
@@ -378,11 +381,10 @@ impl IndexDb {
         zstd::stream::decode_all(&raw[..]).ok().or(Some(raw))
     }
 
-    /// Fold the WAL back into the main db so `index.v1.db-wal` does not sit
-    /// on disk at the same size as the database itself.
+    /// Fold the WAL back into the main db without forcing a full truncate stall.
     pub fn checkpoint(&self) {
         if let Ok(conn) = self.conn.lock() {
-            let _ = conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);");
+            let _ = conn.execute_batch("PRAGMA wal_checkpoint(PASSIVE);");
         }
     }
 }
@@ -435,8 +437,8 @@ pub fn apply_prepared_unit_writes(
         }
     }
 
-    {
-        let mut ins_stmt = tx.prepare(
+    if !upsert_units.is_empty() {
+        let mut ins_stmt = tx.prepare_cached(
             "INSERT INTO file_units (path, mtime_ns, len, data)
              VALUES (?1, ?2, ?3, ?4)
              ON CONFLICT(path) DO UPDATE SET
@@ -446,11 +448,9 @@ pub fn apply_prepared_unit_writes(
         )?;
 
         for item in upsert_units {
-            let norm_str = super::index::normalize_index_path(&item.path)
-                .to_string_lossy()
-                .into_owned();
+            let norm_str = item.path.to_string_lossy();
             ins_stmt.execute(params![
-                norm_str,
+                norm_str.as_ref(),
                 item.mtime_ns as i64,
                 item.len as i64,
                 item.compressed_blob

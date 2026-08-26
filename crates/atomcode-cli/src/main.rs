@@ -3245,6 +3245,13 @@ fn run_init_command(dir: Option<PathBuf>, force: bool) -> i32 {
                 r.cache_hit,
                 r.elapsed.as_secs_f64()
             );
+            if !r.cache_hit && (r.phases.parse_ast > std::time::Duration::ZERO || r.phases.save_disk > std::time::Duration::ZERO) {
+                println!();
+                println!("  [Phase Breakdown]");
+                println!("    • Parse AST & Compress: {:.2}s", r.phases.parse_ast.as_secs_f64());
+                println!("    • Graph Composition:    {:.2}s", r.phases.compose_graph.as_secs_f64());
+                println!("    • Disk SQLite Persist:  {:.2}s", r.phases.save_disk.as_secs_f64());
+            }
             println!();
             println!(
                 "  Tip: agent graph tools load `{DISK_CACHE_REL}` automatically when up to date."

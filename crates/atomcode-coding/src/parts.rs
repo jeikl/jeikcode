@@ -1187,11 +1187,6 @@ async fn publish_ready_mcp_tools(
         return;
     }
     let discovered = mcp::register_mcp_tools(&mut tool_registry, adapters);
-    println!(
-        "\x1b[32m[MCP-Session 4/4]\x1b[0m 成功向 Agent 会话注入 {} 个 MCP 工具: {:?}",
-        discovered.len(),
-        discovered
-    );
     match mcp_tool_names.write() {
         Ok(mut names) => *names = discovered.clone(),
         Err(poisoned) => *poisoned.into_inner() = discovered.clone(),

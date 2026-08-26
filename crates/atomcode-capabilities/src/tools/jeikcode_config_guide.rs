@@ -78,7 +78,7 @@ impl Tool for JeikcodeConfigGuideTool {
     }
 
     fn description(&self) -> &str {
-        "Primary configuration guide and knowledge tool for JeikCode. MUST be invoked whenever the user asks ANY question about JeikCode configurations, settings, system prompts, rules.yaml / init.yaml, project constraints (AGENTS.md, ATOMCODE.md, dbwords.md, rules.md, glossary.md), models & providers, reasoning effort/history, MCP servers, Skills, Cilin thesaurus, tool timeouts, or ~/.atomcode directory layout."
+        "Primary configuration guide and knowledge tool for JeikCode. MUST be invoked whenever the user asks ANY question about JeikCode configurations, settings, system prompts, rules.yaml / init.yaml, project constraints (AGENTS.md, ATOMCODE.md, dbwords.md, rules.md, glossary.md), models & providers, reasoning effort/history, MCP servers, Skills, Cilin thesaurus, tool timeouts, or ~/.atomcode directory layout. NOTE: When the user asks what tools, MCPs, or skills are currently mounted/loaded in the active session, always check your own context, system prompt, and memory FIRST. If not mounted, answer honestly and ask the user if they would like you to look up how to configure them in JeikCode. Do NOT invoke this tool to answer what is currently mounted. However, if the user explicitly asks about the static MCP configuration files, you should query the MCP configuration and report how many are successfully configured/mounted."
     }
 
     fn parameters_schema(&self) -> serde_json::Value {

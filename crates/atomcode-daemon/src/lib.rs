@@ -5650,19 +5650,8 @@ fn spawn_mcp_registry_warmup(registry: Arc<McpRegistry>) {
             _ = registry.wait_until_initial_connections_done() => {}
             _ = registry.wait_for_cancellation() => return,
         }
-        let statuses = registry.server_statuses().await;
-        let tools = registry.list_all_tools_cached().await;
-        println!(
-            "\x1b[36m[MCP-Daemon 2/4]\x1b[0m MCP 服务器初始化完成，连接状态: {:?}",
-            statuses
-                .iter()
-                .map(|(server, status)| format!("{server}: {status:?}"))
-                .collect::<Vec<_>>()
-        );
-        println!(
-            "\x1b[36m[MCP-Daemon 3/4]\x1b[0m 成功发现 {} 个活动 MCP 工具",
-            tools.len()
-        );
+        let _statuses = registry.server_statuses().await;
+        let _tools = registry.list_all_tools_cached().await;
     });
 }
 
@@ -5675,10 +5664,6 @@ pub(crate) async fn get_or_init_project_mcp_registry_from_cache(
         cached.last_used = std::time::Instant::now();
         return cached.registry.clone();
     }
-    println!(
-        "\x1b[36m[MCP-Daemon 1/4]\x1b[0m 正在加载工作区 MCP 配置: {}",
-        project_dir.display()
-    );
     let registry = Arc::new(McpRegistry::from_config_background(project_dir));
     spawn_mcp_registry_warmup(registry.clone());
     if cache.len() >= MCP_CACHE_MAX {

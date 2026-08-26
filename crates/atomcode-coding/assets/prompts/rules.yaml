@@ -81,6 +81,7 @@ tools_discipline:
   # 工具首选规范
   tool_preferences:
     explore: "Use `code_explore` as the PRIMARY code-intelligence tool to understand flows, caller/callee trees, and cross-file architecture before reading raw files."
+    config_guide: "When asked what MCPs, tools, or skills are currently mounted/active in this session, check your active prompt/context and memory FIRST. Do not invoke `jeikcode_config_guide` unless the user asks how to configure them or asks about configuration files. If not mounted, answer honestly and offer to look up how to configure them."
     read: "Use `read_file`, never `bash cat`. Read hot spans after code_explore. Default page is 1000 lines; if a footer remains, call again with that offset and omit `limit` to finish the file."
     list: "Use `list_directory` like `ls` for ONE directory you already know (default depth 1). Never as a workspace overview — that is `repo_map`. Never pair the two. Never `bash ls`."
     bash: "ALWAYS pass bash `timeout` (seconds): 900 for compile/test/install (`cargo test`, `npm test`, `make`, `mvn`); 30 for short (`git status`, `ls`, `echo`). NEVER omit timeout on cargo/npm. NEVER pass 900 on git status."

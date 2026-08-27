@@ -83,9 +83,17 @@ for entry in "${BUILD_TARGETS[@]}"; do
     if cargo build --release --target "$TARGET" --bin atomcode 2>&1; then
         SRC="target/${TARGET}/release/atomcode"
         [ -f "${SRC}.exe" ] && SRC="${SRC}.exe"
-        cp "$SRC" "dist/atomcode-${VERSION}-${PLATFORM}.exe" 2>/dev/null || \
-        cp "$SRC"  "dist/atomcode-${VERSION}-${PLATFORM}"
-        echo "    -> dist/atomcode-${VERSION}-${PLATFORM} ($(du -h dist/atomcode-${VERSION}-${PLATFORM} | cut -f1))"
+        if [ -f "${SRC}.exe" ] || [ "${PLATFORM}" = "windows-x64" ]; then
+            cp "$SRC" "dist/jeikcode-${VERSION}-${PLATFORM}.exe"
+            # 同时也生成 atomcode- 兼容别名软/硬拷贝
+            cp "$SRC" "dist/atomcode-${VERSION}-${PLATFORM}.exe"
+            echo "    -> dist/jeikcode-${VERSION}-${PLATFORM}.exe ($(du -h dist/jeikcode-${VERSION}-${PLATFORM}.exe 2>/dev/null | cut -f1 || ls -lh dist/jeikcode-${VERSION}-${PLATFORM}.exe | awk '{print \$5}'))"
+        else
+            cp "$SRC" "dist/jeikcode-${VERSION}-${PLATFORM}"
+            # 同时也生成 atomcode- 兼容别名
+            cp "$SRC" "dist/atomcode-${VERSION}-${PLATFORM}"
+            echo "    -> dist/jeikcode-${VERSION}-${PLATFORM} ($(du -h dist/jeikcode-${VERSION}-${PLATFORM} 2>/dev/null | cut -f1 || ls -lh dist/jeikcode-${VERSION}-${PLATFORM} | awk '{print \$5}'))"
+        fi
     else
         echo "    !! 跳过 ${TARGET} (缺 target 或链接失败: rustup target add ${TARGET})"
     fi
@@ -109,8 +117,8 @@ const version = '$VERSION';
 const binaries = {};
 
 const targets = [
-  ['linux-x64',    'atomcode-' + version + '-linux-x64'],
-  ['windows-x64',  'atomcode-' + version + '-windows-x64.exe'],
+  ['linux-x64',    'jeikcode-' + version + '-linux-x64'],
+  ['windows-x64',  'jeikcode-' + version + '-windows-x64.exe'],
 ];
 
 for (const [key, asset] of targets) {

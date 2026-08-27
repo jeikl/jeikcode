@@ -30,7 +30,7 @@ workflow:
     MUST be a directory/module (e.g. `crates/atomcode-coding`, `src/auth`, `backend`) and query may be a precise
     symbol (`CodeExploreTool`) or natural Chinese/English (`鉴权怎么做`, `how does session compaction work`).
     NEVER a single file (`src/auth.rs`, `lib.rs`) — that is `read_file` and misses the call graph.
-    `path` may be the workspace root (`.`, `./`, `~`, or the working directory) or a directory/module; never pass a single file.
+    NEVER pass `path: '.'` / `./` / `~` / the workspace root — that is reserved for `repo_map`.
 
   # 负面结论防误判
   # 【中文】：严禁仅凭单一片段就武断断定“项目缺乏某功能”；在下结论前，必须去探索实现文件（如 impl 块）。

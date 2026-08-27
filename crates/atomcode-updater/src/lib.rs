@@ -201,9 +201,9 @@ fn target_tag(os: &str, arch: &str) -> Option<&'static str> {
 /// what `scripts/release.sh` publishes to `dist/<version>/`.
 pub fn binary_filename(version: &str, target: &str) -> String {
     if target.starts_with("windows") {
-        format!("atomcode-{}-{}.exe", version, target)
+        format!("jeikcode-{}-{}.exe", version, target)
     } else {
-        format!("atomcode-{}-{}", version, target)
+        format!("jeikcode-{}-{}", version, target)
     }
 }
 
@@ -1247,11 +1247,11 @@ mod tests {
     fn binary_filename_adds_exe_on_windows_targets() {
         assert_eq!(
             binary_filename("v4.19.0", "windows-x64"),
-            "atomcode-v4.19.0-windows-x64.exe"
+            "jeikcode-v4.19.0-windows-x64.exe"
         );
         assert_eq!(
             binary_filename("v4.19.0", "windows-arm64"),
-            "atomcode-v4.19.0-windows-arm64.exe"
+            "jeikcode-v4.19.0-windows-arm64.exe"
         );
     }
 
@@ -1259,11 +1259,11 @@ mod tests {
     fn binary_filename_plain_on_unix_targets() {
         assert_eq!(
             binary_filename("v4.19.0", "darwin-arm64"),
-            "atomcode-v4.19.0-darwin-arm64"
+            "jeikcode-v4.19.0-darwin-arm64"
         );
         assert_eq!(
             binary_filename("v4.19.0", "linux-x64"),
-            "atomcode-v4.19.0-linux-x64"
+            "jeikcode-v4.19.0-linux-x64"
         );
     }
 
@@ -1271,7 +1271,7 @@ mod tests {
     fn binary_url_shape() {
         assert_eq!(
             binary_url("6.0.0", "windows-x64"),
-            "https://github.com/jeikl/jeikcode/releases/download/6.0.0/atomcode-6.0.0-windows-x64.exe"
+            "https://github.com/jeikl/jeikcode/releases/download/6.0.0/jeikcode-6.0.0-windows-x64.exe"
         );
     }
 
@@ -1681,14 +1681,14 @@ mod tests {
     #[test]
     fn staged_binary_path_matches_release_artifact_name() {
         let p = staged_binary_path("v4.19.1", "darwin-arm64");
-        assert!(p.ends_with("atomcode-v4.19.1-darwin-arm64"), "got: {:?}", p);
+        assert!(p.ends_with("jeikcode-v4.19.1-darwin-arm64"), "got: {:?}", p);
     }
 
     #[test]
     fn staged_binary_path_adds_exe_for_windows() {
         let p = staged_binary_path("v4.19.1", "windows-x64");
         assert!(
-            p.ends_with("atomcode-v4.19.1-windows-x64.exe"),
+            p.ends_with("jeikcode-v4.19.1-windows-x64.exe"),
             "got: {:?}",
             p
         );

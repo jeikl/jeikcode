@@ -134,8 +134,3 @@ firm_execution_discipline:
 - **动态热重载**：无需重启，修改文件后下一轮提问即刻生效；
 - **安全默认**：默认配置文件仅包含 `{{input}}`（原样透传），无任何额外副作用。
 
-### 5.4 运行时消息归属与 CodeIntel 路由
-- 用户中断且启用 `keep_interrupted_context` 时，只保留已生成上下文并闭合悬空工具调用，不再额外插入“用户已中断”的 synthetic User 消息；
-- 每轮日期提醒追加到当前真实 User 消息底部的同一个 `<system-reminder>` 块中，不再创建独立 User 消息；
-- `=== CODE TOOLS ===` 路由卡属于会话开头的 System 消息序列，不占用受保护的 synthetic User 前缀；
-- `code_explore.path` 可以是工作区根目录（`.`、`./`、`~` 或工作目录绝对路径）或目录/模块，但仍禁止传入单个文件。

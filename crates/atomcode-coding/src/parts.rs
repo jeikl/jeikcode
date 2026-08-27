@@ -647,7 +647,7 @@ async fn prepare_with_plugin_hooks_reusing_lease(
     //    sacred_floor — compaction cannot drain it.
     // 2b. SkillCatalogHook — session_start: inject the AVAILABLE SKILLS catalog as a
     //    frozen synthetic User after memory. Same sacred-floor protection.
-    // 2b2. CodeToolsHook — frozen `=== CODE TOOLS ===` routing card (code_explore first).
+    // 2b2. CodeToolsHook — leading-System `=== CODE TOOLS ===` routing card.
     // 2c. McpInstructionsHook — session_start / turn_start: inject MCP server
     //     instructions as a frozen synthetic User after skills. Unchanged bytes
     //     keep the prompt-cache prefix stable; the user query stays at the tail.
@@ -706,11 +706,10 @@ async fn prepare_with_plugin_hooks_reusing_lease(
                 .with_persistence_status(snapshot_hook.persistence_status()),
         ));
     }
-    // Status awareness is UNCONDITIONAL (production parity): a per-turn <system-reminder>
-    // with the calendar date (NO context-usage gauge — pressure is handled silently by
-    // auto-compaction). Injected on `turn_start` immediately ABOVE the real user query
-    // (Grok Build order). Consecutive user messages are kept on OpenAI/Responses wires;
-    // Anthropic merges them with the query last.
+    // Status awareness is UNCONDITIONAL: a per-turn <system-reminder> with the calendar
+    // date (NO context-usage gauge — pressure is handled silently by auto-compaction).
+    // Appended on `turn_start` to the BOTTOM of the current real user block, so every
+    // provider sees one user message instead of a synthetic-user/query pair.
     hooks.push(Arc::new(StatusReminderHook::new()));
     // Pin the workspace root the cadence uses to gate out-of-workspace edits (e.g. a throwaway
     // /tmp write must not arm the "run cargo check" nudge). INVARIANT: this must equal the dir

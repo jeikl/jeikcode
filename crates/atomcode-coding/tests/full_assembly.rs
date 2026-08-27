@@ -125,8 +125,8 @@ async fn full_assembly_lifecycle() {
         }
     }
 
-    // Prefix order: persona → SESSION CONTEXT (System) → MEMORY (frozen synthetic User),
-    // all BEFORE the real query. Memory is user-owned so it sits in sacred_floor.
+    // Prefix order: persona → SESSION CONTEXT → CODE TOOLS (all System) → MEMORY
+    // (frozen synthetic User), all BEFORE the real query.
     {
         let calls = calls1.lock().unwrap();
         let first = &calls[0].0;
@@ -143,15 +143,20 @@ async fn full_assembly_lifecycle() {
             shape()
         );
         assert!(
-            first[2].role == Role::User
-                && first[2].synthetic
-                && first[2].text.starts_with("=== MEMORY ==="),
-            "memory block injected as frozen user prefix after the context block: {:?}",
+            first[2].role == Role::System && first[2].text.starts_with("=== CODE TOOLS ==="),
+            "code-tools routing card belongs to the leading System run: {:?}",
             shape()
         );
-        assert!(first[2].text.contains("prefers tabs"));
-        // StatusReminderHook injects a synthetic date user ABOVE the real query
-        // (Grok Build order). The last message is still the user's turn.
+        assert!(
+            first[3].role == Role::User
+                && first[3].synthetic
+                && first[3].text.starts_with("=== MEMORY ==="),
+            "memory block follows the leading System run: {:?}",
+            shape()
+        );
+        assert!(first[3].text.contains("prefers tabs"));
+        // StatusReminderHook appends the date to the bottom of the real query;
+        // no independent synthetic user message is created.
         assert_eq!(
             first.last().unwrap().role,
             Role::User,
@@ -161,17 +166,14 @@ async fn full_assembly_lifecycle() {
             !first.last().unwrap().synthetic,
             "last user must be the real query, not a reminder"
         );
-        let reminder = first
-            .iter()
-            .rev()
-            .nth(1)
-            .expect("date reminder sits immediately above the query");
         assert!(
-            reminder.synthetic
-                && reminder.role == Role::User
-                && reminder.text.contains("<system-reminder>")
-                && reminder.text.contains("Current date"),
-            "date reminder above query: {:?}",
+            first
+                .last()
+                .unwrap()
+                .text
+                .starts_with("the first task\n\n<system-reminder>")
+                && first.last().unwrap().text.contains("Current date"),
+            "date reminder belongs to the real query block: {:?}",
             shape()
         );
     }
@@ -205,7 +207,9 @@ async fn full_assembly_lifecycle() {
         let calls = calls1b.lock().unwrap();
         let first = &calls[0].0;
         assert!(
-            first.iter().any(|m| m.text == "the first task"),
+            first
+                .iter()
+                .any(|m| m.text.starts_with("the first task\n\n<system-reminder>")),
             "respawn on the same parts carries the conversation"
         );
     }
@@ -235,18 +239,24 @@ async fn full_assembly_lifecycle() {
         let calls = calls2.lock().unwrap();
         let first = &calls[0].0;
         assert!(
-            first.iter().any(|m| m.text == "the first task"),
+            first
+                .iter()
+                .any(|m| m.text.starts_with("the first task\n\n<system-reminder>")),
             "resume carries history"
         );
         assert!(
-            first.iter().any(|m| m.text == "the swap task"),
+            first
+                .iter()
+                .any(|m| m.text.starts_with("the swap task\n\n<system-reminder>")),
             "incl. the respawned turn"
         );
-        assert!(first.iter().any(|m| m.text == "the second task"));
+        assert!(first
+            .iter()
+            .any(|m| m.text.starts_with("the second task\n\n<system-reminder>")));
         let system_count = first.iter().filter(|m| m.role == Role::System).count();
         assert_eq!(
-            system_count, 2,
-            "persona + session-context exactly once each (resume reconciles in place, no double-inject)"
+            system_count, 3,
+            "persona + session-context + code-tools exactly once each"
         );
         let memory_count = first
             .iter()

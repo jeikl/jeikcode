@@ -1,13 +1,10 @@
 //! The `<system-reminder>` convention — the ONE place that owns it.
 //!
-//! Runtime context (the per-turn status from [`StatusReminderHook`], plan-mode notices, …)
-//! is injected as a **synthetic** `Role::User` message WRAPPED in
-//! `<system-reminder>…</system-reminder>`, placed **immediately ABOVE** the current
-//! real user query (Grok Build order). Recency then lands on the user's request, not
-//! the ambient block. Consecutive user messages stay consecutive on OpenAI / Responses
-//! wires; the Anthropic adapter is the only path that still merges them (Messages API
-//! requires alternating roles), and because the reminder sits first the merged block
-//! still ends with the query.
+//! Runtime context is always wrapped in `<system-reminder>…</system-reminder>`.
+//! Most mode/todo notices remain synthetic `Role::User` messages immediately above
+//! the real query. The per-turn calendar date from [`StatusReminderHook`] is the
+//! deliberate exception: it is appended to the bottom of that real user block so it
+//! cannot become an independent user-authored instruction on the wire.
 //!
 //! EVERY injector MUST build its reminder through [`system_reminder`] — that is the whole
 //! point of centralizing the convention: the wrapper can no longer be forgotten. The bug

@@ -97,6 +97,10 @@ impl UserWrapHook {
     /// Extract the raw user input from a potentially wrapped message text
     /// for a given working directory.
     pub fn unwrap_input_for(working_dir: &Path, wrapped: &str) -> String {
+        // StatusReminderHook appends the live date to the bottom of the real user
+        // block for model-facing role integrity. Strip that internal suffix before
+        // restoring history, titles, or UI text.
+        let wrapped = strip_date_reminder_suffix(wrapped);
         let Some(path) = Self::resolve_wrap_file_for(working_dir) else {
             return wrapped.to_string();
         };
@@ -145,6 +149,19 @@ impl UserWrapHook {
                 wrapped.to_string()
             }
         }
+    }
+}
+
+fn strip_date_reminder_suffix(text: &str) -> &str {
+    const MARKER: &str = "\n\n<system-reminder>\nCurrent date:";
+    let trimmed = text.trim_end();
+    let Some(start) = trimmed.rfind(MARKER) else {
+        return text;
+    };
+    if trimmed[start + 2..].ends_with("</system-reminder>") {
+        &trimmed[..start]
+    } else {
+        text
     }
 }
 
@@ -224,5 +241,14 @@ mod tests {
         hook.user_prompt_submit(&mut text).await.unwrap();
         assert_eq!(text, "Wrapped: [original]");
         assert_eq!(hook.unwrap_input(&text), "original");
+    }
+
+    #[test]
+    fn unwrap_strips_appended_date_reminder() {
+        let temp = TempDir::new().unwrap();
+        let hook = UserWrapHook::new(temp.path());
+        let stored =
+            "original\n\n<system-reminder>\nCurrent date: 2026-08-27 (Thu)\n</system-reminder>";
+        assert_eq!(hook.unwrap_input(stored), "original");
     }
 }

@@ -5,11 +5,10 @@
 //! Deliberately DATE-only (no wall-clock time) and with NO context-usage gauge — context
 //! pressure is handled silently by auto-compaction, never pushed to the model (see `render`).
 //!
-//! Cache-safety: injected once per user turn in [`LifecycleHooks::turn_start`], as a
-//! synthetic user message **immediately ABOVE** the real query (Grok Build order).
-//! Tool-loop rounds do not re-inject, so the previous request remains a prefix of the
-//! next. Consecutive user messages are intentional; Anthropic merges them with the
-//! query last.
+//! Cache-safety: appended once per user turn in [`LifecycleHooks::turn_start`] to the
+//! **BOTTOM of the current real user message**. This keeps one wire-level user block,
+//! avoids role confusion from a separate synthetic user instruction, and remains
+//! append-only across tool-loop rounds.
 //!
 //! The body is wrapped in `<system-reminder>…</system-reminder>` so the model reads it as
 //! INJECTED CONTEXT, not the user's own words (matching `PlanModeReminderHook`'s convention).
@@ -17,7 +16,7 @@
 
 use async_trait::async_trait;
 use atomcode_kernel::hook::{LifecycleHooks, TurnCtx};
-use atomcode_kernel::message::{Conversation, Message};
+use atomcode_kernel::message::{Conversation, Role};
 use chrono::{DateTime, Local};
 
 /// Injects a `<system-reminder>` status tail from round 2 of each turn onward.
@@ -82,28 +81,25 @@ impl Default for StatusReminderHook {
 #[async_trait]
 impl LifecycleHooks for StatusReminderHook {
     async fn turn_start(&self, convo: &mut Conversation) {
-        if !convo
+        let Some(query) = convo
             .messages
-            .iter()
-            .any(|m| m.role == atomcode_kernel::message::Role::User && !m.synthetic)
-        {
+            .iter_mut()
+            .rfind(|m| m.role == Role::User && !m.synthetic)
+        else {
+            return;
+        };
+        if query.text.contains("<system-reminder>\nCurrent date:") {
             return;
         }
-        if crate::reminder::reminder_already_before_last_real_user(&convo.messages, |t| {
-            t.contains("Current date:")
-        }) {
-            return;
-        }
-        crate::reminder::insert_before_last_real_user(
-            &mut convo.messages,
-            Message::synthetic_user(Self::render_turn_start(Local::now())),
-        );
+        query.text.push_str("\n\n");
+        query.text.push_str(&Self::render_turn_start(Local::now()));
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use atomcode_kernel::message::Message;
     use chrono::TimeZone;
 
     fn ctx(round: u32, window: u32, used: u32) -> TurnCtx {
@@ -176,22 +172,22 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn turn_start_injects_date_above_the_query() {
+    async fn turn_start_appends_date_to_query_bottom() {
         let hook = StatusReminderHook::new();
         let mut convo = Conversation::default();
         convo.messages = vec![Message::system("s"), Message::user("hi")];
         hook.turn_start(&mut convo).await;
-        assert_eq!(convo.messages.len(), 3);
-        assert!(convo.messages[1].synthetic);
+        assert_eq!(convo.messages.len(), 2);
+        assert!(!convo.messages[1].synthetic);
         assert!(
-            convo.messages[1].text.contains("<system-reminder>")
+            convo.messages[1]
+                .text
+                .starts_with("hi\n\n<system-reminder>")
                 && convo.messages[1].text.contains("Current date"),
-            "date reminder sits above the query: {:?}",
+            "date reminder is appended inside the real query block: {:?}",
             convo.messages[1].text
         );
         assert!(!convo.messages[1].text.contains("Turn round"));
-        assert_eq!(convo.messages[2].text, "hi");
-        assert!(!convo.messages[2].synthetic);
         let before = convo.messages.clone();
         hook.turn_start(&mut convo).await;
         assert_eq!(

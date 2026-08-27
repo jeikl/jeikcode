@@ -307,43 +307,6 @@ struct Args {
     path: Option<String>,
 }
 
-fn workspace_root_path_err(workspace: &Path) -> String {
-    let mut names = Vec::new();
-    if let Ok(rd) = std::fs::read_dir(workspace) {
-        for e in rd.flatten() {
-            let Ok(ft) = e.file_type() else { continue };
-            if !ft.is_dir() {
-                continue;
-            }
-            let name = e.file_name().to_string_lossy().into_owned();
-            if name.starts_with('.')
-                || name == "target"
-                || name == "node_modules"
-                || name == "dist"
-            {
-                continue;
-            }
-            names.push(name);
-            if names.len() >= 5 {
-                break;
-            }
-        }
-    }
-    let examples = if names.is_empty() {
-        "'src/tools', 'crates/atomcode-coding', 'backend'".to_string()
-    } else {
-        names
-            .iter()
-            .map(|n| format!("'{n}'"))
-            .collect::<Vec<_>>()
-            .join(", ")
-    };
-    format!(
-        "code_explore does not accept workspace-root `path` (`.`, `./`, `~`, or the working directory). \
-         Call `repo_map` first, then pass a concrete subdirectory (e.g. {examples})."
-    )
-}
-
 fn looks_like_single_file(p: &str) -> bool {
     let t = p.trim().trim_end_matches(['/', '\\']);
     let Some(ext) = Path::new(t).extension().and_then(|e| e.to_str()) else {
@@ -374,14 +337,10 @@ fn file_scope_err(file: &Path, workspace: &Path) -> String {
     )
 }
 
-/// Tokens that mean "the whole workspace" — reserved for `repo_map`, not explore.
+/// Tokens that mean "the whole workspace".
 fn is_workspace_root_token(p: &str) -> bool {
     let t = p.trim().trim_end_matches(['/', '\\']);
     matches!(t, "." | "./" | ".\\" | "~" | "")
-}
-
-fn is_workspace_root_scope(resolved: &Path, workspace: &Path) -> bool {
-    normalize_path_for_match(resolved) == normalize_path_for_match(workspace)
 }
 
 #[derive(Debug, Clone)]
@@ -437,12 +396,11 @@ impl Tool for CodeExploreTool {
     }
 
     fn description(&self) -> &str {
-        "PRIMARY code-intelligence tool. Search INSIDE a directory/module — never a file.\n\
+        "PRIMARY code-intelligence tool. Search inside the workspace or a directory/module — never a file.\n\
          \n\
-         path (required): MUST be a directory or module after repo_map.\n\
-           GOOD: crates/atomcode-coding   src/auth   backend/service\n\
+         path (required): workspace root or a directory/module.\n\
+           GOOD: .   crates/atomcode-coding   src/auth   backend/service\n\
            BAD:  src/auth.rs   crates/foo/src/lib.rs   foo.go   (a file → use read_file)\n\
-           BAD:  .   ./   ~   (workspace root → use repo_map)\n\
          query (required): the search term, either\n\
            - a precise symbol: CodeExploreTool, assemble_parts, AuthService\n\
            - natural Chinese or English: 鉴权怎么做, how does session compaction work\n\
@@ -461,7 +419,7 @@ impl Tool for CodeExploreTool {
             "properties": {
                 "path": {
                     "type": "string",
-                    "description": "REQUIRED. Directory or module only — e.g. 'crates/atomcode-coding', 'src/auth', 'backend/service'. NEVER a file ('src/auth.rs', 'lib.rs', 'foo.go') — that is read_file and will error. NEVER '.' / workspace root — call repo_map first. Put the symbol or question in `query`, not here."
+                    "description": "REQUIRED. Workspace root ('.', './', '~', or the working directory) or a directory/module such as 'crates/atomcode-coding', 'src/auth', 'backend/service'. NEVER a file ('src/auth.rs', 'lib.rs', 'foo.go') — that is read_file and will error. Put the symbol or question in `query`, not here."
                 },
                 "query": {
                     "type": "string",
@@ -502,13 +460,10 @@ impl Tool for CodeExploreTool {
             Some(p) if !p.is_empty() => p,
             _ => {
                 return err(
-                    "code_explore requires a `path` parameter naming a concrete module or directory (e.g. 'src/tools', 'crates/atomcode-coding', 'backend'). Do not pass '.' — use repo_map for the workspace overview.".to_string()
+                    "code_explore requires a `path` parameter naming the workspace root or a directory/module (e.g. '.', 'src/tools', 'crates/atomcode-coding', 'backend').".to_string()
                 );
             }
         };
-        if is_workspace_root_token(path_str) {
-            return err(workspace_root_path_err(&ctx.working_dir));
-        }
         if looks_like_single_file(path_str) {
             let resolved = if Path::new(path_str).is_absolute() {
                 PathBuf::from(path_str)
@@ -553,14 +508,12 @@ impl Tool for CodeExploreTool {
 
         let t0 = std::time::Instant::now();
 
-        if parsed_query.path_filters.iter().any(|p| is_workspace_root_token(p)) {
-            return err(workspace_root_path_err(&root));
-        }
-
         let scope_path = if !parsed_query.path_filters.is_empty() {
             let p = &parsed_query.path_filters[0];
             let pb = Path::new(p);
-            if pb.is_absolute() {
+            if is_workspace_root_token(p) {
+                Some(root.clone())
+            } else if pb.is_absolute() {
                 Some(canonical(pb))
             } else {
                 Some(canonical(&root.join(pb)))
@@ -568,7 +521,9 @@ impl Tool for CodeExploreTool {
         } else {
             a.path.as_deref().map(|p| {
                 let pb = Path::new(p);
-                if pb.is_absolute() {
+                if is_workspace_root_token(p) {
+                    root.clone()
+                } else if pb.is_absolute() {
                     canonical(pb)
                 } else {
                     canonical(&root.join(pb))
@@ -576,9 +531,6 @@ impl Tool for CodeExploreTool {
             })
         };
         if let Some(sc) = scope_path.as_deref() {
-            if is_workspace_root_scope(sc, &root) {
-                return err(workspace_root_path_err(&root));
-            }
             if sc.is_file() {
                 return err(file_scope_err(sc, &root));
             }
@@ -3401,7 +3353,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn rejects_workspace_root_path_dot() {
+    async fn accepts_workspace_root_paths() {
         use atomcode_kernel::tool::{ProgressSink, Tool, ToolContext};
         use tokio_util::sync::CancellationToken;
 
@@ -3417,18 +3369,10 @@ mod tests {
             progress: ProgressSink::noop(),
             requester: None,
         };
-        for args in [
-            r#"{"query":"cached_symbol","path":"."}"#,
-            r#"{"query":"cached_symbol","path":"./"}"#,
-            r#"{"query":"cached_symbol","path":"~"}"#,
-        ] {
-            let r = tool.execute(args, &ctx).await;
-            assert!(r.is_error, "root path must be rejected: {args}\n{}", r.content);
-            assert!(
-                r.content.contains("does not accept workspace-root"),
-                "error must steer to repo_map: {args}\n{}",
-                r.content
-            );
+        for path in [".", "./", "~", d.path().to_str().unwrap()] {
+            let args = serde_json::json!({"query": "cached_symbol", "path": path}).to_string();
+            let r = tool.execute(&args, &ctx).await;
+            assert!(!r.is_error, "workspace root must be accepted: {args}\n{}", r.content);
         }
         let ok = tool
             .execute(r#"{"query":"cached_symbol","path":"src"}"#, &ctx)

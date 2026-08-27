@@ -102,7 +102,7 @@ diagnostics_settle_delay_ms = 150 # 诊断结果等待延迟（毫秒）
 
 ```toml
 # 顶层中断保护开关（必须置于顶层）
-keep_interrupted_context = true # 按 Ctrl+C 中断时，保留已生成的上下文并安全闭合 tool_calls，方便下一句无缝续接
+keep_interrupted_context = true # 按 Ctrl+C 中断时保留已生成上下文并安全闭合 tool_calls；不会额外插入 synthetic User 中断提示
 
 [datalog]
 enabled = true                  # 是否记录全量结构化执行审计日志

@@ -231,7 +231,7 @@ project files, memories, skills, or tool output.)".to_string()
     }
     // Date is NOT frozen here. A session-start copy went stale across midnight and
     // duplicated the per-turn `<system-reminder>` `Current date:` that
-    // `StatusReminderHook` injects above every real query (Grok-style recency).
+    // `StatusReminderHook` appends to every real query.
     // That reminder is the sole model-facing calendar date.
     p
 }
@@ -503,7 +503,7 @@ The context window is managed for you: as it fills, older turns are automaticall
 
 ## WORKFLOW:
 - CONDITIONAL CONTEXT ROUTING — TARGET FIRST: If the user supplies a file, symbol, error string, stack trace, or narrow module, directly batch the likely `grep` / `read_file` / scoped `code_explore` calls; do NOT call `repo_map` first. Use `repo_map` only when the repository structure is genuinely unknown AND the task spans multiple modules or architectural layers. `list_directory` is `ls` for a directory already known, not a substitute for a workspace map. Optimize model round-trips rather than enforcing a fixed exploration ceremony.
-- SURGICAL CONTEXT: Use `code_explore` when the task needs a call graph, semantic discovery, an unfamiliar business concept, or cross-module impact analysis. For an exact literal, already-known file, compiler diagnostic, or small local change, go directly to `grep` and `read_file`. When using `code_explore`, `path` MUST be a directory or module (e.g. `crates/atomcode-coding`, `src/auth`, `backend`) — NEVER a single file (`src/auth.rs`, `lib.rs`; that is `read_file` and misses the call graph). `query` may be a precise symbol (`CodeExploreTool`) or natural Chinese/English (`鉴权怎么做`). NEVER pass `path: \".\"` / `./` / `~` / the workspace root to `code_explore` — that is reserved for `repo_map`. In a workspace of independent subprojects, target the specific subproject. Treat returned spans as a ranked core skeleton: expand to nearby definitions, tests, imports, or callers when the task requires them, but do not add an obligatory graph round for an already-localized change.
+- SURGICAL CONTEXT: Use `code_explore` when the task needs a call graph, semantic discovery, an unfamiliar business concept, or cross-module impact analysis. For an exact literal, already-known file, compiler diagnostic, or small local change, go directly to `grep` and `read_file`. When using `code_explore`, `path` may be the workspace root (`.`, `./`, `~`, or the working directory) or a directory/module (e.g. `crates/atomcode-coding`, `src/auth`, `backend`) — NEVER a single file (`src/auth.rs`, `lib.rs`; that is `read_file` and misses the call graph). `query` may be a precise symbol (`CodeExploreTool`) or natural Chinese/English (`鉴权怎么做`). In a workspace of independent subprojects, prefer the specific subproject when it is already known. Treat returned spans as a ranked core skeleton: expand to nearby definitions, tests, imports, or callers when the task requires them, but do not add an obligatory graph round for an already-localized change.
 - NEVER jump to negative conclusions (\"the project lacks X mechanism\") based on a single code snippet: ALWAYS inspect the returned `File Capability Capsule` (Types/Traits, Middleware, Pipelines, Plugins) to see all co-located capabilities in that file. A top hit that is a trait/interface is the DECLARATION, not the behavior — the implementations live at `impl <name>` in other files (often in OTHER crates/packages/layers); grep `impl <name>` or query `code_explore(\"impl <name>\")` before judging the mechanism.
 - PATH-SCOPE DISCIPLINE: a `path:`-limited search is CONFINED to that scope — code in sibling layers (other crates/packages/dirs) is NOT in the hit set at all. When a layered capability's location is unknown, use `repo_map` to identify likely crates and choose the scope deliberately; prefer the whole `crates/`/`packages/` tree over a single crate when answering an existence question (\"does X exist here\"). Remember a hit set is only ever a RANKED SKELETON (see the 📊 Coverage line): low counts, omitted symbols and folded spans are reasons to re-query, not reasons to conclude absence.
 - BATCHED PARALLEL EXPLORATION: Once likely targets are known, speculatively issue 2–6 independent `code_explore`, `grep`, or `read_file` calls in ONE response. Read enough contiguous context to cover complete functions, types, relevant tests, and callers. Avoid repeated 20–70 line pagination. Do not over-read unrelated generated files or large vendored trees. A thin search result is not proof of absence; retry synonyms or broaden the relevant module when necessary.
@@ -806,7 +806,7 @@ mod tests {
 
     #[test]
     fn persona_does_not_freeze_a_session_date() {
-        // Live date is the per-turn `<system-reminder>` above the query, not a
+        // Live date is the per-turn `<system-reminder>` at the query bottom, not a
         // second copy frozen into the persona (that duplicated every user send).
         let p = coding_persona("m", true, false);
         assert!(
@@ -886,8 +886,8 @@ mod tests {
             "persona must require grep→code_explore upgrade for known names"
         );
         assert!(
-            p.contains("NEVER pass `path: \".\"`") && p.contains("reserved for `repo_map`"),
-            "persona must forbid workspace-root code_explore: {p}"
+            p.contains("`path` may be the workspace root") && p.contains("working directory"),
+            "persona must allow workspace-root code_explore: {p}"
         );
         assert!(
             p.contains("crates/atomcode-coding")

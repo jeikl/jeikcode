@@ -30,18 +30,17 @@ const MAX_SYMBOLS_PER_FILE: usize = 40;
 const MAX_SYMBOL_OUTPUT_BYTES: usize = 64 * 1024;
 
 /// Appended to every tree section: what the default tree shows, how to explore
-/// deeper files with a scoped `code_explore` (never workspace-root `.`),
+/// deeper files with `code_explore` at either workspace-root or a narrower scope,
 /// and the cross-check duty — if `code_explore`'s hits don't cover every
 /// subdirectory the tree shows, re-explore the directories it missed.
 const TREE_NOTE: &str = "\
 NOTE: top-level files are listed in full; subdirectories are recursed to the \
 deepest level but files inside them are only counted, not named — nothing is \
-elided. To explore deeper files, pick a concrete subdirectory from this tree \
-and call `code_explore` with that `path` (e.g. `crates/atomcode-coding`, \
-`src/auth`, `backend`) — `path` is a directory/module, NEVER a single file \
-(`.rs`/`.ts`/… that is `read_file`). do NOT pass `.` / the workspace root; \
-that is reserved for `repo_map`. If hits miss a subdirectory shown here, \
-re-explore that directory.";
+elided. To explore implementation details, call `code_explore` at the workspace \
+root (`path=.`) or pick a concrete subdirectory from this tree (e.g. \
+`crates/atomcode-coding`, `src/auth`, `backend`). `path` may be the workspace \
+root or a directory/module, but NEVER a single file (`.rs`/`.ts`/… that is \
+`read_file`). If hits miss a subdirectory shown here, re-explore that directory.";
 
 pub struct RepoMapTool {
     index: Arc<CodeIndex>,
@@ -706,12 +705,12 @@ mod tests {
         // Deep files are counted, not named; nothing is elided or folded.
         assert!(map_output.contains("(2 files"));
         assert!(!map_output.contains("util.rs"));
-        // The TREE_NOTE explains deeper-file exploration via scoped code_explore.
+        // The TREE_NOTE explains root or scoped exploration via code_explore.
         assert!(map_output.contains("code_explore"));
         assert!(map_output.contains("nothing is elided"));
         assert!(
-            map_output.contains("do NOT pass `.`") || map_output.contains("do NOT pass"),
-            "TREE_NOTE must forbid workspace-root code_explore:\n{map_output}"
+            map_output.contains("workspace root (`path=.`)"),
+            "TREE_NOTE must allow workspace-root code_explore:\n{map_output}"
         );
     }
 

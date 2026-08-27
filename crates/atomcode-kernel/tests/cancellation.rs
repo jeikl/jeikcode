@@ -705,12 +705,11 @@ async fn cancel_preserves_turn_when_keep_interrupted_context() {
     );
 }
 
-// CLAIM 17f: in preserve mode, finish_cancelled appends a synthetic USER-role marker so
-// the next turn's request explicitly tells the model the prior turn was user-interrupted.
-// User role is wire-safe on all adapters (non-leading system messages are rejected/dropped
-// on many openai-compat gateways; Anthropic lifts all system to top-level field).
+// CLAIM 17f: preserve mode keeps the useful partial turn but does not inject a synthetic
+// USER interruption marker. The next real prompt is sufficient to steer the model, while
+// an extra user-role instruction can be mistaken for user-authored intent.
 #[tokio::test]
-async fn preserve_mode_injects_interruption_marker() {
+async fn preserve_mode_does_not_inject_interruption_marker() {
     let mut reg = ToolRegistry::new();
     reg.register(Arc::new(SelfCancelTool));
     let provider = Arc::new(RecordingProvider::new(vec![
@@ -759,17 +758,10 @@ async fn preserve_mode_injects_interruption_marker() {
 
     let calls = calls.lock().unwrap();
     let history = &calls[1].0;
-    let marker = history
-        .iter()
-        .find(|m| m.text.contains("interrupted by the user"))
-        .expect("expected an interruption marker user message");
-    assert_eq!(
-        marker.role,
-        Role::User,
-        "marker must be Role::User (wire-safe on all adapters)"
-    );
     assert!(
-        marker.synthetic,
-        "marker must be synthetic so /undo and compaction skip it in prompt counting"
+        history
+            .iter()
+            .all(|m| !m.text.contains("interrupted by the user")),
+        "preserve mode must not invent a user-role interruption instruction: {history:?}"
     );
 }

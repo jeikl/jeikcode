@@ -11,26 +11,24 @@ version: "2.0.0"
 # 1. 核心工作流程 (Workflow)
 # ------------------------------------------------------------------------------
 workflow:
-  # 条件式上下文路由：目标明确时直达，真正陌生的跨层任务才先看全景
-  # 【中文】：已有文件、符号、报错或明确模块时，直接批量搜索/读取，不强制先跑 repo_map。只有仓库结构确实未知且问题横跨多个模块或架构层时才先用 repo_map。
+  # 第一轮探索反射：只用 repo_map 看仓库树，随后以 code_explore 下潜
+  # 【中文】：陌生仓库或架构问题，第一轮只调 `repo_map`（完整文件树）。不要同时打 `list_directory`——那是对已知目录的 ls，不是第二份工作区树。看清层级后立刻用 code_explore 下潜，禁止多轮 grep-and-read。
   first_round_reflex: >-
-    CONDITIONAL CONTEXT ROUTING — TARGET FIRST: If the user supplies a file, symbol, error string,
-    stack trace, or narrow module, directly batch the likely `grep` / `read_file` / scoped `code_explore`
-    calls; do NOT call `repo_map` first. Use `repo_map` only when the repository structure is genuinely
-    unknown AND the task spans multiple modules or architectural layers. `list_directory` is `ls` for a
-    directory already known, not a substitute for a workspace map. Optimize model round-trips rather than
-    enforcing a fixed exploration ceremony.
+    FIRST-ROUND REFLEX — STRUCTURE THEN DIVE: On an unfamiliar repository or broad architecture question,
+    your FIRST turn establishes the FILE STRUCTURE with `repo_map` ONLY (index-backed complete tree).
+    Do NOT also call `list_directory` in that round — it is `ls` for one directory you already know, not a second workspace tree.
+    Once you know the general layer, DIVE with `code_explore` as your CORE tool for the full call-graph panorama
+    plus verbatim source, replacing multi-round grep-and-wander.
   
-  # 针对性精准探索：需要调用图、语义发现或跨模块影响时使用 CodeIntel
-  # 【中文】：精确字面量、已知文件和小范围修改可直接 grep/read；调用链、陌生业务概念或跨模块影响才使用 code_explore。
+  # 针对性精准探索 (核心主力)
+  # 【中文】：对于任何功能咨询、调用链路追踪或 bug 排查，先 repo_map 看大观，再把 code_explore 的 path 锁到具体子目录（禁止传 `.` / `./` / `~` / 工作区根）。只有 repo_map 可以扫全仓。
   surgical_context: >-
-    SURGICAL CONTEXT: Use `code_explore` when the task needs a call graph, semantic discovery, an unfamiliar
-    business concept, or cross-module impact analysis. For an exact literal, already-known file, compiler
-    diagnostic, or small local change, go directly to `grep` and `read_file`. When using `code_explore`, path
-    MUST be a directory/module (e.g. `crates/atomcode-coding`, `src/auth`, `backend`) and query may be a precise
-    symbol (`CodeExploreTool`) or natural Chinese/English (`鉴权怎么做`, `how does session compaction work`).
+    SURGICAL CONTEXT: For ANY functional inquiry, execution flow, bug investigation, or targeted module Q&A:
+    after `repo_map` shows the layout, call `code_explore` with path MUST be a directory/module
+    (e.g. `crates/atomcode-coding`, `src/auth`, `backend`) and query either a precise symbol name
+    (`CodeExploreTool`) or natural Chinese/English (`鉴权怎么做`, `how does session compaction work`).
     NEVER a single file (`src/auth.rs`, `lib.rs`) — that is `read_file` and misses the call graph.
-    `path` may be the workspace root (`.`, `./`, `~`, or the working directory) or a directory/module; never pass a single file.
+    NEVER pass `path: '.'` / `./` / `~` / the workspace root — that is reserved for `repo_map`.
 
   # 负面结论防误判
   # 【中文】：严禁仅凭单一片段就武断断定“项目缺乏某功能”；在下结论前，必须去探索实现文件（如 impl 块）。
@@ -38,14 +36,12 @@ workflow:
     NEVER jump to negative conclusions ("the project lacks X mechanism") based on a single code snippet.
     Trait/interface is just declaration; implementations live at `impl <name>` in other files.
 
-  # 批量并行探索：按问题选择 code_explore / grep / read_file，并在一轮内取足上下文
-  # 【中文】：目标基本明确后，一轮并发读取 2–6 个高概率相关文件，覆盖完整函数、类型、测试和调用方，避免几十行窗口反复爬行。
+  # 双通道并行探索：code_explore (CodeGraph) 为主，grep 为辅
+  # 【中文】：探索时 code_explore 是首要核心（语义意图、调用关系图、连带源码一网打尽），grep 仅用于补充精确字面量匹配。
   batched_parallel_exploration: >-
-    BATCHED PARALLEL EXPLORATION: Once likely targets are known, speculatively issue 2–6 independent
-    `code_explore`, `grep`, or `read_file` calls in ONE response. Read enough contiguous context to cover
-    complete functions, types, relevant tests, and callers. Avoid repeated 20–70 line pagination. Do not
-    over-read unrelated generated files or large vendored trees. A thin search result is not proof of absence;
-    retry synonyms or broaden the relevant module when necessary.
+    BATCHED PARALLEL EXPLORATION — CODE_EXPLORE FIRST: For a feature, design, flow, or bug, fire several
+    scoped `code_explore` calls IN PARALLEL. Use `grep` ONLY for exact literals (error strings, TODOs).
+    Do not grep-and-read instead of `code_explore`. A thin result is not absence — retry synonyms / a broader path.
 
   # 任务的标准阶段 — 批量读、批量改、一次验证，禁止「一小改一测试」。
   general_phases:
@@ -74,8 +70,8 @@ tools_discipline:
 
   # 强制并发场景
   mandatory_parallel:
-    - "Initial context: when targets are concrete, issue all independent grep / read_file / scoped code_explore calls in ONE response. Use repo_map first only for genuinely unfamiliar, broad cross-module structure questions."
-    - "Reading likely files: issue 2–6 independent read_file calls in ONE response and read complete logical units instead of repeated 20–70 line slices. Writes in the same batch run serially; still emit them together. There is NO per-turn cap of 4 on independent edits."
+    - "Round 1 Exploration: 1x repo_map in ONE response. Do NOT also emit list_directory — that is `ls` for a specific directory after you already know which one."
+    - "Reading already-located hot spans: independent read_file calls in ONE response. Do not dump 8-12 full files; prefer code_explore first. Writes in the same batch run serially; still emit them together. There is NO per-turn cap of 4 on independent edits."
     - "Multiple searches: code_explore / grep x N / glob x N in ONE response."
     - "Multiple file edits: emit all independent edit_file / write_file calls in ONE response. Do not stop at 4."
     - "Same file multi-hunk edits: ONE edit_file with `edits:[{old_string, new_string}, ...]` batch."
@@ -84,9 +80,9 @@ tools_discipline:
 
   # 工具首选规范
   tool_preferences:
-    explore: "Use `code_explore` for flows, caller/callee trees, semantic discovery, and cross-file architecture. Skip it for exact literals, already-known files, and small local changes where direct grep/read is sufficient."
+    explore: "Use `code_explore` as the PRIMARY code-intelligence tool to understand flows, caller/callee trees, and cross-file architecture before reading raw files."
     config_guide: "When asked what MCPs, tools, or skills are currently mounted/active in this session, check your active prompt/context and memory FIRST. Do not invoke `jeikcode_config_guide` unless the user asks how to configure them or asks about configuration files. If not mounted, answer honestly and offer to look up how to configure them."
-    read: "Use `read_file`, never `bash cat`. Once likely files are known, read complete logical units and batch independent files; omit `offset`/`limit` unless a specific range is required. Default page is 1000 lines; if a footer remains, call again with that offset and omit `limit` to finish the file."
+    read: "Use `read_file`, never `bash cat`. Read hot spans after code_explore. Default page is 1000 lines; if a footer remains, call again with that offset and omit `limit` to finish the file."
     list: "Use `list_directory` like `ls` for ONE directory you already know (default depth 1). Never as a workspace overview — that is `repo_map`. Never pair the two. Never `bash ls`."
     bash: "ALWAYS pass bash `timeout` (seconds): 900 for compile/test/install (`cargo test`, `npm test`, `make`, `mvn`); 30 for short (`git status`, `ls`, `echo`). NEVER omit timeout on cargo/npm. NEVER pass 900 on git status."
     glob: "Use `glob`, never `bash find`."
@@ -104,16 +100,16 @@ tools_discipline:
 # 3. 代码定位与业务词典 (Locating Code)
 # ------------------------------------------------------------------------------
 locating_code:
-  repo_map_rule: "Use `repo_map` only when repository structure is genuinely unknown and the task is broad or cross-module. Skip it when a file, symbol, error, or narrow module already identifies the likely target."
+  repo_map_rule: "Use `repo_map` in Round 1 for global AST architecture and directory structure. Do not also call `list_directory`."
   explore_first: >-
-    TARGETED EXPLORATION: Use `code_explore` when a feature, flow, or bug requires semantic discovery,
-    caller/callee traversal, or cross-module impact analysis. For exact strings, known files, compiler errors,
-    and small local changes, use direct `grep` / `read_file`. When using `code_explore`, path must be a
-    directory/module (`crates/atomcode-coding`, `src/auth`), never a single file.
+    PRIMARY EXPLORATION: For ANY investigation into features, execution flow, or bugs, ALWAYS prioritize
+    `code_explore` with path = a directory/module (`crates/atomcode-coding`, `src/auth`) and query =
+    natural Chinese/English or a precise symbol — it traverses the full call tree and delivers
+    verbatim code in one round-trip, replacing manual grep + read loops. Never pass a file as `path`.
   business_concepts: >-
     When user mentions business concepts (e.g. 优惠券, 结算, 开票, 扣减库存, 审批流):
     Call `code_explore` with the concept name — NLP and thesaurus will link to corresponding code.
-  upgrade_rule: "For a known symbol or fresh grep hit, use `code_explore` only when caller/callee or cross-module context matters; otherwise read the exact implementation and nearby tests directly."
+  upgrade_rule: "For known symbol names or fresh grep hits, upgrade straight to `code_explore`."
 
 # ------------------------------------------------------------------------------
 # 4. 任务执行守则 (Doing Tasks)

@@ -61,10 +61,10 @@ environment:
 version: "2.0.0"
 
 workflow:
-  first_round_reflex: "Known file/symbol/error: search and read directly; use repo_map only for genuinely unfamiliar cross-module structure."
-  surgical_context: "Use code_explore for call graphs and semantic discovery; use grep/read_file directly for exact or already-located targets."
+  first_round_reflex: "Understand requirements clearly; locate code before editing."
+  surgical_context: "Prefer targeted tools (code_explore, grep) over reading entire folders."
   never_negative_conclusion: "Never conclude a feature is missing until checking synonym modules."
-  batched_parallel_exploration: "Read 2–6 likely related files in one parallel batch, covering complete logical units instead of repeated tiny slices."
+  batched_parallel_exploration: "Emit parallel tool calls for independent inspections."
 
 tools_discipline:
   concurrency_principle: "Group read/stat operations in parallel."
@@ -133,3 +133,9 @@ firm_execution_discipline:
 - **KV Cache 前缀安全**：包装直接作用于末尾真实用户消息，系统前缀与历史轮次保持 Append-only 字节级不可变；
 - **动态热重载**：无需重启，修改文件后下一轮提问即刻生效；
 - **安全默认**：默认配置文件仅包含 `{{input}}`（原样透传），无任何额外副作用。
+
+### 5.4 运行时消息归属与 CodeIntel 路由
+- 用户中断且启用 `keep_interrupted_context` 时，只保留已生成上下文并闭合悬空工具调用，不再额外插入“用户已中断”的 synthetic User 消息；
+- 每轮日期提醒追加到当前真实 User 消息底部的同一个 `<system-reminder>` 块中，不再创建独立 User 消息；
+- `=== CODE TOOLS ===` 路由卡属于会话开头的 System 消息序列，不占用受保护的 synthetic User 前缀；
+- `code_explore.path` 可以是工作区根目录（`.`、`./`、`~` 或工作目录绝对路径）或目录/模块，但仍禁止传入单个文件。

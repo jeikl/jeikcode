@@ -400,6 +400,11 @@ pub struct SessionMeta {
     /// that sessions written before this field existed deserialize correctly.
     #[serde(default)]
     pub origin: SessionOrigin,
+    /// Model/selection id last chosen for this session. Independent of the
+    /// process-wide `config.toml` default so concurrent sessions can keep
+    /// different models.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub preferred_model: Option<String>,
 }
 
 impl SessionMeta {
@@ -425,6 +430,7 @@ impl SessionMeta {
             detached_model_usage: Vec::new(),
             detached_unattributed_tokens: 0,
             origin: SessionOrigin::Manual,
+            preferred_model: None,
         }
     }
 

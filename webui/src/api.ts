@@ -445,6 +445,20 @@ export interface SessionDetail {
   updated_at: number;
   message_count: number;
   messages: SessionMessage[];
+  /** Per-session model selection. Absent on older sessions. */
+  preferred_model?: string | null;
+  /** Footer token/cache from last completed turn (persists across restart). */
+  token_usage?: SessionTokenUsage | null;
+}
+
+/** Token footer snapshot from session turn_stats (GET /projects/:hash/sessions/:id). */
+export interface SessionTokenUsage {
+  prompt: number;
+  completion: number;
+  total: number;
+  cached: number;
+  cached_estimated?: boolean;
+  ctx_window?: number;
 }
 
 // NOTE: `/sessions` caps at the 50 most-recent sessions ACROSS ALL projects.
@@ -585,6 +599,16 @@ export interface ProviderInfo {
   requires_login?: boolean;
   is_default: boolean;
   context_window?: number;
+  max_tokens?: number;
+  thinking_enabled?: boolean | null;
+  thinking_budget?: number | null;
+  thinking_type?: string | null;
+  thinking_keep?: string | null;
+  reasoning_history?: string | null;
+  reasoning_effort?: string | null;
+  skip_tls_verify?: boolean;
+  supports_vision?: boolean | null;
+  reasoning_model?: boolean | null;
 }
 
 export interface ConfigInfo {
@@ -720,11 +744,17 @@ export async function getTunnelStatus(): Promise<TunnelStatus> {
 
 export interface CreateProviderBody {
   name: string;
-  type: string;       // 'openai' | 'claude' | 'ollama'
+  type: string; // openai | anthropic | responses | ollama | claude
   model: string;
   api_key?: string;
   base_url?: string;
   context_window?: number;
+  supports_vision?: boolean;
+  reasoning_model?: boolean;
+  reasoning_effort?: string | null;
+  reasoning_history?: string | null;
+  thinking_enabled?: boolean | null;
+  thinking_budget?: number | null;
   set_default?: boolean;
 }
 
@@ -744,14 +774,18 @@ export async function deleteProvider(name: string): Promise<void> {
 }
 
 export interface UpdateProviderBody {
-  // 重命名：传新 name 即把该 provider 改名（后端按 key 迁移并修正默认项）；省略=保持原名。
   name?: string;
   type?: string;
   model?: string;
-  // 省略字段=保持不变；传字符串=覆盖。
   api_key?: string;
   base_url?: string;
   context_window?: number;
+  supports_vision?: boolean | null;
+  reasoning_model?: boolean | null;
+  reasoning_effort?: string | null;
+  reasoning_history?: string | null;
+  thinking_enabled?: boolean | null;
+  thinking_budget?: number | null;
 }
 
 /** PATCH /providers/:name —— 部分更新已有 provider（可改名：body.name 传新名）。 */
@@ -763,6 +797,27 @@ export async function updateProvider(name: string, body: UpdateProviderBody): Pr
   });
   if (!r.ok) { const e = await r.json().catch(() => ({})); throw new Error((e as any).error || `HTTP ${r.status}`); }
   return r.json();
+}
+
+/** POST /providers/upstream-models — 拉取 openai/anthropic/responses/ollama 上游模型列表。 */
+export async function fetchUpstreamModels(body: {
+  protocol: string;
+  base_url: string;
+  api_key?: string;
+  provider_name?: string;
+  skip_tls_verify?: boolean;
+}): Promise<string[]> {
+  const r = await apiFetch('/providers/upstream-models', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...authHeaders() },
+    body: JSON.stringify(body),
+  });
+  if (!r.ok) {
+    const e = await r.json().catch(() => ({}));
+    throw new Error((e as any).error || `HTTP ${r.status}`);
+  }
+  const data = await r.json();
+  return Array.isArray(data?.models) ? data.models.filter((id: unknown) => typeof id === 'string') : [];
 }
 
 /** POST /providers/:name/default —— 设为默认 provider。 */

@@ -13,6 +13,14 @@ import {
   resolveUserInputRequest,
   restoreLiveSnapshot,
   syncAttachDisposition,
+  resolveTokenCache,
+  formatCacheHitRate,
+  estimatePrefixCached,
+  estimateLocalCached,
+  estimateCacheFromHistoryPrompt,
+  createTokenCacheState,
+  resetTokenCacheState,
+  userMessageAlreadyOnCanvas,
 } from './chatTerminal.ts';
 
 test('legacy done and stopped are natural completions that preserve queued messages', () => {
@@ -98,6 +106,18 @@ test('live snapshot never infers running from a trailing user message', () => {
   });
 });
 
+test('user echo already on canvas is not appended again', () => {
+  const user = { role: 'user', parts: [{ kind: 'text', text: '你好啊' }] };
+  const assistant = { role: 'assistant', parts: [{ kind: 'text', text: '你好' }] };
+  const notice = { role: 'system', parts: [{ kind: 'notice', text: 'sync' }] };
+  assert.equal(userMessageAlreadyOnCanvas([user], '你好啊'), true);
+  assert.equal(userMessageAlreadyOnCanvas([user, assistant], '你好啊'), true);
+  assert.equal(userMessageAlreadyOnCanvas([user, notice], '你好啊'), true);
+  assert.equal(userMessageAlreadyOnCanvas([user, assistant, notice], '你好啊'), true);
+  assert.equal(userMessageAlreadyOnCanvas([user, assistant], '另一句'), false);
+  assert.equal(userMessageAlreadyOnCanvas([], '你好啊'), false);
+});
+
 test('live replay input and running state restore an active turn after an idle snapshot', () => {
   let state = createLiveLifecycleState();
   ({ state } = reduceLiveLifecycle(state, { type: 'snapshot' }));
@@ -118,11 +138,8 @@ test('an active live turn cannot be detached locally without a recoverable proto
   assert.deepEqual(liveDetachDisposition(false), { allowed: true });
 });
 
-test('an active live turn keeps ownership of its foreground session', () => {
-  assert.deepEqual(liveSessionSwitchDisposition(true), {
-    allowed: false,
-    reason: 'active_turn',
-  });
+test('switching the viewed session is always allowed; live tasks stay in the background', () => {
+  assert.deepEqual(liveSessionSwitchDisposition(true), { allowed: true });
   assert.deepEqual(liveSessionSwitchDisposition(false), { allowed: true });
 });
 
@@ -203,4 +220,56 @@ test('a live user-input terminal clears only its matching prompt', () => {
   assert.equal(resolveUserInputRequest(current, 42), null);
   assert.equal(resolveUserInputRequest(current, 41), current);
   assert.equal(resolveUserInputRequest(null, 42), null);
+});
+
+test('prefix cache estimate reuses prior request prompt on warm paths', () => {
+  assert.equal(estimatePrefixCached(0, 10_000), 0);
+  assert.equal(estimatePrefixCached(38_555, 0), 0);
+  assert.equal(estimatePrefixCached(38_555, 32_540), 32_540);
+  assert.equal(estimatePrefixCached(40_000, 38_555), 38_555);
+  // Compaction / rewrite invalidates cache key.
+  assert.equal(estimatePrefixCached(5_000, 38_555), 0);
+});
+
+test('resolveTokenCache prefers provider telemetry, otherwise estimates prefix', () => {
+  let state = createTokenCacheState();
+  let r = resolveTokenCache({ prompt: 10_000, cached: 0 }, state);
+  assert.equal(r.cached, 0);
+  assert.equal(r.cached_estimated, false);
+  state = r.nextState;
+
+  r = resolveTokenCache({ prompt: 38_555, cached: 0 }, state);
+  assert.equal(r.cached, 10_000);
+  assert.equal(r.cached_estimated, true);
+  state = r.nextState;
+
+  r = resolveTokenCache({ prompt: 38_555, cached: 32_540 }, state);
+  assert.equal(r.cached, 32_540);
+  assert.equal(r.cached_estimated, false);
+  state = r.nextState;
+
+  r = resolveTokenCache({ prompt: 40_000, cached: 0 }, state);
+  assert.equal(r.cached, 0);
+  assert.equal(r.cached_estimated, false);
+});
+
+test('local prompt bumps keep estimated cache aligned with prior usage', () => {
+  const state = { lastPrompt: 32_540, providerReportsCache: false };
+  const prev = { cached: 32_540, cached_estimated: true };
+  const local = estimateLocalCached(state, 35_000, prev);
+  assert.equal(local.cached, 32_540);
+  assert.equal(local.cached_estimated, true);
+});
+
+test('history prompt estimate uses prefix before last user turn', () => {
+  const cache = estimateCacheFromHistoryPrompt(38_555, 10_000);
+  assert.equal(cache.cached, 10_000);
+  assert.equal(cache.cached_estimated, true);
+});
+
+test('cache hit rate follows provider cached over total prompt tokens', () => {
+  assert.equal(formatCacheHitRate(0, 10_000), null);
+  assert.equal(formatCacheHitRate(6200, 10_000), '62%');
+  assert.equal(formatCacheHitRate(9996, 10_000), '99.9%');
+  assert.equal(formatCacheHitRate(10_000, 10_000), '100%');
 });

@@ -50,7 +50,7 @@ use crate::input::key_action::{classify, is_ctrl_letter, Action};
 use crate::input::InputEvent;
 use crate::render::{Renderer, UiLine};
 use crate::state::{UiPhase, UiState};
-use crate::think::ThinkStripper;
+use crate::think::{reasoning_summary, ThinkStripper};
 
 fn runtime_mode(mode: crate::state::AgentMode) -> atomcode_coding::RuntimeMode {
     match mode {
@@ -12235,7 +12235,7 @@ fn handle_idle_key(
         if let Some(provider) =
             crate::modals::model_picker::adjacent_provider(&ctx.config, direction)
         {
-            set_default_provider_and_reload(ctx, &provider, renderer);
+            apply_session_model_switch(ctx, &provider, renderer);
         }
         redraw_idle_plain(&app.buf, &app.state, ctx, renderer);
         return Ok(());
@@ -13854,6 +13854,24 @@ pub(crate) fn select_provider_and_reload(
         selection_mode_after_success: Some(crate::ProviderSelectionMode::Pinned),
     });
     true
+}
+
+/// Existing sessions keep their model locally. An empty/new session also
+/// updates the shared config default used by sessions created afterwards.
+pub(crate) fn apply_session_model_switch(
+    ctx: &mut LoopCtx,
+    provider_name: &str,
+    renderer: &mut dyn Renderer,
+) -> bool {
+    if ctx.current_session.messages.is_empty() {
+        set_default_provider_and_reload(ctx, provider_name, renderer)
+    } else {
+        let _ = atomcode_capabilities::session::SessionManager::for_project(&ctx.working_dir)
+            .update_meta(&ctx.current_session.id, |meta| {
+                meta.preferred_model = Some(provider_name.to_string());
+            });
+        select_provider_and_reload(ctx, provider_name, renderer)
+    }
 }
 
 /// Persist the new default provider and reload only this runtime transactionally.
@@ -17557,12 +17575,11 @@ mod tool_output_stream_gate_tests {
 
 /// Determine whether the Ctrl+O hint should be shown for a tool call.
 ///
-/// The hint appears only for bash commands when real-time output is
-/// disabled and the call is not a local-shell (-prefixed) invocation.
-/// Extracted as a pure function so the gating logic can be unit-tested
-/// independently of 's rendering infrastructure.
-fn should_show_ctrl_o_hint(tool_name: &str, verbose: bool, call_id: &str) -> bool {
-    tool_name == "bash" && !verbose && !call_id.starts_with("local-shell-")
+/// Live bash output now streams into the inflight strip (last N lines), so the
+/// old "Press Ctrl+O" hint is no longer shown. Kept as a pure function so the
+/// existing gating tests still document the policy.
+fn should_show_ctrl_o_hint(_tool_name: &str, _verbose: bool, _call_id: &str) -> bool {
+    false
 }
 
 #[cfg(test)]
@@ -17570,9 +17587,9 @@ mod ctrl_o_hint_gating_tests {
     use super::should_show_ctrl_o_hint;
 
     #[test]
-    fn shown_for_bash_without_verbose() {
-        // Normal case: bash command, verbose off → show hint
-        assert!(should_show_ctrl_o_hint("bash", false, "call-1"));
+    fn suppressed_for_bash_because_live_tail() {
+        // Live terminal tail replaced the Ctrl+O hint.
+        assert!(!should_show_ctrl_o_hint("bash", false, "call-1"));
     }
 
     #[test]
@@ -19031,6 +19048,19 @@ fn handle_runtime_event(
                     return;
                 }
             };
+            if matches!(
+                state.phase,
+                crate::state::UiPhase::Streaming
+                    | crate::state::UiPhase::Approval
+                    | crate::state::UiPhase::UserInput
+                    | crate::state::UiPhase::RoundCap
+            ) {
+                if let Err(error) = commands::park_foreground_to_background(ctx, state) {
+                    renderer.render(UiLine::Error(error));
+                    renderer.flush();
+                    return;
+                }
+            }
             if let Err(error) = ctx.runtime.resume_session(
                 session.id.clone(),
                 expected.working_dir.clone(),
@@ -20219,11 +20249,25 @@ fn handle_agent_event(
             // Record that reasoning was produced this turn REGARDLESS of
             // visibility — the blank-turn notice uses it to say "only reasoning,
             // press Ctrl+O" vs "no output at all".
+            let first = !state.turn_saw_reasoning;
             state.turn_saw_reasoning = true;
             // Reasoning counts as streamed output for the `↑ N tokens` indicator.
             state.turn_output_chars += text.chars().count();
-            // Display reasoning/thinking content in verbose mode (Ctrl+O)
-            // Only show when the user has enabled it
+            if first {
+                let (title, body) = reasoning_summary(&text);
+                let header = title.unwrap_or_else(|| {
+                    body.lines()
+                        .next()
+                        .unwrap_or("")
+                        .trim()
+                        .chars()
+                        .take(72)
+                        .collect()
+                });
+                renderer.render(UiLine::ReasoningHeader(header));
+                renderer.flush();
+            }
+            // Body stays collapsed unless the user has Ctrl+O verbose on.
             if state.show_reasoning {
                 reasoning_buffer.push_str(&text);
                 // Flush on newline or when buffer gets large
@@ -20407,13 +20451,14 @@ fn handle_agent_event(
                 renderer.flush();
                 return;
             }
-            // Display real-time tool output (e.g., bash stdout/stderr). Normally
-            // gated behind Ctrl+O verbose mode, but user-invoked `!` shell commands
-            // and the dispatch tool's per-child progress always stream (see
-            // `streams_tool_output_by_default`).
+            // Display real-time tool output (e.g., bash stdout/stderr). Full
+            // scrollback is gated behind Ctrl+O / local-shell / dispatch; otherwise
+            // the last N lines ride the inflight strip as a live terminal panel.
             if streams_tool_output_by_default(state.show_tool_output, &call_id, tool_display) {
-                // Append to the scrollback as command output
                 renderer.render(UiLine::CommandOutput(chunk));
+                renderer.flush();
+            } else {
+                renderer.render(UiLine::ToolCallLiveTail { call_id, chunk });
                 renderer.flush();
             }
         }
@@ -20626,7 +20671,7 @@ fn handle_agent_event(
                     };
                     let diff_entries = if matches!(
                         name.as_str(),
-                        "edit_file" | "write_file" | "create_file" | "search_replace"
+                        "edit_file" | "write_file" | "create_file" | "search_replace" | "bash"
                     ) {
                         let entries = crate::render::diff::parse_unified_diff(&output, 120);
                         (!entries.is_empty()).then_some(entries)

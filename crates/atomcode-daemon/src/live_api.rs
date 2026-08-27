@@ -1279,6 +1279,22 @@ fn parse_session_id(session_id_str: Option<String>) -> Option<String> {
     })
 }
 
+fn session_is_established(working_dir: &Path, session_id: &str) -> bool {
+    atomcode_capabilities::session::SessionManager::for_project(working_dir)
+        .read_meta(session_id)
+        .ok()
+        .is_some_and(|meta| meta.message_count > 0 || meta.turn_count > 0)
+}
+
+fn persist_session_preferred_model(working_dir: &Path, session_id: &str, provider: &str) {
+    let _ = atomcode_capabilities::session::SessionManager::for_project(working_dir).update_meta(
+        session_id,
+        |meta| {
+            meta.preferred_model = Some(provider.to_string());
+        },
+    );
+}
+
 fn provider_reload_required(
     active: &str,
     active_fingerprint: &str,
@@ -1840,7 +1856,6 @@ pub(crate) async fn live_provider(
     State(state): State<AppState>,
     Json(req): Json<LiveProviderReq>,
 ) -> impl IntoResponse {
-    let _working_dir = { state.project.read().await.working_dir.clone() };
     let config = match Config::load(&Config::default_path()) {
         Ok(config) => config,
         Err(error) => {
@@ -1857,22 +1872,30 @@ pub(crate) async fn live_provider(
         }));
     }
     let requested_provider = req.provider.clone();
-    let _ = atomcode_config::ConfigStore::default_store().update(|cfg| {
-        if cfg.selection_exists(&requested_provider) {
-            cfg.default_model = Some(requested_provider.clone());
-            cfg.default_provider = requested_provider.clone();
-        }
-        Ok(())
-    });
-
+    let working_dir = { state.project.read().await.working_dir.clone() };
     let requested_session_id = parse_session_id(req.session_id);
+    let established = requested_session_id
+        .as_deref()
+        .is_some_and(|id| session_is_established(&working_dir, id));
+    if established {
+        if let Some(session_id) = requested_session_id.as_deref() {
+            persist_session_preferred_model(&working_dir, session_id, &requested_provider);
+        }
+    } else {
+        let _ = atomcode_config::ConfigStore::default_store().update(|cfg| {
+            if cfg.selection_exists(&requested_provider) {
+                cfg.default_model = Some(requested_provider.clone());
+                cfg.default_provider = requested_provider.clone();
+            }
+            Ok(())
+        });
+    }
+
     let join = match crate::native_live::join_for_provider(requested_session_id.as_deref()) {
         Ok(join) => join,
         Err(crate::live_hub::HubError::Unbound | crate::live_hub::HubError::StaleBinding) => {
-            // When the live hub is unbound or not bound to this session, updating the
-            // ConfigStore (above) is sufficient for non-sync / /chat sessions.
-            // Spawning a headless runtime here would eagerly lock the session lease
-            // and prevent subsequent /chat turns from acquiring it.
+            // Not the live runtime's session (or no hub). The selection is already
+            // persisted above; /chat sends carry the provider on the next turn.
             return Json(serde_json::json!({ "ok": true }));
         }
         Err(error) => {

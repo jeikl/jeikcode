@@ -199,8 +199,56 @@ fn sync_bg_foreground(ctx: &mut LoopCtx) {
     );
 }
 
+/// Park the current foreground runtime into a background slot and spawn a
+/// fresh idle runtime. The live hub stays bound to the parked runtime so
+/// WebUI can keep following that task.
+pub(crate) fn park_foreground_to_background(
+    ctx: &mut LoopCtx,
+    state: &mut crate::state::UiState,
+) -> Result<(), String> {
+    ensure_bg_foreground_switch_allowed(
+        super::provider_transition_pending(ctx),
+        ctx.pending_runtime_request_id.is_some(),
+    )
+    .map_err(str::to_string)?;
+    sync_bg_foreground(ctx);
+    if !ctx.bg_manager.has_capacity() {
+        return Err(t(Msg::BgSlotLimitReached {
+            max: bg_runtime::MAX_BACKGROUND_SLOTS,
+        })
+        .into_owned());
+    }
+    let old_replay_events = foreground_turn_replay_events(state);
+    let new_session = Session::default_session(ctx.working_dir.clone());
+    let (runtime_id, endpoint, new_session) = spawn_runtime(ctx, new_session);
+    let old_state = foreground_state_from_ui(state);
+    ctx.bg_manager
+        .background_current_with_replay(
+            endpoint.clone(),
+            new_session.clone(),
+            ctx.working_dir.clone(),
+            runtime_id,
+            old_state,
+            old_replay_events,
+        )
+        .map_err(|error| match error {
+            bg_runtime::BgError::SlotLimit { max } => t(Msg::BgSlotLimitReached { max }).into_owned(),
+            other => format!("{other:?}"),
+        })?;
+    ctx.runtime = endpoint.native;
+    ctx.foreground_runtime_id = runtime_id;
+    ctx.current_session = new_session;
+    ctx.live_binding = None;
+    bind_telemetry_to_session(ctx, &ctx.current_session);
+    state.on_turn_complete();
+    state.on_session_replaced();
+    state.active_todos = None;
+    crate::event_loop::sync_todo_titles(state);
+    state.approval_panel = None;
+    Ok(())
+}
+
 fn ensure_bg_foreground_switch_allowed(
-    live_binding: bool,
     provider_transition: bool,
     pending_runtime_request: bool,
 ) -> Result<(), &'static str> {
@@ -208,8 +256,6 @@ fn ensure_bg_foreground_switch_allowed(
         Err("/bg cannot switch the foreground while a provider transition is in progress")
     } else if pending_runtime_request {
         Err("/bg cannot switch the foreground while an interactive runtime request is pending")
-    } else if live_binding {
-        Err("/bg cannot switch the foreground while live sync is attached; run /sync off first")
     } else {
         Ok(())
     }
@@ -286,21 +332,20 @@ mod bg_live_guard_tests {
     use crate::state::{UiPhase, UiState};
 
     #[test]
-    fn live_binding_blocks_only_foreground_bg_switches() {
-        assert!(ensure_bg_foreground_switch_allowed(true, false, false).is_err());
-        assert!(ensure_bg_foreground_switch_allowed(false, false, false).is_ok());
+    fn live_binding_does_not_block_foreground_bg_switches() {
+        assert!(ensure_bg_foreground_switch_allowed(false, false).is_ok());
     }
 
     #[test]
     fn provider_transition_blocks_foreground_owner_switches() {
-        assert!(ensure_bg_foreground_switch_allowed(false, true, false).is_err());
-        assert!(ensure_bg_foreground_switch_allowed(false, false, false).is_ok());
+        assert!(ensure_bg_foreground_switch_allowed(true, false).is_err());
+        assert!(ensure_bg_foreground_switch_allowed(false, false).is_ok());
     }
 
     #[test]
     fn pending_runtime_request_blocks_foreground_owner_switches() {
-        assert!(ensure_bg_foreground_switch_allowed(false, false, true).is_err());
-        assert!(ensure_bg_foreground_switch_allowed(false, false, false).is_ok());
+        assert!(ensure_bg_foreground_switch_allowed(false, true).is_err());
+        assert!(ensure_bg_foreground_switch_allowed(false, false).is_ok());
     }
 
     #[test]
@@ -2582,7 +2627,6 @@ fn execute_slash_command_impl(
                 }
                 bg_runtime::BgCommand::BackgroundCurrent => {
                     if let Err(error) = ensure_bg_foreground_switch_allowed(
-                        ctx.live_binding.is_some(),
                         provider_transition_pending(ctx),
                         ctx.pending_runtime_request_id.is_some(),
                     ) {
@@ -2632,6 +2676,10 @@ fn execute_slash_command_impl(
                     ctx.runtime = endpoint.native;
                     ctx.foreground_runtime_id = runtime_id;
                     ctx.current_session = new_session;
+                    // Keep the live hub bound to the parked runtime so WebUI
+                    // continues the in-flight task. This TUI view is now a
+                    // separate foreground runtime.
+                    ctx.live_binding = None;
                     bind_telemetry_to_session(ctx, &ctx.current_session);
                     state.on_turn_complete();
                     state.on_session_replaced();
@@ -2662,7 +2710,6 @@ fn execute_slash_command_impl(
                 }
                 bg_runtime::BgCommand::Resume(slot) => {
                     if let Err(error) = ensure_bg_foreground_switch_allowed(
-                        ctx.live_binding.is_some(),
                         provider_transition_pending(ctx),
                         ctx.pending_runtime_request_id.is_some(),
                     ) {

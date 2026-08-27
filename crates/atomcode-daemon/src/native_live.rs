@@ -25,6 +25,12 @@ fn hub() -> &'static Arc<LiveViewHub> {
     HUB.get_or_init(|| Arc::new(LiveViewHub::new()))
 }
 
+/// Live hub session currently in a turn (TUI / `--host` / `/webui` sync).
+/// `GET /chat/active` unions this so the WebUI sidebar can spin for live tasks.
+pub fn live_running_session_id() -> Option<String> {
+    hub().running_session_id()
+}
+
 fn headless() -> &'static Mutex<Option<HeadlessRuntime>> {
     HEADLESS.get_or_init(|| Mutex::new(None))
 }

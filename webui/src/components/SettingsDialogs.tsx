@@ -2,7 +2,7 @@
 // Each is opened on its own from the sidebar settings menu.
 
 import { ComponentChildren } from 'preact';
-import { useEffect, useState } from 'preact/hooks';
+import { useEffect, useMemo, useRef, useState } from 'preact/hooks';
 import {
   getConfig,
   ConfigInfo,
@@ -11,6 +11,7 @@ import {
   updateProvider,
   setDefaultProvider,
   deleteProvider,
+  fetchUpstreamModels,
   getTunnelStatus,
   TunnelStatus,
 } from '../api';
@@ -24,6 +25,37 @@ const ATOMGIT_BASE_URL = 'https://llm-api.atomgit.com/v1';
 
 // 上下文窗口预设（数值与配置一致，显示时按 /1000 换算为「k tokens」）。
 const CONTEXT_WINDOW_PRESETS = [32000, 64000, 128000, 256000, 512000, 1000000];
+
+/** 与 TUI `/provider` 对齐的三大可自定义协议 + ollama。 */
+const PROVIDER_TYPE_OPTIONS = [
+  { value: 'openai', label: 'openai (Chat Completions)' },
+  { value: 'anthropic', label: 'anthropic (Messages)' },
+  { value: 'responses', label: 'responses (OpenAI Responses)' },
+  { value: 'ollama', label: 'ollama' },
+];
+
+const REASONING_EFFORT_OPTIONS = [
+  { value: '', label: '（默认）' },
+  { value: 'low', label: 'low' },
+  { value: 'medium', label: 'medium' },
+  { value: 'high', label: 'high' },
+  { value: 'xhigh', label: 'xhigh' },
+  { value: 'max', label: 'max' },
+];
+
+const REASONING_HISTORY_OPTIONS = [
+  { value: 'include', label: 'include（回传思考）' },
+  { value: 'exclude', label: 'exclude（不回传）' },
+];
+
+function normalizeProviderType(type: string | undefined): string {
+  const t = (type || 'openai').toLowerCase();
+  if (t === 'claude') return 'anthropic';
+  if (t === 'openai-compatible') return 'openai';
+  if (t === 'anthropic-compatible') return 'anthropic';
+  if (t === 'responses-compatible') return 'responses';
+  return t;
+}
 
 /** 把 context_window 数值格式化为下拉标签：1000000 → "1M"，其余 → "<n>K"。 */
 function fmtContextWindow(v: number): string {
@@ -232,6 +264,24 @@ export function ModelConfigDialog({ onClose }: { onClose: () => void }) {
                         </span>
                       </div>
                     )}
+                    <div>
+                      <span class="pk">{t('settings.supportsVision')}: </span>
+                      <span>{p.supports_vision ? t('settings.yes') : t('settings.no')}</span>
+                      <span class="pk"> · {t('settings.reasoningModel')}: </span>
+                      <span>{p.reasoning_model ? t('settings.yes') : t('settings.no')}</span>
+                      {p.reasoning_model && p.reasoning_effort && (
+                        <>
+                          <span class="pk"> · {t('settings.reasoningEffort')}: </span>
+                          <span class="pv">{p.reasoning_effort}</span>
+                        </>
+                      )}
+                      {p.reasoning_model && p.reasoning_history && (
+                        <>
+                          <span class="pk"> · {t('settings.reasoningHistory')}: </span>
+                          <span class="pv">{p.reasoning_history}</span>
+                        </>
+                      )}
+                    </div>
                   </div>
                 </div>
               ))}
@@ -279,10 +329,9 @@ export function ModelConfigDialog({ onClose }: { onClose: () => void }) {
 }
 
 /**
- * 「添加 / 编辑模型」弹窗。
- * - 添加模式（无 editing）：name/model/base_url/api_key 均必填。
- * - 编辑模式（有 editing）：name 可改（后端按 key 迁移并修正默认项）；api_key 留空表示
- *   保留现有，仅在填写时才覆盖；走 PATCH。两种模式共用此表单避免重复。
+ * 「添加 / 编辑模型」弹窗 — 对齐 TUI `/provider`：
+ * openai / anthropic / responses；图片输入；思考模型 + 档位 + 是否回传思考；
+ * 模型 ID 内嵌筛选框 + 右侧刷新拉取上游列表。
  */
 function ProviderFormDialog({
   editing,
@@ -291,7 +340,6 @@ function ProviderFormDialog({
   onSaved,
 }: {
   editing?: ProviderInfo;
-  // 已有 provider 名称列表，用于重复名校验（编辑模式会排除自身原名）。
   existingNames?: string[];
   onClose: () => void;
   onSaved: () => void;
@@ -300,26 +348,93 @@ function ProviderFormDialog({
   const isEdit = !!editing;
   const [name] = useState(editing?.name ?? '');
   const [nameInput, setNameInput] = useState(editing?.name ?? '');
-  const [type, setType] = useState(editing?.type ?? 'openai');
+  const [type, setType] = useState(normalizeProviderType(editing?.type));
   const [model, setModel] = useState(editing?.model ?? '');
   const [baseUrl, setBaseUrl] = useState(editing?.base_url ?? '');
   const [apiKey, setApiKey] = useState('');
   const [contextWindow, setContextWindow] = useState<number>(editing?.context_window ?? 128000);
+  const [supportsVision, setSupportsVision] = useState(Boolean(editing?.supports_vision));
+  const [reasoningModel, setReasoningModel] = useState(Boolean(editing?.reasoning_model));
+  const [reasoningEffort, setReasoningEffort] = useState(editing?.reasoning_effort ?? '');
+  const [reasoningHistory, setReasoningHistory] = useState(
+    editing?.reasoning_history === 'exclude' ? 'exclude' : 'include',
+  );
   const [setDefault, setSetDefault] = useState(editing?.is_default ?? false);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  // AtomGit 托管 provider 上下文窗口由平台固定，禁止用户改动。
+  const [candidates, setCandidates] = useState<string[]>([]);
+  const [fetching, setFetching] = useState(false);
+  const [fetchStatus, setFetchStatus] = useState<string | null>(null);
+  const [modelMenuOpen, setModelMenuOpen] = useState(false);
+  const [highlight, setHighlight] = useState(0);
+  const modelWrapRef = useRef<HTMLDivElement | null>(null);
+
   const isAtomGit = editing?.base_url === ATOMGIT_BASE_URL;
-  // 当前值若非预设（如旧配置），并入选项首位，避免静默改写。
   const cwOptions = CONTEXT_WINDOW_PRESETS.includes(contextWindow)
     ? CONTEXT_WINDOW_PRESETS
     : [contextWindow, ...CONTEXT_WINDOW_PRESETS];
 
+  const filtered = useMemo(() => {
+    const q = model.trim().toLowerCase();
+    if (!q) return candidates;
+    return candidates.filter((id) => id.toLowerCase().includes(q));
+  }, [candidates, model]);
+
+  useEffect(() => {
+    setHighlight(0);
+  }, [model, candidates]);
+
+  useEffect(() => {
+    if (!modelMenuOpen) return;
+    const onDown = (e: MouseEvent) => {
+      if (modelWrapRef.current && !modelWrapRef.current.contains(e.target as Node)) {
+        setModelMenuOpen(false);
+      }
+    };
+    document.addEventListener('mousedown', onDown);
+    return () => document.removeEventListener('mousedown', onDown);
+  }, [modelMenuOpen]);
+
+  const refreshUpstream = async () => {
+    if (!baseUrl.trim()) {
+      setFetchStatus(t('settings.upstreamNeedBaseUrl'));
+      return;
+    }
+    setFetching(true);
+    setFetchStatus(t('settings.upstreamFetching'));
+    setModelMenuOpen(true);
+    try {
+      const models = await fetchUpstreamModels({
+        protocol: type,
+        base_url: baseUrl.trim(),
+        api_key: apiKey.trim() || undefined,
+        provider_name: isEdit ? name : undefined,
+      });
+      setCandidates(models);
+      setFetchStatus(
+        models.length
+          ? t('settings.upstreamLoaded', { n: models.length })
+          : t('settings.upstreamEmpty'),
+      );
+    } catch (e: unknown) {
+      setCandidates([]);
+      setFetchStatus(
+        `${t('settings.upstreamFailed')}: ${e instanceof Error ? e.message : String(e)}`,
+      );
+    } finally {
+      setFetching(false);
+    }
+  };
+
+  const pickModel = (id: string) => {
+    setModel(id);
+    setModelMenuOpen(false);
+  };
+
   const handleSave = async () => {
     const newName = nameInput.trim();
     if (isEdit) {
-      // 编辑：name 必填且可改；api_key 留空=保留现有，故不计入必填。
       if (!newName || !model.trim() || !baseUrl.trim()) {
         setError(t('settings.allRequired'));
         return;
@@ -328,7 +443,6 @@ function ProviderFormDialog({
       setError(t('settings.allRequired'));
       return;
     }
-    // name 为主键，重复会静默覆盖/冲突，故提前拦截。编辑模式排除自身原名。
     if (
       existingNames.some(
         (n) => n.toLowerCase() !== name.toLowerCase() && n.toLowerCase() === newName.toLowerCase(),
@@ -339,20 +453,23 @@ function ProviderFormDialog({
     }
     setSaving(true);
     setError(null);
+    const advanced = {
+      supports_vision: supportsVision,
+      reasoning_model: reasoningModel,
+      reasoning_effort: reasoningModel && reasoningEffort ? reasoningEffort : null,
+      reasoning_history: reasoningModel ? reasoningHistory : null,
+    };
     try {
       if (isEdit) {
         await updateProvider(name, {
-          // 仅在改名时才传 name，避免无谓的 key 迁移。
           ...(newName !== name ? { name: newName } : {}),
           type,
           model: model.trim(),
           base_url: baseUrl.trim(),
-          // 仅在用户填写了新 key 时才覆盖；留空保留现有。
           ...(apiKey.trim() ? { api_key: apiKey.trim() } : {}),
-          // AtomGit 上下文窗口由平台锁定，不下发该字段。
           ...(isAtomGit ? {} : { context_window: contextWindow }),
+          ...advanced,
         });
-        // PATCH 不处理默认项：若勾选且原本非默认，单独设默认（用新名，改名后旧 key 已不存在）。
         if (setDefault && !editing?.is_default) {
           await setDefaultProvider(newName);
         }
@@ -365,6 +482,7 @@ function ProviderFormDialog({
           api_key: apiKey.trim(),
           context_window: contextWindow,
           set_default: setDefault || undefined,
+          ...advanced,
         });
       }
       onSaved();
@@ -392,26 +510,73 @@ function ProviderFormDialog({
             onInput={(e) => setNameInput((e.target as HTMLInputElement).value)}
           />
         </div>
-        <div class="add-model-field">
-          <label class="add-model-label">{t('settings.model')}</label>
-          <input
-            class="menu-input"
-            type="text"
-            placeholder="deepseek-chat"
-            value={model}
-            onInput={(e) => setModel((e.target as HTMLInputElement).value)}
-          />
+
+        <div class="add-model-field" ref={modelWrapRef}>
+          <label class="add-model-label">{t('settings.modelId')}</label>
+          <div class="model-id-row">
+            <input
+              class="menu-input model-id-input"
+              type="text"
+              placeholder={t('settings.modelIdPlaceholder')}
+              value={model}
+              onFocus={() => setModelMenuOpen(true)}
+              onInput={(e) => {
+                setModel((e.target as HTMLInputElement).value);
+                setModelMenuOpen(true);
+              }}
+              onKeyDown={(e) => {
+                if (!modelMenuOpen || filtered.length === 0) return;
+                if (e.key === 'ArrowDown') {
+                  e.preventDefault();
+                  setHighlight((h) => Math.min(h + 1, filtered.length - 1));
+                } else if (e.key === 'ArrowUp') {
+                  e.preventDefault();
+                  setHighlight((h) => Math.max(h - 1, 0));
+                } else if (e.key === 'Enter' && filtered[highlight]) {
+                  e.preventDefault();
+                  pickModel(filtered[highlight]!);
+                } else if (e.key === 'Escape') {
+                  setModelMenuOpen(false);
+                }
+              }}
+            />
+            <button
+              type="button"
+              class="btn model-id-refresh"
+              disabled={fetching}
+              title={t('settings.upstreamRefresh')}
+              onClick={() => void refreshUpstream()}
+            >
+              {fetching ? '…' : '↻'}
+            </button>
+          </div>
+          {fetchStatus && <span class="field-hint">{fetchStatus}</span>}
+          {modelMenuOpen && filtered.length > 0 && (
+            <div class="model-id-menu" role="listbox">
+              {filtered.slice(0, 80).map((id, i) => (
+                <button
+                  key={id}
+                  type="button"
+                  class={'model-id-option' + (i === highlight ? ' active' : '')}
+                  onMouseDown={(e) => {
+                    e.preventDefault();
+                    pickModel(id);
+                  }}
+                  onMouseEnter={() => setHighlight(i)}
+                >
+                  {id}
+                </button>
+              ))}
+            </div>
+          )}
         </div>
+
         <div class="add-model-row">
           <div class="add-model-field add-model-field-type">
             <label class="add-model-label">{t('settings.providerType')}</label>
             <Select
               value={type}
-              options={[
-                { value: 'openai', label: 'openai' },
-                { value: 'claude', label: 'claude' },
-                { value: 'ollama', label: 'ollama' },
-              ]}
+              options={PROVIDER_TYPE_OPTIONS}
               onChange={(v) => setType(v)}
             />
           </div>
@@ -427,6 +592,7 @@ function ProviderFormDialog({
             </label>
           </div>
         </div>
+
         <div class="add-model-field">
           <label class="add-model-label">{t('settings.contextWindow')}</label>
           <Select
@@ -442,6 +608,7 @@ function ProviderFormDialog({
             <span class="field-hint">{t('settings.contextWindowLocked')}</span>
           )}
         </div>
+
         <div class="add-model-field">
           <label class="add-model-label">{t('settings.baseUrl')}</label>
           <input
@@ -452,6 +619,7 @@ function ProviderFormDialog({
             onInput={(e) => setBaseUrl((e.target as HTMLInputElement).value)}
           />
         </div>
+
         <div class="add-model-field">
           <label class="add-model-label">{t('settings.apiKeyInput')}</label>
           <input
@@ -462,6 +630,56 @@ function ProviderFormDialog({
             onInput={(e) => setApiKey((e.target as HTMLInputElement).value)}
           />
         </div>
+
+        <div class="add-model-toggles">
+          <label class="add-model-checkbox-label">
+            <input
+              type="checkbox"
+              checked={supportsVision}
+              onChange={(e) => setSupportsVision((e.target as HTMLInputElement).checked)}
+            />
+            {t('settings.supportsVision')}
+          </label>
+          <label class="add-model-checkbox-label">
+            <input
+              type="checkbox"
+              checked={reasoningModel}
+              onChange={(e) => setReasoningModel((e.target as HTMLInputElement).checked)}
+            />
+            {t('settings.reasoningModel')}
+          </label>
+        </div>
+
+        {reasoningModel && (
+          <div class="add-model-row">
+            <div class="add-model-field">
+              <label class="add-model-label">{t('settings.reasoningEffort')}</label>
+              <Select
+                value={reasoningEffort}
+                options={REASONING_EFFORT_OPTIONS.map((o) => ({
+                  value: o.value,
+                  label: o.value ? o.label : t('settings.effortDefault'),
+                }))}
+                onChange={setReasoningEffort}
+              />
+            </div>
+            <div class="add-model-field">
+              <label class="add-model-label">{t('settings.reasoningHistory')}</label>
+              <Select
+                value={reasoningHistory}
+                options={REASONING_HISTORY_OPTIONS.map((o) => ({
+                  value: o.value,
+                  label:
+                    o.value === 'include'
+                      ? t('settings.historyInclude')
+                      : t('settings.historyExclude'),
+                }))}
+                onChange={setReasoningHistory}
+              />
+            </div>
+          </div>
+        )}
+
         {error && (
           <div class="modal-error">
             {(isEdit ? t('settings.updateFailed') : t('settings.addFailed'))}: {error}
@@ -473,8 +691,12 @@ function ProviderFormDialog({
           </button>
           <button class="btn btn-primary" type="button" disabled={saving} onClick={handleSave}>
             {isEdit
-              ? (saving ? t('settings.saving') : t('settings.save'))
-              : (saving ? t('settings.adding') : t('settings.add'))}
+              ? saving
+                ? t('settings.saving')
+                : t('settings.save')
+              : saving
+                ? t('settings.adding')
+                : t('settings.add')}
           </button>
         </div>
       </div>

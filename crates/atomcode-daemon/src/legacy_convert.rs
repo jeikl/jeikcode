@@ -542,6 +542,7 @@ fn convert_legacy_session_with_diagnostic(
         detached_model_usage: Vec::new(),
         detached_unattributed_tokens: 0,
         origin: SessionOrigin::Manual,
+        preferred_model: None,
     };
     meta.auto_name_from_messages(&snapshot.messages);
 

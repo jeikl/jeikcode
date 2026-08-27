@@ -89,6 +89,39 @@ export function restoreLiveSnapshot<T>(messages: T[]): { messages: T[]; running:
   return { messages, running: false };
 }
 
+type CanvasPart = { kind: string; text?: string };
+type CanvasMessage = { role: string; parts: CanvasPart[] };
+
+function canvasUserText(message: CanvasMessage | undefined): string | undefined {
+  return message?.parts.find((part) => part.kind === 'text')?.text;
+}
+
+/** True when `userText` is already the latest user turn on the canvas.
+ * Snapshot reconnect / `/chat/watch` replay both re-emit that echo; appending
+ * it again creates duplicate bubbles. */
+export function userMessageAlreadyOnCanvas(
+  messages: CanvasMessage[],
+  userText: string,
+): boolean {
+  if (!userText) return false;
+  const last = messages[messages.length - 1];
+  if (!last) return false;
+  if (last.role === 'user' && canvasUserText(last) === userText) return true;
+  if (last.role === 'assistant' && messages.length >= 2) {
+    const prev = messages[messages.length - 2];
+    if (prev?.role === 'user' && canvasUserText(prev) === userText) return true;
+  }
+  if (last.role === 'system' && messages.length >= 2) {
+    const prev = messages[messages.length - 2];
+    if (prev?.role === 'user' && canvasUserText(prev) === userText) return true;
+    if (prev?.role === 'assistant' && messages.length >= 3) {
+      const user = messages[messages.length - 3];
+      if (user?.role === 'user' && canvasUserText(user) === userText) return true;
+    }
+  }
+  return false;
+}
+
 export type LiveSnapshotQueueDisposition =
   | { discardQueued: false }
   | { discardQueued: true; reason: 'terminal_unknown' };
@@ -200,11 +233,11 @@ export function liveDetachDisposition(running: boolean): LiveDetachDisposition {
   return running ? { allowed: false, reason: 'active_turn' } : { allowed: true };
 }
 
-/** A shared live runtime has one foreground session owner. Switching that
- * owner while its turn is active would reconfigure the runtime and cancel the
- * turn, so navigation must wait for an authoritative terminal. */
-export function liveSessionSwitchDisposition(running: boolean): LiveDetachDisposition {
-  return running ? { allowed: false, reason: 'active_turn' } : { allowed: true };
+/** Switching the WebUI view never rebinds the live runtime. The live stream
+ * keeps publishing the task in the background; the sidebar only changes which
+ * transcript is on screen. */
+export function liveSessionSwitchDisposition(_running?: boolean): LiveDetachDisposition {
+  return { allowed: true };
 }
 
 /** Clear only the structured-input prompt whose native request was resolved.
@@ -214,4 +247,111 @@ export function resolveUserInputRequest<T extends { request_id: number }>(
   resolvedRequestId: number,
 ): T | null {
   return current?.request_id === resolvedRequestId ? null : current;
+}
+
+/** Tracks prefix-cache estimation across successive provider usage events. */
+export type TokenCacheState = {
+  /** Prompt tokens from the immediately prior LLM usage event. */
+  lastPrompt: number;
+  /** True once the provider has reported `cached > 0` (telemetry is trusted). */
+  providerReportsCache: boolean;
+};
+
+export function createTokenCacheState(): TokenCacheState {
+  return { lastPrompt: 0, providerReportsCache: false };
+}
+
+export function resetTokenCacheState(baselinePrompt = 0): TokenCacheState {
+  return { lastPrompt: Math.max(0, baselinePrompt), providerReportsCache: false };
+}
+
+/**
+ * Prefix-cache estimate when upstream omits cached telemetry.
+ *
+ * Model: each request reuses the longest matching prefix from the prior request.
+ * So on warm paths, `cached ≈ min(current_prompt, previous_prompt)`.
+ * A sharp prompt drop (compaction / rewrite) invalidates the cache key.
+ */
+export function estimatePrefixCached(currentPrompt: number, previousPrompt: number): number {
+  if (currentPrompt <= 0 || previousPrompt <= 0) return 0;
+  if (currentPrompt < previousPrompt * 0.9) return 0;
+  return Math.min(currentPrompt, previousPrompt);
+}
+
+/** Resolve cache telemetry for the footer pill. Provider `cached > 0` wins;
+ * once a provider has reported cache hits we also trust explicit zeros;
+ * otherwise fall back to prefix estimation against the prior usage prompt. */
+export function resolveTokenCache(
+  event: { prompt: number; cached?: number },
+  state: TokenCacheState,
+): { cached: number; cached_estimated: boolean; nextState: TokenCacheState } {
+  const prompt = Math.max(0, event.prompt);
+  const reported = event.cached != null ? Math.max(0, event.cached) : null;
+  let providerReportsCache = state.providerReportsCache;
+  if (reported != null && reported > 0) providerReportsCache = true;
+
+  let cached = 0;
+  let cached_estimated = false;
+
+  if (reported != null && reported > 0) {
+    cached = reported;
+  } else if (reported === 0 && providerReportsCache) {
+    cached = 0;
+  } else {
+    const estimated = estimatePrefixCached(prompt, state.lastPrompt);
+    if (estimated > 0) {
+      cached = estimated;
+      cached_estimated = true;
+    }
+  }
+
+  return {
+    cached,
+    cached_estimated,
+    nextState: { lastPrompt: prompt, providerReportsCache },
+  };
+}
+
+/** Recompute cache while locally growing prompt between provider usage events. */
+export function estimateLocalCached(
+  state: TokenCacheState,
+  prompt: number,
+  prev: { cached?: number; cached_estimated?: boolean } | null | undefined,
+): { cached: number; cached_estimated: boolean } {
+  const prevCached = prev?.cached ?? 0;
+  if (prev && !prev.cached_estimated && prevCached > 0) {
+    return { cached: prevCached, cached_estimated: false };
+  }
+  if (state.providerReportsCache && prev && !prev.cached_estimated && prevCached === 0) {
+    return { cached: 0, cached_estimated: false };
+  }
+  const estimated = estimatePrefixCached(prompt, state.lastPrompt);
+  return { cached: estimated, cached_estimated: estimated > 0 };
+}
+
+/** Offline cache estimate when reloading a session from message history only. */
+export function estimateCacheFromHistoryPrompt(
+  currentPrompt: number,
+  promptBeforeLastUserTurn: number,
+): { cached: number; cached_estimated: boolean; cacheState: TokenCacheState } {
+  const cached = estimatePrefixCached(currentPrompt, promptBeforeLastUserTurn);
+  return {
+    cached,
+    cached_estimated: cached > 0,
+    cacheState: {
+      lastPrompt: currentPrompt,
+      providerReportsCache: false,
+    },
+  };
+}
+
+/** Provider-style cache hit rate: cached_input / total_prompt_tokens.
+ * Kernel `prompt` already includes cached tokens for Anthropic/OpenAI adapters. */
+export function formatCacheHitRate(cached: number, prompt: number): string | null {
+  if (cached <= 0 || prompt <= 0) return null;
+  if (cached >= prompt) return '100%';
+  const ratio = (cached / prompt) * 100;
+  if (ratio >= 99.95) return '99.9%';
+  if (ratio >= 10) return `${Math.round(ratio)}%`;
+  return `${ratio.toFixed(1)}%`;
 }

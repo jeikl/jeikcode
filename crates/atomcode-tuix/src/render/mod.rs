@@ -50,6 +50,9 @@ pub enum UiLine {
         attachments: Vec<usize>,
     },
     AssistantText(String),
+    /// Collapsed thinking header (`+ Thought: …`). Always shown so the user
+    /// can see that the model is thinking; the body stays behind Ctrl+O.
+    ReasoningHeader(String),
     /// LLM reasoning/thinking content (displayed in gray/dimmed style)
     ReasoningText(String),
     AssistantLineBreak,
@@ -74,6 +77,13 @@ pub enum UiLine {
         /// as a separate body row breaks the "inflight strip = body tail"
         /// invariant and orphans the spinner glyph on commit.
         hint: Option<String>,
+    },
+    /// Append a stdout/stderr chunk onto the in-flight bash strip (last N
+    /// lines, in-place) so the call reads like a live terminal without
+    /// flooding scrollback. Ignored when no matching inflight tool is live.
+    ToolCallLiveTail {
+        call_id: String,
+        chunk: String,
     },
     /// Freeze the most recent `ToolCallInFlight` row to its final
     /// static `▸` icon. Emitted right before `ToolResult` so the

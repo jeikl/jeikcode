@@ -84,6 +84,7 @@ pub(crate) fn provider_info(
         ephemeral: p.ephemeral,
         pricing: p.pricing,
         supports_vision: p.supports_vision,
+        reasoning_model: p.reasoning_model,
     }
 }
 

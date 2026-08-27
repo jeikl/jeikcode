@@ -51,6 +51,8 @@ interface SidebarProps {
   /** Switch INTO another project (by its working dir): change cwd + land on a new
    *  conversation there + reflect it in the URL (survives refresh). */
   onSwitchProject?: (workingDir: string) => void;
+  /** Live / `--host` 正在跑的 session，立刻转圈，不必等 5s 的 /chat/active。 */
+  extraRunningIds?: string[];
 }
 
 type Translate = (key: MsgKey, params?: Record<string, string | number>) => string;
@@ -299,6 +301,7 @@ export function Sidebar({
   onOpenRemote,
   onOpenCwd,
   onSwitchProject,
+  extraRunningIds,
 }: SidebarProps) {
   const t = useT();
   const { theme, setTheme, lang, setLang } = useSettings();
@@ -1027,7 +1030,7 @@ export function Sidebar({
   const inCwd = merged.filter(inScope);
   // 活跃（正在运行）会话置顶：优先显示「正在执行的会话」，其余保持 daemon
   // 返回的 updated_at 倒序（活跃会话最新被触碰，也在靠前）。
-  const activeSet = new Set(activeIds);
+  const activeSet = new Set([...activeIds, ...(extraRunningIds ?? [])]);
   if (activeSet.size > 0) {
     inCwd.sort((a, b) => {
       const aAct = activeSet.has(a.id) ? 1 : 0;

@@ -509,3 +509,170 @@ pub(crate) async fn patch_thinking(
     };
     Json(provider_info(&name, &p, &default_selection)).into_response()
 }
+
+// ============================================================================
+// Upstream model catalog (WebUI / TUI parity)
+// ============================================================================
+
+/// POST /providers/upstream-models — list model ids from an upstream base_url.
+/// Mirrors TUI `upstream_models::fetch_upstream_model_ids` so the WebUI model-id
+/// field can offer a filterable catalog for openai / responses / anthropic / ollama.
+#[derive(Debug, Deserialize)]
+pub(crate) struct UpstreamModelsRequest {
+    /// Wire protocol: `openai` / `responses` / `anthropic` / `claude` / `ollama`.
+    pub protocol: String,
+    pub base_url: String,
+    #[serde(default)]
+    pub api_key: Option<String>,
+    /// When editing an existing selection, reuse its stored key if the form left
+    /// api_key blank.
+    #[serde(default)]
+    pub provider_name: Option<String>,
+    #[serde(default)]
+    pub skip_tls_verify: bool,
+}
+
+pub(crate) async fn list_upstream_models(
+    Json(req): Json<UpstreamModelsRequest>,
+) -> impl IntoResponse {
+    if req.base_url.trim().is_empty() {
+        return json_error(StatusCode::BAD_REQUEST, "base_url is required").into_response();
+    }
+    let mut api_key = req.api_key.unwrap_or_default();
+    if api_key.trim().is_empty() {
+        if let Some(name) = req.provider_name.as_deref().map(str::trim).filter(|s| !s.is_empty())
+        {
+            if let Ok(config) = load_config() {
+                if let Some(p) = config.provider_config_for_selection(name) {
+                    if let Some(key) = p.resolved_api_key() {
+                        api_key = key;
+                    }
+                }
+            }
+        }
+    }
+    match fetch_upstream_model_ids(
+        &req.protocol,
+        &req.base_url,
+        &api_key,
+        req.skip_tls_verify,
+    )
+    .await
+    {
+        Ok(models) => Json(serde_json::json!({ "models": models })).into_response(),
+        Err(error) => json_error(StatusCode::BAD_GATEWAY, error).into_response(),
+    }
+}
+
+fn models_endpoint(protocol: &str, base_url: &str) -> String {
+    let base = base_url.trim().trim_end_matches('/');
+    let p = protocol.to_ascii_lowercase();
+    if p == "ollama" {
+        let origin = base
+            .strip_suffix("/v1")
+            .unwrap_or(base)
+            .trim_end_matches('/');
+        return format!("{origin}/api/tags");
+    }
+    if base.ends_with("/v1") {
+        format!("{base}/models")
+    } else {
+        format!("{base}/v1/models")
+    }
+}
+
+fn parse_model_ids(body: &str) -> Vec<String> {
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(body) else {
+        return Vec::new();
+    };
+    let mut ids = Vec::new();
+    if let Some(arr) = value.get("data").and_then(|d| d.as_array()) {
+        for item in arr {
+            if let Some(id) = item.get("id").and_then(|x| x.as_str()) {
+                if !id.is_empty() {
+                    ids.push(id.to_string());
+                }
+            } else if let Some(id) = item.as_str() {
+                if !id.is_empty() {
+                    ids.push(id.to_string());
+                }
+            }
+        }
+    }
+    if ids.is_empty() {
+        if let Some(arr) = value.get("models").and_then(|d| d.as_array()) {
+            for item in arr {
+                let id = item
+                    .get("id")
+                    .and_then(|x| x.as_str())
+                    .or_else(|| item.get("name").and_then(|x| x.as_str()))
+                    .or_else(|| item.get("model").and_then(|x| x.as_str()));
+                if let Some(id) = id.filter(|s| !s.is_empty()) {
+                    ids.push(id.to_string());
+                }
+            }
+        }
+    }
+    ids.sort();
+    ids.dedup();
+    ids
+}
+
+async fn fetch_upstream_model_ids(
+    protocol: &str,
+    base_url: &str,
+    api_key: &str,
+    skip_tls_verify: bool,
+) -> Result<Vec<String>, String> {
+    let url = models_endpoint(protocol, base_url);
+    let mut builder = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(8))
+        .connect_timeout(std::time::Duration::from_secs(5));
+    if skip_tls_verify {
+        builder = builder.danger_accept_invalid_certs(true);
+    }
+    let client = builder.build().map_err(|e| e.to_string())?;
+    let mut req = client.get(&url);
+    let protocol = protocol.to_ascii_lowercase();
+    if protocol == "anthropic" || protocol == "claude" {
+        if !api_key.is_empty() {
+            req = req
+                .header("x-api-key", api_key)
+                .header("anthropic-version", "2023-06-01");
+        }
+    } else if !api_key.is_empty() {
+        req = req.bearer_auth(api_key);
+    }
+    let resp = req.send().await.map_err(|e| e.to_string())?;
+    if !resp.status().is_success() {
+        return Err(format!("HTTP {}", resp.status().as_u16()));
+    }
+    let text = resp.text().await.map_err(|e| e.to_string())?;
+    Ok(parse_model_ids(&text))
+}
+
+#[cfg(test)]
+mod upstream_tests {
+    use super::{models_endpoint, parse_model_ids};
+
+    #[test]
+    fn openai_and_responses_use_v1_models() {
+        assert_eq!(
+            models_endpoint("openai", "https://api.openai.com/v1"),
+            "https://api.openai.com/v1/models"
+        );
+        assert_eq!(
+            models_endpoint("responses", "http://127.0.0.1:8000/v1"),
+            "http://127.0.0.1:8000/v1/models"
+        );
+    }
+
+    #[test]
+    fn parse_openai_data_ids() {
+        let body = r#"{"object":"list","data":[{"id":"grok-4.6"},{"id":"grok-4.5"}]}"#;
+        assert_eq!(
+            parse_model_ids(body),
+            vec!["grok-4.5".to_string(), "grok-4.6".to_string()]
+        );
+    }
+}

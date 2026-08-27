@@ -27,7 +27,7 @@
 
 import { VNode } from 'preact';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'preact/hooks';
-import { streamChat, stopChat, getActiveChatSessions, getChatPending, watchChatSession, SSEEvent, getSession, SessionMetaWithProject, getModels, ModelInfo, ImageData, streamLive, postLiveMessage, postLiveStop, postLivePermission, postLiveProvider, postLiveMode, getApprovalMode, ApprovalMode, postLiveSwitchSession, LiveWireEvent, SessionMessage, getSkills, SkillInfo, listDir, changeDir, postConfigReload, postCommand, postLiveCompact, postLiveUserInput, postChatUserInput, setDefaultProvider, type CommandResult, UserInputRequestEvent } from '../api';
+import { streamChat, stopChat, getActiveChatSessions, getChatPending, watchChatSession, SSEEvent, getSession, SessionMetaWithProject, getModels, ModelInfo, ImageData, streamLive, postLiveMessage, postLiveStop, postLivePermission, postLiveProvider, postLiveMode, getApprovalMode, ApprovalMode, LiveWireEvent, SessionMessage, SessionTokenUsage, getSkills, SkillInfo, listDir, changeDir, postConfigReload, postCommand, postLiveCompact, postLiveUserInput, postChatUserInput, setDefaultProvider, type CommandResult, UserInputRequestEvent } from '../api';
 import {
   parseSlashCommand,
   buildCommandMap,
@@ -65,6 +65,16 @@ import {
   type MsgPart,
 } from '../lib/toolRows';
 import {
+  looksLikeUnifiedDiff,
+  parseDiffPreview,
+  formatToolPayload,
+  prettyToolText,
+  toolCategory,
+  toolGlyph,
+  toolRendersAsDiff,
+  type DiffPreviewLine,
+} from '../lib/toolDisplay';
+import {
   applySubtaskProgress,
   applySubtaskResultsFromOutput,
   subtasksFromTaskArgs,
@@ -86,12 +96,20 @@ import {
   createLiveLifecycleState,
   isCurrentChatStream,
   liveDetachDisposition,
-  liveSessionSwitchDisposition,
   liveSnapshotQueueDisposition,
   reduceChatRecovery,
   reduceLiveLifecycle,
   resolveUserInputRequest,
   restoreLiveSnapshot,
+  resolveTokenCache,
+  formatCacheHitRate,
+  createTokenCacheState,
+  resetTokenCacheState,
+  estimateLocalCached,
+  estimateCacheFromHistoryPrompt,
+  type TokenCacheState,
+  estimatePrefixCached,
+  userMessageAlreadyOnCanvas,
   syncAttachDisposition,
   type ChatRecoveryEvent,
   type ChatRecoveryState,
@@ -245,7 +263,7 @@ function messageFullText(m: Message): string {
       lines.push(`🔧 ${displayToolName(tool.name)}`);
       const detail = formatToolDetail(tool.name, tool.args);
       if (detail) lines.push(`   ${detail}`);
-      if (tool.args) lines.push(`   参数: ${tool.args}`);
+      if (tool.args) lines.push(`   参数: ${formatToolPayload(tool.args)}`);
       if (tool.output) lines.push(`   输出: ${tool.output}`);
     } else if (p.kind === 'notice') {
       lines.push(p.text);
@@ -305,7 +323,6 @@ function estimateAllMessagesTokens(messages: Message[]): TokenUsage {
   let prompt = 0;
   let completion = 0;
   let reasoning = 0;
-  let prefixTokens = 0;
 
   for (let i = 0; i < messages.length; i++) {
     const m = messages[i];
@@ -316,7 +333,6 @@ function estimateAllMessagesTokens(messages: Message[]): TokenUsage {
       // In multi-turn chat, historical assistant text is fed back as prompt context,
       // while historical reasoning is omitted by default from next-turn prompt context.
       prompt += est.prompt + est.completion;
-      prefixTokens = prompt; // Historical turns form the candidate prefix
     } else {
       prompt += est.prompt;
       completion += est.completion;
@@ -324,16 +340,52 @@ function estimateAllMessagesTokens(messages: Message[]): TokenUsage {
     }
   }
   const total = prompt + completion + reasoning;
-  const cached = prefixTokens > 0 ? prefixTokens : 0;
   return {
     prompt,
     completion: completion + reasoning,
     total,
-    cached,
-    cached_estimated: cached > 0,
     reasoning,
   };
 }
+
+/** Prompt tokens accumulated before the last user message (prefix-cache baseline). */
+function promptTokensBeforeLastUser(messages: Message[]): number {
+  let lastUserIdx = -1;
+  for (let i = messages.length - 1; i >= 0; i--) {
+    if (messages[i]?.role === 'user') {
+      lastUserIdx = i;
+      break;
+    }
+  }
+  if (lastUserIdx <= 0) return 0;
+  let history = 0;
+  for (let i = 0; i < lastUserIdx; i++) {
+    const m = messages[i]!;
+    const est = estimateMessageTokens(m);
+    if (m.role === 'assistant') history += est.prompt + est.completion;
+    else history += est.prompt;
+  }
+  return history;
+}
+
+function estimateSessionTokens(messages: Message[]): { tokens: TokenUsage; cacheState: TokenCacheState } {
+  const base = estimateAllMessagesTokens(messages);
+  const prior = promptTokensBeforeLastUser(messages);
+  const cache = estimateCacheFromHistoryPrompt(base.prompt, prior);
+  return {
+    tokens: {
+      ...base,
+      cached: cache.cached,
+      cached_estimated: cache.cached_estimated,
+    },
+    cacheState: cache.cacheState,
+  };
+}
+
+type SessionTokenSnapshot = {
+  tokens: TokenUsage;
+  cacheState: TokenCacheState;
+};
 
 /** Max attached images per message and per-image byte cap (raw file size). */
 const MAX_IMAGES = 6;
@@ -412,6 +464,8 @@ interface ChatProps {
   restoring?: boolean;
   /** /live turn 完成后通知 App 刷新侧栏列表（session 已落盘，列表需更新）。 */
   onLiveTurnDone?: () => void;
+  /** /live 回合运行态变化：侧栏/标题头转圈，与 `--host` 的 /chat/active 一致。 */
+  onLiveRunningChange?: (sessionId: string | null, running: boolean) => void;
   /** 首条消息发出瞬间上报标题（取消息前 10 字），供 App 乐观插入侧栏，
    *  让会话即时出现；待后端落盘并自动命名后，列表刷新会换成真实标题。 */
   onOptimisticSession?: (title: string) => void;
@@ -603,7 +657,7 @@ function detectSkillContent(text: string): string | null {
   return title || null;
 }
 
-export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionResolved, activeSession, restoring, onLiveTurnDone, onOptimisticSession, onOpenCwd, onCwdChanged, onLanding, skillInsert, onSessionRenamed }: ChatProps) {
+export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionResolved, activeSession, restoring, onLiveTurnDone, onLiveRunningChange, onOptimisticSession, onOpenCwd, onCwdChanged, onLanding, skillInsert, onSessionRenamed }: ChatProps) {
   const t = useT();
   const [messages, setMessages] = useState<Message[]>([]);
   const [input, setInput] = useState('');
@@ -701,9 +755,104 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
     pushCommandNotice(t('chat.steerRecovered'));
   }
   const [tokens, setTokens] = useState<TokenUsage | null>(null);
+  const tokenCacheRef = useRef(createTokenCacheState());
+  const tokenUsageCacheRef = useRef<Map<string, SessionTokenSnapshot>>(new Map());
   const lastUserTokensRef = useRef(0);
   const [showTokenDetails, setShowTokenDetails] = useState(false);
   const tokenPopoverRef = useRef<HTMLDivElement>(null);
+
+  const applyAuthoritativeTokenUsage = (usage: {
+    prompt: number;
+    completion: number;
+    total: number;
+    cached?: number;
+    reasoning?: number;
+  }) => {
+    const resolved = resolveTokenCache(
+      { prompt: usage.prompt, cached: usage.cached },
+      tokenCacheRef.current,
+    );
+    tokenCacheRef.current = resolved.nextState;
+    setTokens({
+      prompt: usage.prompt,
+      completion: usage.completion,
+      total: usage.total,
+      cached: resolved.cached,
+      cached_estimated: resolved.cached_estimated,
+      reasoning: usage.reasoning ?? 0,
+    });
+  };
+
+  const mergeLocalTokens = (
+    prev: TokenUsage | null,
+    next: { prompt: number; completion: number; total: number; reasoning?: number },
+  ): TokenUsage => {
+    const local = estimateLocalCached(tokenCacheRef.current, next.prompt, prev);
+    return {
+      prompt: next.prompt,
+      completion: next.completion,
+      total: next.total,
+      cached: local.cached,
+      cached_estimated: local.cached_estimated,
+      reasoning: next.reasoning ?? prev?.reasoning ?? 0,
+    };
+  };
+
+  const resetTokenTelemetry = () => {
+    tokenCacheRef.current = createTokenCacheState();
+    setTokens(null);
+  };
+
+  const applyTokenUsage = (usage: TokenUsage, cacheState?: TokenCacheState) => {
+    if (cacheState) tokenCacheRef.current = { ...cacheState };
+    setTokens({ ...usage });
+  };
+
+  const applyServerTokenUsage = (usage: SessionTokenUsage) => {
+    const cacheState: TokenCacheState = {
+      lastPrompt: usage.prompt,
+      providerReportsCache: usage.cached > 0 && !usage.cached_estimated,
+    };
+    applyTokenUsage({
+      prompt: usage.prompt,
+      completion: usage.completion,
+      total: usage.total,
+      cached: usage.cached,
+      cached_estimated: Boolean(usage.cached_estimated),
+      reasoning: 0,
+    }, cacheState);
+  };
+
+  const applySessionTokens = (
+    sid: string | null,
+    messages: Message[],
+    serverUsage?: SessionTokenUsage | null,
+  ) => {
+    if (!sid) {
+      resetTokenTelemetry();
+      return;
+    }
+    if (serverUsage && (serverUsage.prompt > 0 || serverUsage.total > 0)) {
+      const mem = tokenUsageCacheRef.current.get(sid);
+      if (mem && (mem.tokens.total ?? 0) > serverUsage.total) {
+        applyTokenUsage(mem.tokens, mem.cacheState);
+        return;
+      }
+      applyServerTokenUsage(serverUsage);
+      return;
+    }
+    const snap = tokenUsageCacheRef.current.get(sid);
+    if (snap) {
+      applyTokenUsage(snap.tokens, snap.cacheState);
+      return;
+    }
+    if (messages.length > 0) {
+      const est = estimateSessionTokens(messages);
+      applyTokenUsage(est.tokens, est.cacheState);
+      return;
+    }
+    resetTokenTelemetry();
+  };
 
   useEffect(() => {
     if (!showTokenDetails) return;
@@ -1077,7 +1226,10 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
     loadId: string,
     loadGeneration: number,
   ) {
-    if (syncRef.current || busyRef.current) return;
+    if (busyRef.current) return;
+    // Sync keeps a /live subscription for the bound session. Other sessions
+    // still need idle watch so an API /chat turn on that id can push here.
+    if (syncRef.current && liveSessionIdRef.current === loadId) return;
     stopIdleWatch();
     const abort = new AbortController();
     idleWatchAbortRef.current = abort;
@@ -1182,6 +1334,12 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
   // 查看的就是这个实时会话时才把输出渲染进画布——否则用户从侧栏打开了别的历史会话，
   // 实时输出会串进错误页面、且刷新即消失（刷新会按真实会话重载）。
   const liveSessionIdRef = useRef<string | null>(null);
+  function attachedToLiveRuntime(): boolean {
+    return (
+      syncRef.current &&
+      (!liveSessionIdRef.current || liveSessionIdRef.current === activeIdRef.current)
+    );
+  }
   // 是否已为「当前会话」上报过乐观侧栏条目。每次切换/新建会话时复位，
   // 避免同一会话第二条消息（尤其 sync 路径本地不落消息）重复上报、改写标题。
   const optimisticFiredRef = useRef(false);
@@ -1208,14 +1366,6 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
     // sessionId 变成自己的 id（activeIdRef 已同步），不重置，以免清空刚看到的对话。
     if (sessionId !== activeIdRef.current) {
       const prevId = activeIdRef.current;
-      const liveSwitch = liveSessionSwitchDisposition(
-        liveLifecycleRef.current.running || busyRef.current,
-      );
-      if (syncRef.current && !liveSwitch.allowed) {
-        if (prevId) onSessionId(prevId);
-        pushCommandNotice(t('cmd.session.busy'));
-        return;
-      }
       // A correlated steer still belongs to the session being left. Recover it
       // while that session is authoritative and reject this switch once; moving
       // the draft after `activeIdRef` changes would leak it into another chat.
@@ -1290,36 +1440,17 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
       // bot review P2: 切换会话时重置搜索状态,避免残留关键词过滤新会话、matchIdx 超界致计数错乱。
       setSearch('');
       setMatchIdx(0);
-      setTokens(null);
       setHistoryHint(null);
       setPersistenceWarning(null);
+      applySessionTokens(sessionId, cached && cached.length > 0 ? cached : []);
       // 切到一个有 id 的会话 → 进入「加载中」，先抑制落地页（避免闪屏）；
       // 无 id（新建）则不加载、直接落地。
       setLoading(sessionId != null && !cached);
-      // sync 模式：本端在侧栏切到另一个（已存在）会话时，通知后端广播会话切换，
-      // 使同进程 sync 模式的 TUI 跟随加载该会话历史。
-      // 不会回环：远端 session_switched 事件的 handler 会先把 activeIdRef 设为该 id，
-      // 故由广播回流引起的 sessionId 变化进不来这个分支（条件已不成立），不会再次广播。
-      if (sync && sessionId) {
-        postLiveSwitchSession(sessionId)
-          .then((result) => {
-            if (result.ok || sessionGenerationRef.current !== switchGeneration) return;
-            if (result.activeTurn && prevId) {
-              onSessionId(prevId);
-              pushCommandNotice(t('cmd.session.busy'));
-              return;
-            }
-            throw new Error(result.error ?? 'live runtime rejected the session switch');
-          })
-          .catch((error) => {
-            if (sessionGenerationRef.current !== switchGeneration) return;
-            stopLiveStream();
-            setSync(false);
-            finishTurnClock({ stamp: false });
-            setBusy(false);
-            setQueued([]);
-            setHistoryHint(t('sync.switchFailed', { error: String(error) }));
-          });
+      // Sync mode only mirrors the currently viewed transcript. It does not
+      // rebind the live runtime: the in-flight task keeps running in the
+      // background, and switching back reconnects the live snapshot.
+      if (sync && sessionId && liveSessionIdRef.current === sessionId) {
+        startLiveStream();
       }
     }
 
@@ -1355,50 +1486,69 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
         ) return;
 
         let nextHint: string | null = null;
+        const currentCached = messageCacheRef.current.get(loadId);
+        const isLiveSession = liveSessionIdRef.current === loadId;
         if (sessionResult.status === 'fulfilled' && sessionResult.value && Array.isArray(sessionResult.value.messages)) {
-          // Convert loaded messages to display format (reuses sessionMessagesToDisplay).
-          const loaded = sessionMessagesToDisplay(sessionResult.value.messages);
-          const currentCached = messageCacheRef.current.get(loadId);
+          const preferred = sessionResult.value.preferred_model;
+          if (preferred) {
+            setProvider(preferred);
+            providerPinnedRef.current = true;
+          } else {
+            providerPinnedRef.current = false;
+          }
+          // Live reconnect already restores from the /live snapshot. Disk history
+          // can race that snapshot (stale, missing in-flight turns) and must not
+          // overlay the canvas — that was duplicating the last user bubble.
+          if (!isLiveSession) {
+            const loaded = sessionMessagesToDisplay(sessionResult.value.messages);
+            let displayMessages: Message[] = currentCached && currentCached.length > 0 ? currentCached : loaded;
 
-          if (currentCached && currentCached.length > 0) {
-            // If the loaded messages from the backend are shorter than the cached messages,
-            // it means the backend task is still running or hasn't saved yet.
-            // Keep the cached messages and do not overwrite them with stale backend history.
-            if (loaded.length >= currentCached.length) {
+            if (currentCached && currentCached.length > 0) {
+              // If the loaded messages from the backend are shorter than the cached messages,
+              // it means the backend task is still running or hasn't saved yet.
+              // Keep the cached messages and do not overwrite them with stale backend history.
+              if (loaded.length >= currentCached.length) {
+                displayMessages = loaded;
+                setMessages(loaded);
+                messageCacheRef.current.delete(loadId);
+                pinTimelineToBottom();
+              } else {
+                // Still show richer cache pinned to bottom (refresh mid-turn).
+                setMessages(currentCached);
+                pinTimelineToBottom();
+              }
+            } else if (loaded.length > 0) {
+              displayMessages = loaded;
+              // A newly loaded session starts at the bottom regardless of prior scroll state.
               setMessages(loaded);
-              messageCacheRef.current.delete(loadId);
-              pinTimelineToBottom();
-            } else {
-              // Still show richer cache pinned to bottom (refresh mid-turn).
-              setMessages(currentCached);
               pinTimelineToBottom();
             }
-          } else if (loaded.length > 0) {
-            // A newly loaded session starts at the bottom regardless of prior scroll state.
-            setMessages(loaded);
-            pinTimelineToBottom();
+            applySessionTokens(loadId, displayMessages, sessionResult.value.token_usage ?? undefined);
           }
-        } else {
+        } else if (!isLiveSession) {
           loadedForRef.current = null;
           nextHint = t('chat.continueSession', { id: loadId.slice(0, 8) });
         }
 
         if (activeResult.status === 'fulfilled') {
           const active = activeResult.value.includes(loadId);
-          transitionChatRecovery({ type: 'active_check_succeeded', active });
-          if (active) {
+          transitionChatRecovery({ type: 'active_check_succeeded', active: active && !isLiveSession });
+          if (active && !isLiveSession) {
             requestIdRef.current = loadId;
             if (!syncRef.current) setBusyAndClock(false);
             setQueued([]);
-            nextHint = t('chat.detachedActive');
-            pushCommandNotice(t('chat.detachedActive'));
-            // /chat has no SSE reattach: poll disk history while API/other-tab
-            // holds the active turn so the WebUI still "syncs" messages.
+            // Returning to a session this tab already rendered is not "another
+            // client". Keep watching if a /chat turn is live, but don't spam the
+            // OpenAI-API banner or duplicate the last user bubble.
+            if (!currentCached || currentCached.length === 0) {
+              nextHint = t('chat.detachedActive');
+              pushCommandNotice(t('chat.detachedActive'));
+            }
             startDetachedHistoryPoll(projectHash, loadId, loadGeneration);
           } else if (requestIdRef.current === loadId) {
             requestIdRef.current = null;
           }
-        } else {
+        } else if (!isLiveSession) {
           // `/chat` has no stream reattach endpoint. The registry is authoritative
           // when available; if discovery fails, keep the canonical stop alias and
           // fail closed instead of allowing a possibly concurrent send.
@@ -1418,7 +1568,7 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
         if (
           activeResult.status === 'fulfilled' &&
           !activeResult.value.includes(loadId) &&
-          !syncRef.current
+          liveSessionIdRef.current !== loadId
         ) {
           startIdleWatch(projectHash, loadId, loadGeneration);
         }
@@ -1475,13 +1625,22 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
     else bottomRef.current?.scrollIntoView({ behavior: 'auto' });
   }, [messages, tokens]);
 
-  // 消息变化且当前无精确 tokens（如切会话、加载历史）时，自动根据消息内容实时估算 tokens
+  // 消息变化且当前无精确 tokens（如切会话、加载历史）时，根据消息或内存快照恢复 tokens。
   useEffect(() => {
-    if (!tokens && messages.length > 0) {
-      const est = estimateAllMessagesTokens(messages);
-      if (est.total > 0) setTokens(est);
-    }
-  }, [messages, tokens]);
+    const sid = activeIdRef.current;
+    if (!sid || tokens || messages.length === 0) return;
+    applySessionTokens(sid, messages);
+  }, [messages, tokens, sessionId]);
+
+  // 同 session 内 tokens 变化时写入内存快照（切换回来在 getSession 返回前也能恢复）。
+  useEffect(() => {
+    const sid = activeIdRef.current;
+    if (!sid || !tokens) return;
+    tokenUsageCacheRef.current.set(sid, {
+      tokens: { ...tokens },
+      cacheState: { ...tokenCacheRef.current },
+    });
+  }, [tokens, sessionId]);
 
   // Abort the live (/live) stream + cancel any pending reconnect timer if the
   // component unmounts while sync is on.
@@ -1617,6 +1776,7 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
         setUserInputReq(null);
         setHistoryHint(t('sync.reconnectFailed'));
         pushNoticeToLastAssistant(t('sync.reconnectFailed'));
+        onLiveRunningChange?.(liveSessionIdRef.current, false);
         return;
       }
       const delay = Math.min(1000 * 2 ** (attempt - 1), 15000);
@@ -1636,7 +1796,7 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
           }
         },
         controller.signal,
-        activeIdRef.current,
+        liveSessionIdRef.current,
         () => {
           // Heartbeat for the staleness watchdog (any byte incl. keepalive ping).
           lastLiveActivityRef.current = Date.now();
@@ -1839,7 +1999,7 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
       case 'tool_output': return { type: 'tool_output', id: e.id, chunk: e.chunk };
       case 'tool_progress': return { type: 'tool_progress', id: e.id, progress: e.progress };
       case 'tool_result': return { type: 'tool_result', id: e.id, name: e.name, output: e.output, success: e.success, duration_ms: e.duration_ms };
-      case 'tokens': return { type: 'tokens', prompt: e.prompt, completion: e.completion, total: e.total };
+      case 'tokens': return { type: 'tokens', prompt: e.prompt, completion: e.completion, total: e.total, cached: e.cached };
       case 'warning': return { type: 'warning', message: e.message };
       case 'persistence_warning': return { type: 'persistence_warning', message: e.message };
       case 'rate_limited': return { type: 'rate_limited', reset_at_display: e.reset_at_display, reset_label: e.reset_label, secs_until_reset: e.secs_until_reset, auto_resuming: e.auto_resuming, server_message: e.server_message ?? null };
@@ -1860,17 +2020,8 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
     // snapshot：确立实时会话 id 并把视图切到它（连上即对齐）。
     if (e.type === 'snapshot') {
       liveSessionIdRef.current = e.session_id || null;
-      // bot review P2: live 快照路径后端 MessageInfo.created_at 固为 None
-      // (live_api.rs 的 From impl 未注入),与 /chat 历史加载路径不一致。
-      // 此处在前端注入 Date.now() 作为每条快照消息的 ts,让快照消息也显示时间标签,
-      // 与历史加载路径行为一致 (后者用 session.updated_at * 1000 近似)。
       const loaded = sessionMessagesToDisplay(e.messages).map(m => ({ ...m, ts: m.ts ?? Date.now() }));
-      // Live snapshot (session switch / reconnect) → start at the bottom.
       atBottomRef.current = true;
-      // A persisted snapshot does not carry live activity. Replay emits the
-      // authoritative input/state observations immediately after it; only those
-      // may restore `busy`. In particular, a history ending in a user message can
-      // be an already-failed turn and must not manufacture an in-flight reply.
       const queueDisposition = liveSnapshotQueueDisposition(
         liveLifecycleRef.current.running || busyRef.current,
         queuedRef.current.length,
@@ -1878,6 +2029,15 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
       const lifecycle = reduceLiveLifecycle(liveLifecycleRef.current, { type: 'snapshot' });
       liveLifecycleRef.current = lifecycle.state;
       const restored = restoreLiveSnapshot(loaded);
+      onLiveRunningChange?.(e.session_id || null, restored.running);
+      if (e.session_id) {
+        messageCacheRef.current.set(e.session_id, restored.messages);
+      }
+      const viewingOther =
+        !!activeIdRef.current && !!e.session_id && activeIdRef.current !== e.session_id;
+      if (viewingOther) {
+        return;
+      }
       setMessages(restored.messages.length > 0 ? restored.messages : []);
       setBusyAndClock(restored.running);
       if (queueDisposition.discardQueued) {
@@ -1887,15 +2047,10 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
       setLivePending(null);
       setUserInputReq(null);
       setHistoryHint(null);
-      // 连上时回显当前生效的模型，让下拉框与 TUI / 其他端保持一致。
       if (e.provider && !providerPinnedRef.current) {
         setProvider(e.provider);
       }
-      // 同步当前审批模式，让新 tab 显示正确的模式 pill（含别的 tab 切成的 Auto/Plan）。
       if (e.mode) setModeState(initModeState(e.mode));
-      // 把稳定的 session_id 告知 App，接入侧边栏历史 + URL 刷新恢复。
-      // 与 /chat 的 'done' 事件同路径：activeIdRef + loadedForRef 标记，
-      // 避免 App 回填 project_hash 时触发重复加载覆盖当前画布。
       if (e.session_id) {
         if (activeIdRef.current !== e.session_id) {
           sessionGenerationRef.current += 1;
@@ -1906,13 +2061,13 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
       }
       return;
     }
-    // 模型切换是进程级（全局），与正在查看哪个会话无关。provider 事件是运行时
-    // ProviderChanged 的权威回声（本端确认的切换 / 别的 tab / TUI），一律采纳并解除
-    // pin——pin 只用于防止「重连快照」回退一次尚未传播的本地切换，不该挡真实的变更事件，
-    // 否则本端切过一次模型后就永远不再跟随 TUI 的模型切换（S1）。
+    // Provider events belong to the live runtime's session only. Other open
+    // sessions keep their own model selection.
     if (e.type === 'provider') {
-      setProvider(e.provider);
-      providerPinnedRef.current = false;
+      if (!activeIdRef.current || activeIdRef.current === liveSessionIdRef.current) {
+        setProvider(e.provider);
+        providerPinnedRef.current = false;
+      }
       return;
     }
     // 审批模式切换是进程级（另一 tab / 未来 TUI）→ 始终同步 pill。
@@ -1943,23 +2098,21 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
     // 重启 SSE 连接以取得新会话的 authoritative snapshot 和 replay window。
     if (e.type === 'session_switched') {
       liveSessionIdRef.current = e.session_id;
-      // 本端正是发起此次切换的视图（侧栏切到已存在会话→postLiveSwitchSession→广播
-      // 回流），或重复广播：此时我们已经在该会话上、历史也正在/已经加载，绝不能再清空
-      // 画布，否则刚 getSession 加载好的历史会被自己的广播回流抹掉（且 sessionId 未变，
-      // 加载 effect 不会重跑，history 永远回不来）。仅刷新实时流即可。
       const alreadyViewing = activeIdRef.current === e.session_id;
+      if (!alreadyViewing && activeIdRef.current) {
+        return;
+      }
       activeIdRef.current = e.session_id;
       if (!alreadyViewing) {
         sessionGenerationRef.current += 1;
         onSessionId(e.session_id);
         setMessages([]);
-        // bot review P2: 切换会话时重置搜索状态,避免残留关键词过滤新会话、matchIdx 超界致计数错乱。
         setSearch('');
         setMatchIdx(0);
         setSearchOpen(false);
-        setTokens(null);
         setHistoryHint(null);
         setPersistenceWarning(null);
+        applySessionTokens(e.session_id, []);
       }
       if (sync) {
         stopLiveStream();
@@ -1970,6 +2123,10 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
 
     // 门控：仅当"当前查看的会话"就是实时会话时，才把实时输出渲染进画布。否则用户
     // 从侧栏打开了另一个历史会话，实时事件不应串进该页面（串进去刷新还会消失）。
+    // `state` 仍要上报侧栏转圈：切走后 live 任务还在跑。
+    if (e.type === 'state') {
+      onLiveRunningChange?.(liveSessionIdRef.current, e.running);
+    }
     if (
       liveSessionIdRef.current &&
       activeIdRef.current &&
@@ -1995,13 +2152,21 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
           pendingSelfEchoRef.current.splice(ownEchoIndex, 1);
           break;
         }
-        // Append the peer's user message + empty assistant placeholder
         const now = Date.now();
-        setMessages((prev) => [
-          ...prev,
-          { role: 'user', parts: [{ kind: 'text', text: e.text }], images: e.images && e.images.length ? e.images : undefined, ts: now },
-          { role: 'assistant', parts: [] },
-        ]);
+        setMessages((prev) => {
+          if (userMessageAlreadyOnCanvas(prev, e.text)) {
+            const last = prev[prev.length - 1];
+            if (last && last.role === 'user') {
+              return [...prev, { role: 'assistant' as const, parts: [] }];
+            }
+            return prev;
+          }
+          return [
+            ...prev,
+            { role: 'user', parts: [{ kind: 'text', text: e.text }], images: e.images && e.images.length ? e.images : undefined, ts: now },
+            { role: 'assistant', parts: [] },
+          ];
+        });
         break;
       }
 
@@ -2014,7 +2179,7 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
         });
         liveLifecycleRef.current = lifecycle.state;
         setBusyAndClock(lifecycle.state.running);
-        if (lifecycle.terminal) {
+          if (lifecycle.terminal) {
           // A submit whose HTTP receipt is still in flight may belong to the
           // next turn; only confirmed steers are recoverable at this terminal.
           restorePendingSteers(false);
@@ -2028,6 +2193,7 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
           setUserInputReq(null);
           // turn 完成后 session 已落盘，通知 App 刷新侧栏列表。
           onLiveTurnDone?.();
+          onLiveRunningChange?.(liveSessionIdRef.current, false);
         }
         break;
       }
@@ -2101,23 +2267,7 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
         }
       }
       if (next) {
-        // 重新开启同步：先让已绑定的 Coding Runtime 恢复当前会话，再读取 live hub 快照。
-        const sid = activeIdRef.current;
-        if (sid) {
-          postLiveSwitchSession(sid)
-            .then((result) => {
-              if (!result.ok) {
-                throw new Error(result.error ?? 'live runtime rejected the session switch');
-              }
-              startLiveStream();
-            })
-            .catch((error) => {
-              setSync(false);
-              setHistoryHint(t('sync.switchFailed', { error: String(error) }));
-            });
-        } else {
-          startLiveStream();
-        }
+        startLiveStream();
       } else {
         stopLiveStream();
       }
@@ -2301,7 +2451,7 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
         const SESSION_MUTATING = new Set(['undo', 'compact']);
         if (SESSION_MUTATING.has(command)) {
           if (busyRef.current) { pushCommandNotice(t('cmd.session.busy')); return; }
-          if (sync) {
+          if (attachedToLiveRuntime()) {
             // sync 模式：compact 派发到共享实时运行时（结果经 /live 的 Warning 事件
             // 渲染压缩标记）；undo 暂无实时路径，维持拒绝。
             if (command === 'compact') {
@@ -2366,7 +2516,8 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
             if (res.applied) {
               if (sessionId) await reloadSessionTranscript(sessionId);
               pushCommandNotice(t('cmd.compact.done', { n: res.removed_messages, before: res.before_tokens, after: res.after_tokens }));
-              setTokens({ prompt: res.after_tokens, completion: 0, total: res.after_tokens });
+              tokenCacheRef.current = resetTokenCacheState(res.after_tokens);
+              setTokens({ prompt: res.after_tokens, completion: 0, total: res.after_tokens, cached: 0, cached_estimated: false });
             } else {
               pushCommandNotice(t('cmd.compact.none'));
             }
@@ -2380,7 +2531,8 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
                 window: res.ctx_window, name: res.ctx_name,
               })
             );
-            setTokens({ prompt: res.used_tokens, completion: 0, total: res.used_tokens });
+            tokenCacheRef.current = resetTokenCacheState(res.used_tokens);
+            setTokens({ prompt: res.used_tokens, completion: 0, total: res.used_tokens, cached: 0, cached_estimated: false });
             return;
           }
           if (res.kind === 'whoami') {
@@ -2499,43 +2651,17 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
         const userDelta = estimateTextTokens(userText);
         lastUserTokensRef.current = userDelta;
         if (userDelta > 0) {
-          setTokens((prev) => {
-            const p = (prev?.prompt ?? 0) + userDelta;
-            const c = prev?.completion ?? 0;
-            const t = (prev?.total ?? 0) + userDelta;
-            return {
-              prompt: p,
-              completion: c,
-              total: t,
-              cached: prev?.cached ?? 0,
-              cached_estimated: prev?.cached_estimated ?? false,
-              reasoning: 0,
-            };
-          });
+          setTokens((prev) => mergeLocalTokens(prev, {
+            prompt: (prev?.prompt ?? 0) + userDelta,
+            completion: prev?.completion ?? 0,
+            total: (prev?.total ?? 0) + userDelta,
+            reasoning: 0,
+          }));
         }
         setMessages((prev) => {
-          const last = prev[prev.length - 1];
-          // Already the trailing user bubble.
-          if (last && last.role === 'user') {
-            const lastText = last.parts.find((p) => p.kind === 'text') as
-              | { kind: 'text'; text: string }
-              | undefined;
-            if (lastText && lastText.text === userText) return prev;
-          }
-          // Optimistic pattern: […, user(same), assistant(empty|streaming)] —
-          // keep the placeholder so subsequent text/reasoning/tool land on it.
-          if (last && last.role === 'assistant') {
-            const prevUser = prev[prev.length - 2];
-            if (prevUser && prevUser.role === 'user') {
-              const prevText = prevUser.parts.find((p) => p.kind === 'text') as
-                | { kind: 'text'; text: string }
-                | undefined;
-              if (prevText && prevText.text === userText) return prev;
-            }
-          }
-          // Observer upgrade may have pre-inserted an empty assistant before
-          // the user event — drop only that orphan, not a real reply bubble.
+          if (userMessageAlreadyOnCanvas(prev, userText)) return prev;
           let base = prev;
+          const last = prev[prev.length - 1];
           if (last && last.role === 'assistant' && (!last.parts || last.parts.length === 0)) {
             base = prev.slice(0, -1);
           }
@@ -2551,12 +2677,11 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
         appendToLastAssistant(event.content);
         const textDelta = estimateTextTokens(event.content);
         if (textDelta > 0) {
-          setTokens((prev) => {
-            const p = prev?.prompt ?? 0;
-            const c = (prev?.completion ?? 0) + textDelta;
-            const t = (prev?.total ?? 0) + textDelta;
-            return { prompt: p, completion: c, total: t, cached: prev?.cached ?? 0, reasoning: prev?.reasoning ?? 0 };
-          });
+          setTokens((prev) => mergeLocalTokens(prev, {
+            prompt: prev?.prompt ?? 0,
+            completion: (prev?.completion ?? 0) + textDelta,
+            total: (prev?.total ?? 0) + textDelta,
+          }));
         }
         break;
       }
@@ -2574,13 +2699,12 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
         });
         const rDelta = estimateTextTokens(event.content);
         if (rDelta > 0) {
-          setTokens((prev) => {
-            const p = prev?.prompt ?? 0;
-            const c = (prev?.completion ?? 0) + rDelta;
-            const t = (prev?.total ?? 0) + rDelta;
-            const r = (prev?.reasoning ?? 0) + rDelta;
-            return { prompt: p, completion: c, total: t, cached: prev?.cached ?? 0, reasoning: r };
-          });
+          setTokens((prev) => mergeLocalTokens(prev, {
+            prompt: prev?.prompt ?? 0,
+            completion: (prev?.completion ?? 0) + rDelta,
+            total: (prev?.total ?? 0) + rDelta,
+            reasoning: (prev?.reasoning ?? 0) + rDelta,
+          }));
         }
         break;
       }
@@ -2661,39 +2785,29 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
         onPermissionResolved?.(event.id);
         const toolDelta = estimateTextTokens(event.output);
         if (toolDelta > 0) {
-          setTokens((prev) => {
-            const p = (prev?.prompt ?? 0) + toolDelta;
-            const c = prev?.completion ?? 0;
-            const t = (prev?.total ?? 0) + toolDelta;
-            return { prompt: p, completion: c, total: t, cached: prev?.cached ?? 0, reasoning: prev?.reasoning ?? 0 };
-          });
+          setTokens((prev) => mergeLocalTokens(prev, {
+            prompt: (prev?.prompt ?? 0) + toolDelta,
+            completion: prev?.completion ?? 0,
+            total: (prev?.total ?? 0) + toolDelta,
+          }));
         }
         break;
       }
 
       case 'tokens': {
-        const officialCached = event.cached != null && event.cached > 0;
-        setTokens((prev) => {
-          let cached = officialCached ? event.cached! : 0;
-          let cached_estimated = false;
-          // If no official cache was reported by provider, estimate from historical prefix
-          if (!officialCached && (prev?.prompt ?? 0) > 0 && event.prompt > 0) {
-            const userTokens = lastUserTokensRef.current || 0;
-            const prefix = Math.max(0, event.prompt - userTokens);
-            if (prefix > 0 && userTokens > 0) {
-              cached = prefix;
-              cached_estimated = true;
-            }
-          }
-          return {
-            prompt: event.prompt,
-            completion: event.completion,
-            total: event.total,
-            cached,
-            cached_estimated,
-            reasoning: prev?.reasoning ?? 0,
-          };
-        });
+        const resolved = resolveTokenCache(
+          { prompt: event.prompt, cached: event.cached },
+          tokenCacheRef.current,
+        );
+        tokenCacheRef.current = resolved.nextState;
+        setTokens((prev) => ({
+          prompt: event.prompt,
+          completion: event.completion,
+          total: event.total,
+          cached: resolved.cached,
+          cached_estimated: resolved.cached_estimated,
+          reasoning: prev?.reasoning ?? 0,
+        }));
         break;
       }
 
@@ -2732,11 +2846,12 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
           } else if (typeof event.tokens === 'object') {
             const tok = event.tokens as any;
             if (typeof tok.total === 'number' && tok.total > 0) {
-              setTokens({
-                prompt: tok.prompt ?? tok.input ?? 0,
+              const prompt = tok.prompt ?? tok.input ?? 0;
+              applyAuthoritativeTokenUsage({
+                prompt,
                 completion: tok.completion ?? tok.output ?? 0,
                 total: tok.total,
-                cached: tok.cached ?? tok.cached_input ?? 0,
+                cached: tok.cached ?? tok.cached_input,
                 reasoning: tok.reasoning ?? 0,
               });
             }
@@ -2886,7 +3001,7 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
       if (title) onOptimisticSession?.(title);
     }
 
-    if (sync) {
+    if (attachedToLiveRuntime()) {
       // ── Sync path: send to /live/message. Optimistically append the user
       //    message NOW so the view leaves the "new conversation" landing page
       //    immediately (the server `user` echo — which keeps OTHER tabs in sync —
@@ -3089,26 +3204,19 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
     const userDelta = estimateTextTokens(text);
     lastUserTokensRef.current = userDelta;
     if (userDelta > 0) {
-      setTokens((prev) => {
-        const p = (prev?.prompt ?? 0) + userDelta;
-        const c = prev?.completion ?? 0;
-        const t = (prev?.total ?? 0) + userDelta;
-        return {
-          prompt: p,
-          completion: c,
-          total: t,
-          cached: prev?.cached ?? 0,
-          cached_estimated: prev?.cached_estimated ?? false,
-          reasoning: 0,
-        };
-      });
+      setTokens((prev) => mergeLocalTokens(prev, {
+        prompt: (prev?.prompt ?? 0) + userDelta,
+        completion: prev?.completion ?? 0,
+        total: (prev?.total ?? 0) + userDelta,
+        reasoning: 0,
+      }));
     }
 
     // Sync mode shares the native runtime, so an active-turn submit is an
     // authoritative steer. The legacy /chat path has no steer transport and
     // intentionally keeps its next-turn queue semantics.
     if (busy) {
-      if (sync) {
+      if (attachedToLiveRuntime()) {
         void deliver(text, images);
         return;
       }
@@ -3204,19 +3312,19 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
       const recoveryNeedsStop = chatRecoveryPolicy(
         chatRecoveryRef.current,
       ).allowStop;
-      if (requestIdRef.current && (!sync || recoveryNeedsStop)) {
+      if (requestIdRef.current && (!attachedToLiveRuntime() || recoveryNeedsStop)) {
         const requestAlias = requestIdRef.current;
         const detached = abortRef.current === null;
         await stopChat(requestAlias);
         if (detached && requestIdRef.current === requestAlias) {
           transitionChatRecovery({ type: 'stop_succeeded' });
           requestIdRef.current = null;
-          if (!sync) setBusyAndClock(false);
+          if (!attachedToLiveRuntime()) setBusyAndClock(false);
           setQueued([]);
           onPermissionResolved?.(null);
           pushCommandNotice(t('chat.detachedStopped'));
         }
-      } else if (sync) {
+      } else if (attachedToLiveRuntime()) {
         await postLiveStop();
       }
     } catch (error) {
@@ -3646,18 +3754,7 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
             const isEstimated = Boolean(tokens.cached_estimated);
             const reasoning = tokens.reasoning ?? 0;
             const total = tokens.total ?? (prompt + completion);
-            const cachedPct = (() => {
-              if (cached <= 0 || prompt <= 0) return null;
-              if (cached >= prompt) return '100%';
-              const ratio = (cached / prompt) * 100;
-              if (ratio >= 99.5) {
-                return ratio >= 99.9 ? '99.9%' : `${ratio.toFixed(1)}%`;
-              }
-              if (ratio >= 10) {
-                return `${Math.round(ratio)}%`;
-              }
-              return `${ratio.toFixed(1)}%`;
-            })();
+            const cachedPct = formatCacheHitRate(cached, prompt);
             const pctOfLimit = contextLimit && contextLimit > 0 ? Math.min(100, Math.round((total / contextLimit) * 100)) : null;
             const billable = completion + Math.max(0, prompt - cached);
 
@@ -3672,13 +3769,13 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
             const tooltipLines: string[] = [
               '📊 Token 与上下文占用详情',
               '──────────────────────────────',
-              `📥 输入 (Prompt/上下文): ${promptStr}`,
+              `📥 输入 (history): ${promptStr}`,
             ];
             if (cached > 0) {
               if (isEstimated) {
-                tooltipLines.push(`⚡ 预估前缀缓存 (Est. Cache): ${cachedStr} (${cachedPct} 预估，本地前缀估算)`);
+                tooltipLines.push(`⚡ 预估缓存: ${cachedStr} (${cachedPct} 预估)`);
               } else {
-                tooltipLines.push(`⚡ 在线缓存命中 (Cache Hit): ${cachedStr} (${cachedPct} 命中率，厂商权威数据)`);
+                tooltipLines.push(`⚡ 在线缓存命中: ${cachedStr} (${cachedPct} 命中)`);
               }
             }
             if (reasoning > 0) {
@@ -3716,7 +3813,7 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
                   aria-haspopup="dialog"
                   aria-expanded={showTokenDetails}
                 >
-                  <span class="token-pill token-prompt" title={`输入上下文 (Prompt): ${promptStr}`}>
+                  <span class="token-pill token-prompt" title={`输入 (history): ${promptStr}`}>
                     <span class="token-icon">↓</span>
                     <span>input: {formatTokenMetric(prompt)}</span>
                   </span>
@@ -3727,7 +3824,7 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
                   {cached > 0 && (
                     <span
                       class={'token-pill token-cached' + (isEstimated ? ' is-estimated' : '')}
-                      title={isEstimated ? `预估前缀缓存: ${cachedStr} (${cachedPct} 预估)` : `在线缓存命中: ${cachedStr} (${cachedPct})`}
+                      title={isEstimated ? `预估缓存: ${cachedStr} (${cachedPct} 预估)` : `在线缓存命中: ${cachedStr} (${cachedPct})`}
                     >
                       <span class="token-icon">⚡</span>
                       <span>cache: {cachedPct != null ? cachedPct : formatTokenMetric(cached)}</span>
@@ -3808,7 +3905,7 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
                       <div class="token-popover-row">
                         <div class="token-popover-row-left">
                           <span class="token-row-icon">📥</span>
-                          <span class="token-row-label">输入 (Prompt/上下文)</span>
+                          <span class="token-row-label">输入 (history)</span>
                         </div>
                         <span class="token-popover-row-val">{promptStr}</span>
                       </div>
@@ -3818,9 +3915,7 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
                           <div class="token-popover-row-left">
                             <span class="token-row-icon">⚡</span>
                             <span class="token-row-label">
-                              {isEstimated
-                                ? '预估前缀缓存 (Est. Cache)'
-                                : '在线缓存命中 (Cache Hit)'}
+                              {isEstimated ? '预估缓存' : '在线缓存命中'}
                             </span>
                           </div>
                           <div class="token-popover-row-val-group">
@@ -4590,7 +4685,7 @@ function ReasoningBlock({ text, search }: { text: string; search: string }) {
   const t = useT();
   // Default expanded while streaming (short / growing); collapse once settled
   // if the user prefers — start open so live thinking is visible.
-  const [open, setOpen] = useState(true);
+  const [open, setOpen] = useState(false);
   const bodyRef = useRef<HTMLDivElement>(null);
   // Follow latest tokens at the bottom until the user scrolls up (same policy
   // as the main timeline: sticky follow, release on manual up-scroll).
@@ -4807,116 +4902,6 @@ function UserMessageView({
   );
 }
 
-// Map a tool's wire name to a leading line-icon category (mirrors the inline
-// design: file / search / edit / terminal / globe / folder …).
-function toolCategory(name: string): string {
-  if (name.startsWith('mcp__')) return 'mcp';
-  switch (name) {
-    case 'read_file':
-    case 'read_symbol':
-    case 'list_symbols':
-    case 'file_dependencies':
-      return 'file';
-    case 'edit_file':
-    case 'write_file':
-    case 'create_file':
-    case 'search_replace':
-    case 'parallel_edit_files':
-      return 'edit';
-    case 'grep':
-    case 'glob':
-    case 'find_references':
-    case 'trace_callees':
-    case 'trace_callers':
-    case 'trace_chain':
-    case 'blast_radius':
-      return 'search';
-    case 'bash':
-      return 'terminal';
-    case 'web_fetch':
-    case 'web_search':
-      return 'globe';
-    case 'list_directory':
-    case 'change_dir':
-      return 'folder';
-    case 'use_skill':
-      return 'skill';
-    case 'todo':
-      return 'todo';
-    default:
-      return 'default';
-  }
-}
-
-const TOOL_ICON_PATHS: Record<string, VNode> = {
-  file: (
-    <>
-      <path d="M9 1.75H4.5A1.5 1.5 0 0 0 3 3.25v9.5a1.5 1.5 0 0 0 1.5 1.5h7a1.5 1.5 0 0 0 1.5-1.5V5.75L9 1.75Z" />
-      <path d="M9 1.75v4h4" />
-    </>
-  ),
-  edit: <path d="M11.4 2.6l2 2L6 12l-2.6.6L4 10l7.4-7.4Z" />,
-  search: (
-    <>
-      <circle cx="7" cy="7" r="4.25" />
-      <path d="M10.2 10.2 14 14" />
-    </>
-  ),
-  terminal: (
-    <>
-      <rect x="2" y="3" width="12" height="10" rx="1.5" />
-      <path d="M4.5 6.5 7 8.5 4.5 10.5" />
-      <path d="M8.5 10.5h3" />
-    </>
-  ),
-  globe: (
-    <>
-      <circle cx="8" cy="8" r="6" />
-      <path d="M2 8h12" />
-      <path d="M8 2c2.2 2.2 2.2 9.8 0 12-2.2-2.2-2.2-9.8 0-12Z" />
-    </>
-  ),
-  folder: (
-    <path d="M2 4.5A1.5 1.5 0 0 1 3.5 3h2.5l1.3 1.6h5.2A1.5 1.5 0 0 1 14 6.1v5.9a1.5 1.5 0 0 1-1.5 1.5h-9A1.5 1.5 0 0 1 2 12V4.5Z" />
-  ),
-  skill: <path d="M9 1.5 3.5 9H7.5L7 14.5 12.5 7H8.5L9 1.5Z" />,
-  todo: (
-    <>
-      <path d="M6.5 4.5H13M6.5 8H13M6.5 11.5H13" />
-      <path d="M2.5 4.4l.8.8 1.5-1.7" />
-      <circle cx="3.3" cy="8" r="0.5" fill="currentColor" stroke="none" />
-      <circle cx="3.3" cy="11.5" r="0.5" fill="currentColor" stroke="none" />
-    </>
-  ),
-  mcp: (
-    <>
-      <rect x="3" y="3" width="4.5" height="4.5" rx="1" />
-      <rect x="8.5" y="8.5" width="4.5" height="4.5" rx="1" />
-      <path d="M7.5 5.25h2A1.5 1.5 0 0 1 11 6.75v1.75" />
-    </>
-  ),
-  default: <circle cx="8" cy="8" r="2.5" />,
-};
-
-function ToolTypeIcon({ name }: { name: string }) {
-  return (
-    <svg
-      class="tool-type-icon"
-      width="14"
-      height="14"
-      viewBox="0 0 16 16"
-      fill="none"
-      stroke="currentColor"
-      stroke-width="1.4"
-      stroke-linecap="round"
-      stroke-linejoin="round"
-      aria-hidden="true"
-    >
-      {TOOL_ICON_PATHS[toolCategory(name)] ?? TOOL_ICON_PATHS.default}
-    </svg>
-  );
-}
-
 // Status glyph: a check when done, a cross on error, otherwise a spinner that
 // animates while the call is pending / awaiting approval.
 function ToolStatusIcon({ cls }: { cls: string }) {
@@ -4951,17 +4936,19 @@ function ToolRowView({ tool }: { tool: ToolRow }) {
   const t = useT();
   const [expanded, setExpanded] = useState(false);
   const userCollapsedRef = useRef(false);
-  const outputRef = useRef<HTMLDivElement>(null);
+  const outputRef = useRef<HTMLPreElement>(null);
   const hasSubtasks = !!(tool.subtasks && tool.subtasks.length > 0);
+  const category = toolCategory(tool.name);
+  const glyph = toolGlyph(tool.name);
 
-  // While a tool is still running, open the body as soon as stdout/stderr
-  // arrives so the user can watch it like a terminal. Stay open after it
-  // finishes unless they collapsed it themselves.
+  // Shell/edit tools open like a CLI while running (and stay open after)
+  // unless the user collapsed them. Other tools open once output arrives.
   useEffect(() => {
-    if (tool.status === 'pending' && tool.output && !userCollapsedRef.current) {
+    if (tool.status !== 'pending' || userCollapsedRef.current) return;
+    if (category === 'terminal' || category === 'edit' || tool.output) {
       setExpanded(true);
     }
-  }, [tool.status, tool.output]);
+  }, [tool.status, tool.output, category]);
 
   useEffect(() => {
     if (!expanded || !tool.output || !outputRef.current) return;
@@ -4974,8 +4961,6 @@ function ToolRowView({ tool }: { tool: ToolRow }) {
   } else if (tool.status === 'pending') {
     annotation = { cls: 'pending', label: t('tool.running') };
   } else if (tool.status === 'done') {
-    // 统一用状态词「完成」，不再显示耗时——否则实时执行时右侧是耗时（0.00s），
-    // 刷新后历史快照不带 duration_ms 又变「完成」，两处不一致。
     annotation = { cls: 'success', label: t('tool.done') };
   } else if (tool.status === 'error') {
     annotation = { cls: 'error', label: t('tool.failed') };
@@ -4983,13 +4968,7 @@ function ToolRowView({ tool }: { tool: ToolRow }) {
     annotation = { cls: 'warning', label: t('tool.incomplete') };
   }
 
-  // With a subtask panel, the parallel rows are the primary UI — don't force
-  // users to expand raw JSON args / `<task id=…>` dumps after refresh.
-  const hasDetail = hasSubtasks
-    ? false
-    : !!(tool.args || tool.output);
-  // When we have a parallel subtask panel, don't also show the alternating
-  // single-line progress (that was the unfriendly explore#1 / #3 flicker).
+  const hasDetail = hasSubtasks ? false : !!(tool.args || tool.output);
   const showFlatProgress =
     tool.status === 'pending' && !!tool.progress && !hasSubtasks;
 
@@ -5005,7 +4984,7 @@ function ToolRowView({ tool }: { tool: ToolRow }) {
     : abbreviateArgs(formatToolDetail(tool.name, tool.args));
 
   return (
-    <div class="tool-body">
+    <div class={'tool-body kind-' + category}>
       <div
         class="tool-header"
         onClick={() => {
@@ -5017,7 +4996,7 @@ function ToolRowView({ tool }: { tool: ToolRow }) {
           });
         }}
       >
-        <ToolTypeIcon name={tool.name} />
+        <span class="tool-glyph" aria-hidden="true">{glyph}</span>
         <span class="tool-name">{displayToolName(tool.name)}</span>
         <span class="tool-name-secondary">{headerDetail}</span>
         {annotation && (
@@ -5035,21 +5014,136 @@ function ToolRowView({ tool }: { tool: ToolRow }) {
         <div class="tool-progress" title={tool.progress}>{tool.progress}</div>
       )}
       {expanded && hasDetail && (
-        <div class="tool-body-grid">
-          {tool.args && (
-            <div class="tool-body-row">
-              <div class="tool-body-row-label">{t('tool.args')}</div>
-              <div class="tool-body-row-content">{tool.args}</div>
-            </div>
-          )}
-          {tool.output && (
-            <div class="tool-body-row">
-              <div class="tool-body-row-label">{t('tool.output')}</div>
-              <div
-                ref={outputRef}
-                class={'tool-body-row-content' + (tool.status === 'pending' ? ' is-live' : '')}
-              >{tool.output}</div>
-            </div>
+        <ToolExpandedBody tool={tool} outputRef={outputRef} />
+      )}
+    </div>
+  );
+}
+
+function CopyableCodeBlock({
+  text,
+  lang,
+  live,
+  outputRef,
+}: {
+  text: string;
+  lang?: string;
+  live?: boolean;
+  outputRef?: { current: HTMLPreElement | null };
+}) {
+  const t = useT();
+  const [copied, setCopied] = useState(false);
+  if (!text) return null;
+  return (
+    <div class="code-block-wrapper tool-code-block">
+      <pre ref={outputRef} class={live ? 'is-live' : undefined}>
+        <code class={lang ? `language-${lang}` : undefined}>{text}</code>
+      </pre>
+      <button
+        type="button"
+        class="copy-button"
+        onClick={(e) => {
+          e.stopPropagation();
+          void copyTextToClipboard(text).then((ok) => {
+            if (!ok) {
+              window.alert(t('copy.failed'));
+              return;
+            }
+            setCopied(true);
+            window.setTimeout(() => setCopied(false), 1200);
+          });
+        }}
+      >
+        {copied ? t('copy.copied') : t('copy.copy')}
+      </button>
+    </div>
+  );
+}
+
+function DiffBody({ lines, raw }: { lines: DiffPreviewLine[]; raw?: string }) {
+  const t = useT();
+  const [copied, setCopied] = useState(false);
+  return (
+    <div class="code-block-wrapper tool-code-block">
+      <pre class="tool-diff-body">
+        {lines.map((line, i) => {
+          if (line.kind === 'meta') {
+            return (
+              <span key={i} class="diff-line diff-meta">{line.text || ' '}</span>
+            );
+          }
+          const ln = line.kind === 'del' ? line.oldLine : (line.newLine ?? line.oldLine);
+          const sign = line.kind === 'add' ? '+' : line.kind === 'del' ? '-' : ' ';
+          const body = line.text.replace(/^[-+ ]/, '');
+          return (
+            <span key={i} class={'diff-line diff-' + line.kind}>
+              <span class="diff-ln">{ln ?? ''}</span>
+              <span class="diff-sign">{sign}</span>
+              <span>{body || ' '}</span>
+            </span>
+          );
+        })}
+      </pre>
+      {raw ? (
+        <button
+          type="button"
+          class="copy-button"
+          onClick={(e) => {
+            e.stopPropagation();
+            void copyTextToClipboard(raw).then((ok) => {
+              if (!ok) {
+                window.alert(t('copy.failed'));
+                return;
+              }
+              setCopied(true);
+              window.setTimeout(() => setCopied(false), 1200);
+            });
+          }}
+        >
+          {copied ? t('copy.copied') : t('copy.copy')}
+        </button>
+      ) : null}
+    </div>
+  );
+}
+
+function ToolExpandedBody({
+  tool,
+  outputRef,
+}: {
+  tool: ToolRow;
+  outputRef: { current: HTMLPreElement | null };
+}) {
+  const t = useT();
+  const live = tool.status === 'pending';
+  const argsPretty = tool.args ? prettyToolText(tool.args) : null;
+  const outputPretty = tool.output ? prettyToolText(tool.output) : null;
+  const showDiff =
+    !!tool.output &&
+    toolRendersAsDiff(tool.name) &&
+    looksLikeUnifiedDiff(tool.output);
+  const diffLines = showDiff ? parseDiffPreview(tool.output || '') : [];
+
+  return (
+    <div class={'tool-cli' + (live ? ' is-live' : '')}>
+      {argsPretty && argsPretty.text && (
+        <div class="tool-cli-row">
+          <div class="tool-cli-label">{t('tool.args')}</div>
+          <CopyableCodeBlock text={argsPretty.text} lang={argsPretty.lang} />
+        </div>
+      )}
+      {tool.output && (
+        <div class="tool-cli-row">
+          <div class="tool-cli-label">{t('tool.output')}</div>
+          {diffLines.length > 0 ? (
+            <DiffBody lines={diffLines} raw={tool.output} />
+          ) : (
+            <CopyableCodeBlock
+              text={outputPretty?.text || tool.output}
+              lang={outputPretty?.lang}
+              live={live}
+              outputRef={outputRef}
+            />
           )}
         </div>
       )}

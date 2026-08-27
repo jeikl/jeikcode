@@ -48,6 +48,7 @@ export function App() {
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [sessionListVersion, setSessionListVersion] = useState(0);
+  const [liveRunningId, setLiveRunningId] = useState<string | null>(null);
   const [headerMenuOpen, setHeaderMenuOpen] = useState(false);
   // 表头会话菜单改用 fixed 定位，避免被祖先 overflow/层叠裁剪；记录锚点坐标。
   const [headerMenuPos, setHeaderMenuPos] = useState<{ top: number; left: number } | null>(null);
@@ -363,6 +364,7 @@ export function App() {
         onOpenRemote={() => setSettingsSection('remote')}
         onOpenCwd={() => setShowCwd(true)}
         onSwitchProject={handlePickCwd}
+        extraRunningIds={liveRunningId ? [liveRunningId] : []}
       />
       <div
         class={'sidebar-backdrop' + (sidebarOpen ? ' show' : '')}
@@ -398,6 +400,13 @@ export function App() {
               }}
             >
               <span class="session-title-text">{activeSession.name}</span>
+              {liveRunningId === activeSession.id && (
+                <span
+                  class="session-item-running session-header-running"
+                  title={t('sidebar.running')}
+                  aria-label={t('sidebar.running')}
+                />
+              )}
               <svg
                 class="session-title-chevron"
                 width="11"
@@ -463,6 +472,9 @@ export function App() {
             activeSession={activeSession}
             restoring={restoring}
             onLiveTurnDone={() => setSessionListVersion((v) => v + 1)}
+            onLiveRunningChange={(id, running) => {
+              setLiveRunningId(running && id ? id : null);
+            }}
             onOptimisticSession={handleOptimisticSession}
             onOpenCwd={() => setShowCwd(true)}
             onCwdChanged={handleCwdChanged}

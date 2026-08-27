@@ -3,6 +3,7 @@
 import { useState } from 'preact/hooks';
 import { respondPermission } from '../api';
 import { useT } from '../settings';
+import { formatToolPayload } from '../lib/toolDisplay';
 
 interface PermissionRequest {
   session_id: string;
@@ -23,16 +24,10 @@ interface PermissionCardProps {
 
 function formatArgs(args: unknown): string {
   if (typeof args === 'string') {
-    // Try to pretty-print if it looks like JSON
-    try {
-      const parsed = JSON.parse(args);
-      return JSON.stringify(parsed, null, 2);
-    } catch {
-      return args;
-    }
+    return formatToolPayload(args);
   }
   try {
-    return JSON.stringify(args, null, 2);
+    return formatToolPayload(JSON.stringify(args));
   } catch {
     return String(args);
   }

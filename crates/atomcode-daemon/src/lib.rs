@@ -144,6 +144,8 @@ pub(crate) struct ProviderInfo {
     pub pricing: Option<atomcode_config::config::provider::ProviderPricing>,
     /// Explicit vision flag from config (`None` = unset / protocol default opt-in false).
     pub supports_vision: Option<bool>,
+    /// Explicit reasoning-model flag (`None` = unset / name heuristics).
+    pub reasoning_model: Option<bool>,
 }
 
 /// Login attempts stay addressable while a blocking poll is in flight. Per-record
@@ -317,6 +319,114 @@ pub struct SessionDetail {
     pub updated_at: u64,
     pub message_count: usize,
     pub messages: Vec<MessageInfo>,
+    /// Per-session model selection. Absent on older sessions.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub preferred_model: Option<String>,
+    /// Footer token/cache snapshot from the last completed turn's persisted stats.
+    /// Mirrors TUI `restore_context` + turn token tallies so WebUI survives refresh/restart.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub token_usage: Option<SessionTokenUsage>,
+}
+
+/// Token footer snapshot derived from [`SessionMeta::turn_stats`].
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct SessionTokenUsage {
+    pub prompt: usize,
+    pub completion: usize,
+    pub total: usize,
+    pub cached: usize,
+    #[serde(default)]
+    pub cached_estimated: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ctx_window: Option<usize>,
+}
+
+fn estimate_prefix_cached_tokens(current_prompt: usize, previous_prompt: usize) -> usize {
+    if current_prompt == 0 || previous_prompt == 0 {
+        return 0;
+    }
+    if current_prompt < previous_prompt * 9 / 10 {
+        return 0;
+    }
+    current_prompt.min(previous_prompt)
+}
+
+fn turn_stat_prompt_tokens(stat: &atomcode_capabilities::session::TurnStat) -> usize {
+    let mut uncached_input = 0u64;
+    let mut cached_input = 0u64;
+    for usage in &stat.model_usage {
+        uncached_input = uncached_input.saturating_add(usage.tokens.input);
+        cached_input = cached_input.saturating_add(usage.tokens.cached_input);
+    }
+    if uncached_input + cached_input > 0 {
+        usize::try_from(uncached_input + cached_input).unwrap_or(usize::MAX)
+    } else if stat.used_tokens > 0 {
+        stat.used_tokens as usize
+    } else {
+        stat.total_tokens as usize
+    }
+}
+
+/// Build WebUI footer tokens from persisted turn stats (same source as TUI resume).
+pub(crate) fn session_token_usage_from_meta(
+    meta: &atomcode_capabilities::session::SessionMeta,
+) -> Option<SessionTokenUsage> {
+    let stat = meta.turn_stats.iter().rev().find(|s| s.position_valid)?;
+    if stat.used_tokens == 0 && stat.total_tokens == 0 && stat.model_usage.is_empty() {
+        return None;
+    }
+
+    let mut uncached_input = 0u64;
+    let mut output = 0u64;
+    let mut cached_input = 0u64;
+    for usage in &stat.model_usage {
+        uncached_input = uncached_input.saturating_add(usage.tokens.input);
+        output = output.saturating_add(usage.tokens.output);
+        cached_input = cached_input.saturating_add(usage.tokens.cached_input);
+    }
+
+    let prompt = turn_stat_prompt_tokens(stat);
+    let completion = if output > 0 {
+        usize::try_from(output).unwrap_or(0)
+    } else {
+        stat.total_tokens.saturating_sub(stat.used_tokens) as usize
+    };
+    let total = prompt.saturating_add(completion);
+    let mut cached = usize::try_from(cached_input).unwrap_or(0);
+    let mut cached_estimated = false;
+
+    if cached == 0 && prompt > 0 {
+        let previous_prompt = meta
+            .turn_stats
+            .iter()
+            .rev()
+            .filter(|s| s.position_valid)
+            .skip(1)
+            .map(turn_stat_prompt_tokens)
+            .find(|p| *p > 0);
+        if let Some(prev) = previous_prompt {
+            let estimated = estimate_prefix_cached_tokens(prompt, prev);
+            if estimated > 0 {
+                cached = estimated;
+                cached_estimated = true;
+            }
+        }
+    }
+
+    let ctx_window = if stat.ctx_window > 0 {
+        Some(stat.ctx_window as usize)
+    } else {
+        None
+    };
+
+    Some(SessionTokenUsage {
+        prompt,
+        completion,
+        total,
+        cached,
+        cached_estimated,
+        ctx_window,
+    })
 }
 
 /// Global project state store (current working directory)
@@ -2524,6 +2634,7 @@ async fn get_session_detail(Path((hash, id)): Path<(String, String)>) -> impl In
                     return (StatusCode::NOT_FOUND, Json(msg)).into_response();
                 }
             };
+            let token_usage = session_token_usage_from_meta(&session.meta);
             let detail = SessionDetail {
                 id: session.meta.id,
                 name: session.meta.name,
@@ -2532,6 +2643,8 @@ async fn get_session_detail(Path((hash, id)): Path<(String, String)>) -> impl In
                 updated_at: u64::try_from(session.meta.updated_at.max(0)).unwrap_or(0),
                 message_count: messages.len(),
                 messages,
+                preferred_model: session.meta.preferred_model.clone(),
+                token_usage,
             };
             Json(detail).into_response()
         }
@@ -3671,6 +3784,10 @@ pub enum ChatEvent {
         prompt: usize,
         completion: usize,
         total: usize,
+        /// Provider-reported prompt-cache hits. Always serialized (including `0`)
+        /// so clients can tell an explicit miss apart from absent telemetry.
+        #[serde(default)]
+        cached: usize,
     },
     /// Artifact started - detected code block or HTML
     #[serde(rename = "artifact_start")]
@@ -3772,6 +3889,97 @@ pub(crate) fn stop_reason_wire(reason: atomcode_kernel::event::StopReason) -> &'
 }
 
 #[cfg(test)]
+mod session_token_usage_tests {
+    use super::{session_token_usage_from_meta, SessionTokenUsage};
+    use atomcode_capabilities::session::{
+        ModelUsageStat, SessionMeta, TokenBreakdown, TurnStat,
+    };
+
+    fn usage_stat(prompt: u32, completion: u32, cached: u32) -> TurnStat {
+        TurnStat {
+            after_message: 1,
+            position_valid: true,
+            turn_id: 1,
+            round_count: 1,
+            tool_call_count: 0,
+            duration_ms: 1,
+            total_tokens: prompt.saturating_add(completion),
+            errored: false,
+            used_tokens: prompt,
+            ctx_window: 1_000_000,
+            model_usage: vec![ModelUsageStat {
+                provider_id: "main".into(),
+                model_id: "test".into(),
+                tokens: TokenBreakdown {
+                    input: u64::from(prompt.saturating_sub(cached)),
+                    output: u64::from(completion),
+                    cached_input: u64::from(cached),
+                },
+                pricing: None,
+            }],
+        }
+    }
+
+    #[test]
+    fn derives_footer_tokens_from_last_valid_turn() {
+        let mut meta = SessionMeta::new("s1", "/p", 1);
+        meta.turn_stats = vec![
+            usage_stat(10_000, 100, 8_000),
+            usage_stat(38_555, 18, 32_540),
+        ];
+        let usage = session_token_usage_from_meta(&meta).unwrap();
+        assert_eq!(
+            usage,
+            SessionTokenUsage {
+                prompt: 38_555,
+                completion: 18,
+                total: 38_573,
+                cached: 32_540,
+                cached_estimated: false,
+                ctx_window: Some(1_000_000),
+            }
+        );
+    }
+
+    #[test]
+    fn estimates_cache_when_last_turn_lacks_persisted_cached_input() {
+        let mut meta = SessionMeta::new("s1", "/p", 1);
+        meta.turn_stats = vec![
+            TurnStat {
+                after_message: 1,
+                position_valid: true,
+                turn_id: 1,
+                round_count: 1,
+                tool_call_count: 0,
+                duration_ms: 1,
+                total_tokens: 10_100,
+                errored: false,
+                used_tokens: 10_000,
+                ctx_window: 0,
+                model_usage: Vec::new(),
+            },
+            TurnStat {
+                after_message: 2,
+                position_valid: true,
+                turn_id: 2,
+                round_count: 1,
+                tool_call_count: 0,
+                duration_ms: 1,
+                total_tokens: 38_573,
+                errored: false,
+                used_tokens: 38_555,
+                ctx_window: 1_000_000,
+                model_usage: Vec::new(),
+            },
+        ];
+        let usage = session_token_usage_from_meta(&meta).unwrap();
+        assert_eq!(usage.prompt, 38_555);
+        assert_eq!(usage.cached, 10_000);
+        assert!(usage.cached_estimated);
+    }
+}
+
+#[cfg(test)]
 mod chat_event_type_tests {
     use super::{ChatEvent, ChatRuntimeProjector};
 
@@ -3853,7 +4061,8 @@ mod chat_event_type_tests {
             [ChatEvent::TokenUsage {
                 prompt: 7,
                 completion: 5,
-                total: 12
+                total: 12,
+                cached: 2,
             }]
         ));
         assert_eq!(projector.total_tokens, 12);
@@ -4513,12 +4722,14 @@ impl ChatRuntimeProjector {
             Agent::Usage(meta) => {
                 let prompt = meta.tokens.prompt as usize;
                 let completion = meta.tokens.completion as usize;
+                let cached = meta.tokens.cached as usize;
                 let total = prompt + completion;
                 self.total_tokens = total;
                 vec![ChatEvent::TokenUsage {
                     prompt,
                     completion,
                     total,
+                    cached,
                 }]
             }
             Agent::Error { message, .. } => {
@@ -5364,7 +5575,13 @@ async fn stop_chat(
 
 /// GET /chat/active - Return list of session IDs currently generating
 async fn active_chat_sessions(State(state): State<AppState>) -> impl IntoResponse {
-    Json(state.active_chats.active_session_ids().await)
+    let mut ids = state.active_chats.active_session_ids().await;
+    if let Some(live_id) = crate::native_live::live_running_session_id() {
+        if !ids.iter().any(|id| id == &live_id) {
+            ids.push(live_id);
+        }
+    }
+    Json(ids)
 }
 
 #[derive(Debug, serde::Deserialize)]
@@ -6902,6 +7119,10 @@ pub async fn run_server(opts: ServerOpts) -> anyhow::Result<()> {
             get(api_provider::get_providers).post(api_provider::create_provider),
         )
         .route(
+            "/providers/upstream-models",
+            post(api_provider::list_upstream_models),
+        )
+        .route(
             "/providers/:name",
             patch(api_provider::patch_provider).delete(api_provider::delete_provider),
         )
@@ -7016,6 +7237,7 @@ pub async fn run_server(opts: ServerOpts) -> anyhow::Result<()> {
         println!("  POST   /config/reload                  - Reload config from disk");
         println!("  GET    /providers                      - List providers");
         println!("  POST   /providers                      - Create/replace provider");
+        println!("  POST   /providers/upstream-models      - List upstream model ids");
         println!("  PATCH  /providers/:name                - Partially update provider");
         println!("  DELETE /providers/:name                - Delete provider");
         println!("  POST   /providers/:name/default        - Set default provider");

@@ -237,6 +237,15 @@ impl<W: Write + Send> Renderer for PlainRenderer<W> {
                     .out
                     .write_all(self.dg(&scrub_controls(&text)).as_bytes());
             }
+            UiLine::ReasoningHeader(title) => {
+                self.drop_transient();
+                let safe = scrub_controls(&title);
+                if safe.is_empty() {
+                    let _ = writeln!(self.out, "+ Thought");
+                } else {
+                    let _ = writeln!(self.out, "+ Thought: {}", self.dg(&safe));
+                }
+            }
             UiLine::ReasoningText(text) => {
                 // Display reasoning in gray/dimmed style
                 let _ = write!(
@@ -287,6 +296,10 @@ impl<W: Write + Send> Renderer for PlainRenderer<W> {
             UiLine::ToolCallCommit { call_id: _ } => {
                 // Plain mode never animated the row, so there is
                 // nothing to freeze. Skip silently.
+            }
+            UiLine::ToolCallLiveTail { chunk, .. } => {
+                // No in-place rewrite — print the chunk as command output.
+                let _ = write!(self.out, "{}", self.dg(&scrub_controls(&chunk)));
             }
             UiLine::ToolGroupRender {
                 batch_id: _,
@@ -404,6 +417,13 @@ impl<W: Write + Send> Renderer for PlainRenderer<W> {
             UiLine::EditDiffBlock(entries) => {
                 self.drop_transient();
                 let gutter = crate::render::diff::diff_gutter_width(&entries);
+                let bar = if self.caps.unicode_symbols { "│ " } else { "| " };
+                let title = if self.caps.unicode_symbols {
+                    "← Edit"
+                } else {
+                    "< Edit"
+                };
+                let _ = writeln!(self.out, "{title}");
                 for entry in &entries {
                     let color = if self.caps.colors {
                         match entry.kind {
@@ -420,7 +440,13 @@ impl<W: Write + Send> Renderer for PlainRenderer<W> {
                         ""
                     };
                     let body = crate::render::diff::diff_row_text(entry, gutter);
-                    let _ = writeln!(self.out, "{}{}{}", color, scrub_controls(&body), reset);
+                    let _ = writeln!(
+                        self.out,
+                        "{bar}{}{}{}",
+                        color,
+                        scrub_controls(&body),
+                        reset
+                    );
                 }
             }
             UiLine::Error(msg) => {

@@ -261,7 +261,7 @@ pub fn role(caps: TerminalCaps, role: Role) -> Option<Color> {
         Role::Success => Some(Palette::TOOL_SUCCESS),
         Role::DiffAdd => Some(diff_add_for_current_theme()),
         Role::DiffRemove => Some(diff_remove_for_current_theme()),
-        Role::ToolName => None,
+        Role::ToolName => Some(Palette::TOOL_NAME),
         Role::ToolSuccess => Some(Palette::TOOL_SUCCESS),
         Role::ToolError => Some(Palette::TOOL_ERROR),
         Role::PanelFg => {
@@ -422,11 +422,11 @@ mod tests {
     }
 
     #[test]
-    fn secondary_and_toolname_return_none() {
-        // These roles deliberately fall through to the terminal's default
-        // foreground — they should return None even when colours are on.
+    fn secondary_returns_none_toolname_is_cyan() {
+        // Secondary falls through to the terminal default foreground.
+        // Tool names use the cyan accent so call rows read like a live CLI.
         assert!(role(caps(true), Role::Secondary).is_none());
-        assert!(role(caps(true), Role::ToolName).is_none());
+        assert_eq!(role(caps(true), Role::ToolName), Some(Palette::TOOL_NAME));
     }
 
     #[test]

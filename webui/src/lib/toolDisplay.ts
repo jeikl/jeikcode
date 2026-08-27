@@ -1,0 +1,263 @@
+/** OpenCode-style tool chrome shared by the chat tool rows. */
+
+export type ToolCategory =
+  | 'file'
+  | 'edit'
+  | 'search'
+  | 'terminal'
+  | 'globe'
+  | 'folder'
+  | 'skill'
+  | 'todo'
+  | 'mcp'
+  | 'default';
+
+export function toolCategory(name: string): ToolCategory {
+  if (name.startsWith('mcp__')) return 'mcp';
+  switch (name) {
+    case 'read_file':
+    case 'read_symbol':
+    case 'list_symbols':
+    case 'file_dependencies':
+      return 'file';
+    case 'edit_file':
+    case 'write_file':
+    case 'create_file':
+    case 'search_replace':
+    case 'parallel_edit_files':
+      return 'edit';
+    case 'grep':
+    case 'glob':
+    case 'code_explore':
+    case 'find_references':
+    case 'trace_callees':
+    case 'trace_callers':
+    case 'trace_chain':
+    case 'blast_radius':
+      return 'search';
+    case 'bash':
+      return 'terminal';
+    case 'web_fetch':
+    case 'web_search':
+      return 'globe';
+    case 'list_directory':
+    case 'change_dir':
+      return 'folder';
+    case 'use_skill':
+      return 'skill';
+    case 'todo':
+    case 'todowrite':
+      return 'todo';
+    default:
+      return 'default';
+  }
+}
+
+/** OpenCode inline-tool glyphs: `$` bash, `←` edit, `→` read, `✱` search, `◈` web. */
+export function toolGlyph(name: string): string {
+  switch (toolCategory(name)) {
+    case 'terminal':
+      return '$';
+    case 'edit':
+      return '←';
+    case 'file':
+      return '→';
+    case 'search':
+      return '✱';
+    case 'globe':
+      return '◈';
+    default:
+      return '⚙';
+  }
+}
+
+export function jsonArgString(argsJson: string, key: string): string {
+  try {
+    const parsed = JSON.parse(argsJson) as unknown;
+    if (parsed === null || typeof parsed !== 'object') return '';
+    const v = (parsed as Record<string, unknown>)[key];
+    return typeof v === 'string' ? v : '';
+  } catch {
+    return '';
+  }
+}
+
+export type DiffPreviewLine = {
+  kind: 'add' | 'del' | 'ctx' | 'meta';
+  text: string;
+  oldLine?: number;
+  newLine?: number;
+};
+
+/** Tools whose payload is actually a code change (edit/write/git). Bullet lists
+ *  in `code_explore` / skills / grep must never go through the diff highlighter. */
+export function toolRendersAsDiff(name: string): boolean {
+  switch (name) {
+    case 'edit_file':
+    case 'write_file':
+    case 'create_file':
+    case 'search_replace':
+    case 'parallel_edit_files':
+    case 'bash':
+      return true;
+    default:
+      return false;
+  }
+}
+
+/** True only for a real unified diff (`diff --git` or `@@ -n,n +n,n @@`).
+ *  A leading `-` bullet (`- F3 'memory/…'`) is not a deletion. */
+export function looksLikeUnifiedDiff(text: string): boolean {
+  const lines = text.replace(/\r\n/g, '\n').split('\n');
+  const n = Math.min(lines.length, 80);
+  for (let i = 0; i < n; i++) {
+    const line = lines[i]!;
+    if (line.startsWith('diff --git ') || /^@@ -\d+/.test(line)) return true;
+  }
+  return false;
+}
+
+function parseHunkStarts(header: string): { oldStart: number; newStart: number } | null {
+  let oldStart: number | undefined;
+  let newStart: number | undefined;
+  for (const tok of header.split(/\s+/)) {
+    if (tok.startsWith('-')) {
+      const n = Number.parseInt(tok.slice(1).split(',')[0] ?? '', 10);
+      if (Number.isFinite(n)) oldStart = n;
+    } else if (tok.startsWith('+')) {
+      const n = Number.parseInt(tok.slice(1).split(',')[0] ?? '', 10);
+      if (Number.isFinite(n)) newStart = n;
+    }
+  }
+  return oldStart != null && newStart != null ? { oldStart, newStart } : null;
+}
+
+/** Best-effort unified-diff preview with per-line numbers from `@@` hunks.
+ *  `+/-` lines are only colored after a real diff header — never on first sight. */
+export function parseDiffPreview(output: string, maxLines = 2000): DiffPreviewLine[] {
+  const raw = output.replace(/\r\n/g, '\n').split('\n');
+  const out: DiffPreviewLine[] = [];
+  let sawDiff = false;
+  let oldLn = 0;
+  let newLn = 0;
+  let inHunk = false;
+  for (const line of raw) {
+    if (out.length >= maxLines) break;
+    if (
+      line.startsWith('diff --git') ||
+      line.startsWith('index ') ||
+      line.startsWith('--- ') ||
+      line.startsWith('+++ ') ||
+      line.startsWith('@@')
+    ) {
+      sawDiff = true;
+      if (line.startsWith('@@')) {
+        const starts = parseHunkStarts(line);
+        if (starts) {
+          oldLn = starts.oldStart;
+          newLn = starts.newStart;
+          inHunk = true;
+        }
+      } else {
+        inHunk = false;
+      }
+      out.push({ kind: 'meta', text: line });
+      continue;
+    }
+    if (!sawDiff) continue;
+    if (line.startsWith('+') && !line.startsWith('+++ ')) {
+      out.push({
+        kind: 'add',
+        text: line,
+        newLine: inHunk ? newLn : undefined,
+      });
+      if (inHunk) newLn += 1;
+      continue;
+    }
+    if (line.startsWith('-') && !line.startsWith('--- ')) {
+      out.push({
+        kind: 'del',
+        text: line,
+        oldLine: inHunk ? oldLn : undefined,
+      });
+      if (inHunk) oldLn += 1;
+      continue;
+    }
+    const isCtx = line.startsWith(' ') || line === '';
+    out.push({
+      kind: 'ctx',
+      text: line,
+      oldLine: inHunk && isCtx ? oldLn : undefined,
+      newLine: inHunk && isCtx ? newLn : undefined,
+    });
+    if (inHunk && isCtx) {
+      oldLn += 1;
+      newLn += 1;
+    }
+  }
+  return sawDiff ? out : [];
+}
+
+export type StructuredField = {
+  key: string;
+  value: string;
+  multiline: boolean;
+};
+
+function tryParseJson(text: string): unknown | undefined {
+  const trimmed = text.trim();
+  if (!trimmed) return undefined;
+  const starts = trimmed[0];
+  if (starts !== '{' && starts !== '[' && starts !== '"') return undefined;
+  try {
+    return JSON.parse(trimmed) as unknown;
+  } catch {
+    return undefined;
+  }
+}
+
+function prettyUnknown(value: unknown): string {
+  if (typeof value === 'string') {
+    const nested = tryParseJson(value);
+    if (nested !== undefined && typeof nested !== 'string') {
+      return JSON.stringify(nested, null, 2);
+    }
+    return value;
+  }
+  if (value === null || value === undefined) return String(value);
+  if (typeof value === 'object') return JSON.stringify(value, null, 2);
+  return String(value);
+}
+
+/** Turn a raw tool-args JSON blob into readable key/value fields.
+ * Nested JSON strings and `\n` escapes become real formatted text. */
+export function structuredToolFields(raw: string): StructuredField[] | null {
+  const parsed = tryParseJson(raw);
+  if (parsed === undefined || parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    return null;
+  }
+  return Object.entries(parsed as Record<string, unknown>).map(([key, val]) => {
+    const value = prettyUnknown(val);
+    return { key, value, multiline: value.includes('\n') };
+  });
+}
+
+/** Pretty-print tool args/output: unescape JSON, expand nested strings. */
+export function formatToolPayload(raw: string): string {
+  if (!raw) return raw;
+  const pretty = prettyToolText(raw);
+  return pretty.text;
+}
+
+/** Copyable code-block body: pretty JSON when the payload parses, else unescaped text. */
+export function prettyToolText(raw: string): { text: string; lang: 'json' | 'text' } {
+  if (!raw) return { text: '', lang: 'text' };
+  const parsed = tryParseJson(raw);
+  if (parsed !== undefined) {
+    return { text: JSON.stringify(parsed, null, 2), lang: 'json' };
+  }
+  return {
+    text: raw.replace(/\\r\\n/g, '\n').replace(/\\n/g, '\n').replace(/\\t/g, '\t').replace(/\\"/g, '"'),
+    lang: 'text',
+  };
+}

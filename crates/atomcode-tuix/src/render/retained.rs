@@ -968,6 +968,14 @@ pub struct RetainedRenderer<W: Write + Send> {
     /// strip = body tail" invariant and orphans the spinner glyph next to the
     /// committed `●` (bash-only, since the hint is).
     inflight_hint: Option<String>,
+    /// Live stdout/stderr captured for the current inflight tool (bash). Shown
+    /// as a left-bordered terminal tail inside the strip (last N lines) and
+    /// frozen into the transcript on commit so the call reads like a CLI.
+    inflight_output: String,
+    /// Last spinner glyph / elapsed-meta forwarded into `render_inflight_tool`,
+    /// so a `ToolCallLiveTail` rewrite can keep the Running row in sync.
+    inflight_icon: String,
+    inflight_meta: String,
     /// Active multi-row "live group" — the tail of `body_lines` is one
     /// header + N child rows for a parallel tool batch. Subsequent
     /// `UiLine::ToolGroupChildUpdate` events resolve `call_id` →
@@ -1149,6 +1157,9 @@ impl<W: Write + Send> RetainedRenderer<W> {
             inflight_tool: None,
             inflight_tool_rows: 0,
             inflight_hint: None,
+            inflight_output: String::new(),
+            inflight_icon: String::new(),
+            inflight_meta: String::new(),
             live_group: None,
             modal_overlay: None,
             diff_overlay_active: false,
@@ -1407,6 +1418,56 @@ impl<W: Write + Send> RetainedRenderer<W> {
     /// `push_body_prefixed`. Removes any previously rendered inflight
     /// tool lines from `body_lines` first so the spinner animation
     /// replaces in-place rather than accumulating rows.
+    /// Last N lines of live tool stdout, each prefixed with a left border so
+    /// the strip reads as a terminal panel (OpenCode BlockTool). Capped so
+    /// growing output does not change the inflight row count after fill —
+    /// in-place rewrite requires a stable height.
+    const LIVE_TAIL_MAX_LINES: usize = 8;
+    const LIVE_TAIL_MAX_CHARS: usize = 4096;
+
+    fn append_inflight_output(buf: &mut String, chunk: &str) {
+        buf.push_str(chunk);
+        if buf.len() <= Self::LIVE_TAIL_MAX_CHARS {
+            return;
+        }
+        let drain_to = buf.len() - Self::LIVE_TAIL_MAX_CHARS;
+        let cut = buf[drain_to..]
+            .find('\n')
+            .map(|i| drain_to + i + 1)
+            .unwrap_or(drain_to);
+        buf.drain(..cut);
+    }
+
+    fn live_tail_preview_lines(buf: &str) -> Vec<&str> {
+        let mut lines: Vec<&str> = buf.lines().collect();
+        if lines.len() > Self::LIVE_TAIL_MAX_LINES {
+            let skip = lines.len() - Self::LIVE_TAIL_MAX_LINES;
+            lines = lines[skip..].to_vec();
+        }
+        lines
+    }
+
+    fn build_live_tail_rows(&self, buf: &str) -> Vec<Vec<Cell>> {
+        let lines = Self::live_tail_preview_lines(buf);
+        if lines.is_empty() {
+            return Vec::new();
+        }
+        let unicode = self.caps.unicode_symbols;
+        let bar = if unicode { "│ " } else { "| " };
+        let border = self.style_for(Role::Border);
+        let body = self.style_for(Role::Secondary);
+        let screen_w = self.screen.width() as usize;
+        let mut rows = Vec::with_capacity(lines.len());
+        for line in lines {
+            let mut row = Vec::new();
+            push_str_cells(&mut row, bar, &border);
+            let safe = scrub_controls(line);
+            push_str_cells(&mut row, &safe, &body);
+            rows.push(clip_cells_to_width(&row, screen_w.max(1)));
+        }
+        rows
+    }
+
     fn render_inflight_tool(&mut self, icon: &str, name: &str, detail: &str, meta: &str) {
         // Spinner ticks fire at ~80ms cadence and re-call this fn with a
         // new icon glyph each time. The OLD implementation truncated
@@ -1435,6 +1496,8 @@ impl<W: Write + Send> RetainedRenderer<W> {
         // it doesn't accumulate across ticks.
         let safe_name = scrub_controls(name);
         let safe_detail = scrub_controls(detail);
+        self.inflight_icon = icon.to_string();
+        self.inflight_meta = meta.to_string();
 
         // Task/CodeReview are long-running sub-agent fan-outs. Their live row
         // carries spinner activity (`· thinking…`, elapsed, token count), so
@@ -1559,6 +1622,9 @@ impl<W: Write + Send> RetainedRenderer<W> {
             let label = format!("Running{meta}");
             new_rows.push(self.build_spinner_body_row(icon, &label));
         }
+        // Live stdout/stderr tail — after the header (and bash Running) so
+        // existing tests that pin `command → blank → Running` stay valid.
+        new_rows.extend(self.build_live_tail_rows(&self.inflight_output));
 
         let prev_rows = self.inflight_tool_rows;
         let n = new_rows.len();
@@ -6123,6 +6189,9 @@ impl<W: Write + Send> RetainedRenderer<W> {
         if let Some((_id, name, detail)) = self.inflight_tool.take() {
             let safe_name = scrub_controls(&name);
             let safe_detail = scrub_controls(&detail);
+            let output_snapshot = std::mem::take(&mut self.inflight_output);
+            self.inflight_icon.clear();
+            self.inflight_meta.clear();
             // Clear any previously rendered inflight tool rows so
             // push_body_prefixed appends fresh committed lines.
             self.live_spinner_active = false;
@@ -6209,6 +6278,9 @@ impl<W: Write + Send> RetainedRenderer<W> {
                 for row in rows {
                     self.push_body_row(row);
                 }
+            }
+            for row in self.build_live_tail_rows(&output_snapshot) {
+                self.push_body_row(row);
             }
         }
     }
@@ -6936,7 +7008,8 @@ impl<W: Write + Send> RetainedRenderer<W> {
             | UiLine::ClearTransient
             | UiLine::InputCommit
             | UiLine::DiffPanel { .. }
-            | UiLine::ModalOverlayClear => return,
+            | UiLine::ModalOverlayClear
+            | UiLine::ToolCallLiveTail { .. } => return,
             _ => {}
         }
         // Coalesce consecutive streaming text: feeding the markdown
@@ -6991,9 +7064,12 @@ impl<W: Write + Send> RetainedRenderer<W> {
         self.reasoning_line_buf.clear();
         self.md_state.reset();
         self.live_group = None;
-        self.inflight_tool = None;
-        self.inflight_tool_rows = 0;
-        self.inflight_hint = None;
+            self.inflight_tool = None;
+            self.inflight_tool_rows = 0;
+            self.inflight_hint = None;
+            self.inflight_output.clear();
+            self.inflight_icon.clear();
+            self.inflight_meta.clear();
         self.live_spinner_active = false;
         self.live_spinner_spacer_active = false;
         self.live_spinner_tail_compacted = false;
@@ -7366,6 +7442,18 @@ impl<W: Write + Send> Renderer for RetainedRenderer<W> {
                     self.flush_assistant_remainder();
                 }
             }
+            UiLine::ReasoningHeader(title) => {
+                self.flush_assistant_remainder();
+                let style = self.style_bold(Role::ThinkingHeader);
+                let safe = scrub_controls(&title);
+                let label = if safe.is_empty() {
+                    "+ Thought".to_string()
+                } else {
+                    format!("+ Thought: {safe}")
+                };
+                self.push_body_text(&label, &style);
+                self.reasoning_header_emitted = true;
+            }
             UiLine::ReasoningText(text) => {
                 let safe = scrub_controls(&text);
                 self.flush_reasoning_lines(&safe);
@@ -7435,6 +7523,9 @@ impl<W: Write + Send> Renderer for RetainedRenderer<W> {
                 // keeps ITS OWN hint, and BEFORE render_inflight_tool so the
                 // first paint already includes it.
                 self.inflight_hint = hint;
+                self.inflight_output.clear();
+                self.inflight_icon.clear();
+                self.inflight_meta.clear();
                 // Use a plausible "still" frame for the initial paint;
                 // the next Spinner / StreamingBox tick (within ~80ms)
                 // overwrites with the real frame, picking up the
@@ -7449,6 +7540,29 @@ impl<W: Write + Send> Renderer for RetainedRenderer<W> {
                 // elapsed-time suffix to forward. The next Spinner /
                 // StreamingBox tick (~80ms later) supplies the meta.
                 self.render_inflight_tool(initial, &name, &detail, "");
+            }
+            UiLine::ToolCallLiveTail { call_id, chunk } => {
+                let matches = self
+                    .inflight_tool
+                    .as_ref()
+                    .is_some_and(|(id, _, _)| id == &call_id);
+                if !matches {
+                    return;
+                }
+                Self::append_inflight_output(&mut self.inflight_output, &chunk);
+                let (id, name, detail) = self.inflight_tool.clone().expect("matched above");
+                let _ = id;
+                let icon = if self.inflight_icon.is_empty() {
+                    if self.caps.unicode_symbols {
+                        "\u{2819}".to_string()
+                    } else {
+                        "*".to_string()
+                    }
+                } else {
+                    self.inflight_icon.clone()
+                };
+                let meta = self.inflight_meta.clone();
+                self.render_inflight_tool(&icon, &name, &detail, &meta);
             }
             UiLine::ToolCallCommit { call_id } => {
                 // Only commit if the inflight_tool matches the expected call_id,
@@ -7775,6 +7889,9 @@ impl<W: Write + Send> Renderer for RetainedRenderer<W> {
                 // Bash exit-code failures always start with the
                 // `format_exit_marker` prefix from bash.rs:578.
                 let is_exit_code_failure = !success && safe.starts_with("[elapsed:");
+                let is_timeout = !success
+                    && (safe.to_ascii_lowercase().contains("timed out")
+                        || safe.to_ascii_lowercase().contains("timeout"));
                 let body_str = if success {
                     safe
                 } else {
@@ -7824,7 +7941,9 @@ impl<W: Write + Send> Renderer for RetainedRenderer<W> {
                     // shouldn't fade to default mid-sentence).
                     let line_style = if line_idx == 0 {
                         if !success {
-                            if is_exit_code_failure {
+                            if is_timeout {
+                                &error_header
+                            } else if is_exit_code_failure {
                                 &warn_header
                             } else {
                                 &error_header
@@ -7949,14 +8068,19 @@ impl<W: Write + Send> Renderer for RetainedRenderer<W> {
                 let add_style = self.style_for(Role::DiffAdd);
                 let del_style = self.style_for(Role::DiffRemove);
                 let secondary = self.style_for(Role::Secondary);
+                let border = self.style_for(Role::Border);
                 let unicode = self.caps.unicode_symbols;
+                let bar = if unicode { "│ " } else { "| " };
                 const MAX_DIFF_DISPLAY: usize = 25;
                 let content_total = entries
                     .iter()
                     .filter(|entry| entry.kind != DiffKind::Separator)
                     .count();
                 let ellipsis = if unicode { "\u{2026}" } else { "..." };
+                let title = if unicode { "← Edit" } else { "< Edit" };
+                self.push_body_text(title, &muted);
                 let mut shown = 0usize;
+                let screen_w = self.screen.width() as usize;
                 for entry in &entries {
                     if entry.kind == DiffKind::Separator {
                         let separator = if unicode {
@@ -7964,14 +8088,18 @@ impl<W: Write + Send> Renderer for RetainedRenderer<W> {
                         } else {
                             format!("  {:>gutter$} ...", "")
                         };
-                        self.push_body_text(&separator, &muted);
+                        let mut row = Vec::new();
+                        push_str_cells(&mut row, bar, &border);
+                        push_str_cells(&mut row, &separator, &muted);
+                        self.push_body_row(clip_cells_to_width(&row, screen_w.max(1)));
                         continue;
                     }
                     if shown >= MAX_DIFF_DISPLAY {
-                        self.push_body_text(
-                            &format!("  {ellipsis} +{} more lines", content_total - shown),
-                            &muted,
-                        );
+                        let more = format!("  {ellipsis} +{} more lines", content_total - shown);
+                        let mut row = Vec::new();
+                        push_str_cells(&mut row, bar, &border);
+                        push_str_cells(&mut row, &more, &muted);
+                        self.push_body_row(clip_cells_to_width(&row, screen_w.max(1)));
                         break;
                     }
                     let style = match entry.kind {
@@ -7980,7 +8108,10 @@ impl<W: Write + Send> Renderer for RetainedRenderer<W> {
                         _ => &secondary,
                     };
                     let body = crate::render::diff::diff_row_text(entry, gutter);
-                    self.push_body_text(&scrub_controls(&body), style);
+                    let mut row = Vec::new();
+                    push_str_cells(&mut row, bar, &border);
+                    push_str_cells(&mut row, &scrub_controls(&body), style);
+                    self.push_body_row(clip_cells_to_width(&row, screen_w.max(1)));
                     shown += 1;
                 }
             }
@@ -18772,6 +18903,74 @@ mod tests {
             running_row - command_row,
             2,
             "command and Running must have exactly one blank row between them:\n{}",
+            vterm.dump()
+        );
+    }
+
+    /// Live bash stdout rides INSIDE the inflight strip (left-bordered tail)
+    /// so commit erase covers it. Row count is capped so later chunks rewrite
+    /// in place instead of scrolling a new copy of the command header.
+    #[test]
+    fn retained_bash_live_tail_is_part_of_strip_and_cleared_on_commit() {
+        let (mut r, buf) = new_capturing(80, 24);
+        let mut vterm = crate::test_term::VirtualTerminal::new(80, 24);
+
+        r.render(UiLine::ToolCallInFlight {
+            id: "call-1".into(),
+            name: "Bash".into(),
+            detail: "ls -la".into(),
+            hint: None,
+        });
+        r.render(UiLine::ToolCallLiveTail {
+            call_id: "call-1".into(),
+            chunk: "file_one.rs\nfile_two.rs\n".into(),
+        });
+        r.flush_deferred();
+        drain_into_vterm(&buf, &mut vterm);
+
+        assert!(
+            vterm.any_row(|row| row.contains("file_one.rs")),
+            "live stdout must show during flight:\n{}",
+            vterm.dump()
+        );
+        assert!(
+            vterm.any_row(|row| row.contains('│') || row.contains('|')),
+            "live stdout must use a left border:\n{}",
+            vterm.dump()
+        );
+        let rows_during = r.inflight_tool_rows;
+        assert!(
+            rows_during >= 4,
+            "tail must be counted in the inflight strip, got {rows_during}"
+        );
+
+        r.render(UiLine::ToolCallCommit {
+            call_id: Some("call-1".into()),
+        });
+        r.flush_deferred();
+        drain_into_vterm(&buf, &mut vterm);
+
+        assert!(
+            vterm.any_row(|row| row.contains("file_one.rs")),
+            "committed tail must remain in the transcript:\n{}",
+            vterm.dump()
+        );
+        assert_eq!(
+            r.inflight_tool_rows, 0,
+            "strip must be frozen after commit"
+        );
+    }
+
+    #[test]
+    fn retained_reasoning_header_is_always_visible() {
+        let (mut r, buf) = new_capturing(80, 24);
+        let mut vterm = crate::test_term::VirtualTerminal::new(80, 24);
+        r.render(UiLine::ReasoningHeader("Inspecting workflow".into()));
+        r.flush_deferred();
+        drain_into_vterm(&buf, &mut vterm);
+        assert!(
+            vterm.any_row(|row| row.contains("Thought") && row.contains("Inspecting workflow")),
+            "thinking header must render:\n{}",
             vterm.dump()
         );
     }

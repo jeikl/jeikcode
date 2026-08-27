@@ -249,6 +249,17 @@ impl LiveViewHub {
         Ok(identity)
     }
 
+    pub fn running_session_id(&self) -> Option<String> {
+        let state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+        if !state.turn_active {
+            return None;
+        }
+        state
+            .binding
+            .as_ref()
+            .map(|bound| bound.identity.session_id.clone())
+    }
+
     pub fn join(&self) -> Result<LiveJoin, HubError> {
         self.join_for_provider(None)
     }
@@ -1188,6 +1199,16 @@ mod tests {
             ..unchanged
         };
         assert!(!session_change_is_noop(&binding, &changed));
+    }
+
+    #[test]
+    fn running_session_id_is_none_while_idle() {
+        let hub = LiveViewHub::new();
+        assert_eq!(hub.running_session_id(), None);
+        let (control, _) = control();
+        hub.bind("session-1", PathBuf::from("/one"), snapshot("one"), control)
+            .unwrap();
+        assert_eq!(hub.running_session_id(), None);
     }
 
     #[test]

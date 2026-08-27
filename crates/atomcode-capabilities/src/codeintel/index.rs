@@ -23,7 +23,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::hash::{DefaultHasher, Hash, Hasher};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant, UNIX_EPOCH};
 
@@ -34,6 +34,22 @@ const BACKGROUND_REFRESH_SECS: u64 = 5;
 /// Query-time safety valve: never re-tree-sitter thousands of files on a single
 /// `code_explore`. Explicit `atomcode init` / `--force` pass [`ReparseBudget::Unlimited`].
 const MAX_REPARSE_PER_QUERY: usize = 128;
+
+/// Parse-thread cap. Same as sibling `codegraph`'s `DEFAULT_PARSE_POOL_CAP`:
+/// `clamp(max(3, cores) - 1, 1, 8)` — leave a core for the main thread / SQLite
+/// writer, never more than 8, and a 2-core box still gets 2 parse workers.
+const MAX_PARSE_THREADS: usize = 8;
+/// Files parsed (and flushed to SQLite) per batch. Bounds in-flight tree-sitter
+/// trees + source strings + prepared blobs.
+const PARSE_BATCH_FILES: usize = 256;
+/// SQLite upsert chunk. Sibling codegraph commits as results arrive; a single
+/// 15k-row WAL transaction is the other half of the OOM.
+const UNIT_WRITE_CHUNK: usize = 256;
+/// Per-symbol caps so a Java/C# ERP method with a wall of SQL strings cannot
+/// inflate a `FileUnit` to megabytes.
+const MAX_STRING_LITERALS_PER_SYMBOL: usize = 32;
+const MAX_LITERAL_CHARS: usize = 240;
+const MAX_SQL_PREDICATES_PER_SYMBOL: usize = 16;
 
 /// How many dirty files [`sync_units`] may re-parse in one pass.
 #[derive(Debug, Clone, Copy)]
@@ -554,6 +570,22 @@ fn enrich_symbol_microstructure(nodes: &mut [SymbolNode], source: &str) {
 
         literals.sort();
         literals.dedup();
+        if literals.len() > MAX_STRING_LITERALS_PER_SYMBOL {
+            literals.truncate(MAX_STRING_LITERALS_PER_SYMBOL);
+        }
+        for lit in &mut literals {
+            if lit.len() > MAX_LITERAL_CHARS {
+                lit.truncate(MAX_LITERAL_CHARS);
+            }
+        }
+        if sqls.len() > MAX_SQL_PREDICATES_PER_SYMBOL {
+            sqls.truncate(MAX_SQL_PREDICATES_PER_SYMBOL);
+        }
+        for pred in &mut sqls {
+            if pred.raw_clause.len() > MAX_LITERAL_CHARS {
+                pred.raw_clause.truncate(MAX_LITERAL_CHARS);
+            }
+        }
 
         let has_sql = !sqls.is_empty();
         let is_dto = matches!(
@@ -1381,6 +1413,9 @@ fn load_disk_cache(root: &Path) -> Option<DiskCache> {
 
 /// Persist only the dirty file-unit rows. Never serializes the whole graph or
 /// rewrites the giant JSON/bin snapshots — those belong on first build / init.
+///
+/// Writes in [`UNIT_WRITE_CHUNK`]-sized transactions so the WAL cannot grow to
+/// the size of the whole corpus (the 15k-file one-shot commit).
 fn persist_units_incremental(
     root: &Path,
     upsert: &[(PathBuf, FileUnit)],
@@ -1389,15 +1424,87 @@ fn persist_units_incremental(
     if upsert.is_empty() && deleted.is_empty() {
         return;
     }
-    use rayon::prelude::*;
-    // Pre-compress FileUnits in parallel workers before acquiring SQLite lock.
-    let prepared: Vec<super::index_db::PreparedUnitWrite> = upsert
-        .into_par_iter()
-        .filter_map(|(p, u)| super::index_db::PreparedUnitWrite::from_unit(p.clone(), u))
-        .collect();
+    let Ok(db) = super::index_db::IndexDb::open_shared(root) else {
+        return;
+    };
+    if upsert.is_empty() {
+        let _ = db.upsert_units_prepared(&[], deleted);
+        return;
+    }
+    for (i, chunk) in upsert.chunks(UNIT_WRITE_CHUNK).enumerate() {
+        let prepared: Vec<super::index_db::PreparedUnitWrite> = chunk
+            .par_iter()
+            .filter_map(|(p, u)| super::index_db::PreparedUnitWrite::from_unit(p.clone(), u))
+            .collect();
+        let dels = if i == 0 { deleted } else { &[] as &[PathBuf] };
+        let _ = db.upsert_units_prepared(&prepared, dels);
+    }
+}
 
-    if let Ok(db) = super::index_db::IndexDb::open_shared(root) {
-        let _ = db.upsert_units_prepared(&prepared, deleted);
+/// Persist `paths` looked up from `units` (no `FileUnit` clone) in chunks.
+fn persist_paths(
+    root: &Path,
+    units: &HashMap<PathBuf, FileUnit>,
+    paths: &[PathBuf],
+    deleted: &[PathBuf],
+) {
+    if paths.is_empty() && deleted.is_empty() {
+        return;
+    }
+    let Ok(db) = super::index_db::IndexDb::open_shared(root) else {
+        return;
+    };
+    if paths.is_empty() {
+        let _ = db.upsert_units_prepared(&[], deleted);
+        return;
+    }
+    for (i, chunk) in paths.chunks(UNIT_WRITE_CHUNK).enumerate() {
+        let prepared: Vec<super::index_db::PreparedUnitWrite> = chunk
+            .par_iter()
+            .filter_map(|p| {
+                let u = units.get(p)?;
+                super::index_db::PreparedUnitWrite::from_unit(p.clone(), u)
+            })
+            .collect();
+        let dels = if i == 0 { deleted } else { &[] as &[PathBuf] };
+        let _ = db.upsert_units_prepared(&prepared, dels);
+    }
+}
+
+/// First-build persist of every unit, chunked. Does **not** serialize the graph
+/// blob — caller writes that separately after compose, once unit buffers are gone.
+fn persist_units_chunked(
+    root: &Path,
+    units: &HashMap<PathBuf, FileUnit>,
+    deleted: &[PathBuf],
+) {
+    if units.is_empty() && deleted.is_empty() {
+        return;
+    }
+    let Ok(db) = super::index_db::IndexDb::open_shared(root) else {
+        return;
+    };
+    if !deleted.is_empty() {
+        let _ = db.upsert_units_prepared(&[], deleted);
+    }
+    let mut batch: Vec<(&PathBuf, &FileUnit)> = Vec::with_capacity(UNIT_WRITE_CHUNK);
+    for (p, u) in units {
+        batch.push((p, u));
+        if batch.len() >= UNIT_WRITE_CHUNK {
+            let prepared: Vec<super::index_db::PreparedUnitWrite> = batch
+                .par_iter()
+                .filter_map(|(p, u)| super::index_db::PreparedUnitWrite::from_unit((*p).clone(), u))
+                .collect();
+            let _ = db.upsert_units_prepared(&prepared, &[]);
+            batch.clear();
+        }
+    }
+    if !batch.is_empty() {
+        let prepared: Vec<super::index_db::PreparedUnitWrite> = batch
+            .par_iter()
+            .filter_map(|(p, u)| super::index_db::PreparedUnitWrite::from_unit((*p).clone(), u))
+            .collect();
+        let _ = db.upsert_units_prepared(&prepared, &[]);
     }
 }
 
@@ -1462,16 +1569,17 @@ fn save_disk_cache(
 
     // SQLite is the only on-disk store. Units are the source of truth; the
     // graph is recomposed in memory on cold start. No JSON, no bin snapshot.
+    // Never compress the whole corpus + graph in one shot — that WAL+bincode
+    // spike is what OOM-killed large `atomcode init` runs.
     let incremental = !changed_units.is_empty() || !deleted_paths.is_empty();
     if incremental {
         persist_units_incremental(root, changed_units, deleted_paths);
-    } else if let Ok(db) = super::index_db::IndexDb::open_shared(root) {
-        use rayon::prelude::*;
-        let prepared: Vec<super::index_db::PreparedUnitWrite> = units
-            .par_iter()
-            .filter_map(|(p, u)| super::index_db::PreparedUnitWrite::from_unit(p.clone(), u))
-            .collect();
-        let _ = db.sync_incremental_prepared(walk_fp, &prepared, &[], _graph);
+    } else {
+        persist_units_chunked(root, units, &[]);
+        if let Ok(db) = super::index_db::IndexDb::open_shared(root) {
+            let _ = db.save_graph_only(walk_fp, _graph);
+            let _ = db.set_walk_fp(walk_fp);
+        }
     }
     cleanup_legacy_sidecars(root);
     Ok(db_path)
@@ -1598,24 +1706,30 @@ fn parse_unit(w: &Walked) -> Option<FileUnit> {
 
 /// Compose a cross-file graph from per-file units (symbols first, then call resolve).
 /// Call resolution is global (names may resolve into other files) but cheap vs parse.
+///
+/// **Moves** `nodes` and `calls` out of `units` so the in-memory working set stays
+/// ~1× (graph) instead of ~2× (units + cloned graph). After this returns, `units`
+/// keep only mtime/len fingerprints — SQLite already holds the full rows.
 fn compose_graph(
     root: &Path,
-    units: &HashMap<PathBuf, FileUnit>,
+    units: &mut HashMap<PathBuf, FileUnit>,
     on_progress: &dyn Fn(&str),
 ) -> CodeGraph {
     let t_start = Instant::now();
     let mut g = CodeGraph::new();
-    let mut raw_calls_by_file: Vec<(&Path, &[RawCall])> = Vec::with_capacity(units.len());
+    let mut raw_calls_by_file: Vec<(PathBuf, Vec<RawCall>)> = Vec::with_capacity(units.len());
     let mut total_calls = 0;
-    for (path, unit) in units {
-        for n in &unit.nodes {
-            g.add_symbol(n.clone());
+    for (path, unit) in units.iter_mut() {
+        for n in std::mem::take(&mut unit.nodes) {
+            g.add_symbol(n);
         }
+        unit.nodes.shrink_to_fit();
         g.file_mtimes
             .insert(path.clone(), (unit.mtime_ns / 1_000_000_000) as u64);
         if !unit.calls.is_empty() {
             total_calls += unit.calls.len();
-            raw_calls_by_file.push((path.as_path(), &unit.calls));
+            raw_calls_by_file.push((path.clone(), std::mem::take(&mut unit.calls)));
+            unit.calls.shrink_to_fit();
         }
     }
     let t_syms = t_start.elapsed();
@@ -1631,10 +1745,10 @@ fn compose_graph(
     let resolved_edges: Vec<(SymbolId, Edge)> = raw_calls_by_file
         .into_par_iter()
         .flat_map(|(caller_file, calls)| {
-            let ctx = ResolveContext::new(caller_file, root);
+            let ctx = ResolveContext::new(&caller_file, root);
             let mut edges = Vec::with_capacity(calls.len());
-            for rc in calls {
-                let caller = CodeGraph::make_id(caller_file, &rc.caller_name, rc.caller_line);
+            for rc in &calls {
+                let caller = CodeGraph::make_id(&caller_file, &rc.caller_name, rc.caller_line);
                 if g.node(caller).is_none() {
                     continue;
                 }
@@ -2043,16 +2157,43 @@ fn take_reparse_budget<'a>(
     selected
 }
 
-/// Diff `walked` against `units`: re-parse dirty/new, drop deleted. Returns
-/// `(reparsed, removed, kept, changed_units, deleted_paths)`. Dirty files are parsed **in parallel** across
-/// available CPU cores (each thread caches its own tree-sitter queries).
+/// Same formula as sibling `codegraph` `resolveParsePoolSize`:
+/// `clamp(max(3, available_parallelism()) - 1, 1, 8)`.
+fn parse_parallelism() -> usize {
+    let cores = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(2);
+    resolve_parse_pool_size(cores)
+}
+
+/// Pure pool-size helper — same as codegraph `resolveParsePoolSize(unset, n)`
+/// after the caller does `Math.max(3, availableParallelism())`.
+fn resolve_parse_pool_size(cpu_count: usize) -> usize {
+    cpu_count.max(3).saturating_sub(1).clamp(1, MAX_PARSE_THREADS)
+}
+
+/// Result of [`sync_units`]. `changed_paths` are keys in `units` (no cloned
+/// `FileUnit`s). `units_flushed` means every changed row is already in SQLite.
+struct UnitSync {
+    reparsed: usize,
+    removed: usize,
+    kept: usize,
+    changed_paths: Vec<PathBuf>,
+    deleted_paths: Vec<PathBuf>,
+    units_flushed: bool,
+}
+
+/// Diff `walked` against `units`: re-parse dirty/new, drop deleted.
+/// Dirty files are parsed in bounded batches on a dedicated Rayon pool
+/// (not the process-global pool) so tree-sitter TLS dies with the pool.
 fn sync_units(
     units: &mut HashMap<PathBuf, FileUnit>,
     walked: &[Walked],
     on_progress: &dyn Fn(&str),
     budget: ReparseBudget,
     focus: Option<&Path>,
-) -> (usize, usize, usize, Vec<(PathBuf, FileUnit)>, Vec<PathBuf>) {
+    root: &Path,
+) -> UnitSync {
     rekey_units(units);
 
     let walked_paths: std::collections::HashSet<PathBuf> =
@@ -2079,7 +2220,14 @@ fn sync_units(
         }
     }
     if dirty.is_empty() {
-        return (0, removed, kept, Vec::new(), deleted_paths);
+        return UnitSync {
+            reparsed: 0,
+            removed,
+            kept,
+            changed_paths: Vec::new(),
+            deleted_paths,
+            units_flushed: false,
+        };
     }
 
     let dirty_found = dirty.len();
@@ -2087,12 +2235,9 @@ fn sync_units(
     let dirty_total = dirty.len();
     let deferred = dirty_found.saturating_sub(dirty_total);
 
-    let threads = std::thread::available_parallelism()
-        .map(|n| n.get())
-        .unwrap_or(4)
-        .max(1);
+    let threads = parse_parallelism();
     on_progress(&format!(
-        "Code graph: re-parsing {dirty_total} changed/new file(s) ({kept} unchanged{}) with {threads} threads (Rayon work-stealing)...",
+        "Code graph: re-parsing {dirty_total} changed/new file(s) ({kept} unchanged{}) with {threads} threads in batches of {PARSE_BATCH_FILES}...",
         if deferred > 0 {
             format!(", {deferred} deferred")
         } else {
@@ -2100,55 +2245,75 @@ fn sync_units(
         }
     ));
 
-    // Dynamic work-stealing parallel parse and in-worker Zstd level 1 compression.
-    // Eliminates static chunk long-tail stalls and prevents single-core serialization bottlenecks.
-    use rayon::prelude::*;
-    use std::sync::atomic::{AtomicUsize, Ordering};
+    // Stream to SQLite once the dirty set is large enough that holding a
+    // second copy (changed_units clone + one-shot WAL) would OOM.
+    let stream_persist = dirty_total >= PARSE_BATCH_FILES;
+    let mut reparsed = 0usize;
+    let mut changed_paths = Vec::with_capacity(dirty_total);
 
-    let finished = AtomicUsize::new(0);
-    let step = (dirty_total / 6).max(500);
+    // Dedicated pool so per-thread tree-sitter Parser/Query TLS dies with
+    // the pool — before compose / graph serialize — instead of living on
+    // the process-global Rayon workers for the rest of the CLI run.
+    {
+        let pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(threads)
+            .thread_name(|i| format!("codegraph-parse-{i}"))
+            .build()
+            .ok();
 
-    let (tx, rx) = std::sync::mpsc::channel::<String>();
-    let parsed: Vec<(PathBuf, Option<FileUnit>)> = dirty
-        .into_par_iter()
-        .map_with(tx, |tx, w| {
-            let norm_p = normalize_index_path(&w.path);
-            let unit = parse_unit(w);
-            let count = finished.fetch_add(1, Ordering::Relaxed) + 1;
-            if count % step == 0 || count == dirty_total {
-                let _ = tx.send(format!(
-                    "Code graph: re-parsed {count}/{dirty_total} dirty files..."
-                ));
+        let parse_chunk = |chunk: &[&Walked]| -> Vec<(PathBuf, Option<FileUnit>)> {
+            let job = || {
+                chunk
+                    .par_iter()
+                    .map(|w| {
+                        let norm_p = normalize_index_path(&w.path);
+                        (norm_p, parse_unit(w))
+                    })
+                    .collect()
+            };
+            match pool.as_ref() {
+                Some(p) => p.install(job),
+                None => job(),
             }
-            (norm_p, unit)
-        })
-        .collect();
+        };
 
-    while let Ok(msg) = rx.try_recv() {
-        on_progress(&msg);
+        for chunk in dirty.chunks(PARSE_BATCH_FILES) {
+            let parsed = parse_chunk(chunk);
+            let flush_from = changed_paths.len();
+            for (path, unit) in parsed {
+                reparsed += 1;
+                match unit {
+                    Some(u) => {
+                        changed_paths.push(path.clone());
+                        units.insert(path, u);
+                    }
+                    None => {
+                        units.remove(&path);
+                        deleted_paths.push(path);
+                    }
+                }
+            }
+            if stream_persist {
+                persist_paths(root, units, &changed_paths[flush_from..], &[]);
+            }
+            on_progress(&format!(
+                "Code graph: re-parsed {reparsed}/{dirty_total} dirty files..."
+            ));
+        }
     }
 
     on_progress(&format!(
         "Code graph: finished parse of {dirty_total} dirty files ({threads} threads)."
     ));
 
-    let mut reparsed = 0usize;
-    let mut changed_units = Vec::with_capacity(parsed.len());
-    for (path, unit) in parsed {
-        let norm_path = normalize_index_path(&path);
-        reparsed += 1;
-        match unit {
-            Some(u) => {
-                changed_units.push((norm_path.clone(), u.clone()));
-                units.insert(norm_path, u);
-            }
-            None => {
-                units.remove(&norm_path);
-                deleted_paths.push(norm_path);
-            }
-        }
+    UnitSync {
+        reparsed,
+        removed,
+        kept,
+        changed_paths,
+        deleted_paths,
+        units_flushed: stream_persist,
     }
-    (reparsed, removed, kept, changed_units, deleted_paths)
 }
 
 /// Build a fresh code graph for `root` (walk → parse → resolve). O(repo), CPU-bound.
@@ -2161,7 +2326,7 @@ pub fn build_graph(root: &Path) -> CodeGraph {
             units.insert(normalize_index_path(&w.path), u);
         }
     }
-    compose_graph(&root, &units, &|_| {})
+    compose_graph(&root, &mut units, &|_| {})
 }
 
 /// Shared, lazily-built **incremental** code index the graph tools hold.
@@ -2690,7 +2855,7 @@ impl CodeIndex {
                     let disk_fp = disk.walk_fp;
                     let disk_graph_ok = disk.graph.node_count() > 0;
                     let disk_graph = disk.graph;
-                    let loaded = disk
+                    let mut loaded = disk
                         .units
                         .into_iter()
                         .map(|(p, u)| (normalize_index_path(&PathBuf::from(p)), u))
@@ -2717,12 +2882,20 @@ impl CodeIndex {
                                 "Code graph: loaded SQLite snapshot ({n_files} files, {} symbols) — skipped tree walk.",
                                 disk_graph.node_count()
                             ));
+                            // Graph already holds the symbols. Drop node/call
+                            // payloads so a 15k-file restart is not 2× RSS.
+                            for u in loaded.values_mut() {
+                                u.nodes.clear();
+                                u.nodes.shrink_to_fit();
+                                u.calls.clear();
+                                u.calls.shrink_to_fit();
+                            }
                             Arc::new(disk_graph)
                         } else {
                             on_progress(&format!(
                                 "Code graph: composing {n_files} units from SQLite (one-time, no tree walk)...",
                             ));
-                            let composed = Arc::new(compose_graph(&root, &loaded, on_progress));
+                            let composed = Arc::new(compose_graph(&root, &mut loaded, on_progress));
                             if let Ok(db) = super::index_db::IndexDb::open_shared(&root) {
                                 let _ = db.save_graph_only(disk_fp, composed.as_ref());
                             }
@@ -2759,18 +2932,20 @@ impl CodeIndex {
                         for p in &missing {
                             units.remove(p);
                         }
-                        let (reparsed, removed, kept, changed, deleted) =
-                            sync_units(&mut units, &walked_known, on_progress, budget, focus);
+                        let sync = sync_units(
+                            &mut units,
+                            &walked_known,
+                            on_progress,
+                            budget,
+                            focus,
+                            &root,
+                        );
                         return self.finish_reconcile(
                             &root,
                             disk_fp,
                             units,
                             Some(g),
-                            reparsed,
-                            removed,
-                            kept,
-                            changed,
-                            deleted,
+                            sync,
                             walked_known.len(),
                             on_progress,
                             started,
@@ -2790,18 +2965,13 @@ impl CodeIndex {
             let files = collect_files(&root);
             let fp = fingerprint(&files);
 
-            let (reparsed, removed, kept, changed_units, deleted_paths) =
-                sync_units(&mut units, &files, on_progress, budget, focus);
+            let sync = sync_units(&mut units, &files, on_progress, budget, focus, &root);
             let g = self.finish_reconcile(
                 &root,
                 fp,
                 units,
                 prev_graph,
-                reparsed,
-                removed,
-                kept,
-                changed_units,
-                deleted_paths,
+                sync,
                 files.len(),
                 on_progress,
                 started,
@@ -2855,12 +3025,11 @@ impl CodeIndex {
             ));
             walked.extend(newcomers);
         }
-        let (reparsed, removed_sync, kept, mut changed_units, mut deleted_paths) =
-            sync_units(&mut units, &walked, on_progress, budget, focus);
-        let removed = removed_sync + missing.len();
-        deleted_paths.extend(missing);
-        if reparsed == 0 && removed == 0 {
-            changed_units.clear();
+        let mut sync = sync_units(&mut units, &walked, on_progress, budget, focus, root);
+        sync.removed += missing.len();
+        sync.deleted_paths.extend(missing);
+        if sync.reparsed == 0 && sync.removed == 0 {
+            sync.changed_paths.clear();
         }
         let fp = fingerprint(&walked);
         self.finish_reconcile(
@@ -2868,11 +3037,7 @@ impl CodeIndex {
             fp,
             units,
             prev_graph,
-            reparsed,
-            removed,
-            kept,
-            changed_units,
-            deleted_paths,
+            sync,
             walked.len(),
             on_progress,
             started,
@@ -2883,23 +3048,43 @@ impl CodeIndex {
         &self,
         root: &Path,
         fp: u64,
-        units: HashMap<PathBuf, FileUnit>,
+        mut units: HashMap<PathBuf, FileUnit>,
         prev_graph: Option<Arc<CodeGraph>>,
-        reparsed: usize,
-        removed: usize,
-        kept: usize,
-        changed_units: Vec<(PathBuf, FileUnit)>,
-        deleted_paths: Vec<PathBuf>,
+        sync: UnitSync,
         walked_len: usize,
         on_progress: &dyn Fn(&str),
         started: Instant,
     ) -> Arc<CodeGraph> {
+        let UnitSync {
+            reparsed,
+            removed,
+            kept,
+            changed_paths,
+            deleted_paths,
+            units_flushed,
+        } = sync;
         // If we already have a live graph, NEVER recompose all call edges.
         // Reparsing 2223 files used to still rebuild 38万 symbols — that is why
         // a "partial" increment cost the same as a full index.
         let can_patch = prev_graph.is_some() && (reparsed > 0 || removed > 0);
         let need_compose = prev_graph.is_none();
         let cache_hit = reparsed == 0 && removed == 0 && prev_graph.is_some();
+
+        // Persist FULL units BEFORE compose moves nodes out of them. Streaming
+        // parse already flushed large dirty sets; this covers the small-set
+        // path and any leftover deletes.
+        let mut save_dur = Duration::ZERO;
+        if (reparsed > 0 || removed > 0) && !units_flushed {
+            let t_save = Instant::now();
+            if kept == 0 {
+                persist_units_chunked(root, &units, &deleted_paths);
+            } else {
+                persist_paths(root, &units, &changed_paths, &deleted_paths);
+            }
+            save_dur += t_save.elapsed();
+        } else if (reparsed > 0 || removed > 0) && units_flushed && !deleted_paths.is_empty() {
+            persist_paths(root, &units, &[], &deleted_paths);
+        }
 
         let t_compose = Instant::now();
         let mut compose_dur = Duration::ZERO;
@@ -2911,8 +3096,10 @@ impl CodeIndex {
             for p in &deleted_paths {
                 g.remove_file(p);
             }
-            for (path, unit) in &changed_units {
-                patch_graph_with_unit(&mut g, path, unit, root);
+            for path in &changed_paths {
+                if let Some(unit) = units.get(path) {
+                    patch_graph_with_unit(&mut g, path, unit, root);
+                }
             }
             compose_dur = t_compose.elapsed();
             Arc::new(g)
@@ -2933,17 +3120,16 @@ impl CodeIndex {
                     "Code graph: unit update - reparsed {reparsed}, removed {removed}, kept {kept}."
                 ));
             }
-            let res = Arc::new(compose_graph(root, &units, on_progress));
+            let res = Arc::new(compose_graph(root, &mut units, on_progress));
             compose_dur = t_compose.elapsed();
             res
         } else {
             prev_graph.expect("need_compose false => graph present")
         };
 
-        // Only rewrite SQLite when file units actually changed. Composing the
-        // in-memory graph from an existing db must NOT touch the files on disk
-        // (that was the "restart = rebuild three index files" bug).
-        let mut save_dur = Duration::ZERO;
+        // Units are already on disk. The graph blob is a cold-start shortcut
+        // written only after a full compose — never on a 1-file incremental
+        // patch (serializing the whole CodeGraph is the multi-second stall).
         if reparsed > 0 || removed > 0 {
             on_progress(&format!(
                 "Code graph: ready ({} symbols, {} files; reparsed {}, removed {}, kept {}).",
@@ -2954,19 +3140,19 @@ impl CodeIndex {
                 kept
             ));
             let t_save = Instant::now();
-            let first_or_large = kept == 0;
-            let (ch, del): (&[(PathBuf, FileUnit)], &[PathBuf]) = if first_or_large {
-                (&[], &[])
-            } else {
-                (&changed_units, &deleted_paths)
-            };
-            match save_disk_cache(root, fp, &units, g.as_ref(), ch, del) {
-                Ok(p) => {
-                    save_dur = t_save.elapsed();
-                    on_progress(&format!("Code graph: saved {} in {:?}", path_for_display(&p), save_dur));
+            if let Ok(db) = super::index_db::IndexDb::open_shared(root) {
+                if need_compose {
+                    let _ = db.save_graph_only(fp, g.as_ref());
                 }
-                Err(e) => on_progress(&format!("Code graph: disk save skipped ({e})")),
+                let _ = db.set_walk_fp(fp);
             }
+            cleanup_legacy_sidecars(root);
+            save_dur += t_save.elapsed();
+            on_progress(&format!(
+                "Code graph: saved {} in {:?}",
+                path_for_display(&super::index_db::disk_cache_path_db(root)),
+                save_dur
+            ));
         } else if need_compose {
             if let Ok(db) = super::index_db::IndexDb::open_shared(root) {
                 let t_save = Instant::now();
@@ -2976,7 +3162,7 @@ impl CodeIndex {
             }
         }
 
-        let reparsed_files: Vec<PathBuf> = changed_units.iter().map(|(p, _)| p.clone()).collect();
+        let reparsed_files = changed_paths;
         // Time spent from `started` up to graph composition is the parse & scan phase
         let parse_dur = started.elapsed().saturating_sub(compose_dur);
         let stats = RefreshStats {
@@ -4082,6 +4268,123 @@ public class OrderController
         assert!(
             idx.inner.lock().unwrap().units.len() < 5,
             "must not ingest the 20-file unindexed vendor tree"
+        );
+    }
+
+    #[test]
+    fn parse_parallelism_is_bounded() {
+        let n = parse_parallelism();
+        assert!(
+            (1..=MAX_PARSE_THREADS).contains(&n),
+            "parse threads must stay in 1..={MAX_PARSE_THREADS}, got {n}"
+        );
+    }
+
+    #[test]
+    fn parse_pool_size_matches_codegraph_formula() {
+        // codegraph: resolveParsePoolSize(unset, Math.max(3, cores))
+        //          = clamp(max(3, cores) - 1, 1, 8)
+        assert_eq!(resolve_parse_pool_size(1), 2, "1-core floored to 3 → 2 workers");
+        assert_eq!(resolve_parse_pool_size(2), 2, "2-core floored to 3 → 2 workers");
+        assert_eq!(resolve_parse_pool_size(6), 5, "6-core → 5 workers (leave 1)");
+        assert_eq!(resolve_parse_pool_size(8), 7);
+        assert_eq!(resolve_parse_pool_size(16), 8, "cap at 8");
+        assert_eq!(resolve_parse_pool_size(32), 8);
+    }
+
+    #[test]
+    fn init_sqlite_keeps_full_units_after_compose_slims_memory() {
+        let d = tempfile::tempdir().unwrap();
+        for i in 0..24 {
+            std::fs::write(
+                d.path().join(format!("f{i:02}.rs")),
+                format!("pub fn f{i}() {{}}\n"),
+            )
+            .unwrap();
+        }
+        let report = init_workspace_index(d.path(), false, &|_| {}).expect("init");
+        assert_eq!(report.files, 24);
+
+        let db = crate::codeintel::index_db::IndexDb::open_shared(d.path()).unwrap();
+        let loaded = db.load_units();
+        assert_eq!(loaded.len(), 24);
+        let with_nodes = loaded.values().filter(|u| !u.nodes.is_empty()).count();
+        assert_eq!(
+            with_nodes, 24,
+            "SQLite must store full units, not post-compose fingerprints"
+        );
+        let graph = db.load_graph().expect("graph blob");
+        assert!(
+            graph.node_count() >= 24,
+            "graph snapshot must be written: {}",
+            graph.node_count()
+        );
+
+        let idx = CodeIndex::new();
+        let g = idx.get(d.path());
+        assert!(g.find_by_name("f0").into_iter().next().is_some());
+        let stats = idx.last_stats(d.path()).unwrap();
+        assert!(
+            stats.cache_hit && stats.reparsed == 0,
+            "restart after slim-on-load must be a cache hit: {stats:?}"
+        );
+    }
+
+    #[test]
+    fn init_streams_batches_without_dropping_units() {
+        let d = tempfile::tempdir().unwrap();
+        let n = PARSE_BATCH_FILES + 8;
+        for i in 0..n {
+            std::fs::write(
+                d.path().join(format!("s{i:04}.rs")),
+                format!("pub fn s{i}() {{}}\n"),
+            )
+            .unwrap();
+        }
+        let report = init_workspace_index(d.path(), false, &|_| {}).expect("init");
+        assert_eq!(report.files, n, "{report:?}");
+        assert!(report.reparsed >= n, "{report:?}");
+
+        let db = crate::codeintel::index_db::IndexDb::open_shared(d.path()).unwrap();
+        let loaded = db.load_units();
+        assert_eq!(loaded.len(), n);
+        assert_eq!(
+            loaded.values().filter(|u| !u.nodes.is_empty()).count(),
+            n,
+            "streamed persist must write full units for every file"
+        );
+        let g = db.load_graph().expect("graph");
+        assert!(g.node_count() >= n, "graph {}", g.node_count());
+        assert!(g.find_by_name("s0").into_iter().next().is_some());
+        assert!(
+            g.find_by_name(&format!("s{}", n - 1))
+                .into_iter()
+                .next()
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn string_literals_are_capped_per_symbol() {
+        let d = tempfile::tempdir().unwrap();
+        let mut src = String::from("pub fn many() {\n");
+        for i in 0..80 {
+            src.push_str(&format!("    let _s{i} = \"literal_value_{i:04}\";\n"));
+        }
+        src.push_str("}\n");
+        std::fs::write(d.path().join("many.rs"), src).unwrap();
+        let g = build_graph(d.path());
+        let n = g.find_by_name("many").into_iter().next().expect("many");
+        assert!(
+            n.string_literals.len() <= MAX_STRING_LITERALS_PER_SYMBOL,
+            "literals leaked past cap: {}",
+            n.string_literals.len()
+        );
+        assert!(
+            n.string_literals
+                .iter()
+                .all(|s| s.len() <= MAX_LITERAL_CHARS),
+            "a literal exceeded the char cap"
         );
     }
 }

@@ -39,16 +39,19 @@ impl IndexDb {
         )?;
 
         // Performance & concurrency tunings. Incremental agent edits must not
-        // stall on fsync or a cold page cache — WAL + a large mmap keeps a
-        // single-row upsert in the millisecond range.
+        // stall on fsync or a cold page cache. mmap/cache used to be 512MB/128MB,
+        // which on a 16GB Linux box competing with a 15k-file first index left
+        // nothing for sshd. 128MB mmap + 32MB cache is enough for single-row
+        // upserts; journal_size_limit caps WAL growth between checkpoints.
         conn.execute_batch(
             "PRAGMA journal_mode = WAL;
              PRAGMA synchronous = OFF;
              PRAGMA temp_store = MEMORY;
              PRAGMA busy_timeout = 5000;
-             PRAGMA cache_size = -131072;
-             PRAGMA mmap_size = 536870912;
-             PRAGMA wal_autocheckpoint = 5000;
+             PRAGMA cache_size = -32768;
+             PRAGMA mmap_size = 134217728;
+             PRAGMA journal_size_limit = 67108864;
+             PRAGMA wal_autocheckpoint = 1000;
              CREATE TABLE IF NOT EXISTS meta (
                  key TEXT PRIMARY KEY,
                  value TEXT NOT NULL

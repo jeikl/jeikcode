@@ -21,9 +21,9 @@ mod anthropic;
 mod atomgit_sign;
 mod ollama;
 mod openai_compat;
-mod responses;
 mod pricing_catalog;
 mod reasoning;
+mod responses;
 mod retry;
 mod sign;
 
@@ -34,12 +34,12 @@ pub use openai_compat::{
     effort_control_applicable, model_suggests_vision, reason_effort_applicable,
     resolve_wire_effort, OpenAiCompatConfig, OpenAiCompatProvider,
 };
-pub use responses::{ResponsesConfig, ResponsesProvider};
 pub use pricing_catalog::{
     ensure_models_dev_catalog, resolve_models_dev_pricing, spawn_models_dev_catalog_refresh,
     CatalogPricing,
 };
 pub use reasoning::{ReasoningPolicy, REASONING_PLACEHOLDER};
+pub use responses::{ResponsesConfig, ResponsesProvider};
 pub use retry::RetryPolicy;
 pub use sign::{RequestSigner, RequestSigningError, SignedAuth};
 
@@ -176,7 +176,11 @@ pub(crate) fn sanitize_schema_for_wire(val: &Value) -> Value {
             let mut out = serde_json::Map::new();
 
             // Check if this object is a oneOf / anyOf container that should be normalized
-            if let Some(one_of) = map.get("oneOf").or_else(|| map.get("anyOf")).and_then(|v| v.as_array()) {
+            if let Some(one_of) = map
+                .get("oneOf")
+                .or_else(|| map.get("anyOf"))
+                .and_then(|v| v.as_array())
+            {
                 if !one_of.is_empty() && one_of.iter().all(|item| item.is_object()) {
                     let mut merged_props = serde_json::Map::new();
                     let mut merged_desc = map.get("description").cloned();
@@ -187,14 +191,18 @@ pub(crate) fn sanitize_schema_for_wire(val: &Value) -> Value {
                             if merged_desc.is_none() {
                                 merged_desc = item_obj.get("description").cloned();
                             }
-                            if let Some(props) = item_obj.get("properties").and_then(|p| p.as_object()) {
+                            if let Some(props) =
+                                item_obj.get("properties").and_then(|p| p.as_object())
+                            {
                                 for (k, v) in props {
                                     if k == "kind" || k == "type" || k == "action" {
                                         if let Some(c) = v.get("const").and_then(|c| c.as_str()) {
                                             if !kinds.contains(&c.to_string()) {
                                                 kinds.push(c.to_string());
                                             }
-                                        } else if let Some(e) = v.get("enum").and_then(|e| e.as_array()) {
+                                        } else if let Some(e) =
+                                            v.get("enum").and_then(|e| e.as_array())
+                                        {
                                             for ev in e {
                                                 if let Some(s) = ev.as_str() {
                                                     if !kinds.contains(&s.to_string()) {
@@ -203,7 +211,8 @@ pub(crate) fn sanitize_schema_for_wire(val: &Value) -> Value {
                                                 }
                                             }
                                         } else {
-                                            merged_props.insert(k.clone(), sanitize_schema_for_wire(v));
+                                            merged_props
+                                                .insert(k.clone(), sanitize_schema_for_wire(v));
                                         }
                                     } else {
                                         merged_props.insert(k.clone(), sanitize_schema_for_wire(v));
@@ -247,9 +256,7 @@ pub(crate) fn sanitize_schema_for_wire(val: &Value) -> Value {
             }
             Value::Object(out)
         }
-        Value::Array(arr) => {
-            Value::Array(arr.iter().map(sanitize_schema_for_wire).collect())
-        }
+        Value::Array(arr) => Value::Array(arr.iter().map(sanitize_schema_for_wire).collect()),
         _ => val.clone(),
     }
 }
@@ -376,4 +383,3 @@ mod wire_dump_tests {
         assert_eq!(res["properties"]["base"]["type"], "string");
     }
 }
-

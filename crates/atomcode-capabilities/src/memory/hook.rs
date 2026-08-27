@@ -164,7 +164,10 @@ mod tests {
         );
         let mem = &convo.messages[1];
         assert_eq!(mem.role, Role::User);
-        assert!(mem.synthetic, "legacy system memory converts to frozen user");
+        assert!(
+            mem.synthetic,
+            "legacy system memory converts to frozen user"
+        );
         assert!(mem.text.contains("- old fact") && mem.text.contains("- new fact"));
         assert!(!mem.text.contains("stale copy"));
         assert_eq!(convo.messages[2].text, "earlier turn", "history untouched");

@@ -55,7 +55,11 @@ pub struct ResponsesConfig {
 }
 
 impl ResponsesConfig {
-    pub fn new(api_key: impl Into<String>, base_url: impl Into<String>, model: impl Into<String>) -> Self {
+    pub fn new(
+        api_key: impl Into<String>,
+        base_url: impl Into<String>,
+        model: impl Into<String>,
+    ) -> Self {
         Self {
             api_key: api_key.into(),
             base_url: base_url.into(),
@@ -339,10 +343,7 @@ fn build_request_body(
     body.insert("store".into(), json!(false));
     if policy == ReasoningPolicy::Include {
         // Ask the server for ciphertext we can echo next turn (Grok Build / OpenAI).
-        body.insert(
-            "include".into(),
-            json!(["reasoning.encrypted_content"]),
-        );
+        body.insert("include".into(), json!(["reasoning.encrypted_content"]));
     }
     if !session_id.is_empty() {
         body.insert("prompt_cache_key".into(), json!(session_id));
@@ -616,7 +617,8 @@ impl ResponsesSseDecoder {
                 let item_type = item.get("type").and_then(Value::as_str).unwrap_or("");
                 match item_type {
                     "function_call" => {
-                        let index = v.get("output_index").and_then(Value::as_u64).unwrap_or(0) as u32;
+                        let index =
+                            v.get("output_index").and_then(Value::as_u64).unwrap_or(0) as u32;
                         let id = item
                             .get("call_id")
                             .or_else(|| item.get("id"))
@@ -670,10 +672,7 @@ impl ResponsesSseDecoder {
                             .and_then(Value::as_str)
                             .filter(|s| !s.is_empty())
                             .map(str::to_string);
-                        let entry = self
-                            .pending_reasoning
-                            .entry(index)
-                            .or_insert((None, None));
+                        let entry = self.pending_reasoning.entry(index).or_insert((None, None));
                         if id.is_some() {
                             entry.0 = id;
                         }
@@ -683,7 +682,10 @@ impl ResponsesSseDecoder {
                         if ty != "response.output_item.done" {
                             return Some(vec![]);
                         }
-                        let (id, enc) = self.pending_reasoning.remove(&index).unwrap_or((None, None));
+                        let (id, enc) = self
+                            .pending_reasoning
+                            .remove(&index)
+                            .unwrap_or((None, None));
                         let Some(enc) = enc else {
                             return Some(vec![]);
                         };
@@ -727,7 +729,13 @@ impl ResponsesSseDecoder {
         keys.into_iter()
             .filter_map(|k| self.pending_calls.remove(&k))
             .filter(|(id, name, _)| !id.is_empty() || !name.is_empty())
-            .map(|(id, name, arguments)| StreamEvent::ToolCall(ToolCall { id, name, arguments }))
+            .map(|(id, name, arguments)| {
+                StreamEvent::ToolCall(ToolCall {
+                    id,
+                    name,
+                    arguments,
+                })
+            })
             .collect()
     }
 }
@@ -920,10 +928,7 @@ mod tests {
         let parts = on[0]["content"].as_array().expect("multimodal array");
         assert_eq!(parts[0]["type"], "input_text");
         assert_eq!(parts[1]["type"], "input_image");
-        assert_eq!(
-            parts[1]["image_url"],
-            "data:image/png;base64,QUJD"
-        );
+        assert_eq!(parts[1]["image_url"], "data:image/png;base64,QUJD");
     }
 
     #[test]
@@ -940,10 +945,16 @@ mod tests {
             "data: {\"type\":\"response.completed\",\"response\":{\"usage\":{\"input_tokens\":10,\"output_tokens\":3,\"input_tokens_details\":{\"cached_tokens\":8}}}}\n\n"
         );
         let evs = dec.feed(chunk.as_bytes());
-        assert!(evs.iter().any(|e| matches!(e, StreamEvent::TextDelta(s) if s == "hi")));
-        assert!(evs.iter().any(|e| matches!(e, StreamEvent::ToolCall(tc) if tc.id == "c1" && tc.name == "bash")));
+        assert!(evs
+            .iter()
+            .any(|e| matches!(e, StreamEvent::TextDelta(s) if s == "hi")));
+        assert!(evs
+            .iter()
+            .any(|e| matches!(e, StreamEvent::ToolCall(tc) if tc.id == "c1" && tc.name == "bash")));
         assert!(evs.iter().any(|e| matches!(e, StreamEvent::ReasoningSignature { opaque, provider, id } if opaque == "enc" && provider == RESPONSES_PROVIDER && id.as_deref() == Some("rs_stream_01"))));
-        assert!(evs.iter().any(|e| matches!(e, StreamEvent::Usage(u) if u.prompt == 10 && u.cached == 8)));
+        assert!(evs
+            .iter()
+            .any(|e| matches!(e, StreamEvent::Usage(u) if u.prompt == 10 && u.cached == 8)));
         assert!(evs.iter().any(|e| matches!(e, StreamEvent::Done { .. })));
     }
 }

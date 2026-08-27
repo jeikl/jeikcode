@@ -547,12 +547,7 @@ parallel workers NON-OVERLAPPING scopes."
                 // The child runs AutoRespond::AllowAll (no human in its loop), so the parent's
                 // prompting gates wouldn't protect it. Hard-deny sensitive-path ops for every
                 // child (#1); additionally confine a `worker`'s WRITES to its declared scope.
-                for mw in child_middlewares(
-                    is_worker,
-                    &scope,
-                    &wd,
-                    &inherited_worker_middlewares,
-                ) {
+                for mw in child_middlewares(is_worker, &scope, &wd, &inherited_worker_middlewares) {
                     builder = builder.middleware(mw);
                 }
                 let child = builder.build();
@@ -1792,13 +1787,7 @@ mod tests {
             "read-only explore children do not need worker execution policy"
         );
         assert_eq!(
-            child_middlewares(
-                true,
-                &["src/**".into()],
-                Path::new("/w"),
-                &inherited,
-            )
-            .len(),
+            child_middlewares(true, &["src/**".into()], Path::new("/w"), &inherited,).len(),
             base + 2,
             "worker receives inherited policy plus its scope gate"
         );

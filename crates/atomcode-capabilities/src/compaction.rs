@@ -873,7 +873,10 @@ pub fn build_compact_stub(tool_name: &str, output: &str, success: bool) -> Strin
             None => String::new(),
         }
     };
-    let body_line_count = body.lines().count().max(if body.is_empty() { 0 } else { 1 });
+    let body_line_count = body
+        .lines()
+        .count()
+        .max(if body.is_empty() { 0 } else { 1 });
     let head: String = body
         .lines()
         .next()
@@ -882,12 +885,7 @@ pub fn build_compact_stub(tool_name: &str, output: &str, success: bool) -> Strin
         .take(80)
         .collect();
     let tail: String = if body_line_count > 1 {
-        body.lines()
-            .last()
-            .unwrap_or("")
-            .chars()
-            .take(80)
-            .collect()
+        body.lines().last().unwrap_or("").chars().take(80).collect()
     } else {
         String::new()
     };
@@ -931,7 +929,10 @@ fn extract_artifact_id(output: &str) -> Option<String> {
                 .take(16)
                 .take_while(|c| c.is_ascii_hexdigit())
                 .collect();
-            if id.len() == 16 && id.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+            if id.len() == 16
+                && id
+                    .bytes()
+                    .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
             {
                 return Some(id);
             }
@@ -1020,7 +1021,10 @@ mod tests {
         assert!(s.contains("head: line1"), "{s}");
         assert!(s.contains("tail: line3"), "{s}");
         assert!(s.contains("re-run the original tool"), "{s}");
-        assert!(!s.contains("first:"), "legacy first-only format retired: {s}");
+        assert!(
+            !s.contains("first:"),
+            "legacy first-only format retired: {s}"
+        );
     }
 
     #[test]

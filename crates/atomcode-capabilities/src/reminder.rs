@@ -89,7 +89,9 @@ mod tests {
     #[test]
     fn detects_wrapped_reminders_but_not_plain_user_text() {
         assert!(is_system_reminder(&system_reminder("日期：2026-08-09")));
-        assert!(is_system_reminder("  <system-reminder>\n注意\n</system-reminder>"));
+        assert!(is_system_reminder(
+            "  <system-reminder>\n注意\n</system-reminder>"
+        ));
         assert!(!is_system_reminder("我提到了 <system-reminder> 这个词"));
         assert!(!is_system_reminder("修复登录错误"));
         assert!(!is_system_reminder(""));
@@ -98,10 +100,7 @@ mod tests {
     #[test]
     fn insert_before_last_real_user_puts_reminder_above_query() {
         use atomcode_kernel::message::Message;
-        let mut msgs = vec![
-            Message::system("sys"),
-            Message::user("the query"),
-        ];
+        let mut msgs = vec![Message::system("sys"), Message::user("the query")];
         insert_before_last_real_user(
             &mut msgs,
             Message::synthetic_user(system_reminder("ambient")),

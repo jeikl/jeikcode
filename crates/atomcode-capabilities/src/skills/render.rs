@@ -325,6 +325,9 @@ mod tests {
             short_location("/root/.atomcode/skills/multi-db-executor"),
             "skills/multi-db-executor"
         );
-        assert_eq!(short_location("C:\\Users\\a\\.atomcode\\skills\\x"), "skills/x");
+        assert_eq!(
+            short_location("C:\\Users\\a\\.atomcode\\skills\\x"),
+            "skills/x"
+        );
     }
 }

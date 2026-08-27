@@ -52,15 +52,42 @@ impl JeikcodeConfigGuideTool {
 
     fn get_topic_map(&self) -> HashMap<&'static str, String> {
         let mut map = HashMap::new();
-        map.insert("overview", self.load_document("00_overview_index.md", DOC_OVERVIEW));
-        map.insert("prompts", self.load_document("01_prompts_and_context.md", DOC_PROMPTS));
-        map.insert("models", self.load_document("02_models_and_providers.md", DOC_MODELS));
-        map.insert("mcp_skills", self.load_document("03_mcp_and_skills.md", DOC_MCP_SKILLS));
-        map.insert("thesaurus", self.load_document("04_thesaurus_and_retrieval.md", DOC_THESAURUS));
-        map.insert("tools", self.load_document("05_tools_and_timeouts.md", DOC_TOOLS));
-        map.insert("directories", self.load_document("06_directories_and_system.md", DOC_DIRECTORIES));
-        map.insert("project", self.load_document("07_project_constraints_and_rules.md", DOC_PROJECT));
-        map.insert("updates", self.load_document("08_updates_and_releases.md", DOC_UPDATES));
+        map.insert(
+            "overview",
+            self.load_document("00_overview_index.md", DOC_OVERVIEW),
+        );
+        map.insert(
+            "prompts",
+            self.load_document("01_prompts_and_context.md", DOC_PROMPTS),
+        );
+        map.insert(
+            "models",
+            self.load_document("02_models_and_providers.md", DOC_MODELS),
+        );
+        map.insert(
+            "mcp_skills",
+            self.load_document("03_mcp_and_skills.md", DOC_MCP_SKILLS),
+        );
+        map.insert(
+            "thesaurus",
+            self.load_document("04_thesaurus_and_retrieval.md", DOC_THESAURUS),
+        );
+        map.insert(
+            "tools",
+            self.load_document("05_tools_and_timeouts.md", DOC_TOOLS),
+        );
+        map.insert(
+            "directories",
+            self.load_document("06_directories_and_system.md", DOC_DIRECTORIES),
+        );
+        map.insert(
+            "project",
+            self.load_document("07_project_constraints_and_rules.md", DOC_PROJECT),
+        );
+        map.insert(
+            "updates",
+            self.load_document("08_updates_and_releases.md", DOC_UPDATES),
+        );
         map
     }
 }
@@ -124,17 +151,18 @@ impl Tool for JeikcodeConfigGuideTool {
     }
 
     async fn execute(&self, args: &str, _ctx: &ToolContext) -> ToolResult {
-        let parsed: Args = match parse_tool_args(
-            "jeikcode_config_guide",
-            args,
-            r#"{"topic":"overview"}"#,
-        ) {
-            Ok(a) => a,
-            Err(e) => return e.into_tool_result(),
-        };
+        let parsed: Args =
+            match parse_tool_args("jeikcode_config_guide", args, r#"{"topic":"overview"}"#) {
+                Ok(a) => a,
+                Err(e) => return e.into_tool_result(),
+            };
 
         let topic_map = self.get_topic_map();
-        let topic_req = parsed.topic.as_deref().unwrap_or("overview").to_ascii_lowercase();
+        let topic_req = parsed
+            .topic
+            .as_deref()
+            .unwrap_or("overview")
+            .to_ascii_lowercase();
 
         // Return by topic
         let content = match topic_req.as_str() {
@@ -145,20 +173,56 @@ impl Tool for JeikcodeConfigGuideTool {
             "thesaurus" | "cilin" => topic_map.get("thesaurus").cloned().unwrap_or_default(),
             "tools" | "timeouts" => topic_map.get("tools").cloned().unwrap_or_default(),
             "directories" | "files" => topic_map.get("directories").cloned().unwrap_or_default(),
-            "project" | "constraints" | "rules" => topic_map.get("project").cloned().unwrap_or_default(),
-            "updates" | "upgrade" | "release" => topic_map.get("updates").cloned().unwrap_or_default(),
+            "project" | "constraints" | "rules" => {
+                topic_map.get("project").cloned().unwrap_or_default()
+            }
+            "updates" | "upgrade" | "release" => {
+                topic_map.get("updates").cloned().unwrap_or_default()
+            }
             "all" => {
                 let mut combined = String::new();
                 for (doc_name, filename, embedded) in [
                     ("00_overview_index.md", "00_overview_index.md", DOC_OVERVIEW),
-                    ("01_prompts_and_context.md", "01_prompts_and_context.md", DOC_PROMPTS),
-                    ("02_models_and_providers.md", "02_models_and_providers.md", DOC_MODELS),
-                    ("03_mcp_and_skills.md", "03_mcp_and_skills.md", DOC_MCP_SKILLS),
-                    ("04_thesaurus_and_retrieval.md", "04_thesaurus_and_retrieval.md", DOC_THESAURUS),
-                    ("05_tools_and_timeouts.md", "05_tools_and_timeouts.md", DOC_TOOLS),
-                    ("06_directories_and_system.md", "06_directories_and_system.md", DOC_DIRECTORIES),
-                    ("07_project_constraints_and_rules.md", "07_project_constraints_and_rules.md", DOC_PROJECT),
-                    ("08_updates_and_releases.md", "08_updates_and_releases.md", DOC_UPDATES),
+                    (
+                        "01_prompts_and_context.md",
+                        "01_prompts_and_context.md",
+                        DOC_PROMPTS,
+                    ),
+                    (
+                        "02_models_and_providers.md",
+                        "02_models_and_providers.md",
+                        DOC_MODELS,
+                    ),
+                    (
+                        "03_mcp_and_skills.md",
+                        "03_mcp_and_skills.md",
+                        DOC_MCP_SKILLS,
+                    ),
+                    (
+                        "04_thesaurus_and_retrieval.md",
+                        "04_thesaurus_and_retrieval.md",
+                        DOC_THESAURUS,
+                    ),
+                    (
+                        "05_tools_and_timeouts.md",
+                        "05_tools_and_timeouts.md",
+                        DOC_TOOLS,
+                    ),
+                    (
+                        "06_directories_and_system.md",
+                        "06_directories_and_system.md",
+                        DOC_DIRECTORIES,
+                    ),
+                    (
+                        "07_project_constraints_and_rules.md",
+                        "07_project_constraints_and_rules.md",
+                        DOC_PROJECT,
+                    ),
+                    (
+                        "08_updates_and_releases.md",
+                        "08_updates_and_releases.md",
+                        DOC_UPDATES,
+                    ),
                 ] {
                     combined.push_str(&format!("<!-- START {} -->\n", doc_name));
                     combined.push_str(&self.load_document(filename, embedded));
@@ -309,4 +373,3 @@ mod tests {
         assert!(res.content.contains("/upgrade"));
     }
 }
-

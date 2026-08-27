@@ -2735,11 +2735,21 @@ body {
   font-family: var(--app-monospace-font-family);
   font-size: var(--app-monospace-font-size-small);
   color: var(--app-primary-foreground);
-  white-space: pre;
+  white-space: pre-wrap;
   overflow: auto;
   max-height: 320px;
   width: 100%;
   min-width: 0;
+}
+
+.tool-body-row-content.is-live::after {
+  content: '▍';
+  color: var(--app-primary-foreground);
+  animation: tool-caret-blink 1s step-end infinite;
+}
+
+@keyframes tool-caret-blink {
+  50% { opacity: 0; }
 }
 
 /* Buttons */

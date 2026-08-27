@@ -73,10 +73,7 @@ pub(crate) fn format_user_input_as_final_answer(payload: &serde_json::Value) -> 
             .get("header")
             .and_then(|v| v.as_str())
             .unwrap_or("需要你的确认");
-        let question = q
-            .get("question")
-            .and_then(|v| v.as_str())
-            .unwrap_or("");
+        let question = q.get("question").and_then(|v| v.as_str()).unwrap_or("");
         let mut out = String::new();
         if let Some(i) = index {
             out.push_str(&format!("### 问题 {}\n", i + 1));
@@ -551,7 +548,12 @@ pub(crate) async fn run_chat_turn_v2(
     // model conversation below (`user_images = Vec::new()`), so a reloading client refills
     // the thumbnail from the sidecar. The /chat path previously skipped this, so the image
     // was lost after refresh for anyone loading the session fresh from disk. Mirrors /live.
-    stash_vl_display_images(&runtime_cfg.working_dir, &session_id, &user_text, &user_images);
+    stash_vl_display_images(
+        &runtime_cfg.working_dir,
+        &session_id,
+        &user_text,
+        &user_images,
+    );
     let naming_session_id = session_id.clone();
     let naming_project_bucket =
         atomcode_capabilities::session::SessionManager::project_hash(&runtime_cfg.working_dir);
@@ -860,6 +862,10 @@ pub(crate) enum LiveWireEvent {
         name: String,
         arguments: String,
     },
+    /// Append-only live stdout/stderr (or other committed tool bytes). Distinct
+    /// from `tool_progress`, which is latest-wins ephemeral activity.
+    #[serde(rename = "tool_output")]
+    ToolOutput { id: String, chunk: String },
     #[serde(rename = "tool_progress")]
     ToolProgress { id: String, progress: String },
     #[serde(rename = "tool_result")]
@@ -1027,10 +1033,22 @@ impl NativeLiveWireProjector {
                         arguments: call.arguments,
                     }
                 }
-                Kernel::ToolProgress { call_id, message } => LiveWireEvent::ToolProgress {
-                    id: call_id,
-                    progress: message,
-                },
+                Kernel::ToolProgress { call_id, message } => {
+                    // Match `/chat` ChatEvent projection: U+001E marks ephemeral
+                    // latest-wins activity (subagent spinner); everything else is
+                    // committed output the UI should append like a terminal.
+                    if let Some(progress) = message.strip_prefix('\u{1e}') {
+                        LiveWireEvent::ToolProgress {
+                            id: call_id,
+                            progress: progress.to_string(),
+                        }
+                    } else {
+                        LiveWireEvent::ToolOutput {
+                            id: call_id,
+                            chunk: message,
+                        }
+                    }
+                }
                 Kernel::ToolResult { result } => {
                     let (name, started) = self
                         .tools
@@ -1444,7 +1462,12 @@ pub(crate) async fn preprocess_image_caption(
         .or_else(|| {
             config.logical_models().into_iter().find_map(|(id, m)| {
                 (m.model == active_model || id == active_model)
-                    .then(|| config.resolve_model(Some(&id)).ok().map(|r| r.accepts_images()))
+                    .then(|| {
+                        config
+                            .resolve_model(Some(&id))
+                            .ok()
+                            .map(|r| r.accepts_images())
+                    })
                     .flatten()
             })
         })
@@ -2736,7 +2759,10 @@ mod tests {
             ]
         });
         let text = format_user_input_as_final_answer(&payload);
-        assert!(text.contains("再发一条消息"), "must ask user to send next message");
+        assert!(
+            text.contains("再发一条消息"),
+            "must ask user to send next message"
+        );
         assert!(text.contains("部署方式"));
         assert!(text.contains("选哪种"));
         assert!(text.contains("**A.** Docker"));
@@ -2797,11 +2823,8 @@ mod tests {
     #[tokio::test]
     async fn chat_user_input_wait_degrades_to_null_at_driver_timeout() {
         let (_tx, rx) = tokio::sync::oneshot::channel();
-        let value = await_chat_user_input_response(
-            rx,
-            Some(std::time::Duration::from_millis(1)),
-        )
-        .await;
+        let value =
+            await_chat_user_input_response(rx, Some(std::time::Duration::from_millis(1))).await;
         assert!(value.is_null());
     }
 
@@ -2810,11 +2833,8 @@ mod tests {
         let (tx, rx) = tokio::sync::oneshot::channel();
         tx.send(serde_json::json!({ "selected": ["Blue"] }))
             .unwrap();
-        let value = await_chat_user_input_response(
-            rx,
-            Some(std::time::Duration::from_secs(1)),
-        )
-        .await;
+        let value =
+            await_chat_user_input_response(rx, Some(std::time::Duration::from_secs(1))).await;
         assert_eq!(value["selected"][0], "Blue");
     }
 
@@ -3096,13 +3116,27 @@ mod tests {
             .project(crate::live_hub::LiveViewEvent::Runtime(
                 CodingRuntimeEvent::Agent(atomcode_kernel::event::AgentEvent::ToolProgress {
                     call_id: "c1".into(),
-                    message: "explore#4 · grep unwrap".into(),
+                    message: "\u{1e}explore#4 · grep unwrap".into(),
                 }),
             ))
-            .expect("tool progress must reach the live wire");
+            .expect("ephemeral tool progress must reach the live wire");
         let json = serde_json::to_value(progress).unwrap();
         assert_eq!(json["type"], "tool_progress");
         assert_eq!(json["id"], "c1");
+        assert_eq!(json["progress"], "explore#4 · grep unwrap");
+
+        let output = projector
+            .project(crate::live_hub::LiveViewEvent::Runtime(
+                CodingRuntimeEvent::Agent(atomcode_kernel::event::AgentEvent::ToolProgress {
+                    call_id: "c2".into(),
+                    message: "compiling foo v0.1.0".into(),
+                }),
+            ))
+            .expect("committed tool output must reach the live wire");
+        let out_json = serde_json::to_value(output).unwrap();
+        assert_eq!(out_json["type"], "tool_output");
+        assert_eq!(out_json["id"], "c2");
+        assert_eq!(out_json["chunk"], "compiling foo v0.1.0");
     }
 
     #[test]

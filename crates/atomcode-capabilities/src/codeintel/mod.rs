@@ -88,12 +88,20 @@ pub enum CodeIntelMode {
 
 impl CodeIntelMode {
     pub fn from_env_or_config(env_val: Option<&str>, config_mode: Option<&str>) -> Self {
-        let val = env_val.or(config_mode).unwrap_or("unified").trim().to_ascii_lowercase();
+        let val = env_val
+            .or(config_mode)
+            .unwrap_or("unified")
+            .trim()
+            .to_ascii_lowercase();
         match val.as_str() {
             "full" | "all" | "granular" => Self::Full,
             "unified" | "compact" => Self::Unified,
             other if other.contains(',') => {
-                let list = other.split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect();
+                let list = other
+                    .split(',')
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty())
+                    .collect();
                 Self::Custom(list)
             }
             _ => Self::Unified,
@@ -417,8 +425,16 @@ pub(crate) fn path_matches_scope(file_path: &Path, scope: &Path) -> bool {
         return false;
     }
 
-    let fc: &[&str] = if is_windows_drive(fc[0]) { &fc[1..] } else { &fc };
-    let sc: &[&str] = if is_windows_drive(sc[0]) { &sc[1..] } else { &sc };
+    let fc: &[&str] = if is_windows_drive(fc[0]) {
+        &fc[1..]
+    } else {
+        &fc
+    };
+    let sc: &[&str] = if is_windows_drive(sc[0]) {
+        &sc[1..]
+    } else {
+        &sc
+    };
     if fc.is_empty() || sc.is_empty() {
         return false;
     }
@@ -549,7 +565,9 @@ mod tests {
             "canonicalized absolute scope must match a relative indexed file"
         );
         assert!(path_matches_scope(
-            Path::new(r"E:\code\agents\coupon-mall-demo\backend\src\main\java\com\demo\coupon\service\CouponService.java"),
+            Path::new(
+                r"E:\code\agents\coupon-mall-demo\backend\src\main\java\com\demo\coupon\service\CouponService.java"
+            ),
             Path::new("coupon-mall-demo/backend/src/main/java/com/demo/coupon/service")
         ));
         assert!(!path_matches_scope(

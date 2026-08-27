@@ -1140,7 +1140,9 @@ mod tests {
     #[test]
     fn reminder_above_query_merges_with_query_last() {
         let msgs = vec![
-            Message::synthetic_user("<system-reminder>\nCurrent date: 2026-08-22\n</system-reminder>"),
+            Message::synthetic_user(
+                "<system-reminder>\nCurrent date: 2026-08-22\n</system-reminder>",
+            ),
             Message::user("the real question"),
         ];
         let (_system, out) = format_messages(&msgs, false);
@@ -1377,17 +1379,12 @@ mod tests {
         );
         assert_eq!(body["stream"], true);
         assert_eq!(
-            body["system"][0]["text"],
-            "s",
+            body["system"][0]["text"], "s",
             "system is a cached text block"
         );
+        assert_eq!(body["system"][0]["cache_control"]["type"], "ephemeral");
         assert_eq!(
-            body["system"][0]["cache_control"]["type"],
-            "ephemeral"
-        );
-        assert_eq!(
-            body["messages"][0]["content"][0]["cache_control"]["type"],
-            "ephemeral",
+            body["messages"][0]["content"][0]["cache_control"]["type"], "ephemeral",
             "last message is a cache breakpoint"
         );
         assert!(body.get("tools").is_none(), "empty tools omitted");

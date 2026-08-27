@@ -144,10 +144,7 @@ fn project_file(project: &Path) -> Option<PathBuf> {
 }
 
 fn first_existing(project: &Path, names: &[&str]) -> Option<PathBuf> {
-    names
-        .iter()
-        .map(|n| project.join(n))
-        .find(|p| p.is_file())
+    names.iter().map(|n| project.join(n)).find(|p| p.is_file())
 }
 
 /// Read a tier file → its trimmed body, or `None` if missing/non-file/empty.

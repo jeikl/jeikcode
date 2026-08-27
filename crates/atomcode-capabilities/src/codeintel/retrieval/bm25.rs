@@ -56,7 +56,11 @@ pub fn bm25_search(
         }
     }
 
-    hits.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
+    hits.sort_by(|a, b| {
+        b.score
+            .partial_cmp(&a.score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
     hits.truncate(top_k);
     hits
 }
@@ -96,7 +100,10 @@ fn bm25_symbol(
         if !query_cjk.contains(p_lower.as_str()) {
             continue;
         }
-        let tf = cjk_phrases.iter().filter(|x| x.eq_ignore_ascii_case(p)).count() as f64;
+        let tf = cjk_phrases
+            .iter()
+            .filter(|x| x.eq_ignore_ascii_case(p))
+            .count() as f64;
         let len = (ascii_terms.len() + cjk_phrases.len()) as f64;
         score += bm25_term(tf, stats.idf(&p_lower), len, avgdl);
     }
@@ -165,6 +172,9 @@ mod tests {
         tokens.words.push("turn".into());
         let hits = bm25_search(&graph, &stats, &tokens, None, 5);
         assert!(!hits.is_empty());
-        assert_eq!(hits[0].node_id, a.id, "sampler_turn must rank first:\n{hits:?}");
+        assert_eq!(
+            hits[0].node_id, a.id,
+            "sampler_turn must rank first:\n{hits:?}"
+        );
     }
 }

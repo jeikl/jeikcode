@@ -73,7 +73,7 @@ export type SSEEvent =
   | { type: 'text'; content: string }
   | { type: 'reasoning'; content: string }
   | { type: 'tool_start'; id: string; name: string; arguments: unknown }
-  | { type: 'tool_output'; chunk: string }
+  | { type: 'tool_output'; id?: string; chunk: string }
   | { type: 'tool_progress'; id: string; progress: string }
   | { type: 'tool_result'; id: string; name: string; output: string; success: boolean; duration_ms: number }
   | { type: 'tokens'; prompt: number; completion: number; total: number; cached?: number; cached_estimated?: boolean; reasoning?: number }
@@ -874,7 +874,7 @@ export type LiveWireEvent =
   | { type: 'text'; content: string }
   | { type: 'reasoning'; content: string }
   | { type: 'tool_start'; id: string; name: string; arguments: string }
-  | { type: 'tool_output'; chunk: string }
+  | { type: 'tool_output'; id: string; chunk: string }
   | { type: 'tool_progress'; id: string; progress: string }
   | { type: 'tool_result'; id: string; name: string; output: string; success: boolean; duration_ms: number }
   | { type: 'tokens'; prompt: number; completion: number; total: number; cached?: number }

@@ -184,11 +184,14 @@ mod tests {
         let tool = UseSkillTool::new(reg);
         let r = tool.execute(r#"{"name":"multi-db"}"#, &ctx()).await;
         assert!(!r.is_error, "{}", r.content);
-        assert!(r.content.contains("Base directory for this skill:"), "{}", r.content);
+        assert!(
+            r.content.contains("Base directory for this skill:"),
+            "{}",
+            r.content
+        );
         assert!(r.content.contains("db_executor.py"), "{}", r.content);
         assert!(
-            r.content.contains("连接公司内部数据库")
-                || r.content.contains("description=\"连接"),
+            r.content.contains("连接公司内部数据库") || r.content.contains("description=\"连接"),
             "description must not be bare '>': {}",
             r.content
         );
@@ -261,9 +264,7 @@ mod tests {
             "---\ndescription: review code\n---\nbody\n",
         )
         .unwrap();
-        let tool = ListSkillsTool::new(Arc::new(SkillRegistry::load(&[base
-            .path()
-            .to_path_buf()])));
+        let tool = ListSkillsTool::new(Arc::new(SkillRegistry::load(&[base.path().to_path_buf()])));
         let r = tool.execute("{}", &ctx()).await;
         assert!(r.content.contains("review"), "{}", r.content);
         assert!(

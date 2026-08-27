@@ -572,11 +572,7 @@ pub(crate) struct CallSite {
 }
 
 /// Extract `@callee` call sites from an already-parsed tree.
-pub(crate) fn extract_call_sites_from_tree(
-    source: &str,
-    lang: Lang,
-    tree: &Tree,
-) -> Vec<CallSite> {
+pub(crate) fn extract_call_sites_from_tree(source: &str, lang: Lang, tree: &Tree) -> Vec<CallSite> {
     with_call_query(lang, |query| {
         let Some(callee_idx) = query.capture_index_for_name("callee") else {
             return Vec::new();

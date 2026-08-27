@@ -13,10 +13,10 @@
 
 use super::graph::{CodeGraph, Edge, EdgeKind, SymbolId, SymbolKind, SymbolNode, Visibility};
 use super::lang::Lang;
-use super::{path_for_display, path_matches_scope};
 use super::symbols::{
     extract_call_sites_from_tree, extract_symbols_from_tree, parse_source, CallSite, Symbol,
 };
+use super::{path_for_display, path_matches_scope};
 use ignore::WalkBuilder;
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
@@ -100,10 +100,16 @@ pub const DISK_CACHE_REL_BIN: &str = ".atomcode/codegraph/units.v4.bin";
 /// `classify_symbol_kind`.
 fn classify_symbol_kind(ts: &str) -> SymbolKind {
     match ts {
-        "function_item" | "function_definition" | "function_declaration" | "func_literal"
+        "function_item"
+        | "function_definition"
+        | "function_declaration"
+        | "func_literal"
         | "local_function_statement" => SymbolKind::Function,
-        "method_definition" | "method_declaration" | "constructor_declaration"
-        | "destructor_declaration" | "operator_declaration" => SymbolKind::Method,
+        "method_definition"
+        | "method_declaration"
+        | "constructor_declaration"
+        | "destructor_declaration"
+        | "operator_declaration" => SymbolKind::Method,
         "struct_item" | "struct_specifier" | "struct_type" | "struct_declaration"
         | "record_declaration" => SymbolKind::Struct,
         "class_definition" | "class_declaration" | "class_specifier" => SymbolKind::Class,
@@ -113,8 +119,9 @@ fn classify_symbol_kind(ts: &str) -> SymbolKind {
             SymbolKind::Enum
         }
         "property_declaration" | "field_declaration" => SymbolKind::Property,
-        "const_item" | "const_declaration" | "event_declaration"
-        | "delegate_declaration" => SymbolKind::Constant,
+        "const_item" | "const_declaration" | "event_declaration" | "delegate_declaration" => {
+            SymbolKind::Constant
+        }
         "let_declaration" | "variable_declaration" | "static_item" => SymbolKind::Variable,
         "mod_item" | "module" | "namespace_declaration" | "file_scoped_namespace_declaration" => {
             SymbolKind::Module
@@ -184,9 +191,17 @@ fn parse_yaml_config(path: &Path, source: &str) -> Option<(Vec<SymbolNode>, Vec<
         }
 
         if let Some(pos) = trimmed.find(':') {
-            let key = trimmed[..pos].trim().trim_start_matches("- ").trim_matches('"').trim_matches('\'');
+            let key = trimmed[..pos]
+                .trim()
+                .trim_start_matches("- ")
+                .trim_matches('"')
+                .trim_matches('\'');
             if !key.is_empty() && key.len() >= 3 && !key.contains(' ') {
-                let kind = if key.contains("plugin") || key.contains("reminder") || key.contains("middleware") || key.contains("hook") {
+                let kind = if key.contains("plugin")
+                    || key.contains("reminder")
+                    || key.contains("middleware")
+                    || key.contains("hook")
+                {
                     SymbolKind::PluginDeclaration
                 } else {
                     SymbolKind::ConfigProperty
@@ -255,7 +270,10 @@ fn parse_toml_config(path: &Path, source: &str) -> Option<(Vec<SymbolNode>, Vec<
                 });
             }
         } else if let Some(eq_pos) = trimmed.find('=') {
-            let key = trimmed[..eq_pos].trim().trim_matches('"').trim_matches('\'');
+            let key = trimmed[..eq_pos]
+                .trim()
+                .trim_matches('"')
+                .trim_matches('\'');
             if !key.is_empty() && key.len() >= 2 && !key.contains(' ') {
                 nodes.push(SymbolNode {
                     id: CodeGraph::make_id(path, key, line_num),
@@ -321,9 +339,23 @@ fn parse_json_config(path: &Path, source: &str) -> Option<(Vec<SymbolNode>, Vec<
         let trimmed = line.trim();
         if let Some(colon) = trimmed.find(':') {
             let key = trimmed[..colon].trim().trim_matches('"').trim_matches('\'');
-            if (key.contains("plugin") || key.contains("middleware") || key.contains("name") || key.contains("main") || key.contains("scripts")) && key.len() >= 3 {
-                let val_part = trimmed[colon + 1..].trim().trim_matches(',').trim_matches('"').trim_matches('\'');
-                let sym_name = if !val_part.is_empty() && val_part.len() >= 3 && !val_part.starts_with('{') && !val_part.starts_with('[') {
+            if (key.contains("plugin")
+                || key.contains("middleware")
+                || key.contains("name")
+                || key.contains("main")
+                || key.contains("scripts"))
+                && key.len() >= 3
+            {
+                let val_part = trimmed[colon + 1..]
+                    .trim()
+                    .trim_matches(',')
+                    .trim_matches('"')
+                    .trim_matches('\'');
+                let sym_name = if !val_part.is_empty()
+                    && val_part.len() >= 3
+                    && !val_part.starts_with('{')
+                    && !val_part.starts_with('[')
+                {
                     format!("{key}::{val_part}")
                 } else {
                     key.to_string()
@@ -364,7 +396,10 @@ fn parse_file(path: &Path, source: &str) -> Option<(Vec<SymbolNode>, Vec<RawCall
             }
         } else if ext_lower == "json" {
             let file_name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
-            if file_name.contains("package.json") || file_name.contains("config") || file_name.contains("plugin") {
+            if file_name.contains("package.json")
+                || file_name.contains("config")
+                || file_name.contains("plugin")
+            {
                 if let Some(json_res) = parse_json_config(path, source) {
                     return Some(json_res);
                 }
@@ -434,11 +469,7 @@ fn parse_file(path: &Path, source: &str) -> Option<(Vec<SymbolNode>, Vec<RawCall
 ///
 /// Falls back to a plain TSX parse of the whole file when the script/template
 /// split fails (non-SFC content, malformed blocks).
-fn parse_sfc(
-    path: &Path,
-    source: &str,
-    ext: &str,
-) -> Option<(Vec<SymbolNode>, Vec<RawCall>)> {
+fn parse_sfc(path: &Path, source: &str, ext: &str) -> Option<(Vec<SymbolNode>, Vec<RawCall>)> {
     let script = extract_sfc_block(source, "script");
     let template = extract_sfc_block(source, "template");
 
@@ -669,7 +700,18 @@ fn truncate_to_char_boundary(s: &mut String, max_bytes: usize) {
 
 fn is_trivial_literal(s: &str) -> bool {
     const TRIVIAL: &[&str] = &[
-        "", " ", "\n", "\t", "true", "false", "null", "undefined", "0", "1", "utf-8", "utf8",
+        "",
+        " ",
+        "\n",
+        "\t",
+        "true",
+        "false",
+        "null",
+        "undefined",
+        "0",
+        "1",
+        "utf-8",
+        "utf8",
     ];
     TRIVIAL.contains(&s) || s.chars().all(|c| c.is_ascii_punctuation())
 }
@@ -714,7 +756,8 @@ fn extract_sfc_block(source: &str, tag: &str) -> Option<(String, usize)> {
         let line_num = idx + 1;
         let trimmed = line.trim();
         if start_line.is_none() {
-            if trimmed.starts_with(&format!("<{tag}")) && !trimmed.starts_with(&format!("</{tag}")) {
+            if trimmed.starts_with(&format!("<{tag}")) && !trimmed.starts_with(&format!("</{tag}"))
+            {
                 start_line = Some(line_num);
                 // After the `>` of the opening tag, the rest of the line is body.
                 if let Some(gt) = trimmed.find('>') {
@@ -729,7 +772,9 @@ fn extract_sfc_block(source: &str, tag: &str) -> Option<(String, usize)> {
                 }
                 continue;
             }
-        } else if trimmed.starts_with(&format!("<{tag}")) && !trimmed.starts_with(&format!("</{tag}")) {
+        } else if trimmed.starts_with(&format!("<{tag}"))
+            && !trimmed.starts_with(&format!("</{tag}"))
+        {
             depth += 1;
         } else if trimmed.starts_with(&format!("</{tag}")) {
             if depth == 0 {
@@ -787,14 +832,21 @@ fn parse_css_styles(path: &Path, source: &str) -> Option<(Vec<SymbolNode>, Vec<R
         let mut i = 0;
         while i < chars.len() {
             let ch = chars[i];
-            if (ch == '.' || ch == '#') && i + 1 < chars.len() && chars[i + 1].is_ascii_alphabetic() {
+            if (ch == '.' || ch == '#') && i + 1 < chars.len() && chars[i + 1].is_ascii_alphabetic()
+            {
                 let mut j = i + 1;
-                while j < chars.len() && (chars[j].is_ascii_alphanumeric() || chars[j] == '-' || chars[j] == '_') {
+                while j < chars.len()
+                    && (chars[j].is_ascii_alphanumeric() || chars[j] == '-' || chars[j] == '_')
+                {
                     j += 1;
                 }
                 let ident: String = chars[i + 1..j].iter().collect();
                 if ident.len() >= 2 {
-                    let name = if ch == '#' { format!("#{ident}") } else { ident };
+                    let name = if ch == '#' {
+                        format!("#{ident}")
+                    } else {
+                        ident
+                    };
                     let key = format!("{name}@{line_num}");
                     if seen.insert(key) {
                         nodes.push(SymbolNode {
@@ -814,9 +866,15 @@ fn parse_css_styles(path: &Path, source: &str) -> Option<(Vec<SymbolNode>, Vec<R
                 let s = &line[i..];
                 if s.starts_with("@keyframes") {
                     let mut j = i + "@keyframes".len();
-                    while j < chars.len() && chars[j].is_whitespace() { j += 1; }
+                    while j < chars.len() && chars[j].is_whitespace() {
+                        j += 1;
+                    }
                     let start = j;
-                    while j < chars.len() && (chars[j].is_ascii_alphanumeric() || chars[j] == '-' || chars[j] == '_') { j += 1; }
+                    while j < chars.len()
+                        && (chars[j].is_ascii_alphanumeric() || chars[j] == '-' || chars[j] == '_')
+                    {
+                        j += 1;
+                    }
                     let name: String = chars[start..j].iter().collect();
                     if !name.is_empty() {
                         let key = format!("@{name}@{line_num}");
@@ -834,8 +892,12 @@ fn parse_css_styles(path: &Path, source: &str) -> Option<(Vec<SymbolNode>, Vec<R
                         }
                     }
                     i = j;
-                } else { i += 1; }
-            } else { i += 1; }
+                } else {
+                    i += 1;
+                }
+            } else {
+                i += 1;
+            }
         }
     }
 
@@ -864,7 +926,12 @@ fn parse_xml_mapper(path: &Path, source: &str) -> Option<(Vec<SymbolNode>, Vec<R
         }
     }
 
-    if namespace.is_empty() && !source.contains("<select") && !source.contains("<insert") && !source.contains("<update") && !source.contains("<delete") {
+    if namespace.is_empty()
+        && !source.contains("<select")
+        && !source.contains("<insert")
+        && !source.contains("<update")
+        && !source.contains("<delete")
+    {
         return None;
     }
 
@@ -912,10 +979,10 @@ fn parse_xml_mapper(path: &Path, source: &str) -> Option<(Vec<SymbolNode>, Vec<R
 
 /// Extensions walked into the graph (matches production's full language matrix).
 pub const INDEXED_EXTS: &[&str] = &[
-    "rs", "py", "pyi", "js", "jsx", "mjs", "cjs", "ts", "mts", "cts", "tsx", "vue",
-    "go", "java", "c", "h", "cc", "cpp", "cxx", "hpp", "hh", "cs", "php", "phtml",
-    "kt", "kts", "swift", "dart", "rb", "scala", "sc", "sol", "lua", "tf", "tfvars",
-    "erl", "hrl", "r", "nix", "xml", "sql", "yml", "yaml", "json", "toml", "md", "markdown",
+    "rs", "py", "pyi", "js", "jsx", "mjs", "cjs", "ts", "mts", "cts", "tsx", "vue", "go", "java",
+    "c", "h", "cc", "cpp", "cxx", "hpp", "hh", "cs", "php", "phtml", "kt", "kts", "swift", "dart",
+    "rb", "scala", "sc", "sol", "lua", "tf", "tfvars", "erl", "hrl", "r", "nix", "xml", "sql",
+    "yml", "yaml", "json", "toml", "md", "markdown",
     // Frontend stylesheets + SFC flavors: textual selector extraction (zero deps).
     "css", "scss", "less", "sass", "svelte", "astro", "html",
 ];
@@ -1012,8 +1079,14 @@ fn collect_files(root: &Path) -> Vec<Walked> {
 
 fn collect_files_via_git(root: &Path) -> Option<Vec<Walked>> {
     let mut cmd = std::process::Command::new("git");
-    cmd.args(&["ls-files", "-z", "--cached", "--others", "--exclude-standard"])
-        .current_dir(root);
+    cmd.args(&[
+        "ls-files",
+        "-z",
+        "--cached",
+        "--others",
+        "--exclude-standard",
+    ])
+    .current_dir(root);
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
@@ -1255,11 +1328,7 @@ fn resolve_callee(
 }
 
 #[inline(always)]
-fn resolve_callee_with_ctx(
-    g: &CodeGraph,
-    callee: &str,
-    ctx: &ResolveContext,
-) -> Option<SymbolId> {
+fn resolve_callee_with_ctx(g: &CodeGraph, callee: &str, ctx: &ResolveContext) -> Option<SymbolId> {
     let candidates = g.find_by_name(callee);
     if candidates.is_empty() {
         return None;
@@ -1383,25 +1452,22 @@ fn load_disk_cache(root: &Path) -> Option<DiskCache> {
     let db_path = super::index_db::disk_cache_path_db(root);
     if db_path.is_file() {
         if let Ok(db) = super::index_db::IndexDb::open_shared(root) {
-        let units_map = db.load_units();
-        if !units_map.is_empty() {
-            let mut unit_str_map = HashMap::with_capacity(units_map.len());
-            for (p, u) in units_map {
-                unit_str_map.insert(
-                    normalize_index_path(&p).to_string_lossy().into_owned(),
-                    u,
-                );
+            let units_map = db.load_units();
+            if !units_map.is_empty() {
+                let mut unit_str_map = HashMap::with_capacity(units_map.len());
+                for (p, u) in units_map {
+                    unit_str_map.insert(normalize_index_path(&p).to_string_lossy().into_owned(), u);
+                }
+                let graph = db.load_graph().unwrap_or_else(CodeGraph::new);
+                let walk_fp = db.get_walk_fp().unwrap_or(0);
+                return Some(DiskCache {
+                    version: DISK_CACHE_VERSION,
+                    root: root.display().to_string(),
+                    walk_fp,
+                    units: unit_str_map,
+                    graph,
+                });
             }
-            let graph = db.load_graph().unwrap_or_else(CodeGraph::new);
-            let walk_fp = db.get_walk_fp().unwrap_or(0);
-            return Some(DiskCache {
-                version: DISK_CACHE_VERSION,
-                root: root.display().to_string(),
-                walk_fp,
-                units: unit_str_map,
-                graph,
-            });
-        }
         }
     }
 
@@ -1426,11 +1492,7 @@ fn load_disk_cache(root: &Path) -> Option<DiskCache> {
 ///
 /// Writes in [`UNIT_WRITE_CHUNK`]-sized transactions so the WAL cannot grow to
 /// the size of the whole corpus (the 15k-file one-shot commit).
-fn persist_units_incremental(
-    root: &Path,
-    upsert: &[(PathBuf, FileUnit)],
-    deleted: &[PathBuf],
-) {
+fn persist_units_incremental(root: &Path, upsert: &[(PathBuf, FileUnit)], deleted: &[PathBuf]) {
     if upsert.is_empty() && deleted.is_empty() {
         return;
     }
@@ -1483,11 +1545,7 @@ fn persist_paths(
 
 /// First-build persist of every unit, chunked. Does **not** serialize the graph
 /// blob — caller writes that separately after compose, once unit buffers are gone.
-fn persist_units_chunked(
-    root: &Path,
-    units: &HashMap<PathBuf, FileUnit>,
-    deleted: &[PathBuf],
-) {
+fn persist_units_chunked(root: &Path, units: &HashMap<PathBuf, FileUnit>, deleted: &[PathBuf]) {
     if units.is_empty() && deleted.is_empty() {
         return;
     }
@@ -2179,7 +2237,10 @@ fn parse_parallelism() -> usize {
 /// Pure pool-size helper — same as codegraph `resolveParsePoolSize(unset, n)`
 /// after the caller does `Math.max(3, availableParallelism())`.
 fn resolve_parse_pool_size(cpu_count: usize) -> usize {
-    cpu_count.max(3).saturating_sub(1).clamp(1, MAX_PARSE_THREADS)
+    cpu_count
+        .max(3)
+        .saturating_sub(1)
+        .clamp(1, MAX_PARSE_THREADS)
 }
 
 /// Result of [`sync_units`]. `changed_paths` are keys in `units` (no cloned
@@ -2206,8 +2267,10 @@ fn sync_units(
 ) -> UnitSync {
     rekey_units(units);
 
-    let walked_paths: std::collections::HashSet<PathBuf> =
-        walked.iter().map(|w| normalize_index_path(&w.path)).collect();
+    let walked_paths: std::collections::HashSet<PathBuf> = walked
+        .iter()
+        .map(|w| normalize_index_path(&w.path))
+        .collect();
 
     let mut deleted_paths = Vec::new();
     let before = units.len();
@@ -2675,7 +2738,10 @@ impl CodeIndex {
         let t_cv = Instant::now();
         let mut map = std::collections::HashMap::with_capacity(g.nodes.len());
         for node in g.nodes.values() {
-            map.insert(node.id, super::retrieval::concept_projection(&node.name, &HashSet::new()));
+            map.insert(
+                node.id,
+                super::retrieval::concept_projection(&node.name, &HashSet::new()),
+            );
         }
         let n = map.len();
         let vectors = Arc::new(map);
@@ -2760,23 +2826,21 @@ impl CodeIndex {
                 let (dirty, missing) = snapshot
                     .par_iter()
                     .filter(|(path, _, _)| path_in_focus(path, focus))
-                    .map(|(path, mtime_ns, len)| {
-                        match std::fs::metadata(path) {
-                            Ok(md) => {
-                                let disk_mtime = md
-                                    .modified()
-                                    .ok()
-                                    .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
-                                    .map(|d| d.as_nanos())
-                                    .unwrap_or(0);
-                                if disk_mtime != *mtime_ns || md.len() != *len {
-                                    (1usize, 0usize)
-                                } else {
-                                    (0, 0)
-                                }
+                    .map(|(path, mtime_ns, len)| match std::fs::metadata(path) {
+                        Ok(md) => {
+                            let disk_mtime = md
+                                .modified()
+                                .ok()
+                                .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
+                                .map(|d| d.as_nanos())
+                                .unwrap_or(0);
+                            if disk_mtime != *mtime_ns || md.len() != *len {
+                                (1usize, 0usize)
+                            } else {
+                                (0, 0)
                             }
-                            Err(_) => (0, 1),
                         }
+                        Err(_) => (0, 1),
                     })
                     .reduce(|| (0, 0), |a, b| (a.0 + b.0, a.1 + b.1));
 
@@ -2882,10 +2946,7 @@ impl CodeIndex {
                                     })
                             })
                             .count()
-                            + missing
-                                .iter()
-                                .filter(|p| path_in_focus(p, focus))
-                                .count();
+                            + missing.iter().filter(|p| path_in_focus(p, focus)).count();
                         let newcomers = discover_new_files(&root, &loaded, focus);
                         let g = if disk_graph_ok {
                             on_progress(&format!(
@@ -3168,7 +3229,10 @@ impl CodeIndex {
                 let t_save = Instant::now();
                 let _ = db.save_graph_only(fp, g.as_ref());
                 save_dur = t_save.elapsed();
-                on_progress(&format!("Code graph: saved graph snapshot in {:?}", save_dur));
+                on_progress(&format!(
+                    "Code graph: saved graph snapshot in {:?}",
+                    save_dur
+                ));
             }
         }
 
@@ -3373,8 +3437,14 @@ export function CouponPanel() {
             .filter(|n| n.kind == SymbolKind::UiElement)
             .map(|n| n.name.clone())
             .collect();
-        assert!(names.contains(&"el-button".to_string()), "el-button: {names:?}");
-        assert!(names.contains(&"CouponDialog".to_string()), "CouponDialog: {names:?}");
+        assert!(
+            names.contains(&"el-button".to_string()),
+            "el-button: {names:?}"
+        );
+        assert!(
+            names.contains(&"CouponDialog".to_string()),
+            "CouponDialog: {names:?}"
+        );
         assert!(names.contains(&"span".to_string()), "span: {names:?}");
     }
 
@@ -3400,12 +3470,27 @@ export function CouponPanel() {
             .filter(|n| n.kind == SymbolKind::UiElement)
             .map(|n| n.name.clone())
             .collect();
-        assert!(names.contains(&"coupon-panel".to_string()), "class: {names:?}");
-        assert!(names.contains(&"btn".to_string()), "comma-split class: {names:?}");
-        assert!(names.contains(&"coupon-btn".to_string()), "pseudo-stripped: {names:?}");
+        assert!(
+            names.contains(&"coupon-panel".to_string()),
+            "class: {names:?}"
+        );
+        assert!(
+            names.contains(&"btn".to_string()),
+            "comma-split class: {names:?}"
+        );
+        assert!(
+            names.contains(&"coupon-btn".to_string()),
+            "pseudo-stripped: {names:?}"
+        );
         assert!(names.contains(&"#coupon-app".to_string()), "id: {names:?}");
-        assert!(names.contains(&"fadeIn".to_string()), "keyframes: {names:?}");
-        assert!(names.contains(&"mobile-only".to_string()), "media-nested: {names:?}");
+        assert!(
+            names.contains(&"fadeIn".to_string()),
+            "keyframes: {names:?}"
+        );
+        assert!(
+            names.contains(&"mobile-only".to_string()),
+            "media-nested: {names:?}"
+        );
     }
 
     #[test]
@@ -3457,7 +3542,10 @@ export function CouponPanel() {
         std::fs::write(d.path().join("sibling.rs"), "pub fn sibling() {}\n").unwrap();
 
         let g2 = idx.get(d.path());
-        assert!(!g2.find_by_name("brand_new").is_empty(), "new file in new subdir");
+        assert!(
+            !g2.find_by_name("brand_new").is_empty(),
+            "new file in new subdir"
+        );
         assert!(!g2.find_by_name("sibling").is_empty(), "new sibling file");
         assert!(!g2.find_by_name("old_sym").is_empty());
         let stats = idx.last_stats(d.path()).unwrap();
@@ -3477,7 +3565,13 @@ export function CouponPanel() {
             .map(|o| o.status.success())
             .unwrap_or(false));
         let _ = std::process::Command::new("git")
-            .args(["-C", &root.to_string_lossy(), "config", "user.email", "t@t.t"])
+            .args([
+                "-C",
+                &root.to_string_lossy(),
+                "config",
+                "user.email",
+                "t@t.t",
+            ])
             .status();
         let _ = std::process::Command::new("git")
             .args(["-C", &root.to_string_lossy(), "config", "user.name", "t"])
@@ -3487,7 +3581,14 @@ export function CouponPanel() {
             .args(["-C", &root.to_string_lossy(), "add", "old.rs"])
             .status();
         let _ = std::process::Command::new("git")
-            .args(["-C", &root.to_string_lossy(), "commit", "-m", "init", "--no-gpg-sign"])
+            .args([
+                "-C",
+                &root.to_string_lossy(),
+                "commit",
+                "-m",
+                "init",
+                "--no-gpg-sign",
+            ])
             .status();
 
         let idx = CodeIndex::new();
@@ -3638,7 +3739,8 @@ public class OrderController
         let apply_file = &apply.file;
         let deps = g.file_dependents(apply_file, 2);
         assert!(
-            deps.iter().any(|f| f.file_name().and_then(|n| n.to_str()) == Some("OrderController.cs")),
+            deps.iter()
+                .any(|f| f.file_name().and_then(|n| n.to_str()) == Some("OrderController.cs")),
             "OrderController.cs must appear in blast radius of CouponService.cs: {deps:?}"
         );
     }
@@ -3737,14 +3839,8 @@ public class OrderController
             g.find_by_name("RealService").into_iter().next().is_some(),
             "real source must be indexed"
         );
-        assert!(
-            g.find_by_name("BinOnly").is_empty(),
-            "bin/ must be skipped"
-        );
-        assert!(
-            g.find_by_name("ObjOnly").is_empty(),
-            "obj/ must be skipped"
-        );
+        assert!(g.find_by_name("BinOnly").is_empty(), "bin/ must be skipped");
+        assert!(g.find_by_name("ObjOnly").is_empty(), "obj/ must be skipped");
         assert!(
             g.find_by_name("Form1").is_empty(),
             "Designer.cs must be skipped"
@@ -3769,7 +3865,11 @@ public class OrderController
                 "parallel cold gets must share one built graph"
             );
         }
-        assert!(graphs[0].find_by_name("shared").into_iter().next().is_some());
+        assert!(graphs[0]
+            .find_by_name("shared")
+            .into_iter()
+            .next()
+            .is_some());
     }
 
     #[test]
@@ -3848,7 +3948,11 @@ public class OrderController
         );
         let guard = idx.inner.lock().unwrap();
         assert!(
-            guard.last_stats.as_ref().map(|s| s.cache_hit).unwrap_or(false),
+            guard
+                .last_stats
+                .as_ref()
+                .map(|s| s.cache_hit)
+                .unwrap_or(false),
             "second process should report disk cache hit"
         );
     }
@@ -3866,17 +3970,28 @@ public class OrderController
         let g1 = idx.get(d.path());
         let run = g1.find_by_name("run").into_iter().next().unwrap();
         let compute = g1.find_by_name("compute").into_iter().next().unwrap();
-        assert!(g1.callees(run.id).unwrap().iter().any(|e| e.to == compute.id));
+        assert!(g1
+            .callees(run.id)
+            .unwrap()
+            .iter()
+            .any(|e| e.to == compute.id));
 
         // Rename callee in util only — main unit unchanged; edge must re-resolve.
-        std::fs::write(d.path().join("util.rs"), "pub fn compute_v2() -> i32 { 2 }\n").unwrap();
+        std::fs::write(
+            d.path().join("util.rs"),
+            "pub fn compute_v2() -> i32 { 2 }\n",
+        )
+        .unwrap();
         let g2 = idx.get(d.path());
         assert!(g2.find_by_name("compute").is_empty());
         assert!(g2.find_by_name("compute_v2").into_iter().next().is_some());
         let run2 = g2.find_by_name("run").into_iter().next().unwrap();
         // main still calls "compute" textually → no resolve target → no edge (or empty).
         let callees = g2.callees(run2.id).map(|e| e.len()).unwrap_or(0);
-        assert_eq!(callees, 0, "stale name must not keep old edge after unit recompose");
+        assert_eq!(
+            callees, 0,
+            "stale name must not keep old edge after unit recompose"
+        );
     }
 
     #[test]
@@ -3936,7 +4051,11 @@ public class OrderController
         let d = tempfile::tempdir().unwrap();
         std::fs::write(d.path().join("main.rs"), "pub fn main() {}").unwrap();
         std::fs::create_dir_all(d.path().join("custom_dist")).unwrap();
-        std::fs::write(d.path().join("custom_dist").join("dist_code.rs"), "pub fn dist() {}").unwrap();
+        std::fs::write(
+            d.path().join("custom_dist").join("dist_code.rs"),
+            "pub fn dist() {}",
+        )
+        .unwrap();
         std::fs::write(d.path().join("test_generated.rs"), "pub fn gen() {}").unwrap();
 
         // Write .codegraphignore
@@ -3948,8 +4067,14 @@ public class OrderController
 
         let g = build_graph(d.path());
         assert!(!g.find_by_name("main").is_empty(), "main should be indexed");
-        assert!(g.find_by_name("dist").is_empty(), "custom_dist should be ignored");
-        assert!(g.find_by_name("gen").is_empty(), "test_generated.rs should be ignored");
+        assert!(
+            g.find_by_name("dist").is_empty(),
+            "custom_dist should be ignored"
+        );
+        assert!(
+            g.find_by_name("gen").is_empty(),
+            "test_generated.rs should be ignored"
+        );
     }
 
     #[test]
@@ -3969,11 +4094,17 @@ public class OrderController
 
         let g = build_graph(d.path());
         assert!(
-            g.find_by_name("repeat-tool-reminder").into_iter().next().is_some(),
+            g.find_by_name("repeat-tool-reminder")
+                .into_iter()
+                .next()
+                .is_some(),
             "YAML plugin should be indexed"
         );
         assert!(
-            g.find_by_name("auto-context-compaction").into_iter().next().is_some(),
+            g.find_by_name("auto-context-compaction")
+                .into_iter()
+                .next()
+                .is_some(),
             "YAML plugin should be indexed"
         );
     }
@@ -4002,13 +4133,22 @@ public class OrderController
         assert_eq!(stats.removed, 0);
 
         let g2 = index.get(root);
-        assert!(g2.find_by_name("alpha").is_empty(), "old symbol should be removed");
-        assert!(!g2.find_by_name("alpha_prime").is_empty(), "new symbol should be present");
+        assert!(
+            g2.find_by_name("alpha").is_empty(),
+            "old symbol should be removed"
+        );
+        assert!(
+            !g2.find_by_name("alpha_prime").is_empty(),
+            "new symbol should be present"
+        );
         assert!(!g2.find_by_name("beta").is_empty());
 
         // A second get with no disk change must be a cache hit — not "reparse N files".
         let g3 = index.get(root);
-        assert!(Arc::ptr_eq(&g2, &g3), "warm get after patch must reuse graph");
+        assert!(
+            Arc::ptr_eq(&g2, &g3),
+            "warm get after patch must reuse graph"
+        );
         let stats2 = index.last_stats(root).unwrap();
         assert!(
             stats2.cache_hit || stats2.reparsed <= 1,
@@ -4093,7 +4233,10 @@ public class OrderController
             stats.cache_hit,
             "sqlite + no known-file change must be a cache hit: {stats:?}"
         );
-        assert_eq!(stats.reparsed, 0, "must not reparse sibling tree: {stats:?}");
+        assert_eq!(
+            stats.reparsed, 0,
+            "must not reparse sibling tree: {stats:?}"
+        );
     }
 
     #[test]
@@ -4294,9 +4437,21 @@ public class OrderController
     fn parse_pool_size_matches_codegraph_formula() {
         // codegraph: resolveParsePoolSize(unset, Math.max(3, cores))
         //          = clamp(max(3, cores) - 1, 1, 8)
-        assert_eq!(resolve_parse_pool_size(1), 2, "1-core floored to 3 → 2 workers");
-        assert_eq!(resolve_parse_pool_size(2), 2, "2-core floored to 3 → 2 workers");
-        assert_eq!(resolve_parse_pool_size(6), 5, "6-core → 5 workers (leave 1)");
+        assert_eq!(
+            resolve_parse_pool_size(1),
+            2,
+            "1-core floored to 3 → 2 workers"
+        );
+        assert_eq!(
+            resolve_parse_pool_size(2),
+            2,
+            "2-core floored to 3 → 2 workers"
+        );
+        assert_eq!(
+            resolve_parse_pool_size(6),
+            5,
+            "6-core → 5 workers (leave 1)"
+        );
         assert_eq!(resolve_parse_pool_size(8), 7);
         assert_eq!(resolve_parse_pool_size(16), 8, "cap at 8");
         assert_eq!(resolve_parse_pool_size(32), 8);
@@ -4366,12 +4521,11 @@ public class OrderController
         let g = db.load_graph().expect("graph");
         assert!(g.node_count() >= n, "graph {}", g.node_count());
         assert!(g.find_by_name("s0").into_iter().next().is_some());
-        assert!(
-            g.find_by_name(&format!("s{}", n - 1))
-                .into_iter()
-                .next()
-                .is_some()
-        );
+        assert!(g
+            .find_by_name(&format!("s{}", n - 1))
+            .into_iter()
+            .next()
+            .is_some());
     }
 
     #[test]
@@ -4419,12 +4573,19 @@ public class OrderController
         let g = build_graph(d.path());
         let n = g.find_by_name("report").into_iter().next().expect("report");
         assert!(
-            n.string_literals.iter().all(|s| s.len() <= MAX_LITERAL_CHARS),
+            n.string_literals
+                .iter()
+                .all(|s| s.len() <= MAX_LITERAL_CHARS),
             "CJK literal exceeded byte cap: {:?}",
-            n.string_literals.iter().map(|s| s.len()).collect::<Vec<_>>()
+            n.string_literals
+                .iter()
+                .map(|s| s.len())
+                .collect::<Vec<_>>()
         );
         assert!(
-            n.string_literals.iter().all(|s| std::str::from_utf8(s.as_bytes()).is_ok()),
+            n.string_literals
+                .iter()
+                .all(|s| std::str::from_utf8(s.as_bytes()).is_ok()),
             "truncated literal must stay valid UTF-8"
         );
     }

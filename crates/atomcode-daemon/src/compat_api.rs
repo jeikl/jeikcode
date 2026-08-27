@@ -417,7 +417,11 @@ pub(crate) async fn openai_get_model(Path(id): Path<String>) -> Response {
     // Catch-all may leave a leading slash depending on router; normalize.
     let id = id.trim_start_matches('/').trim().to_string();
     if id.is_empty() {
-        return api_error(StatusCode::NOT_FOUND, "model id is empty", "model_not_found");
+        return api_error(
+            StatusCode::NOT_FOUND,
+            "model id is empty",
+            "model_not_found",
+        );
     }
     let config = match load_config() {
         Ok(c) => c,
@@ -482,8 +486,7 @@ fn chrono_like_now() -> String {
 
 fn list_project_sessions(working_dir: &std::path::Path) -> Vec<(String, SessionSummary)> {
     let root = atomcode_capabilities::session::SessionManager::sessions_root();
-    let project_hash =
-        atomcode_capabilities::session::SessionManager::project_hash(working_dir);
+    let project_hash = atomcode_capabilities::session::SessionManager::project_hash(working_dir);
     let scan = atomcode_capabilities::session::SessionManager::scan_catalog(&root);
     let mut out = Vec::new();
     for entry in scan.entries {
@@ -511,7 +514,9 @@ fn list_project_sessions(working_dir: &std::path::Path) -> Vec<(String, SessionS
 /// - Empty after trim ⇒ `None` (ephemeral: new session every request).
 /// - Any other non-empty string is a stable key: `alice_proj1`, `chat-42`, `u1_t2`.
 fn normalize_session_key(raw: Option<&str>) -> Option<String> {
-    raw.map(str::trim).filter(|s| !s.is_empty()).map(str::to_string)
+    raw.map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
 }
 
 /// Find the most recently updated session whose **name** equals the client session key.
@@ -590,7 +595,11 @@ pub(crate) async fn get_session(State(state): State<AppState>, Path(id): Path<St
             working_dir: s.working_dir.display().to_string(),
         })
         .into_response(),
-        None => api_error(StatusCode::NOT_FOUND, "session not found", "session_not_found"),
+        None => api_error(
+            StatusCode::NOT_FOUND,
+            "session not found",
+            "session_not_found",
+        ),
     }
 }
 
@@ -858,7 +867,10 @@ fn session_key_from_request(user: &Option<String>, meta: &Option<Value>) -> Opti
     })
 }
 
-fn resolve_wire_model(config: &Config, requested: Option<String>) -> Result<(String, String), String> {
+fn resolve_wire_model(
+    config: &Config,
+    requested: Option<String>,
+) -> Result<(String, String), String> {
     let (selection, provider) =
         resolve_chat_provider(config, requested).map_err(|e| e.to_string())?;
     Ok((selection, provider.model))
@@ -873,11 +885,7 @@ pub(super) enum WireFormat {
     Anthropic,
 }
 
-async fn run_compat_turn(
-    state: AppState,
-    turn: CompatTurn,
-    format: WireFormat,
-) -> Response {
+async fn run_compat_turn(state: AppState, turn: CompatTurn, format: WireFormat) -> Response {
     let working_dir = state.project.read().await.working_dir.clone();
     let config = match load_config() {
         Ok(c) => c,
@@ -905,8 +913,7 @@ async fn run_compat_turn(
         .map(str::trim)
         .filter(|s| !s.is_empty())
         .unwrap_or("default");
-    let (session_id, session_key) =
-        resolve_session_for_key(&working_dir, Some(session_key_raw));
+    let (session_id, session_key) = resolve_session_for_key(&working_dir, Some(session_key_raw));
 
     // Always Auto for OpenAI/Anthropic API; serve --yolo additionally disables
     // interactive user-input modals process-wide via AppState.yolo.
@@ -924,7 +931,6 @@ async fn run_compat_turn(
         session_title: session_key.clone(),
     };
 
-
     let admission = match state
         .active_chats
         .admit(chat_req.session_id.as_deref(), None)
@@ -939,11 +945,7 @@ async fn run_compat_turn(
             );
         }
         Err(ActiveChatAdmissionError::RequestBusy) => {
-            return api_error(
-                StatusCode::CONFLICT,
-                "request is busy",
-                "request_busy",
-            );
+            return api_error(StatusCode::CONFLICT, "request is busy", "request_busy");
         }
     };
 
@@ -1134,7 +1136,11 @@ async fn collect_compat_response(
                     ));
                 }
             }
-            ChatEvent::ToolCallStarted { id, name, arguments } => {
+            ChatEvent::ToolCallStarted {
+                id,
+                name,
+                arguments,
+            } => {
                 if !current_block.is_empty() {
                     text_blocks.push(std::mem::take(&mut current_block));
                 }
@@ -1406,13 +1412,14 @@ pub(crate) async fn anthropic_messages(
     State(state): State<AppState>,
     Json(body): Json<AnthropicMessagesRequest>,
 ) -> Response {
-    let (system, message, images) =
-        match extract_anthropic_turn(&body.system, &body.messages).await {
-            Ok(v) => v,
-            Err(e) => return api_error(StatusCode::BAD_REQUEST, e, "invalid_request"),
-        };
+    let (system, message, images) = match extract_anthropic_turn(&body.system, &body.messages).await
+    {
+        Ok(v) => v,
+        Err(e) => return api_error(StatusCode::BAD_REQUEST, e, "invalid_request"),
+    };
     let meta_user = body.metadata.as_ref().and_then(|m| m.user_id.clone());
-    let session_key = session_key_from_request(&body.user, &meta_user.map(|u| json!({"user_id": u})));
+    let session_key =
+        session_key_from_request(&body.user, &meta_user.map(|u| json!({"user_id": u})));
     let model_wire = body.model.clone().unwrap_or_default();
     let turn = CompatTurn {
         message,
@@ -1471,7 +1478,10 @@ mod tests {
         // No bare legacy provider name without model.
         assert!(!ids.iter().any(|id| *id == "claude"), "{ids:?}");
 
-        let glm = rows.iter().find(|r| r.public_id == "AtomGit/GLM-5.2").unwrap();
+        let glm = rows
+            .iter()
+            .find(|r| r.public_id == "AtomGit/GLM-5.2")
+            .unwrap();
         assert_eq!(glm.selection_id, "AtomGit-GLM-5.2");
         assert_eq!(glm.account, "AtomGit");
         assert_eq!(glm.wire_model, "GLM-5.2");

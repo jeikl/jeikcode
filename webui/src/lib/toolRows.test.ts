@@ -1,6 +1,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert';
 import {
+  appendToolOutput,
+  MAX_LIVE_TOOL_OUTPUT,
   toolResultStatus,
   updateToolProgress,
   upsertToolPart,
@@ -44,6 +46,39 @@ test('distinct tool ids each keep their own row (genuine repeat calls)', () => {
   parts = upsertToolPart(parts, tool('a'));
   parts = upsertToolPart(parts, tool('b'));
   assert.equal(parts.length, 2);
+});
+
+test('appendToolOutput writes to the matching call id, not the latest row', () => {
+  let parts: MsgPart[] = [
+    { kind: 'tool', tool: tool('a', { name: 'bash' }) },
+    { kind: 'tool', tool: tool('b', { name: 'bash' }) },
+  ];
+  parts = appendToolOutput(parts, 'a', 'hello');
+  parts = appendToolOutput(parts, 'b', 'world');
+  const a = parts[0]!.kind === 'tool' ? parts[0].tool : undefined;
+  const b = parts[1]!.kind === 'tool' ? parts[1].tool : undefined;
+  assert.equal(a?.output, 'hello');
+  assert.equal(b?.output, 'world');
+});
+
+test('appendToolOutput falls back to the most recent tool when id is missing', () => {
+  const parts = appendToolOutput(
+    [
+      { kind: 'text', text: 'hi' },
+      { kind: 'tool', tool: tool('a') },
+    ],
+    undefined,
+    'out',
+  );
+  assert.equal(parts[1]!.kind === 'tool' ? parts[1].tool.output : undefined, 'out');
+});
+
+test('appendToolOutput keeps a bounded tail on huge streams', () => {
+  const huge = 'x'.repeat(MAX_LIVE_TOOL_OUTPUT + 50);
+  const parts = appendToolOutput([{ kind: 'tool', tool: tool('a') }], 'a', huge);
+  const output = parts[0]!.kind === 'tool' ? parts[0].tool.output ?? '' : '';
+  assert.equal(output.length, MAX_LIVE_TOOL_OUTPUT);
+  assert.equal(output, 'x'.repeat(MAX_LIVE_TOOL_OUTPUT));
 });
 
 test('upsertToolPart replaces live progress instead of accumulating it', () => {

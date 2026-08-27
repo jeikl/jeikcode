@@ -84,6 +84,43 @@ export function updateToolProgress(
   );
 }
 
+/** Bound live-appended tool output so a runaway `yes`/build log cannot freeze the tab. */
+export const MAX_LIVE_TOOL_OUTPUT = 256 * 1024;
+
+/**
+ * Append a live stdout/stderr chunk to the matching tool row.
+ * Prefer `id` (kernel call_id) so parallel tools do not mix; fall back to the
+ * most recent tool part when the wire event omitted it.
+ */
+export function appendToolOutput(
+  parts: MsgPart[],
+  id: string | undefined,
+  chunk: string,
+): MsgPart[] {
+  if (!chunk) return parts;
+  let idx = -1;
+  if (id) {
+    idx = parts.findIndex((p) => p.kind === 'tool' && p.tool.id === id);
+  }
+  if (idx < 0) {
+    for (let i = parts.length - 1; i >= 0; i--) {
+      if (parts[i]!.kind === 'tool') {
+        idx = i;
+        break;
+      }
+    }
+  }
+  if (idx < 0) return parts;
+  const tp = parts[idx] as { kind: 'tool'; tool: ToolRow };
+  let output = (tp.tool.output ?? '') + chunk;
+  if (output.length > MAX_LIVE_TOOL_OUTPUT) {
+    output = output.slice(output.length - MAX_LIVE_TOOL_OUTPUT);
+  }
+  const next = parts.slice();
+  next[idx] = { kind: 'tool', tool: { ...tp.tool, output } };
+  return next;
+}
+
 /** Append a reasoning delta to the last reasoning part, or start a new one. */
 export function appendReasoningPart(parts: MsgPart[], delta: string): MsgPart[] {
   if (!delta) return parts;

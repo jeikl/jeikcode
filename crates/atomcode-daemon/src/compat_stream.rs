@@ -421,7 +421,8 @@ impl CompatProjector {
     }
 
     fn remember_tool(&mut self, call_id: &str, name: &str) -> usize {
-        self.tool_names.insert(call_id.to_string(), name.to_string());
+        self.tool_names
+            .insert(call_id.to_string(), name.to_string());
         self.tool_index_for(call_id)
     }
 
@@ -588,7 +589,11 @@ impl CompatProjector {
                     None,
                 ));
             }
-            ChatEvent::ToolCallStarted { id, name, arguments } => {
+            ChatEvent::ToolCallStarted {
+                id,
+                name,
+                arguments,
+            } => {
                 self.ensure_openai_started(&mut out);
                 self.remember_tool(&id, &name);
                 out.push(self.openai_progress_chunk(&format!("正在调用 {name}")));
@@ -837,7 +842,11 @@ impl CompatProjector {
                     out.extend(self.responses_tool_started(&c.id, &c.name, &c.arguments));
                 }
             }
-            ChatEvent::ToolCallStarted { id, name, arguments } => {
+            ChatEvent::ToolCallStarted {
+                id,
+                name,
+                arguments,
+            } => {
                 out.extend(self.responses_tool_started(&id, &name, &arguments));
             }
             ChatEvent::ToolOutputChunk { id, chunk } => {
@@ -974,24 +983,24 @@ impl CompatProjector {
                 out.push(self.responses_event(
                     "response.completed",
                     json!({
-                        "type": "response.completed",
-                        "response": {
-                            "id": self.response_id,
-                            "status": "completed",
-                            "output": [{
-                                "id": text_item_id,
-                                "type": "message",
+                            "type": "response.completed",
+                            "response": {
+                                "id": self.response_id,
                                 "status": "completed",
-                                "role": "assistant",
-                                "content": [{
-                                "type": "output_text",
-                                "text": err_text
+                                "output": [{
+                                    "id": text_item_id,
+                                    "type": "message",
+                                    "status": "completed",
+                                    "role": "assistant",
+                                    "content": [{
+                                    "type": "output_text",
+                                    "text": err_text
+                                }]
                             }]
-                        }]
-                    }
-                }),
-            ));
-        }
+                        }
+                    }),
+                ));
+            }
             _ => {}
         }
         out
@@ -1145,7 +1154,11 @@ impl CompatProjector {
                     out.extend(self.anthropic_tool_started(&c.id, &c.name, &c.arguments));
                 }
             }
-            ChatEvent::ToolCallStarted { id, name, arguments } => {
+            ChatEvent::ToolCallStarted {
+                id,
+                name,
+                arguments,
+            } => {
                 self.close_open_anthropic_blocks(&mut out);
                 out.extend(self.anthropic_tool_started(&id, &name, &arguments));
             }
@@ -1329,7 +1342,8 @@ impl CompatProjector {
         name: &str,
         arguments: &str,
     ) -> Vec<SseChunk> {
-        self.tool_names.insert(call_id.to_string(), name.to_string());
+        self.tool_names
+            .insert(call_id.to_string(), name.to_string());
         let idx = self.next_block;
         self.next_block += 1;
         self.tool_blocks.insert(call_id.to_string(), idx);
@@ -1475,19 +1489,10 @@ mod tests {
         }
 
         let texts = reasoning_texts(&all);
-        let panel_chunks: Vec<&String> = texts
-            .iter()
-            .filter(|t| t.contains("子代理 "))
-            .collect();
-        assert!(
-            !panel_chunks.is_empty(),
-            "expected panel chunks: {texts:?}"
-        );
+        let panel_chunks: Vec<&String> = texts.iter().filter(|t| t.contains("子代理 ")).collect();
+        assert!(!panel_chunks.is_empty(), "expected panel chunks: {texts:?}");
         // Later updates (after first panel paint) must include cursor-up CSI.
-        let with_cup = panel_chunks
-            .iter()
-            .filter(|t| t.contains("\x1b["))
-            .count();
+        let with_cup = panel_chunks.iter().filter(|t| t.contains("\x1b[")).count();
         assert!(
             with_cup >= 1,
             "expected ANSI cursor-up panel redraw: {panel_chunks:?}"
@@ -1534,7 +1539,13 @@ mod tests {
             arguments: r#"{"command":"ls"}"#.into(),
         });
         let joined: String = chunks.iter().map(|c| c.data.as_str()).collect();
-        assert!(joined.contains("response.output_item.added") || chunks[0].event.as_deref() == Some("response.created") || chunks.iter().any(|c| c.event.as_deref() == Some("response.output_item.added")));
+        assert!(
+            joined.contains("response.output_item.added")
+                || chunks[0].event.as_deref() == Some("response.created")
+                || chunks
+                    .iter()
+                    .any(|c| c.event.as_deref() == Some("response.output_item.added"))
+        );
         assert!(chunks
             .iter()
             .any(|c| c.event.as_deref() == Some("response.output_item.added")));

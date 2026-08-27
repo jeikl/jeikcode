@@ -9,9 +9,9 @@ use super::{err, is_skip_dir, not_found_hint, ok, resolve_path};
 use crate::tool_feedback::{format_path_not_found, parse_tool_args};
 use async_trait::async_trait;
 use atomcode_kernel::tool::{Tool, ToolContext, ToolResult};
+use globset::{GlobBuilder, GlobMatcher};
 use grep::regex::{RegexMatcher, RegexMatcherBuilder};
 use grep::searcher::{BinaryDetection, Searcher, SearcherBuilder, Sink, SinkContext, SinkMatch};
-use globset::{GlobBuilder, GlobMatcher};
 use ignore::WalkBuilder;
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -163,7 +163,9 @@ impl Tool for GrepTool {
                     "No matches found for '{pattern}' in {display_path} ({files} files searched)"
                 );
                 if timed_out {
-                    msg.push_str("\n[Search timed out; narrow `path` / `glob` or use code_explore]");
+                    msg.push_str(
+                        "\n[Search timed out; narrow `path` / `glob` or use code_explore]",
+                    );
                 }
                 if let Some(note) = recovered {
                     msg = format!("{note}\n{msg}");
@@ -290,10 +292,7 @@ fn recover_pattern_into(v: &mut Value) -> Option<String> {
         .get("pattern")
         .and_then(|p| p.as_str())
         .unwrap_or("<regex>");
-    let path = obj
-        .get("path")
-        .and_then(|p| p.as_str())
-        .unwrap_or("<dir>");
+    let path = obj.get("path").and_then(|p| p.as_str()).unwrap_or("<dir>");
     Some(format!(
         "[grep: recovered {} — next call use {{\"pattern\":\"{pat}\",\"path\":\"{path}\"}}]",
         recovered_from.join(", ")
@@ -809,10 +808,7 @@ mod tests {
         std::fs::write(d.path().join("src/a.txt"), "NEEDLE text\n").unwrap();
         std::fs::write(d.path().join("top.rs"), "NEEDLE top\n").unwrap();
         let r = GrepTool
-            .execute(
-                r#"{"pattern":"NEEDLE","glob":"*.rs"}"#,
-                &ctx(d.path()),
-            )
+            .execute(r#"{"pattern":"NEEDLE","glob":"*.rs"}"#, &ctx(d.path()))
             .await;
         assert!(!r.is_error, "{}", r.content);
         assert!(r.content.contains("a.rs"), "{}", r.content);
@@ -827,11 +823,7 @@ mod tests {
     #[tokio::test]
     async fn default_context_is_zero() {
         let d = tempfile::tempdir().unwrap();
-        std::fs::write(
-            d.path().join("f.txt"),
-            "line 1\nNEEDLE two\nline 3\n",
-        )
-        .unwrap();
+        std::fs::write(d.path().join("f.txt"), "line 1\nNEEDLE two\nline 3\n").unwrap();
         let r = GrepTool
             .execute(r#"{"pattern":"NEEDLE"}"#, &ctx(d.path()))
             .await;
@@ -853,7 +845,9 @@ mod tests {
         assert!(d.contains("[Constraint: pattern:"), "{d}");
         assert!(d.contains("code_explore"), "{d}");
         let schema = GrepTool.parameters_schema();
-        let pat = schema["properties"]["pattern"]["description"].as_str().unwrap_or("");
+        let pat = schema["properties"]["pattern"]["description"]
+            .as_str()
+            .unwrap_or("");
         assert!(
             pat.contains("Constraint") || pat.contains("description"),
             "{pat}"
@@ -894,7 +888,11 @@ mod tests {
             )
             .await;
         assert!(!r3.is_error, "{}", r3.content);
-        assert!(r3.content.contains("GetSalePostSettingData"), "{}", r3.content);
+        assert!(
+            r3.content.contains("GetSalePostSettingData"),
+            "{}",
+            r3.content
+        );
         assert!(
             r3.content.contains("CustomerRelationService.cs"),
             "{}",

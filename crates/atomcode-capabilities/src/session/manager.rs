@@ -4093,7 +4093,9 @@ mod tests {
         let mut meta = SessionMeta::new("reminder-session", "/project", 1);
 
         meta.auto_name_from_messages(&[
-            Message::user(crate::reminder::system_reminder("我就在任务1上！继续任务2！")),
+            Message::user(crate::reminder::system_reminder(
+                "我就在任务1上！继续任务2！",
+            )),
             Message::user("修复登录错误"),
         ]);
 

@@ -276,10 +276,16 @@ mod tests {
         let common_idf = stats.idf("handle_tool_call");
         // "sampler_turn" appears in 1 symbol → high idf.
         let rare_idf = stats.idf("sampler_turn");
-        assert!(rare_idf > common_idf, "rare term should have higher idf: {rare_idf} vs {common_idf}");
+        assert!(
+            rare_idf > common_idf,
+            "rare term should have higher idf: {rare_idf} vs {common_idf}"
+        );
         // A term absent from the corpus gets the highest idf (df=0).
         let absent_idf = stats.idf("sampler_turn_xyz");
-        assert!(absent_idf > rare_idf, "absent term should have the highest idf");
+        assert!(
+            absent_idf > rare_idf,
+            "absent term should have the highest idf"
+        );
     }
 
     #[test]
@@ -289,8 +295,17 @@ mod tests {
         n.id = 1;
         graph.add_symbol(n);
         let stats = IdfStats::build(&graph);
-        assert!(stats.df.contains_key("主循环处理"), "full cjk phrase must be indexed");
-        assert!(stats.df.contains_key("主循环"), "2-gram cjk sub-phrase must be indexed");
-        assert!(stats.df.contains_key("循环"), "2-gram cjk sub-phrase must be indexed");
+        assert!(
+            stats.df.contains_key("主循环处理"),
+            "full cjk phrase must be indexed"
+        );
+        assert!(
+            stats.df.contains_key("主循环"),
+            "2-gram cjk sub-phrase must be indexed"
+        );
+        assert!(
+            stats.df.contains_key("循环"),
+            "2-gram cjk sub-phrase must be indexed"
+        );
     }
 }

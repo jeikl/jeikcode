@@ -43,12 +43,7 @@ impl ReadFileTool {
     }
 }
 
-fn continuation_footer(
-    file_path: &str,
-    start: usize,
-    end: usize,
-    total: usize,
-) -> String {
+fn continuation_footer(file_path: &str, start: usize, end: usize, total: usize) -> String {
     // Never echo a previous small `limit` — that is what trapped models in 25-line
     // crawls. The next call should omit `limit` and pick up at `offset`.
     let continuation = json!({
@@ -221,11 +216,7 @@ impl Tool for ReadFileTool {
     }
     // read is non-destructive → risk() defaults to Safe.
     async fn execute(&self, args: &str, ctx: &ToolContext) -> ToolResult {
-        let a: Args = match parse_tool_args(
-            "read_file",
-            args,
-            r#"{"file_path":"<path>"}"#,
-        ) {
+        let a: Args = match parse_tool_args("read_file", args, r#"{"file_path":"<path>"}"#) {
             Ok(a) => a,
             Err(e) => return e.into_tool_result(),
         };
@@ -340,9 +331,7 @@ impl Tool for ReadFileTool {
                 "[no lines in requested range (start={start}, total={total})]"
             ));
         }
-        let skill_md = path
-            .file_name()
-            .is_some_and(|n| n == "SKILL.md");
+        let skill_md = path.file_name().is_some_and(|n| n == "SKILL.md");
         let page_limit = if skill_md {
             a.limit.unwrap_or(usize::MAX)
         } else {
@@ -387,12 +376,7 @@ impl Tool for ReadFileTool {
             end_idx = candidate_end;
         }
         if end_idx < total {
-            out.push_str(&continuation_footer(
-                &a.file_path,
-                start,
-                end_idx,
-                total,
-            ));
+            out.push_str(&continuation_footer(&a.file_path, start, end_idx, total));
         } else if start > 1 {
             out.push_str(&format!(
                 "[Showing lines {start}-{end_idx} of {total} (end)]"
@@ -674,24 +658,30 @@ mod tests {
         );
 
         let page2 = ReadFileTool::default()
-            .execute(
-                r#"{"file_path":"notes.txt","offset":1001}"#,
-                &ctx(d.path()),
-            )
+            .execute(r#"{"file_path":"notes.txt","offset":1001}"#, &ctx(d.path()))
             .await;
         assert!(!page2.is_error, "{}", page2.content);
-        assert!(page2.content.contains("1001\tline 1001"), "{}", page2.content);
+        assert!(
+            page2.content.contains("1001\tline 1001"),
+            "{}",
+            page2.content
+        );
         assert!(page2.content.contains("offset=2001"), "{}", page2.content);
 
         let page3 = ReadFileTool::default()
-            .execute(
-                r#"{"file_path":"notes.txt","offset":2001}"#,
-                &ctx(d.path()),
-            )
+            .execute(r#"{"file_path":"notes.txt","offset":2001}"#, &ctx(d.path()))
             .await;
         assert!(!page3.is_error, "{}", page3.content);
-        assert!(page3.content.contains("2001\tline 2001"), "{}", page3.content);
-        assert!(page3.content.contains("2505\tline 2505"), "{}", page3.content);
+        assert!(
+            page3.content.contains("2001\tline 2001"),
+            "{}",
+            page3.content
+        );
+        assert!(
+            page3.content.contains("2505\tline 2505"),
+            "{}",
+            page3.content
+        );
         assert!(
             page3.content.contains("(end)") || !page3.content.contains("offset="),
             "last page finishes the file: {}",
@@ -718,11 +708,7 @@ mod tests {
             "read_file must emit within budget: {} bytes",
             r.content.len()
         );
-        assert!(
-            r.content.contains("read_file("),
-            "{}",
-            r.content
-        );
+        assert!(r.content.contains("read_file("), "{}", r.content);
     }
 
     #[tokio::test]
@@ -736,11 +722,7 @@ mod tests {
             .await;
 
         assert!(!r.is_error, "{}", r.content);
-        assert!(
-            r.content.contains("read_file("),
-            "{}",
-            r.content
-        );
+        assert!(r.content.contains("read_file("), "{}", r.content);
         assert!(
             r.content.len() <= MAX_READ_OUTPUT_BYTES,
             "{} bytes",
@@ -881,11 +863,7 @@ mod tests {
             .execute(r#"{"file_path":"nope.txt"}"#, &ctx(d.path()))
             .await;
         assert!(r.is_error);
-        assert!(
-            r.content.contains("path does not exist"),
-            "{}",
-            r.content
-        );
+        assert!(r.content.contains("path does not exist"), "{}", r.content);
     }
 
     /// Local Grok-style not-found feedback (not the official "Nearest existing
@@ -902,16 +880,8 @@ mod tests {
             )
             .await;
         assert!(r.is_error, "{}", r.content);
-        assert!(
-            r.content.contains("path does not exist"),
-            "{}",
-            r.content
-        );
-        assert!(
-            r.content.contains("AndroidManifest.xml"),
-            "{}",
-            r.content
-        );
+        assert!(r.content.contains("path does not exist"), "{}", r.content);
+        assert!(r.content.contains("AndroidManifest.xml"), "{}", r.content);
     }
 
     #[tokio::test]

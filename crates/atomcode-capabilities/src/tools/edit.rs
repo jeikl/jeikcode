@@ -235,7 +235,11 @@ fn apply_hunk(
                 lines.len()
             ));
         }
-        let file_eol = if content.contains("\r\n") { "\r\n" } else { "\n" };
+        let file_eol = if content.contains("\r\n") {
+            "\r\n"
+        } else {
+            "\n"
+        };
         let end_bounded = e.min(lines.len());
         let prefix = if s > 1 {
             let mut p = lines[..s - 1].join(file_eol);
@@ -316,9 +320,7 @@ fn apply_hunk(
             }
         }
         let hint = find_closest_match_snippet(content, old_string).unwrap_or_default();
-        return Err(format!(
-            "old_string not found in file.\n{hint}"
-        ));
+        return Err(format!("old_string not found in file.\n{hint}"));
     }
     if count > 1 && !replace_all {
         return Err(format!(
@@ -465,8 +467,15 @@ fn try_fuzzy_replace(
     let old_normalized: Vec<&str> = old_string.lines().map(|l| l.trim()).collect();
     // Strip leading/trailing empty lines from the old_string pattern if they don't match the file boundary
     let old_trimmed_core: Vec<&str> = {
-        let start = old_normalized.iter().position(|l| !l.is_empty()).unwrap_or(0);
-        let end = old_normalized.iter().rposition(|l| !l.is_empty()).map(|p| p + 1).unwrap_or(0);
+        let start = old_normalized
+            .iter()
+            .position(|l| !l.is_empty())
+            .unwrap_or(0);
+        let end = old_normalized
+            .iter()
+            .rposition(|l| !l.is_empty())
+            .map(|p| p + 1)
+            .unwrap_or(0);
         if start < end {
             old_normalized[start..end].to_vec()
         } else {
@@ -577,8 +586,15 @@ fn try_block_anchor_replace(
     new_string: &str,
 ) -> Option<(String, usize)> {
     let raw_old_lines: Vec<&str> = old_string.lines().collect();
-    let start_pos = raw_old_lines.iter().position(|l| !l.trim().is_empty()).unwrap_or(0);
-    let end_pos = raw_old_lines.iter().rposition(|l| !l.trim().is_empty()).map(|p| p + 1).unwrap_or(0);
+    let start_pos = raw_old_lines
+        .iter()
+        .position(|l| !l.trim().is_empty())
+        .unwrap_or(0);
+    let end_pos = raw_old_lines
+        .iter()
+        .rposition(|l| !l.trim().is_empty())
+        .map(|p| p + 1)
+        .unwrap_or(0);
     let old_lines: Vec<&str> = if start_pos < end_pos {
         raw_old_lines[start_pos..end_pos].to_vec()
     } else {
@@ -610,7 +626,11 @@ fn try_block_anchor_replace(
                     a == b || strsim::normalized_levenshtein(&a, &b) >= 0.75
                 })
                 .count();
-            let threshold = if n <= 4 { n.saturating_sub(1) } else { (n as f32 * 0.65).ceil() as usize };
+            let threshold = if n <= 4 {
+                n.saturating_sub(1)
+            } else {
+                (n as f32 * 0.65).ceil() as usize
+            };
             if matched >= threshold {
                 matches.push(i);
             }
@@ -644,12 +664,7 @@ fn clean_token_normalize(s: &str) -> String {
     for c in s.chars() {
         if matches!(
             c,
-            '\u{feff}'
-                | '\u{200b}'
-                | '\u{200c}'
-                | '\u{200d}'
-                | '\u{2060}'
-                | '\u{fe0f}'
+            '\u{feff}' | '\u{200b}' | '\u{200c}' | '\u{200d}' | '\u{2060}' | '\u{fe0f}'
         ) {
             continue;
         }
@@ -731,7 +746,11 @@ fn try_token_normalized_replace(
     let has_trailing_newline = content.ends_with('\n');
     let new_lines: Vec<&str> = new_string.lines().collect();
     let mut result_lines: Vec<String> = content_lines.iter().map(|l| l.to_string()).collect();
-    let to_replace = if replace_all { &matches[..] } else { &matches[..1] };
+    let to_replace = if replace_all {
+        &matches[..]
+    } else {
+        &matches[..1]
+    };
     for &(start, end) in to_replace.iter().rev() {
         let replacement = reanchored_replacement(&new_lines, content_lines[start]);
         result_lines.splice(start..end, replacement);
@@ -795,10 +814,7 @@ fn collapse_comment_style_lines(lines: &[&str]) -> Vec<String> {
     for raw in lines {
         let t = raw.trim();
         if t.starts_with("/**") && t.ends_with("*/") {
-            let inner = t
-                .trim_start_matches("/**")
-                .trim_end_matches("*/")
-                .trim();
+            let inner = t.trim_start_matches("/**").trim_end_matches("*/").trim();
             out.push(clean_token_normalize(&format!("/** {inner} */")));
             continue;
         }
@@ -813,12 +829,19 @@ fn collapse_comment_style_lines(lines: &[&str]) -> Vec<String> {
         }
         if in_javadoc {
             if t.ends_with("*/") {
-                let inner = t.trim_end_matches("*/").trim().trim_start_matches('*').trim();
+                let inner = t
+                    .trim_end_matches("*/")
+                    .trim()
+                    .trim_start_matches('*')
+                    .trim();
                 if !inner.is_empty() {
                     javadoc.push(inner.to_string());
                 }
                 in_javadoc = false;
-                out.push(clean_token_normalize(&format!("/** {} */", javadoc.join(" "))));
+                out.push(clean_token_normalize(&format!(
+                    "/** {} */",
+                    javadoc.join(" ")
+                )));
             } else {
                 let inner = t.trim_start_matches('*').trim();
                 if !inner.is_empty() {
@@ -828,7 +851,10 @@ fn collapse_comment_style_lines(lines: &[&str]) -> Vec<String> {
             continue;
         }
         if t.starts_with("//") {
-            out.push(clean_token_normalize(&format!("/** {} */", t.trim_start_matches('/').trim())));
+            out.push(clean_token_normalize(&format!(
+                "/** {} */",
+                t.trim_start_matches('/').trim()
+            )));
             continue;
         }
         let n = clean_token_normalize(raw);
@@ -848,10 +874,7 @@ fn collapse_comment_style_spans(lines: &[&str]) -> Vec<(String, usize, usize)> {
     for (i, raw) in lines.iter().enumerate() {
         let t = raw.trim();
         if t.starts_with("/**") && t.ends_with("*/") {
-            let inner = t
-                .trim_start_matches("/**")
-                .trim_end_matches("*/")
-                .trim();
+            let inner = t.trim_start_matches("/**").trim_end_matches("*/").trim();
             out.push((clean_token_normalize(&format!("/** {inner} */")), i, i + 1));
             continue;
         }
@@ -867,7 +890,11 @@ fn collapse_comment_style_spans(lines: &[&str]) -> Vec<(String, usize, usize)> {
         }
         if in_javadoc {
             if t.ends_with("*/") {
-                let inner = t.trim_end_matches("*/").trim().trim_start_matches('*').trim();
+                let inner = t
+                    .trim_end_matches("*/")
+                    .trim()
+                    .trim_start_matches('*')
+                    .trim();
                 if !inner.is_empty() {
                     javadoc.push(inner.to_string());
                 }
@@ -947,7 +974,11 @@ fn try_comment_style_replace(
     let has_trailing_newline = content.ends_with('\n');
     let new_lines: Vec<&str> = new_string.lines().collect();
     let mut result_lines: Vec<String> = content_lines.iter().map(|l| l.to_string()).collect();
-    let to_replace = if replace_all { &matches[..] } else { &matches[..1] };
+    let to_replace = if replace_all {
+        &matches[..]
+    } else {
+        &matches[..1]
+    };
     for &(start, end) in to_replace.iter().rev() {
         let replacement = reanchored_replacement(&new_lines, content_lines[start]);
         result_lines.splice(start..end, replacement);
@@ -1144,11 +1175,16 @@ mod tests {
             "old_string": "    /**\n     * 创建时间\n     */\n    private LocalDateTime createTime;",
             "new_string": "    /**\n     * 创建时间\n     */\n    private LocalDateTime createTime;\n\n    /** 过期提前预警天数 */\n    private Integer expireWarningDays;"
         });
-        let r = EditFileTool.execute(&args.to_string(), &ctx(d.path())).await;
+        let r = EditFileTool
+            .execute(&args.to_string(), &ctx(d.path()))
+            .await;
         assert!(!r.is_error, "javadoc wrap must match: {}", r.content);
         let on_disk = std::fs::read_to_string(d.path().join("Coupon.java")).unwrap();
         assert!(on_disk.contains("expireWarningDays"), "{on_disk}");
-        assert!(on_disk.contains("createTime"), "must keep existing field: {on_disk}");
+        assert!(
+            on_disk.contains("createTime"),
+            "must keep existing field: {on_disk}"
+        );
     }
 
     #[tokio::test]
@@ -1164,11 +1200,20 @@ mod tests {
             "old_string": "    /**\n     * 创建时间\n     */\n    @TableField(\"create_time\")\n    private LocalDateTime createTime;\n}",
             "new_string": "    /**\n     * 过期提前预警天数 (默认为3天)\n     */\n    @TableField(\"expire_warning_days\")\n    private Integer expireWarningDays;\n}"
         });
-        let r = EditFileTool.execute(&args.to_string(), &ctx(d.path())).await;
-        assert!(r.is_error, "must refuse a structurally different old_string: {}", r.content);
+        let r = EditFileTool
+            .execute(&args.to_string(), &ctx(d.path()))
+            .await;
+        assert!(
+            r.is_error,
+            "must refuse a structurally different old_string: {}",
+            r.content
+        );
         assert!(r.content.contains("not found"), "{}", r.content);
         let on_disk = std::fs::read_to_string(d.path().join("Coupon.java")).unwrap();
-        assert!(on_disk.contains("createTime"), "createTime must survive: {on_disk}");
+        assert!(
+            on_disk.contains("createTime"),
+            "createTime must survive: {on_disk}"
+        );
         assert!(
             on_disk.matches("expireWarningDays").count() == 1,
             "must not duplicate expireWarningDays: {on_disk}"
@@ -1684,7 +1729,11 @@ mod tests {
                 &ctx(d.path()),
             )
             .await;
-        assert!(!r.is_error, "token normalized match must succeed: {}", r.content);
+        assert!(
+            !r.is_error,
+            "token normalized match must succeed: {}",
+            r.content
+        );
         assert!(r.content.contains("token-normalized match"));
         let updated = std::fs::read_to_string(d.path().join("calc.rs")).unwrap();
         assert!(updated.contains("let subtotal = price * (1.0 + tax_rate) + 5.0;"));
@@ -1710,7 +1759,11 @@ mod tests {
                 &ctx(d.path()),
             )
             .await;
-        assert!(!r.is_error, "boundary trimmed match must succeed: {}", r.content);
+        assert!(
+            !r.is_error,
+            "boundary trimmed match must succeed: {}",
+            r.content
+        );
         let updated = std::fs::read_to_string(d.path().join("main.rs")).unwrap();
         assert!(updated.contains("let sum = a * b;"));
     }
@@ -1729,7 +1782,8 @@ mod tests {
             .await;
         assert!(r.is_error);
         assert!(
-            r.content.contains("Closest matching block") || r.content.contains("[Content Mismatch]"),
+            r.content.contains("Closest matching block")
+                || r.content.contains("[Content Mismatch]"),
             "{}",
             r.content
         );

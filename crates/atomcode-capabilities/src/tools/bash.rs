@@ -5,13 +5,16 @@
 //! flags it (a faithful port of the production destructive-command classifier —
 //! privilege escalation, recursive force deletes, `find -delete`, `dd`, fork bombs,
 //! destructive git, remote-script-piped-to-shell, …); everything else is `Safe`.
-//! Dropped vs production: streamed stdout (no event channel in the neutral context),
-//! first-error-signature capture, telemetry, and the setsid/process-group reaping
-//! (the neutral version kills the direct child via `kill_on_drop`).
+//! Live stdout/stderr is forwarded through [`ToolContext::progress`] so drivers
+//! (TUI / WebUI) can render the command like a terminal while it runs; the
+//! final [`ToolResult`] is still the combined sanitized capture.
+//! Dropped vs production: first-error-signature capture, telemetry, and the
+//! setsid/process-group reaping (the neutral version kills the direct child
+//! via `kill_on_drop`).
 
 use super::{err, ok};
 use async_trait::async_trait;
-use atomcode_kernel::tool::{RiskLevel, Tool, ToolContext, ToolResult};
+use atomcode_kernel::tool::{ProgressSink, RiskLevel, Tool, ToolContext, ToolResult};
 use base64::Engine;
 use serde::Deserialize;
 use serde_json::json;
@@ -95,15 +98,15 @@ impl Tool for BashTool {
                 "timeout": {
                     "type": "integer",
                     "description": "REQUIRED seconds before the command is killed. Pick by job kind — do NOT omit.\n\
-Compile / test / install / link: ALWAYS 900 (they can print nothing for minutes while linking or compiling):\n\
-  cargo build|test|check|clippy|run, npm/pnpm/yarn test|install|ci, make, mvn, gradle, pytest, go test, tsc.\n\
-  GOOD: {\"command\":\"cargo test --offline\",\"timeout\":900}\n\
-  GOOD: {\"command\":\"npm test\",\"timeout\":900}\n\
-Short commands: 30 (git status, ls, echo, pwd, which).\n\
-  GOOD: {\"command\":\"git status\",\"timeout\":30}\n\
-Medium (git fetch/clone, one-off scripts): 120.\n\
-BAD: omit timeout on cargo test / npm install / make\n\
-BAD: timeout=900 on git status or ls"
+        Compile / test / install / link: ALWAYS 900 (they can print nothing for minutes while linking or compiling):\n\
+        cargo build|test|check|clippy|run, npm/pnpm/yarn test|install|ci, make, mvn, gradle, pytest, go test, tsc.\n\
+        GOOD: {\"command\":\"cargo test --offline\",\"timeout\":900}\n\
+        GOOD: {\"command\":\"npm test\",\"timeout\":900}\n\
+        Short commands: 30 (git status, ls, echo, pwd, which).\n\
+        GOOD: {\"command\":\"git status\",\"timeout\":30}\n\
+        Medium (git fetch/clone, one-off scripts): 120.\n\
+        BAD: omit timeout on cargo test / npm install / make\n\
+        BAD: timeout=900 on git status or ls"
                 }
             },
             "required": ["command"]
@@ -250,7 +253,7 @@ BAD: timeout=900 on git status or ls"
             }
         }
 
-        let child = match cmd.spawn() {
+        let mut child = match cmd.spawn() {
             Ok(c) => c,
             Err(e) => return err(format!("bash: failed to spawn shell: {e}")),
         };
@@ -271,11 +274,18 @@ BAD: timeout=900 on git status or ls"
         // leak, and the same fix, as Windows.
         #[cfg(windows)]
         let job_guard = crate::process_utils::assign_child_to_kill_on_close_job(&child);
-        // PID captured before `wait_with_output` consumes `child`. On Unix it is
-        // the pgid (setsid leader); on Windows it's the `taskkill /T` fallback
+        // PID captured before we take the pipes and `wait`. On Unix it is the
+        // pgid (setsid leader); on Windows it's the `taskkill /T` fallback
         // root for when the Job Object couldn't be set up.
         let child_pid = child.id();
-        let wait = child.wait_with_output();
+        let mut stdout = match child.stdout.take() {
+            Some(pipe) => pipe,
+            None => return err("bash: failed to capture stdout".to_string()),
+        };
+        let mut stderr = match child.stderr.take() {
+            Some(pipe) => pipe,
+            None => return err("bash: failed to capture stderr".to_string()),
+        };
 
         let kill_tree = || {
             #[cfg(windows)]
@@ -288,9 +298,24 @@ BAD: timeout=900 on git status or ls"
             }
         };
 
+        let progress = ctx.progress.clone();
+        let live_sent = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let run = async {
+            let live_out = live_sent.clone();
+            let live_err = live_sent.clone();
+            let progress_out = progress.clone();
+            let progress_err = progress.clone();
+            let (stdout_buf, stderr_buf) = tokio::join!(
+                read_pipe_and_stream(&mut stdout, progress_out, live_out),
+                read_pipe_and_stream(&mut stderr, progress_err, live_err),
+            );
+            let status = child.wait().await;
+            (stdout_buf, stderr_buf, status)
+        };
+
         tokio::select! {
             biased;
-            // Cooperative cancel: returning drops `wait` → kill_on_drop SIGKILLs the child.
+            // Cooperative cancel: returning drops `run` → kill_on_drop SIGKILLs the child.
             _ = ctx.cancel.cancelled() => {
                 kill_tree();
                 // The command itself is already shown in the `● Bash(…)`
@@ -299,10 +324,12 @@ BAD: timeout=900 on git status or ls"
                 // just wraps into several redundant error lines.
                 err("bash: cancelled before completion.".to_string())
             }
-            res = tokio::time::timeout(dur, wait) => match res {
-                Ok(Ok(output)) => format_output(&output),
-                Ok(Err(e)) => err(format!("bash: error running command: {e}")),
-                // Timed out: the timeout future drops `wait` → kill_on_drop SIGKILLs the child.
+            res = tokio::time::timeout(dur, run) => match res {
+                Ok((stdout_buf, stderr_buf, Ok(status))) => {
+                    format_captured_output(&stdout_buf, &stderr_buf, status)
+                }
+                Ok((_, _, Err(e))) => err(format!("bash: error running command: {e}")),
+                // Timed out: the timeout future drops `run` → kill_on_drop SIGKILLs the child.
                 // Don't echo the command (see the cancel arm); point at the actionable
                 // knob — a larger `timeout` — the way the core bash tool does.
                 Err(_) => {
@@ -1280,9 +1307,60 @@ fn sanitize_terminal_output(s: &str) -> String {
         .collect()
 }
 
-fn format_output(output: &std::process::Output) -> ToolResult {
-    let stdout = sanitize_terminal_output(&decode_output(&output.stdout));
-    let stderr = sanitize_terminal_output(&decode_output(&output.stderr));
+/// Cap on live `ctx.progress` bytes for one bash invocation. The final
+/// [`ToolResult`] still carries the full (kernel-capped) capture; this only
+/// bounds the mid-flight UI/event flood (`yes`, tight loops, huge logs).
+const MAX_LIVE_STREAM_BYTES: usize = 256 * 1024;
+
+fn emit_live_chunk(
+    progress: &ProgressSink,
+    live_sent: &std::sync::atomic::AtomicUsize,
+    chunk: &str,
+) {
+    let text = sanitize_terminal_output(chunk);
+    if text.is_empty() {
+        return;
+    }
+    let prev = live_sent.fetch_add(text.len(), std::sync::atomic::Ordering::Relaxed);
+    if prev >= MAX_LIVE_STREAM_BYTES {
+        return;
+    }
+    progress.emit(text);
+}
+
+async fn read_pipe_and_stream(
+    reader: &mut (impl tokio::io::AsyncRead + Unpin),
+    progress: ProgressSink,
+    live_sent: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+) -> Vec<u8> {
+    let mut buf = vec![0u8; 65536];
+    let mut collected = Vec::new();
+    let mut decode_pending = Vec::new();
+    loop {
+        match reader.read(&mut buf).await {
+            Ok(0) => break,
+            Ok(n) => {
+                collected.extend_from_slice(&buf[..n]);
+                if let Some(chunk) = decode_stream_chunk(&mut decode_pending, &buf[..n], false) {
+                    emit_live_chunk(&progress, live_sent.as_ref(), &chunk);
+                }
+            }
+            Err(_) => break,
+        }
+    }
+    if let Some(chunk) = decode_stream_chunk(&mut decode_pending, &[], true) {
+        emit_live_chunk(&progress, live_sent.as_ref(), &chunk);
+    }
+    collected
+}
+
+fn format_captured_output(
+    stdout: &[u8],
+    stderr: &[u8],
+    status: std::process::ExitStatus,
+) -> ToolResult {
+    let stdout = sanitize_terminal_output(&decode_output(stdout));
+    let stderr = sanitize_terminal_output(&decode_output(stderr));
     let mut s = String::new();
     if !stdout.is_empty() {
         s.push_str(&stdout);
@@ -1294,7 +1372,7 @@ fn format_output(output: &std::process::Output) -> ToolResult {
         s.push_str("[stderr]\n");
         s.push_str(&stderr);
     }
-    match output.status.code() {
+    match status.code() {
         Some(0) => {
             if s.trim().is_empty() {
                 s = "(no output)".to_string();
@@ -2171,11 +2249,50 @@ pub fn bash_invocations(source: &str) -> Option<Vec<BashInvocation>> {
 /// Binaries that routinely run for minutes with little or no stdout (link, LLVM, package
 /// download). Schema asks the model for timeout=900; if omitted they still get 900s and skip idle-kill.
 const LONG_JOB_BINS: &[&str] = &[
-    "cargo", "rustc", "rustdoc", "npm", "npx", "pnpm", "yarn", "bun", "bunx", "mvn", "mvnw",
-    "gradle", "gradlew", "make", "gmake", "cmake", "ninja", "meson", "go", "dotnet", "msbuild",
-    "gcc", "g++", "clang", "clang++", "cl", "pip", "pip3", "poetry", "uv", "pipenv", "composer",
-    "docker", "docker-compose", "podman", "webpack", "vite", "tsc", "esbuild", "pytest", "ctest",
-    "xcodebuild", "javac", "ant",
+    "cargo",
+    "rustc",
+    "rustdoc",
+    "npm",
+    "npx",
+    "pnpm",
+    "yarn",
+    "bun",
+    "bunx",
+    "mvn",
+    "mvnw",
+    "gradle",
+    "gradlew",
+    "make",
+    "gmake",
+    "cmake",
+    "ninja",
+    "meson",
+    "go",
+    "dotnet",
+    "msbuild",
+    "gcc",
+    "g++",
+    "clang",
+    "clang++",
+    "cl",
+    "pip",
+    "pip3",
+    "poetry",
+    "uv",
+    "pipenv",
+    "composer",
+    "docker",
+    "docker-compose",
+    "podman",
+    "webpack",
+    "vite",
+    "tsc",
+    "esbuild",
+    "pytest",
+    "ctest",
+    "xcodebuild",
+    "javac",
+    "ant",
 ];
 
 fn command_basename(name: &str) -> String {
@@ -2217,9 +2334,9 @@ pub(crate) fn looks_like_long_job(command: &str) -> bool {
     if let Some(invs) = bash_invocations(command) {
         return invs.iter().any(invocation_is_long_job);
     }
-    command.split_whitespace().any(|tok| {
-        LONG_JOB_BINS.contains(&command_basename(tok).as_str())
-    })
+    command
+        .split_whitespace()
+        .any(|tok| LONG_JOB_BINS.contains(&command_basename(tok).as_str()))
 }
 
 /// Whether `command` is PROVABLY read-only, so it may run CONCURRENTLY without a
@@ -3039,10 +3156,16 @@ mod tests {
     #[test]
     fn looks_like_long_job_detects_compile_and_skips_short_reads() {
         assert!(super::looks_like_long_job("cargo build"));
-        assert!(super::looks_like_long_job("cd crates/foo && cargo test --offline"));
+        assert!(super::looks_like_long_job(
+            "cd crates/foo && cargo test --offline"
+        ));
         assert!(super::looks_like_long_job("npm install"));
-        assert!(super::looks_like_long_job(r"C:\Users\me\.cargo\bin\cargo.exe check"));
-        assert!(super::looks_like_long_job("git clone https://example.com/repo.git"));
+        assert!(super::looks_like_long_job(
+            r"C:\Users\me\.cargo\bin\cargo.exe check"
+        ));
+        assert!(super::looks_like_long_job(
+            "git clone https://example.com/repo.git"
+        ));
         assert!(!super::looks_like_long_job("ls -la"));
         assert!(!super::looks_like_long_job("git status"));
         assert!(!super::looks_like_long_job("echo cargo"));
@@ -3922,6 +4045,65 @@ mod tests {
             .await;
         assert!(!r.is_error, "{}", r.content);
         assert!(r.content.contains("hello"), "{}", r.content);
+    }
+
+    #[tokio::test]
+    async fn execute_emits_stdout_chunks_via_progress() {
+        use std::sync::{Arc, Mutex};
+        let d = tempfile::tempdir().unwrap();
+        let seen = Arc::new(Mutex::new(String::new()));
+        let seen2 = seen.clone();
+        let cx = ToolContext {
+            working_dir: d.path().to_path_buf(),
+            cancel: CancellationToken::new(),
+            progress: ProgressSink::new(Arc::new(move |message| {
+                seen2.lock().unwrap().push_str(&message);
+            })),
+            requester: None,
+        };
+        let r = BashTool
+            .execute(r#"{"command":"echo streamed"}"#, &cx)
+            .await;
+        assert!(!r.is_error, "{}", r.content);
+        assert!(
+            seen.lock().unwrap().contains("streamed"),
+            "live progress should include stdout; got {:?}",
+            seen.lock().unwrap()
+        );
+    }
+
+    #[tokio::test]
+    async fn execute_streams_stdout_before_process_exits() {
+        use std::sync::Arc;
+        let d = tempfile::tempdir().unwrap();
+        let token = CancellationToken::new();
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let cx = ToolContext {
+            working_dir: d.path().to_path_buf(),
+            cancel: token.clone(),
+            progress: ProgressSink::new(Arc::new(move |message| {
+                let _ = tx.send(message);
+            })),
+            requester: None,
+        };
+        let join = tokio::spawn(async move {
+            BashTool
+                .execute(
+                    r#"{"command":"echo streamed && sleep 8","timeout":15}"#,
+                    &cx,
+                )
+                .await
+        });
+        let chunk = tokio::time::timeout(std::time::Duration::from_secs(2), rx.recv())
+            .await
+            .expect("stdout should stream before sleep finishes")
+            .expect("progress channel stayed open");
+        assert!(
+            chunk.contains("streamed"),
+            "first live chunk should include stdout, got {chunk:?}"
+        );
+        token.cancel();
+        let _ = join.await;
     }
 
     #[tokio::test]

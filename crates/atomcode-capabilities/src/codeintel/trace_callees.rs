@@ -49,14 +49,11 @@ impl Tool for TraceCalleesTool {
         })
     }
     async fn execute(&self, args: &str, ctx: &ToolContext) -> ToolResult {
-        let a: Args = match parse_tool_args(
-            "trace_callees",
-            args,
-            r#"{"symbol":"<name>","depth":3}"#,
-        ) {
-            Ok(a) => a,
-            Err(e) => return e.into_tool_result(),
-        };
+        let a: Args =
+            match parse_tool_args("trace_callees", args, r#"{"symbol":"<name>","depth":3}"#) {
+                Ok(a) => a,
+                Err(e) => return e.into_tool_result(),
+            };
         let depth = a.depth.unwrap_or(3).min(5);
         let index = self.index.clone();
         let root = ctx.working_dir.clone();

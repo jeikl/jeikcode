@@ -11,17 +11,18 @@
 //! 8. Test file deprioritization & Zero-hit rich diagnostic feedback
 
 use super::bilingual_nlp::{
-    calculate_text_similarity, derive_project_name_tokens, parse_bilingual_query_with_thesaurus,
-    parse_field_qualified_query, DynamicThesaurus, ParsedQuery, SearchTokens,
+    calculate_lexical_similarity, calculate_text_similarity, derive_project_name_tokens,
+    parse_bilingual_query_with_thesaurus, parse_field_qualified_query, DynamicThesaurus,
+    ParsedQuery, SearchTokens,
 };
 use super::graph::{CodeGraph, EdgeKind, SymbolId, SymbolKind, SymbolNode};
 use super::index::CodeIndex;
 use super::{canonical, err, normalize_path_for_match, ok, path_matches_scope};
 use async_trait::async_trait;
 use atomcode_kernel::tool::{Tool, ToolContext, ToolResult};
+use rayon::prelude::*;
 use serde::Deserialize;
 use serde_json::json;
-use rayon::prelude::*;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock};
@@ -76,7 +77,14 @@ fn query_cache_get(
 ) -> Option<String> {
     let guard = QUERY_RESULT_CACHE.read().unwrap();
     guard
-        .get(&(fingerprint, query.to_string(), scope.to_string(), max_files, bm25_enabled, concept_enabled))
+        .get(&(
+            fingerprint,
+            query.to_string(),
+            scope.to_string(),
+            max_files,
+            bm25_enabled,
+            concept_enabled,
+        ))
         .cloned()
 }
 
@@ -271,20 +279,48 @@ fn seed_fork_defaults() {
 
 /// Bundled thesaurus dictionaries (this fork's domain word-lists), embedded so
 /// a fresh install starts with the same thesaurus the fork was developed with.
-static THESAURUS_ASSETS: std::sync::LazyLock<std::collections::HashMap<&'static str, &'static str>> =
-    std::sync::LazyLock::new(|| {
-        let mut m = std::collections::HashMap::new();
-        m.insert("admin_system.txt", include_str!("../../assets/thesaurus/admin_system.txt"));
-        m.insert("agent_core.txt", include_str!("../../assets/thesaurus/agent_core.txt"));
-        m.insert("ai_agent.txt", include_str!("../../assets/thesaurus/ai_agent.txt"));
-        m.insert("ailaierp.txt", include_str!("../../assets/thesaurus/ailaierp.txt"));
-        m.insert("computer_science.txt", include_str!("../../assets/thesaurus/computer_science.txt"));
-        m.insert("fullstack_dev.txt", include_str!("../../assets/thesaurus/fullstack_dev.txt"));
-        m.insert("medical.txt", include_str!("../../assets/thesaurus/medical.txt"));
-        m.insert("robotics.txt", include_str!("../../assets/thesaurus/robotics.txt"));
-        m.insert("web_http.txt", include_str!("../../assets/thesaurus/web_http.txt"));
-        m
-    });
+static THESAURUS_ASSETS: std::sync::LazyLock<
+    std::collections::HashMap<&'static str, &'static str>,
+> = std::sync::LazyLock::new(|| {
+    let mut m = std::collections::HashMap::new();
+    m.insert(
+        "admin_system.txt",
+        include_str!("../../assets/thesaurus/admin_system.txt"),
+    );
+    m.insert(
+        "agent_core.txt",
+        include_str!("../../assets/thesaurus/agent_core.txt"),
+    );
+    m.insert(
+        "ai_agent.txt",
+        include_str!("../../assets/thesaurus/ai_agent.txt"),
+    );
+    m.insert(
+        "ailaierp.txt",
+        include_str!("../../assets/thesaurus/ailaierp.txt"),
+    );
+    m.insert(
+        "computer_science.txt",
+        include_str!("../../assets/thesaurus/computer_science.txt"),
+    );
+    m.insert(
+        "fullstack_dev.txt",
+        include_str!("../../assets/thesaurus/fullstack_dev.txt"),
+    );
+    m.insert(
+        "medical.txt",
+        include_str!("../../assets/thesaurus/medical.txt"),
+    );
+    m.insert(
+        "robotics.txt",
+        include_str!("../../assets/thesaurus/robotics.txt"),
+    );
+    m.insert(
+        "web_http.txt",
+        include_str!("../../assets/thesaurus/web_http.txt"),
+    );
+    m
+});
 
 /// Bundled builtin-tools catalog (what tool names may be whitelisted in
 /// `[tools.tool_output] no_fold_tools`), embedded for first-run seeding.
@@ -314,10 +350,38 @@ fn looks_like_single_file(p: &str) -> bool {
     };
     matches!(
         ext.to_ascii_lowercase().as_str(),
-        "rs" | "py" | "ts" | "tsx" | "js" | "jsx" | "go" | "java" | "kt" | "cs"
-            | "c" | "cc" | "cpp" | "h" | "hpp" | "php" | "rb" | "swift" | "scala"
-            | "vue" | "svelte" | "md" | "toml" | "json" | "yaml" | "yml" | "xml"
-            | "sql" | "html" | "css" | "sh" | "txt" | "lock"
+        "rs" | "py"
+            | "ts"
+            | "tsx"
+            | "js"
+            | "jsx"
+            | "go"
+            | "java"
+            | "kt"
+            | "cs"
+            | "c"
+            | "cc"
+            | "cpp"
+            | "h"
+            | "hpp"
+            | "php"
+            | "rb"
+            | "swift"
+            | "scala"
+            | "vue"
+            | "svelte"
+            | "md"
+            | "toml"
+            | "json"
+            | "yaml"
+            | "yml"
+            | "xml"
+            | "sql"
+            | "html"
+            | "css"
+            | "sh"
+            | "txt"
+            | "lock"
     )
 }
 
@@ -371,7 +435,8 @@ pub fn detect_subproject_roots(root: &Path) -> Vec<PathBuf> {
         let path = entry.path();
         if path.is_dir() {
             let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
-            if name.starts_with('.') || name == "target" || name == "node_modules" || name == "dist" {
+            if name.starts_with('.') || name == "target" || name == "node_modules" || name == "dist"
+            {
                 continue;
             }
             if path.join("Cargo.toml").exists()
@@ -474,7 +539,10 @@ impl Tool for CodeExploreTool {
         }
 
         let root = canonical(&ctx.working_dir);
-        let max_files = a.max_files.unwrap_or(DEFAULT_MAX_FILES).clamp(1, MAX_ALLOWED_FILES);
+        let max_files = a
+            .max_files
+            .unwrap_or(DEFAULT_MAX_FILES)
+            .clamp(1, MAX_ALLOWED_FILES);
         let _log_guard = super::index_log::ToolCallGuard::enter(
             "code_explore",
             json!({
@@ -551,9 +619,14 @@ impl Tool for CodeExploreTool {
             .unwrap_or_default();
         let bm25_enabled = std::env::var("ATOMCODE_EXPLORE_BM25").as_deref() == Ok("1");
         let concept_enabled = std::env::var("ATOMCODE_EXPLORE_CONCEPT").as_deref() == Ok("1");
-        if let Some(cached_body) =
-            query_cache_get(fp, &a.query, &scope_key, max_files, bm25_enabled, concept_enabled)
-        {
+        if let Some(cached_body) = query_cache_get(
+            fp,
+            &a.query,
+            &scope_key,
+            max_files,
+            bm25_enabled,
+            concept_enabled,
+        ) {
             let t_retrieval = Duration::ZERO;
             let t_render = Duration::ZERO;
             let total_cost = t0.elapsed();
@@ -684,10 +757,16 @@ impl Tool for CodeExploreTool {
                     if files_in_scope.is_empty() && disk_files > 0 {
                         format!("* ⚠️ Disk Inspection: Found {} source file(s) on disk {:?}, but 0 files indexed in memory. (Likely filtered by ignore rules or index needs rebuild).\n", disk_files, ext_list)
                     } else {
-                        format!("* Disk Inspection: {} source file(s) on disk {:?}.\n", disk_files, ext_list)
+                        format!(
+                            "* Disk Inspection: {} source file(s) on disk {:?}.\n",
+                            disk_files, ext_list
+                        )
                     }
                 } else {
-                    format!("* ⚠️ Disk Inspection: Specified path `{}` does not exist on disk.\n", sc.display())
+                    format!(
+                        "* ⚠️ Disk Inspection: Specified path `{}` does not exist on disk.\n",
+                        sc.display()
+                    )
                 }
             } else {
                 String::new()
@@ -881,7 +960,9 @@ fn has_genuine_match_anchor(tokens: &SearchTokens, node: &SymbolNode) -> bool {
         // Strict symbol lookup intent — reject random stop-word fragmentation.
         for id in &tokens.code_identifiers {
             let id_lower = id.to_ascii_lowercase();
-            if node_name_lower == id_lower || (node_name_lower.contains(&id_lower) && id_lower.len() >= 4) {
+            if node_name_lower == id_lower
+                || (node_name_lower.contains(&id_lower) && id_lower.len() >= 4)
+            {
                 return true;
             }
             if id_lower.contains(&node_name_lower) && node_name_lower.len() >= 5 {
@@ -1005,9 +1086,15 @@ fn has_genuine_match_anchor(tokens: &SearchTokens, node: &SymbolNode) -> bool {
     // 9. Check SQL predicates and string literals
     for sql in &node.sql_predicates {
         let sql_lower = sql.raw_clause.to_ascii_lowercase();
-        if tokens.cjk_phrases.iter().any(|p| sql.raw_clause.contains(p))
+        if tokens
+            .cjk_phrases
+            .iter()
+            .any(|p| sql.raw_clause.contains(p))
             || tokens.expanded_terms.iter().any(|t| sql_lower.contains(t))
-            || tokens.words.iter().any(|w| w.len() >= 3 && sql_lower.contains(w))
+            || tokens
+                .words
+                .iter()
+                .any(|w| w.len() >= 3 && sql_lower.contains(w))
         {
             return true;
         }
@@ -1016,7 +1103,10 @@ fn has_genuine_match_anchor(tokens: &SearchTokens, node: &SymbolNode) -> bool {
         let lit_lower = lit.to_ascii_lowercase();
         if tokens.cjk_phrases.iter().any(|p| lit.contains(p))
             || tokens.expanded_terms.iter().any(|t| lit_lower.contains(t))
-            || tokens.words.iter().any(|w| w.len() >= 3 && lit_lower.contains(w))
+            || tokens
+                .words
+                .iter()
+                .any(|w| w.len() >= 3 && lit_lower.contains(w))
         {
             return true;
         }
@@ -1071,7 +1161,7 @@ fn score_workspace_symbols(
         .map(|(file, _)| {
             (
                 (*file).clone(),
-                calculate_text_similarity(tokens, &file.to_string_lossy()),
+                calculate_lexical_similarity(tokens, &file.to_string_lossy()),
             )
         })
         .collect();
@@ -1083,191 +1173,210 @@ fn score_workspace_symbols(
     let scored: Vec<(PathBuf, ScoredSymbol)> = nodes
         .into_par_iter()
         .filter_map(|node| {
-        if !parsed_query.kind_filters.is_empty() {
-            let kind_str = format!("{:?}", node.kind).to_ascii_lowercase();
-            if !parsed_query.kind_filters.iter().any(|k| kind_str.contains(k)) {
+            if !parsed_query.kind_filters.is_empty() {
+                let kind_str = format!("{:?}", node.kind).to_ascii_lowercase();
+                if !parsed_query
+                    .kind_filters
+                    .iter()
+                    .any(|k| kind_str.contains(k))
+                {
+                    return None;
+                }
+            }
+            if !name_filters_lower.is_empty() {
+                let name_lower = node.name.to_ascii_lowercase();
+                if !name_filters_lower.iter().any(|n| name_lower.contains(n)) {
+                    return None;
+                }
+            }
+            if !path_filters_lower.is_empty() {
+                let f_lower = node.file.to_string_lossy().to_ascii_lowercase();
+                if !path_filters_lower.iter().any(|p| f_lower.contains(p)) {
+                    return None;
+                }
+            }
+
+            let name_sim = calculate_text_similarity(tokens, &node.name);
+            let mut name_bonus = 0.0;
+            let node_name_lower = node.name.to_ascii_lowercase();
+
+            if tokens.raw_query.eq_ignore_ascii_case(&node.name) {
+                name_bonus += 100.0;
+            }
+            for id in &tokens.code_identifiers {
+                if id.eq_ignore_ascii_case(&node.name) {
+                    name_bonus += if *id == node.name { 70.0 } else { 50.0 };
+                }
+            }
+            if tokens
+                .expanded_terms
+                .iter()
+                .any(|term| node_name_lower == *term || node_name_lower.contains(term))
+            {
+                name_bonus += 30.0;
+            }
+            if project_tokens.contains(&node_name_lower)
+                && !tokens.raw_query.eq_ignore_ascii_case(&node.name)
+            {
+                name_bonus *= 0.2;
+            }
+
+            // Body fields: lexical + 词林 `contains` only. Dense 128-dim embedding on
+            // SQL/comment walls × 31万 symbols is what made Retrieval 50–150s.
+            let mut branch_comment_sim = 0.0f64;
+            let mut doc_sim = 0.0f64;
+            let mut plain_inline_sim = 0.0f64;
+            let mut sql_sim = 0.0f64;
+            let scan_body = name_bonus < 70.0 || !tokens.cjk_phrases.is_empty();
+            if scan_body {
+                if let Some(doc) = &node.docstring {
+                    doc_sim = doc_sim.max(calculate_lexical_similarity(tokens, doc));
+                }
+                for c in &node.inline_comments {
+                    plain_inline_sim =
+                        plain_inline_sim.max(calculate_lexical_similarity(tokens, c));
+                }
+                for sc in &node.comments {
+                    let sim = calculate_lexical_similarity(tokens, &sc.text);
+                    match sc.scope {
+                        super::graph::CommentScope::BranchInline { .. } => {
+                            branch_comment_sim = branch_comment_sim.max(sim);
+                        }
+                        super::graph::CommentScope::Docstring
+                        | super::graph::CommentScope::MethodHeader => {
+                            doc_sim = doc_sim.max(sim);
+                        }
+                        super::graph::CommentScope::PropertyDoc
+                        | super::graph::CommentScope::PlainInline => {
+                            plain_inline_sim = plain_inline_sim.max(sim);
+                        }
+                    }
+                }
+                for sql in &node.sql_predicates {
+                    sql_sim = sql_sim.max(calculate_lexical_similarity(tokens, &sql.raw_clause));
+                    for f in &sql.target_fields {
+                        sql_sim = sql_sim.max(calculate_lexical_similarity(tokens, f));
+                    }
+                }
+                for lit in &node.string_literals {
+                    sql_sim = sql_sim.max(calculate_lexical_similarity(tokens, lit));
+                }
+            }
+
+            let path_sim = path_sims.get(&node.file).copied().unwrap_or(0.0);
+
+            let text_match = (name_sim + name_bonus) * 0.15
+                + branch_comment_sim * 0.35
+                + sql_sim * 0.30
+                + doc_sim * 0.20
+                + plain_inline_sim * 0.10
+                + path_sim * 0.05;
+
+            let has_strong_anchor = branch_comment_sim >= 20.0
+                || sql_sim >= 20.0
+                || doc_sim >= 25.0
+                || name_bonus >= 30.0;
+
+            let genuine = bm25_scores.contains_key(&node.id)
+                || has_strong_anchor
+                || (scan_body && has_genuine_match_anchor(tokens, node));
+            let text_relevant = genuine || name_bonus >= 30.0 || text_match >= 12.0;
+            if !text_relevant {
                 return None;
             }
-        }
-        if !name_filters_lower.is_empty() {
-            let name_lower = node.name.to_ascii_lowercase();
-            if !name_filters_lower.iter().any(|n| name_lower.contains(n)) {
-                return None;
-            }
-        }
-        if !path_filters_lower.is_empty() {
-            let f_lower = node.file.to_string_lossy().to_ascii_lowercase();
-            if !path_filters_lower.iter().any(|p| f_lower.contains(p)) {
-                return None;
-            }
-        }
 
-        // SOFT SEMANTIC ANCHOR: symbols failing the genuine-anchor gate are NOT
-        // dropped — they get a 0.3 decay so naming-plain core files (run_loop.rs /
-        // turn.rs / tool_calls.rs) still reach the corpus. BM25 lexical hits skip
-        // the decay (a word-level match is genuine relevance).
-        let anchor_decay = if bm25_scores.contains_key(&node.id) {
-            1.0
-        } else if has_genuine_match_anchor(tokens, node) {
-            1.0
-        } else {
-            0.3
-        };
+            let anchor_decay = if genuine { 1.0 } else { 0.3 };
 
-        let name_sim = calculate_text_similarity(tokens, &node.name);
-        let mut name_bonus = 0.0;
-        let node_name_lower = node.name.to_ascii_lowercase();
+            let callers_cnt = graph.callers(node.id).map(|v| v.len()).unwrap_or(0);
+            let callees_cnt = graph.callees(node.id).map(|v| v.len()).unwrap_or(0);
+            // Call-graph mass is a boost for hits, not a free ticket into the catalog.
+            let graph_mass = ((callers_cnt + callees_cnt) as f64).min(12.0);
 
-        // Exact query match (highest priority)
-        if tokens.raw_query.eq_ignore_ascii_case(&node.name) {
-            name_bonus += 100.0;
-        }
-
-        // Exact identifier token match
-        for id in &tokens.code_identifiers {
-            if id.eq_ignore_ascii_case(&node.name) {
-                name_bonus += if *id == node.name { 70.0 } else { 50.0 };
-            }
-        }
-
-        // Bilingual thesaurus term hit in symbol name
-        if tokens.expanded_terms.iter().any(|term| node_name_lower == *term || node_name_lower.contains(term)) {
-            name_bonus += 30.0;
-        }
-
-        // Project name de-inflation
-        if project_tokens.contains(&node_name_lower) && !tokens.raw_query.eq_ignore_ascii_case(&node.name) {
-            name_bonus *= 0.2;
-        }
-
-        // 1. Structural comment matching
-        let mut branch_comment_sim = 0.0f64;
-        let mut doc_sim = 0.0f64;
-        let mut plain_inline_sim = 0.0f64;
-
-        if let Some(doc) = &node.docstring {
-            doc_sim = doc_sim.max(calculate_text_similarity(tokens, doc));
-        }
-        for c in &node.inline_comments {
-            plain_inline_sim = plain_inline_sim.max(calculate_text_similarity(tokens, c));
-        }
-        for sc in &node.comments {
-            let sim = calculate_text_similarity(tokens, &sc.text);
-            match sc.scope {
-                super::graph::CommentScope::BranchInline { .. } => {
-                    branch_comment_sim = branch_comment_sim.max(sim);
+            // 4. AST Role & Active Logic weighting
+            let kind_weight = match node.kind {
+                SymbolKind::SqlStatement => 1.50,
+                _ if node.metrics.has_sql_or_qs || branch_comment_sim >= 20.0 => 1.45,
+                SymbolKind::Enum => 1.30,
+                SymbolKind::Function
+                | SymbolKind::Method
+                | SymbolKind::Middleware
+                | SymbolKind::RouteEndpoint => {
+                    if node.metrics.is_active_logic {
+                        1.25
+                    } else {
+                        1.0
+                    }
                 }
-                super::graph::CommentScope::Docstring
-                | super::graph::CommentScope::MethodHeader => {
-                    doc_sim = doc_sim.max(sim);
-                }
-                super::graph::CommentScope::PropertyDoc
-                | super::graph::CommentScope::PlainInline => {
-                    plain_inline_sim = plain_inline_sim.max(sim);
-                }
-            }
-        }
-
-        // 2. SQL predicates & String literals matching
-        let mut sql_sim = 0.0f64;
-        for sql in &node.sql_predicates {
-            sql_sim = sql_sim.max(calculate_text_similarity(tokens, &sql.raw_clause));
-            for f in &sql.target_fields {
-                sql_sim = sql_sim.max(calculate_text_similarity(tokens, f));
-            }
-        }
-        for lit in &node.string_literals {
-            sql_sim = sql_sim.max(calculate_text_similarity(tokens, lit));
-        }
-
-        let path_sim = path_sims.get(&node.file).copied().unwrap_or(0.0);
-
-        // 3. Multi-channel text similarity
-        let text_match = (name_sim + name_bonus) * 0.15
-            + branch_comment_sim * 0.35
-            + sql_sim * 0.30
-            + doc_sim * 0.20
-            + plain_inline_sim * 0.10
-            + path_sim * 0.05;
-
-        let has_strong_anchor = branch_comment_sim >= 20.0
-            || sql_sim >= 20.0
-            || doc_sim >= 25.0
-            || (name_sim + name_bonus) >= 30.0;
-
-        if text_match < 2.5 && !has_strong_anchor && !bm25_scores.contains_key(&node.id) {
-            return None;
-        }
-
-        let callers_cnt = graph.callers(node.id).map(|v| v.len()).unwrap_or(0);
-        let callees_cnt = graph.callees(node.id).map(|v| v.len()).unwrap_or(0);
-        let graph_mass = ((callers_cnt + callees_cnt) as f64).min(12.0);
-
-        // 4. AST Role & Active Logic weighting
-        let kind_weight = match node.kind {
-            SymbolKind::SqlStatement => 1.50,
-            _ if node.metrics.has_sql_or_qs || branch_comment_sim >= 20.0 => 1.45,
-            SymbolKind::Enum => 1.30,
-            SymbolKind::Function | SymbolKind::Method | SymbolKind::Middleware | SymbolKind::RouteEndpoint => {
-                if node.metrics.is_active_logic { 1.25 } else { 1.0 }
-            }
-            SymbolKind::Class | SymbolKind::Struct | SymbolKind::Interface | SymbolKind::Trait => 0.95,
-            SymbolKind::PluginDeclaration => 1.05,
-            SymbolKind::ConfigProperty | SymbolKind::UiElement => 0.85,
-            SymbolKind::Constant | SymbolKind::Variable => 0.75,
-            _ if node.metrics.is_pure_dto => 0.45,
-            _ => 0.7,
-        };
-
-        let active_bonus = if node.metrics.is_active_logic {
-            let b = (node.metrics.branch_count as f64 * 6.0).min(18.0);
-            let s = if node.metrics.has_sql_or_qs { 15.0 } else { 0.0 };
-            b + s
-        } else if node.metrics.is_pure_dto && name_sim < 60.0 {
-            -10.0
-        } else {
-            0.0
-        };
-
-        // RRF-style BM25 fusion
-        let bm25_bonus = if bm25_max > 0.0 {
-            let norm = bm25_scores.get(&node.id).copied().unwrap_or(0.0) / bm25_max;
-            norm * 25.0
-        } else {
-            0.0
-        };
-
-        let concept_bonus = if !query_concept_vec.is_empty() {
-            let sim = match concept_vectors.and_then(|m| m.get(&node.id)) {
-                Some(v) => super::retrieval::concept_cosine(query_concept_vec, v),
-                None => {
-                    let node_vec =
-                        super::retrieval::concept_projection(&node.name, &HashSet::new());
-                    super::retrieval::concept_cosine(query_concept_vec, &node_vec)
-                }
+                SymbolKind::Class
+                | SymbolKind::Struct
+                | SymbolKind::Interface
+                | SymbolKind::Trait => 0.95,
+                SymbolKind::PluginDeclaration => 1.05,
+                SymbolKind::ConfigProperty | SymbolKind::UiElement => 0.85,
+                SymbolKind::Constant | SymbolKind::Variable => 0.75,
+                _ if node.metrics.is_pure_dto => 0.45,
+                _ => 0.7,
             };
-            sim * 20.0
-        } else {
-            0.0
-        };
 
-        let raw_score = ((text_match * anchor_decay + graph_mass * 1.0 + active_bonus + bm25_bonus + concept_bonus) * kind_weight).max(0.0);
+            let active_bonus = if node.metrics.is_active_logic {
+                let b = (node.metrics.branch_count as f64 * 6.0).min(18.0);
+                let s = if node.metrics.has_sql_or_qs {
+                    15.0
+                } else {
+                    0.0
+                };
+                b + s
+            } else if node.metrics.is_pure_dto && name_sim < 60.0 {
+                -10.0
+            } else {
+                0.0
+            };
 
-        if raw_score >= 10.0 || (has_strong_anchor && raw_score >= 5.0) {
-            Some((
-                node.file.clone(),
-                ScoredSymbol {
-                    node: node.clone(),
-                    total_score: raw_score,
-                    name_score: name_sim + name_bonus,
-                    doc_score: doc_sim.max(branch_comment_sim),
-                    inline_score: plain_inline_sim.max(sql_sim),
-                    graph_mass,
-                },
-            ))
-        } else {
-            None
-        }
+            // RRF-style BM25 fusion
+            let bm25_bonus = if bm25_max > 0.0 {
+                let norm = bm25_scores.get(&node.id).copied().unwrap_or(0.0) / bm25_max;
+                norm * 25.0
+            } else {
+                0.0
+            };
+
+            let concept_bonus = if !query_concept_vec.is_empty() {
+                let sim = match concept_vectors.and_then(|m| m.get(&node.id)) {
+                    Some(v) => super::retrieval::concept_cosine(query_concept_vec, v),
+                    None => {
+                        let node_vec =
+                            super::retrieval::concept_projection(&node.name, &HashSet::new());
+                        super::retrieval::concept_cosine(query_concept_vec, &node_vec)
+                    }
+                };
+                sim * 20.0
+            } else {
+                0.0
+            };
+
+            let raw_score = ((text_match * anchor_decay
+                + graph_mass * 1.0
+                + active_bonus
+                + bm25_bonus
+                + concept_bonus)
+                * kind_weight)
+                .max(0.0);
+
+            if raw_score >= 10.0 || (has_strong_anchor && raw_score >= 5.0) {
+                Some((
+                    node.file.clone(),
+                    ScoredSymbol {
+                        node: node.clone(),
+                        total_score: raw_score,
+                        name_score: name_sim + name_bonus,
+                        doc_score: doc_sim.max(branch_comment_sim),
+                        inline_score: plain_inline_sim.max(sql_sim),
+                        graph_mass,
+                    },
+                ))
+            } else {
+                None
+            }
         })
         .collect();
 
@@ -1276,7 +1385,6 @@ fn score_workspace_symbols(
     for (file, sym) in scored {
         file_map.entry(file).or_default().push(sym);
     }
-
 
     let mut candidates = Vec::new();
     for (file, mut syms) in file_map {
@@ -1348,7 +1456,12 @@ fn score_workspace_symbols(
     }
 
     for cand in &mut candidates {
-        let file_name_lower = cand.file.file_name().and_then(|n| n.to_str()).unwrap_or("").to_ascii_lowercase();
+        let file_name_lower = cand
+            .file
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("")
+            .to_ascii_lowercase();
         let is_strategy_or_sql_class = file_name_lower.contains("sqlstr")
             || file_name_lower.contains("wheremodel")
             || file_name_lower.contains("strategy")
@@ -1373,7 +1486,9 @@ fn score_workspace_symbols(
 
     // Sort production files ahead of test files and peripheral scripts
     candidates.sort_by(|a, b| {
-        b.top_score.partial_cmp(&a.top_score).unwrap_or(std::cmp::Ordering::Equal)
+        b.top_score
+            .partial_cmp(&a.top_score)
+            .unwrap_or(std::cmp::Ordering::Equal)
     });
     candidates
 }
@@ -1552,7 +1667,9 @@ fn collect_directory_panorama(
     // 2. 锚定目录:候选文件所在目录 -> (锚定文件数, 峰值分, 命中文件)。
     let mut anchor_dirs: HashMap<PathBuf, (usize, f64, Vec<(PathBuf, f64)>)> = HashMap::new();
     for fc in top_files {
-        let Some(dir) = fc.file.parent() else { continue };
+        let Some(dir) = fc.file.parent() else {
+            continue;
+        };
         let e = anchor_dirs.entry(dir.to_path_buf()).or_default();
         e.0 += 1;
         if fc.top_score > e.1 {
@@ -1698,9 +1815,9 @@ fn collect_directory_panorama(
             for id in symbols_in_dir(graph, &dir) {
                 if let Some(n) = graph.node(*id) {
                     let name_lower = n.name.to_ascii_lowercase();
-                    let related = query_terms
-                        .iter()
-                        .any(|t| t.len() >= 3 && (name_lower.contains(t) || t.contains(&name_lower)));
+                    let related = query_terms.iter().any(|t| {
+                        t.len() >= 3 && (name_lower.contains(t) || t.contains(&name_lower))
+                    });
                     if related && n.name.len() >= 3 && !grep_terms.contains(&n.name) {
                         grep_terms.push(n.name.clone());
                         if grep_terms.len() >= 6 {
@@ -1714,7 +1831,11 @@ fn collect_directory_panorama(
 
         let score = match group {
             DirGroup::Anchor | DirGroup::GraphLinked => {
-                let ratio = if total > 0 { anchored as f64 / total as f64 } else { 0.0 };
+                let ratio = if total > 0 {
+                    anchored as f64 / total as f64
+                } else {
+                    0.0
+                };
                 let peak_norm = (peak / 80.0).min(1.0);
                 let div_norm = directory_term_diversity(tokens, graph, &dir);
                 (0.60 * ratio + 0.25 * peak_norm + 0.15 * div_norm) * 100.0
@@ -1736,9 +1857,11 @@ fn collect_directory_panorama(
 
     // 5. 组间固定顺序(①→⑥)+ 组内按分数降序。
     out.sort_by(|a, b| {
-        a.group
-            .cmp(&b.group)
-            .then_with(|| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal))
+        a.group.cmp(&b.group).then_with(|| {
+            b.score
+                .partial_cmp(&a.score)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        })
     });
     out
 }
@@ -1844,7 +1967,11 @@ fn weak_dir_score(
     };
 
     // 活跃度:目录在索引中是否含符号文件。
-    let active = if symbols_in_dir(graph, dir).is_empty() { 0.8 } else { 1.0 };
+    let active = if symbols_in_dir(graph, dir).is_empty() {
+        0.8
+    } else {
+        1.0
+    };
 
     (0.30 * proximity + 0.25 * path_sim + 0.25 * sib_ratio + 0.20 * active) * 100.0
 }
@@ -2148,7 +2275,10 @@ struct EvidencePick<'a> {
 /// then highest remaining scores. Config/Doc stay catalog-only unless nothing else
 /// is available. Runs over ALL candidates (not just max_files) so a 10th-place
 /// exact hit can beat nine noisy `render` files.
-fn auction_evidence<'a>(candidates: &'a [FileCandidate], max_spans: usize) -> Vec<EvidencePick<'a>> {
+fn auction_evidence<'a>(
+    candidates: &'a [FileCandidate],
+    max_spans: usize,
+) -> Vec<EvidencePick<'a>> {
     struct Item<'a> {
         fc: &'a FileCandidate,
         sym: &'a ScoredSymbol,
@@ -2173,7 +2303,11 @@ fn auction_evidence<'a>(candidates: &'a [FileCandidate], max_spans: usize) -> Ve
             }
         }
     }
-    items.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
+    items.sort_by(|a, b| {
+        b.score
+            .partial_cmp(&a.score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
 
     let mut picked: Vec<EvidencePick<'a>> = Vec::new();
     let mut used_layers: HashSet<CodeLayer> = HashSet::new();
@@ -2237,7 +2371,12 @@ fn grep_query_terms(tokens: &SearchTokens) -> Vec<String> {
     terms
 }
 
-fn fold_snippet(lines: &[&str], start_line: usize, end_line: usize, rel_path: &str) -> (Vec<String>, bool, usize) {
+fn fold_snippet(
+    lines: &[&str],
+    start_line: usize,
+    end_line: usize,
+    rel_path: &str,
+) -> (Vec<String>, bool, usize) {
     let total_span = end_line.saturating_sub(start_line) + 1;
     let mut snippet = Vec::new();
     if total_span > FOLD_AFTER_LINES {
@@ -2346,14 +2485,27 @@ fn render_explore_output(
         }
         None => (workspace_files, workspace_syms),
     };
-    let remaining = candidates.len().saturating_sub(evidence_file_set.len().max(top_files.len().min(candidates.len())));
-    let omitted_symbols: usize = top_files.iter().map(|fc| fc.symbols.len().saturating_sub(4)).sum();
+    let remaining = candidates.len().saturating_sub(
+        evidence_file_set
+            .len()
+            .max(top_files.len().min(candidates.len())),
+    );
+    let omitted_symbols: usize = top_files
+        .iter()
+        .map(|fc| fc.symbols.len().saturating_sub(4))
+        .sum();
 
     let mut business_hops: Vec<(String, String, &'static str)> = Vec::new();
     for (from, to, kind) in flow_spine {
         let Some(target) = to else { continue };
-        let from_name = graph.node(*from).map(|n| n.name.as_str()).unwrap_or("unknown");
-        let to_name = graph.node(*target).map(|n| n.name.as_str()).unwrap_or("unknown");
+        let from_name = graph
+            .node(*from)
+            .map(|n| n.name.as_str())
+            .unwrap_or("unknown");
+        let to_name = graph
+            .node(*target)
+            .map(|n| n.name.as_str())
+            .unwrap_or("unknown");
         if is_spine_noise(from_name) || is_spine_noise(to_name) {
             continue;
         }
@@ -2403,7 +2555,14 @@ fn render_explore_output(
             first.sym.node.name
         ));
         n += 1;
-        if first.sym.node.end_line.saturating_sub(first.sym.node.start_line) + 1 > FOLD_AFTER_LINES {
+        if first
+            .sym
+            .node
+            .end_line
+            .saturating_sub(first.sym.node.start_line)
+            + 1
+            > FOLD_AFTER_LINES
+        {
             next.push(format!(
                 "{n}. read_file  {rel}  offset={}  (omit limit; call again with the footer offset to finish the file)",
                 first.sym.node.start_line
@@ -2516,7 +2675,14 @@ fn render_explore_output(
             .symbols
             .iter()
             .take(4)
-            .map(|s| format!("`{}`:L{} {}", s.node.name, s.node.start_line, symbol_match_signal(s)))
+            .map(|s| {
+                format!(
+                    "`{}`:L{} {}",
+                    s.node.name,
+                    s.node.start_line,
+                    symbol_match_signal(s)
+                )
+            })
             .collect();
         out.push(format!(
             "| **{:.1}** | `{rel_path}` | {layer} | {} |",
@@ -2537,8 +2703,7 @@ fn render_explore_output(
             let rel = rel_disp(&e.fc.file, root);
             out.push(format!(
                 "> budget full — skipped `{}` in `{rel}`. NEXT: read_file  {rel}  offset={}",
-                e.sym.node.name,
-                e.sym.node.start_line
+                e.sym.node.name, e.sym.node.start_line
             ));
             continue;
         }
@@ -2612,7 +2777,10 @@ fn render_explore_output(
             if sym_summary.is_empty() {
                 out.push(format!("- {id} `{rel}` [{layer}]"));
             } else {
-                out.push(format!("- {id} `{rel}` [{layer}] — {}", sym_summary.join(", ")));
+                out.push(format!(
+                    "- {id} `{rel}` [{layer}] — {}",
+                    sym_summary.join(", ")
+                ));
             }
         }
         let extra = catalog_rest.len().saturating_sub(MAX_CATALOG_REMAINING);
@@ -2670,17 +2838,44 @@ fn render_explore_output(
         }
     }
     if !dir_block.is_empty() || skipped_foreign > 0 || !other_groups.is_empty() {
-        out.push("\n> 📁 **Directory Panorama** (anchor + same-repo graph; other groups counted):".to_string());
+        out.push(
+            "\n> 📁 **Directory Panorama** (anchor + same-repo graph; other groups counted):"
+                .to_string(),
+        );
         out.extend(dir_block);
         if !other_groups.is_empty() {
             let mut parts: Vec<String> = Vec::new();
             for (g, n) in [
-                (DirGroup::Subtree, other_groups.get(&DirGroup::Subtree).copied().unwrap_or(0)),
-                (DirGroup::ParentChain, other_groups.get(&DirGroup::ParentChain).copied().unwrap_or(0)),
-                (DirGroup::Sibling, other_groups.get(&DirGroup::Sibling).copied().unwrap_or(0)),
-                (DirGroup::PathHit, other_groups.get(&DirGroup::PathHit).copied().unwrap_or(0)),
-                (DirGroup::GraphLinked, other_groups.get(&DirGroup::GraphLinked).copied().unwrap_or(0)),
-                (DirGroup::Anchor, other_groups.get(&DirGroup::Anchor).copied().unwrap_or(0)),
+                (
+                    DirGroup::Subtree,
+                    other_groups.get(&DirGroup::Subtree).copied().unwrap_or(0),
+                ),
+                (
+                    DirGroup::ParentChain,
+                    other_groups
+                        .get(&DirGroup::ParentChain)
+                        .copied()
+                        .unwrap_or(0),
+                ),
+                (
+                    DirGroup::Sibling,
+                    other_groups.get(&DirGroup::Sibling).copied().unwrap_or(0),
+                ),
+                (
+                    DirGroup::PathHit,
+                    other_groups.get(&DirGroup::PathHit).copied().unwrap_or(0),
+                ),
+                (
+                    DirGroup::GraphLinked,
+                    other_groups
+                        .get(&DirGroup::GraphLinked)
+                        .copied()
+                        .unwrap_or(0),
+                ),
+                (
+                    DirGroup::Anchor,
+                    other_groups.get(&DirGroup::Anchor).copied().unwrap_or(0),
+                ),
             ] {
                 if n > 0 {
                     parts.push(format!("{}×{n}", g.label()));
@@ -2718,7 +2913,8 @@ mod tests {
 
     #[test]
     fn test_field_qualified_query_parser() {
-        let q = parse_field_qualified_query("kind:trait path:session name:ToolMiddleware agent loop");
+        let q =
+            parse_field_qualified_query("kind:trait path:session name:ToolMiddleware agent loop");
         assert_eq!(q.kind_filters, vec!["trait"]);
         assert_eq!(q.path_filters, vec!["session"]);
         assert_eq!(q.name_filters, vec!["ToolMiddleware"]);
@@ -2815,11 +3011,36 @@ mod tests {
             symbols,
         }];
         let root = PathBuf::from(".");
-        let out = render_explore_output(&graph, &root, "coverage probe", &candidates, &[], false, 8, None, &SearchTokens::default(), None, None, None);
-        assert!(out.contains("📊 **Coverage**"), "coverage summary missing:\n{out}");
-        assert!(out.contains("evidence 1/1 files"), "shown/total missing:\n{out}");
-        assert!(out.contains("omitted-sym 2"), "omitted count missing:\n{out}");
-        assert!(out.contains("spine 0/0 hops"), "spine counts missing:\n{out}");
+        let out = render_explore_output(
+            &graph,
+            &root,
+            "coverage probe",
+            &candidates,
+            &[],
+            false,
+            8,
+            None,
+            &SearchTokens::default(),
+            None,
+            None,
+            None,
+        );
+        assert!(
+            out.contains("📊 **Coverage**"),
+            "coverage summary missing:\n{out}"
+        );
+        assert!(
+            out.contains("evidence 1/1 files"),
+            "shown/total missing:\n{out}"
+        );
+        assert!(
+            out.contains("omitted-sym 2"),
+            "omitted count missing:\n{out}"
+        );
+        assert!(
+            out.contains("spine 0/0 hops"),
+            "spine counts missing:\n{out}"
+        );
         assert!(out.contains("**NEXT**"), "work-order NEXT missing:\n{out}");
         assert!(out.contains("EVIDENCE"), "evidence section missing:\n{out}");
     }
@@ -2861,11 +3082,28 @@ mod tests {
         let flow_spine: Vec<(u64, Option<u64>, super::super::graph::EdgeKind)> = (0..40u64)
             .map(|i| (i, Some(i + 1), super::super::graph::EdgeKind::Calls))
             .collect();
-        let out = render_explore_output(&graph, &root, "q", &candidates, &flow_spine, true, 8, None, &SearchTokens::default(), None, None, None);
-        assert!(out.contains("evidence 5/15 files"), "evidence auction cap:\n{out}");
+        let out = render_explore_output(
+            &graph,
+            &root,
+            "q",
+            &candidates,
+            &flow_spine,
+            true,
+            8,
+            None,
+            &SearchTokens::default(),
+            None,
+            None,
+            None,
+        );
+        assert!(
+            out.contains("evidence 5/15 files"),
+            "evidence auction cap:\n{out}"
+        );
         assert!(out.contains("CATALOG"), "catalog section missing:\n{out}");
         assert!(
-            out.contains("PARENT DIRECTORY") && !out.contains("copy path into read_file / code_explore"),
+            out.contains("PARENT DIRECTORY")
+                && !out.contains("copy path into read_file / code_explore"),
             "catalog must not tell the model to pass a file path to code_explore:\n{out}"
         );
         assert!(
@@ -2876,7 +3114,10 @@ mod tests {
             out.contains("hidden_14.rs"),
             "last remaining candidate missing:\n{out}"
         );
-        assert!(out.contains("spine 12/40 hops"), "spine overflow count:\n{out}");
+        assert!(
+            out.contains("spine 12/40 hops"),
+            "spine overflow count:\n{out}"
+        );
         assert!(
             out.contains("more edges omitted"),
             "omitted-hop note missing:\n{out}"
@@ -2925,7 +3166,14 @@ mod tests {
             };
             graph.add_symbol(node.clone());
             caller_ids.push(node.id);
-            graph.add_edge(node.id, Edge { to: target_id, kind: EdgeKind::Calls, line: 3 });
+            graph.add_edge(
+                node.id,
+                Edge {
+                    to: target_id,
+                    kind: EdgeKind::Calls,
+                    line: 3,
+                },
+            );
         }
 
         let mut callee_ids = Vec::new();
@@ -2943,7 +3191,14 @@ mod tests {
             };
             graph.add_symbol(node.clone());
             callee_ids.push(node.id);
-            graph.add_edge(target_id, Edge { to: node.id, kind: EdgeKind::Calls, line: 30 });
+            graph.add_edge(
+                target_id,
+                Edge {
+                    to: node.id,
+                    kind: EdgeKind::Calls,
+                    line: 30,
+                },
+            );
         }
 
         let candidates = vec![FileCandidate {
@@ -2967,12 +3222,21 @@ mod tests {
         // Find-all contract: every caller appears as an incoming edge (its id is
         // the FROM of a caller edge) and every callee as an outgoing TO.
         for id in &caller_ids {
-            assert!(spine_froms.contains(id), "caller {id} missing from spine:\n{spine:?}");
+            assert!(
+                spine_froms.contains(id),
+                "caller {id} missing from spine:\n{spine:?}"
+            );
         }
         for id in &callee_ids {
-            assert!(spine_tos.contains(id), "callee {id} missing from spine:\n{spine:?}");
+            assert!(
+                spine_tos.contains(id),
+                "callee {id} missing from spine:\n{spine:?}"
+            );
         }
-        assert!(spine_tos.contains(&target_id), "target missing as edge target:\n{spine:?}");
+        assert!(
+            spine_tos.contains(&target_id),
+            "target missing as edge target:\n{spine:?}"
+        );
     }
 
     #[test]
@@ -3022,10 +3286,22 @@ mod tests {
             None,
         );
         assert!(out.contains("🔭 scope"), "scope hint missing:\n{out}");
-        assert!(out.contains("SIBLING layers"), "sibling-layers hint missing:\n{out}");
-        assert!(out.contains("🧩 Contract hit"), "contract hint missing:\n{out}");
-        assert!(out.contains("`impl <name>`"), "impl-follow-up hint missing:\n{out}");
-        assert!(out.contains("🎯 Low hit count"), "low-hit hint missing:\n{out}");
+        assert!(
+            out.contains("SIBLING layers"),
+            "sibling-layers hint missing:\n{out}"
+        );
+        assert!(
+            out.contains("🧩 Contract hit"),
+            "contract hint missing:\n{out}"
+        );
+        assert!(
+            out.contains("`impl <name>`"),
+            "impl-follow-up hint missing:\n{out}"
+        );
+        assert!(
+            out.contains("🎯 Low hit count"),
+            "low-hit hint missing:\n{out}"
+        );
         assert!(out.contains("**NEXT**"), "work-order NEXT missing:\n{out}");
         // Contract hint must NOT fire when the top symbol is not a contract (function here),
         // while the low-hit hint still fires (1 candidate).
@@ -3052,9 +3328,28 @@ mod tests {
                 graph_mass: 10.0,
             }],
         }];
-        let no_contract = render_explore_output(&graph, &root, "q", &func_candidates, &[], false, 8, None, &SearchTokens::default(), None, None, None);
-        assert!(!no_contract.contains("🧩 Contract hit"), "contract hint should not fire for a function:\n{no_contract}");
-        assert!(no_contract.contains("🎯 Low hit count"), "low-hit should still fire:\n{no_contract}");
+        let no_contract = render_explore_output(
+            &graph,
+            &root,
+            "q",
+            &func_candidates,
+            &[],
+            false,
+            8,
+            None,
+            &SearchTokens::default(),
+            None,
+            None,
+            None,
+        );
+        assert!(
+            !no_contract.contains("🧩 Contract hit"),
+            "contract hint should not fire for a function:\n{no_contract}"
+        );
+        assert!(
+            no_contract.contains("🎯 Low hit count"),
+            "low-hit should still fire:\n{no_contract}"
+        );
     }
 
     #[test]
@@ -3117,14 +3412,30 @@ mod tests {
             }],
         }];
         let root = PathBuf::from(".");
-        let out = render_explore_output(&graph, &root, "repair_tool_args", &candidates, &[], false, 8, None, &SearchTokens::default(), None, None, None);
+        let out = render_explore_output(
+            &graph,
+            &root,
+            "repair_tool_args",
+            &candidates,
+            &[],
+            false,
+            8,
+            None,
+            &SearchTokens::default(),
+            None,
+            None,
+            None,
+        );
         // 📁 now lists the hit's DIRECTORY (not sibling filenames): the tools/
         // dir must appear; the far kernel/src dir must not.
         assert!(
             out.contains("crates/capabilities/src/tools/"),
             "hit dir must be listed in 📁:\n{out}"
         );
-        assert!(!out.contains("kernel/src/"), "far dir must NOT be listed:\n{out}");
+        assert!(
+            !out.contains("kernel/src/"),
+            "far dir must NOT be listed:\n{out}"
+        );
         assert!(
             out.contains("adjacent dir(s) in 📁"),
             "adjacent dir count missing in Coverage:\n{out}"
@@ -3195,8 +3506,14 @@ mod tests {
         // The Coverage line must surface the workspace contrast: only 1 of 2 files /
         // 1 of 2 symbols were searched, and 1 symbol is OUTSIDE the scope — so a
         // scope-confined "no mechanism" conclusion is invalid.
-        assert!(out.contains("in-scope 1 of 2 indexed files"), "scope-vs-workspace file counts missing:\n{out}");
-        assert!(out.contains("1/2 symbols"), "scope-vs-workspace symbol counts missing:\n{out}");
+        assert!(
+            out.contains("in-scope 1 of 2 indexed files"),
+            "scope-vs-workspace file counts missing:\n{out}"
+        );
+        assert!(
+            out.contains("1/2 symbols"),
+            "scope-vs-workspace symbol counts missing:\n{out}"
+        );
         assert!(
             out.contains("1 OUTSIDE not ranked"),
             "outside-scope warning missing:\n{out}"
@@ -3225,8 +3542,12 @@ mod tests {
 
         // 2. Exact file match
         assert!(path_matches_scope(
-            Path::new("coupon-mall-demo/backend/src/main/java/com/demo/coupon/service/CouponService.java"),
-            Path::new("coupon-mall-demo/backend/src/main/java/com/demo/coupon/service/CouponService.java")
+            Path::new(
+                "coupon-mall-demo/backend/src/main/java/com/demo/coupon/service/CouponService.java"
+            ),
+            Path::new(
+                "coupon-mall-demo/backend/src/main/java/com/demo/coupon/service/CouponService.java"
+            )
         ));
 
         // 3. Segment boundary mismatch (prevent substring false positives)
@@ -3245,7 +3566,9 @@ mod tests {
             Path::new(r"E:\code\agents\coupon-mall-demo\backend\src\main\java\com\demo\coupon\service")
         ));
         assert!(path_matches_scope(
-            Path::new(r"E:\code\agents\coupon-mall-demo\backend\src\main\java\com\demo\coupon\service\CouponService.java"),
+            Path::new(
+                r"E:\code\agents\coupon-mall-demo\backend\src\main\java\com\demo\coupon\service\CouponService.java"
+            ),
             Path::new("coupon-mall-demo/backend/src/main/java/com/demo/coupon/service")
         ));
     }
@@ -3391,12 +3714,20 @@ mod tests {
         for path in [".", "./", "~", d.path().to_str().unwrap()] {
             let args = serde_json::json!({"query": "cached_symbol", "path": path}).to_string();
             let r = tool.execute(&args, &ctx).await;
-            assert!(!r.is_error, "workspace root must be accepted: {args}\n{}", r.content);
+            assert!(
+                !r.is_error,
+                "workspace root must be accepted: {args}\n{}",
+                r.content
+            );
         }
         let ok = tool
             .execute(r#"{"query":"cached_symbol","path":"src"}"#, &ctx)
             .await;
-        assert!(!ok.is_error, "concrete subdirectory must still work:\n{}", ok.content);
+        assert!(
+            !ok.is_error,
+            "concrete subdirectory must still work:\n{}",
+            ok.content
+        );
     }
 
     #[tokio::test]
@@ -3416,10 +3747,7 @@ mod tests {
             requester: None,
         };
         let r = tool
-            .execute(
-                r#"{"query":"cached_symbol","path":"src/hot.rs"}"#,
-                &ctx,
-            )
+            .execute(r#"{"query":"cached_symbol","path":"src/hot.rs"}"#, &ctx)
             .await;
         assert!(r.is_error, "{}", r.content);
         assert!(
@@ -3429,14 +3757,20 @@ mod tests {
         );
         assert!(r.content.contains("src"), "{}", r.content);
         assert!(
-            r.content.contains("query=") || r.content.contains("query<") || r.content.contains("`query`"),
+            r.content.contains("query=")
+                || r.content.contains("query<")
+                || r.content.contains("`query`"),
             "error must tell the model to put the symbol in query:\n{}",
             r.content
         );
         let toml = tool
             .execute(r#"{"query":"name","path":"Cargo.toml"}"#, &ctx)
             .await;
-        assert!(toml.is_error && toml.content.contains("not a single file"), "{}", toml.content);
+        assert!(
+            toml.is_error && toml.content.contains("not a single file"),
+            "{}",
+            toml.content
+        );
     }
 
     #[test]
@@ -3456,8 +3790,12 @@ mod tests {
             "description must allow a precise symbol or natural Chinese/English:\n{d}"
         );
         let schema = tool.parameters_schema();
-        let path_d = schema["properties"]["path"]["description"].as_str().unwrap_or("");
-        let query_d = schema["properties"]["query"]["description"].as_str().unwrap_or("");
+        let path_d = schema["properties"]["path"]["description"]
+            .as_str()
+            .unwrap_or("");
+        let query_d = schema["properties"]["query"]["description"]
+            .as_str()
+            .unwrap_or("");
         assert!(
             path_d.contains("src/auth.rs") && path_d.contains("NEVER a file"),
             "path schema must reject files up front:\n{path_d}"
@@ -3496,7 +3834,13 @@ mod tests {
     #[test]
     fn classify_layer_covers_backend_frontend_docs_and_config() {
         let java_ctl = scored(
-            node_at(1, "acquireCoupon", SymbolKind::Method, "backend/controller/CouponController.java", 26),
+            node_at(
+                1,
+                "acquireCoupon",
+                SymbolKind::Method,
+                "backend/controller/CouponController.java",
+                26,
+            ),
             80.0,
         );
         assert_eq!(
@@ -3504,7 +3848,13 @@ mod tests {
             CodeLayer::Http
         );
         let java_svc = scored(
-            node_at(2, "CouponService", SymbolKind::Interface, "backend/service/CouponService.java", 12),
+            node_at(
+                2,
+                "CouponService",
+                SymbolKind::Interface,
+                "backend/service/CouponService.java",
+                12,
+            ),
             70.0,
         );
         assert_eq!(
@@ -3512,7 +3862,13 @@ mod tests {
             CodeLayer::Service
         );
         let java_impl = scored(
-            node_at(3, "poupou", SymbolKind::Method, "backend/service/impl/CouponServiceImpl.java", 21),
+            node_at(
+                3,
+                "poupou",
+                SymbolKind::Method,
+                "backend/service/impl/CouponServiceImpl.java",
+                21,
+            ),
             90.0,
         );
         assert_eq!(
@@ -3520,7 +3876,13 @@ mod tests {
             CodeLayer::Impl
         );
         let mapper = scored(
-            node_at(4, "selectAvailableCouponsByUserId", SymbolKind::Method, "backend/mapper/CouponMapper.java", 20),
+            node_at(
+                4,
+                "selectAvailableCouponsByUserId",
+                SymbolKind::Method,
+                "backend/mapper/CouponMapper.java",
+                20,
+            ),
             60.0,
         );
         assert_eq!(classify_layer(&mapper.node.file, &mapper), CodeLayer::Data);
@@ -3536,7 +3898,13 @@ mod tests {
         );
         assert_eq!(classify_layer(&xml.node.file, &xml), CodeLayer::Sql);
         let yml = scored(
-            node_at(6, "spring", SymbolKind::ConfigProperty, "backend/resources/application.yml", 1),
+            node_at(
+                6,
+                "spring",
+                SymbolKind::ConfigProperty,
+                "backend/resources/application.yml",
+                1,
+            ),
             20.0,
         );
         assert_eq!(classify_layer(&yml.node.file, &yml), CodeLayer::Config);
@@ -3546,17 +3914,35 @@ mod tests {
         );
         assert_eq!(classify_layer(&md.node.file, &md), CodeLayer::Doc);
         let vue = scored(
-            node_at(8, "CouponCard", SymbolKind::UiElement, "frontend/src/components/CouponCard.vue", 1),
+            node_at(
+                8,
+                "CouponCard",
+                SymbolKind::UiElement,
+                "frontend/src/components/CouponCard.vue",
+                1,
+            ),
             40.0,
         );
         assert_eq!(classify_layer(&vue.node.file, &vue), CodeLayer::Ui);
         let tsx = scored(
-            node_at(9, "HomePage", SymbolKind::Function, "packages/app/src/pages/HomePage.tsx", 1),
+            node_at(
+                9,
+                "HomePage",
+                SymbolKind::Function,
+                "packages/app/src/pages/HomePage.tsx",
+                1,
+            ),
             40.0,
         );
         assert_eq!(classify_layer(&tsx.node.file, &tsx), CodeLayer::Ui);
         let go_handler = scored(
-            node_at(10, "Acquire", SymbolKind::Function, "internal/httpapi/coupon_handler.go", 12),
+            node_at(
+                10,
+                "Acquire",
+                SymbolKind::Function,
+                "internal/httpapi/coupon_handler.go",
+                12,
+            ),
             50.0,
         );
         assert_eq!(
@@ -3567,12 +3953,24 @@ mod tests {
             node_at(11, "acquire", SymbolKind::Function, "shop/views.py", 8),
             50.0,
         );
-        assert_eq!(classify_layer(&py_view.node.file, &py_view), CodeLayer::Http);
+        assert_eq!(
+            classify_layer(&py_view.node.file, &py_view),
+            CodeLayer::Http
+        );
         let rs_core = scored(
-            node_at(12, "cycle_reasoning_effort", SymbolKind::Function, "crates/atomcode-tuix/src/state.rs", 1981),
+            node_at(
+                12,
+                "cycle_reasoning_effort",
+                SymbolKind::Function,
+                "crates/atomcode-tuix/src/state.rs",
+                1981,
+            ),
             136.0,
         );
-        assert_eq!(classify_layer(&rs_core.node.file, &rs_core), CodeLayer::Core);
+        assert_eq!(
+            classify_layer(&rs_core.node.file, &rs_core),
+            CodeLayer::Core
+        );
     }
 
     #[test]
@@ -3763,8 +4161,12 @@ mod tests {
         graph.add_symbol(dto_node.clone());
 
         let dt = super::super::bilingual_nlp::DynamicThesaurus::default();
-        let tokens = super::super::bilingual_nlp::parse_bilingual_query_with_thesaurus("基本盘业绩 计算", &dt);
-        let parsed_query = super::super::bilingual_nlp::parse_field_qualified_query("基本盘业绩 计算");
+        let tokens = super::super::bilingual_nlp::parse_bilingual_query_with_thesaurus(
+            "基本盘业绩 计算",
+            &dt,
+        );
+        let parsed_query =
+            super::super::bilingual_nlp::parse_field_qualified_query("基本盘业绩 计算");
         let project_tokens = HashSet::new();
         let bm25_scores = HashMap::new();
 
@@ -3784,7 +4186,10 @@ mod tests {
             candidates[0].file,
             core_sql_node.file,
             "DailyPerformanceStatSqlStr must rank #1 ahead of DTO noise. Actual order: {:?}",
-            candidates.iter().map(|c| (&c.file, c.top_score)).collect::<Vec<_>>()
+            candidates
+                .iter()
+                .map(|c| (&c.file, c.top_score))
+                .collect::<Vec<_>>()
         );
         assert!(
             candidates[0].top_score > 60.0,
@@ -3847,7 +4252,9 @@ mod tests {
             name: "DailyPerformanceEntity".to_string(),
             kind: SymbolKind::Class,
             visibility: super::super::graph::Visibility::Public,
-            file: PathBuf::from("sources/ERP.API/Apis/Ailai.Order/Models/Data/DailyPerformanceEntity.cs"),
+            file: PathBuf::from(
+                "sources/ERP.API/Apis/Ailai.Order/Models/Data/DailyPerformanceEntity.cs",
+            ),
             start_line: 10,
             end_line: 60,
             signature: Some("public class DailyPerformanceEntity".to_string()),
@@ -3897,7 +4304,8 @@ mod tests {
 
         let dt = super::super::bilingual_nlp::DynamicThesaurus::new();
         let query_text = "每日美莱业绩";
-        let tokens = super::super::bilingual_nlp::parse_bilingual_query_with_thesaurus(query_text, &dt);
+        let tokens =
+            super::super::bilingual_nlp::parse_bilingual_query_with_thesaurus(query_text, &dt);
         let parsed_query = super::super::bilingual_nlp::parse_field_qualified_query(query_text);
         let project_tokens = HashSet::new();
         let bm25_scores = HashMap::new();
@@ -3917,8 +4325,7 @@ mod tests {
 
         // 核心 SQL 类必须稳居第一
         assert_eq!(
-            candidates[0].file,
-            core_sql_node.file,
+            candidates[0].file, core_sql_node.file,
             "核心 SQL 组装类 DailyPerformanceStatSqlStr.cs 必须排在第 1 位！实际第一位: {:?}",
             candidates[0].file
         );
@@ -3977,12 +4384,17 @@ mod tests {
             name: "CustomerBaseData".to_string(),
             kind: SymbolKind::Class,
             visibility: super::super::graph::Visibility::Public,
-            file: PathBuf::from("sources/ERP.API/Apis/Ailai.Customer/Models/Data/CustomerBaseData.cs"),
+            file: PathBuf::from(
+                "sources/ERP.API/Apis/Ailai.Customer/Models/Data/CustomerBaseData.cs",
+            ),
             start_line: 50,
             end_line: 4000,
             signature: Some("public class CustomerBaseData : ICustomerBaseData".to_string()),
             docstring: Some("/// 客户资源分配与三水项目二调统计".to_string()),
-            inline_comments: vec!["// 三水项目工号分配与二调流转".to_string(), "case ProjectTraceRequest.PageTypeEnum.三水一调:".to_string()],
+            inline_comments: vec![
+                "// 三水项目工号分配与二调流转".to_string(),
+                "case ProjectTraceRequest.PageTypeEnum.三水一调:".to_string(),
+            ],
             comments: vec![super::super::graph::StructuredComment {
                 text: "// 三水项目工号分配与二调流转".to_string(),
                 scope: super::super::graph::CommentScope::BranchInline {
@@ -4025,7 +4437,10 @@ mod tests {
             None,
         );
         assert!(!cands1.is_empty());
-        assert_eq!(cands1[0].file, jinke_node.file, "搜索金客必须命中 CustomerIntroAttachmentController");
+        assert_eq!(
+            cands1[0].file, jinke_node.file,
+            "搜索金客必须命中 CustomerIntroAttachmentController"
+        );
 
         // 搜索 "三水一调 分配"
         let q2 = "三水一调 分配";
@@ -4042,7 +4457,9 @@ mod tests {
             None,
         );
         assert!(!cands2.is_empty());
-        assert_eq!(cands2[0].file, sanshui_node.file, "搜索三水一调必须命中 CustomerBaseData");
+        assert_eq!(
+            cands2[0].file, sanshui_node.file,
+            "搜索三水一调必须命中 CustomerBaseData"
+        );
     }
 }
-

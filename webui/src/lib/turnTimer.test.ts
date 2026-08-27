@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { formatTurnElapsed, stampLastAssistantElapsed } from './turnTimer.ts';
+import { formatTurnElapsed, stampLastAssistantElapsed, turnDurationMs } from './turnTimer.ts';
 
 test('formatTurnElapsed stays in seconds until 60, then rolls to m:ss', () => {
   assert.equal(formatTurnElapsed(0), '0s');
@@ -32,4 +32,10 @@ test('stampLastAssistantElapsed writes the latest unstamped assistant only', () 
 test('stampLastAssistantElapsed is a no-op when there is no assistant', () => {
   const msgs = [{ role: 'user' as const }];
   assert.equal(stampLastAssistantElapsed(msgs, 1000), msgs);
+});
+
+test('turnDurationMs is user-bubble to end, not per-agent-round', () => {
+  assert.equal(turnDurationMs(1000, 46000), 45000);
+  assert.equal(turnDurationMs(undefined, 46000), undefined);
+  assert.equal(turnDurationMs(5000, 4000), undefined);
 });

@@ -1340,10 +1340,9 @@ mod tests {
             .await
             .expect("tool call should reach the client");
 
-        let write_guard =
-            tokio::time::timeout(Duration::from_secs(1), registry.servers.write())
-                .await
-                .expect("slow tool call must not retain the registry read lock");
+        let write_guard = tokio::time::timeout(Duration::from_secs(1), registry.servers.write())
+            .await
+            .expect("slow tool call must not retain the registry read lock");
         drop(write_guard);
 
         release.notify_one();

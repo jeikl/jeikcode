@@ -22,6 +22,9 @@ opt-level = 2
 lto = false
 codegen-units = 4
 strip = true
+# Cargo 默认 release 关增量，所以「只改几行 Rust」也会把整个成品重链 7–8 分钟。
+# 打开后 target/release 可复用；官方 CI 若要可复现、无增量缓存，设 CARGO_INCREMENTAL=0。
+incremental = true
 
 [profile.test]
 debug = "line-tables-only" # Smaller binaries, faster linker
@@ -43,7 +46,7 @@ incremental = true
 codegen-units = 16
 
 [workspace.package]
-version = "6.0.38"
+version = "6.0.39"
 edition = "2021"
 license = "MIT"
 repository = "https://github.com/jeikl/jeikcode"

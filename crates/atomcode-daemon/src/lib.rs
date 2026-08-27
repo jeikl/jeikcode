@@ -67,9 +67,7 @@ pub(crate) use telemetry_scope::daemon_scope;
 
 use axum::{
     extract::{DefaultBodyLimit, Path, Query, State},
-    http::{
-        header, request::Parts as RequestParts, HeaderName, HeaderValue, Method, StatusCode,
-    },
+    http::{header, request::Parts as RequestParts, HeaderName, HeaderValue, Method, StatusCode},
     response::{sse::Sse, IntoResponse, Json},
     routing::{delete, get, post},
     Router,
@@ -465,7 +463,10 @@ impl ActiveChatRegistry {
     }
 
     /// Clone the turn's event bus (for fan-out from the producer task).
-    async fn event_bus(&self, operation_id: &str) -> Option<tokio::sync::broadcast::Sender<ChatEvent>> {
+    async fn event_bus(
+        &self,
+        operation_id: &str,
+    ) -> Option<tokio::sync::broadcast::Sender<ChatEvent>> {
         self.inner
             .read()
             .await
@@ -604,7 +605,9 @@ impl ActiveChatRegistry {
                             Ok(event) => {
                                 let terminal = matches!(
                                     event,
-                                    ChatEvent::Done { .. } | ChatEvent::Error { .. } | ChatEvent::Stopped
+                                    ChatEvent::Done { .. }
+                                        | ChatEvent::Error { .. }
+                                        | ChatEvent::Stopped
                                 );
                                 if tx.send(event).is_err() {
                                     break;
@@ -802,19 +805,12 @@ fn pending_interactive_from_replay(events: &[ChatEvent]) -> (Option<ChatEvent>, 
 /// deltas so a long stream does not allocate one Vec entry per token.
 fn push_chat_replay(buf: &mut Vec<ChatEvent>, event: ChatEvent) {
     match (&event, buf.last_mut()) {
-        (
-            ChatEvent::TextDelta { content },
-            Some(ChatEvent::TextDelta {
-                content: prev,
-            }),
-        ) => {
+        (ChatEvent::TextDelta { content }, Some(ChatEvent::TextDelta { content: prev })) => {
             prev.push_str(content);
         }
         (
             ChatEvent::ReasoningDelta { content },
-            Some(ChatEvent::ReasoningDelta {
-                content: prev,
-            }),
+            Some(ChatEvent::ReasoningDelta { content: prev }),
         ) => {
             prev.push_str(content);
         }
@@ -848,7 +844,9 @@ pub(crate) fn fanout_chat_events(
             // question and turn terminal lands in `<atomcode_dir>/logs/atomcode.log`
             // so approval-flow issues can be diagnosed from the file.
             match &event {
-                ChatEvent::ToolCallStarted { name, arguments, .. } => {
+                ChatEvent::ToolCallStarted {
+                    name, arguments, ..
+                } => {
                     tracing::info!(
                         tool = %name,
                         args = %log_truncate(arguments, 300),
@@ -869,9 +867,7 @@ pub(crate) fn fanout_chat_events(
                         "chat: user_input_request emitted (model asked a structured question)"
                     );
                 }
-                ChatEvent::ToolCallResult {
-                    name, success, ..
-                } => {
+                ChatEvent::ToolCallResult { name, success, .. } => {
                     tracing::info!(tool = %name, success, "chat: tool result");
                 }
                 ChatEvent::Done {
@@ -1195,19 +1191,19 @@ fn tool_result_summary(text: &str) -> String {
     // Compaction stubs / short single-line results: keep as one line.
     if line_count <= 1 {
         return if first.chars().count() > CAP {
-            format!("{}…", first.chars().take(CAP.saturating_sub(1)).collect::<String>())
+            format!(
+                "{}…",
+                first
+                    .chars()
+                    .take(CAP.saturating_sub(1))
+                    .collect::<String>()
+            )
         } else {
             first.to_string()
         };
     }
     let head: String = first.chars().take(80).collect();
-    let tail: String = text
-        .lines()
-        .last()
-        .unwrap_or("")
-        .chars()
-        .take(80)
-        .collect();
+    let tail: String = text.lines().last().unwrap_or("").chars().take(80).collect();
     let summary = if tail.is_empty() || tail == head {
         format!("{line_count} lines | head: {head}")
     } else {
@@ -1216,7 +1212,10 @@ fn tool_result_summary(text: &str) -> String {
     if summary.chars().count() > CAP {
         format!(
             "{}…",
-            summary.chars().take(CAP.saturating_sub(1)).collect::<String>()
+            summary
+                .chars()
+                .take(CAP.saturating_sub(1))
+                .collect::<String>()
         )
     } else {
         summary
@@ -1272,7 +1271,8 @@ impl MessageInfo {
         });
         if msg.role == Role::User {
             let cwd = std::env::current_dir().unwrap_or_default();
-            content = atomcode_capabilities::session::UserWrapHook::unwrap_input_for(&cwd, &content);
+            content =
+                atomcode_capabilities::session::UserWrapHook::unwrap_input_for(&cwd, &content);
             let (display, had_vision_marker) = strip_vision_marker(&content);
             if had_vision_marker {
                 content = display;
@@ -1292,11 +1292,7 @@ impl MessageInfo {
             artifacts,
             images,
             created_at: (msg.created_at_ms > 0).then_some(msg.created_at_ms),
-            elapsed_ms: msg
-                .meta
-                .as_ref()
-                .map(|m| m.elapsed_ms)
-                .filter(|&ms| ms > 0),
+            elapsed_ms: msg.meta.as_ref().map(|m| m.elapsed_ms).filter(|&ms| ms > 0),
         }
     }
 }
@@ -1790,11 +1786,7 @@ impl ChatTurnPolicy {
     /// WebUI / channel / IDE own message — honor the client's mode pill when the
     /// client can answer approval / user-input. Does **not** force Auto (that is
     /// reserved for API + YOLO).
-    pub fn native(
-        client_mode: SessionMode,
-        enforce_token: bool,
-        bind_host: &str,
-    ) -> Self {
+    pub fn native(client_mode: SessionMode, enforce_token: bool, bind_host: &str) -> Self {
         Self {
             origin: ChatTurnOrigin::Native,
             interactive_permission: client_interactive_permission(
@@ -5084,12 +5076,11 @@ async fn process_chat_request(
         if let Some(event) = projector.finish() {
             let _ = event_tx.send(event);
         }
-        let message = projector.last_error.clone().unwrap_or_else(|| {
-            "coding runtime event stream closed before turn terminal".into()
-        });
-        let _ = event_tx.send(ChatEvent::Error {
-            message,
-        });
+        let message = projector
+            .last_error
+            .clone()
+            .unwrap_or_else(|| "coding runtime event stream closed before turn terminal".into());
+        let _ = event_tx.send(ChatEvent::Error { message });
     }
 
     // The native runtime owns turn boundaries, mid-turn cancel cleanup
@@ -5233,9 +5224,7 @@ async fn chat_watch(
                     Ok(event) => {
                         let terminal = matches!(
                             event,
-                            ChatEvent::Done { .. }
-                                | ChatEvent::Error { .. }
-                                | ChatEvent::Stopped
+                            ChatEvent::Done { .. } | ChatEvent::Error { .. } | ChatEvent::Stopped
                         );
                         if tx.send(event).is_err() {
                             break;
@@ -5250,7 +5239,11 @@ async fn chat_watch(
             }
         });
     } else {
-        match state.active_chats.subscribe_or_standby(&session_id, &tx).await {
+        match state
+            .active_chats
+            .subscribe_or_standby(&session_id, &tx)
+            .await
+        {
             WatchOutcome::Live(mut bus_rx) => {
                 // Race: turn admitted between the two lookups — no replay buffer
                 // snapshot, fall back to live-only + admitted user message.
@@ -5258,10 +5251,8 @@ async fn chat_watch(
                     session_id = %session_id,
                     "chat_watch: LIVE race fallback (no snapshot)"
                 );
-                if let Some(operation_id) = state
-                    .active_chats
-                    .operation_for_session(&session_id)
-                    .await
+                if let Some(operation_id) =
+                    state.active_chats.operation_for_session(&session_id).await
                 {
                     if let Some(content) = state
                         .active_chats
@@ -6422,9 +6413,7 @@ async fn get_tunnel_status(
         )
     })
     .or_else(|| {
-        auth_token::token_from_api_key_header(
-            headers.get("api-key").and_then(|h| h.to_str().ok()),
-        )
+        auth_token::token_from_api_key_header(headers.get("api-key").and_then(|h| h.to_str().ok()))
     })
     .or_else(|| {
         auth_token::token_from_cookie(
@@ -7424,8 +7413,7 @@ mod tests {
         );
 
         // Public form
-        let (sel, p) =
-            resolve_chat_provider(&config, Some("AtomGit/GLM-5.2".into())).unwrap();
+        let (sel, p) = resolve_chat_provider(&config, Some("AtomGit/GLM-5.2".into())).unwrap();
         assert_eq!(sel, "AtomGit-GLM-5.2");
         assert_eq!(p.model, "GLM-5.2");
 
@@ -7435,8 +7423,7 @@ mod tests {
         assert_eq!(sel2, "AtomGit-deepseek-v4-flash");
 
         // Wire model alone
-        let (sel3, _) =
-            resolve_chat_provider(&config, Some("deepseek-v4-flash".into())).unwrap();
+        let (sel3, _) = resolve_chat_provider(&config, Some("deepseek-v4-flash".into())).unwrap();
         assert_eq!(sel3, "AtomGit-deepseek-v4-flash");
     }
 

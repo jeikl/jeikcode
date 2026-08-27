@@ -101,7 +101,10 @@ impl Tool for WriteFileTool {
             None => format!("Created {disp} ({bytes} bytes, {new_lines} lines)"),
         };
         let cost_time = t0.elapsed();
-        ok(format!("> ⏱️ **Cost Time**: {:.2?}ms\n\n{msg}", cost_time.as_millis()))
+        ok(format!(
+            "> ⏱️ **Cost Time**: {:.2?}ms\n\n{msg}",
+            cost_time.as_millis()
+        ))
     }
 }
 

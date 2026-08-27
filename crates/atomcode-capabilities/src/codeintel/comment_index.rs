@@ -95,7 +95,9 @@ pub fn extract_comment_blocks(source: &str) -> Vec<CommentBlock> {
         // Line comment prefixes: //, ///, #, --
         let is_line_comment = trimmed.starts_with("//")
             || trimmed.starts_with("///")
-            || (trimmed.starts_with('#') && !trimmed.starts_with("#[") && !trimmed.starts_with("#include"))
+            || (trimmed.starts_with('#')
+                && !trimmed.starts_with("#[")
+                && !trimmed.starts_with("#include"))
             || trimmed.starts_with("--");
 
         if is_line_comment {
@@ -194,8 +196,9 @@ pub fn bind_comments_to_symbols_with_source(
                     super::graph::SymbolKind::Property
                     | super::graph::SymbolKind::ConfigProperty
                     | super::graph::SymbolKind::Variable => CommentScope::PropertyDoc,
-                    super::graph::SymbolKind::Method
-                    | super::graph::SymbolKind::Function => CommentScope::MethodHeader,
+                    super::graph::SymbolKind::Method | super::graph::SymbolKind::Function => {
+                        CommentScope::MethodHeader
+                    }
                     _ => CommentScope::Docstring,
                 };
                 structured_comments.push(StructuredComment {
@@ -257,10 +260,7 @@ pub fn bind_comments_to_symbols_with_source(
 }
 
 /// Attach extracted comments to symbol nodes by physical line proximity.
-pub fn bind_comments_to_symbols(
-    symbols: &mut [SymbolNode],
-    comments: &[CommentBlock],
-) {
+pub fn bind_comments_to_symbols(symbols: &mut [SymbolNode], comments: &[CommentBlock]) {
     bind_comments_to_symbols_with_source(symbols, comments, "");
 }
 

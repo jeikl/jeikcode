@@ -56,11 +56,7 @@ impl Tool for ListDirTool {
     }
     // listing is non-destructive → risk() defaults to Safe.
     async fn execute(&self, args: &str, ctx: &ToolContext) -> ToolResult {
-        let a: Args = match parse_tool_args(
-            "list_directory",
-            args,
-            r#"{"path":"<dir>"}"#,
-        ) {
+        let a: Args = match parse_tool_args("list_directory", args, r#"{"path":"<dir>"}"#) {
             Ok(a) => a,
             Err(e) => return e.into_tool_result(),
         };
@@ -92,8 +88,7 @@ impl Tool for ListDirTool {
         }
 
         let root2 = root.clone();
-        let lines = match tokio::task::spawn_blocking(move || collect_tree(&root2, depth)).await
-        {
+        let lines = match tokio::task::spawn_blocking(move || collect_tree(&root2, depth)).await {
             Ok(v) => v,
             Err(_) => return err("list_directory: scan task failed".to_string()),
         };
@@ -236,7 +231,13 @@ fn collect_tree(root: &Path, max_depth: usize) -> Vec<(usize, String)> {
 }
 
 /// Depth-first walk for nested rows, sharing the overall nested budget.
-fn walk_nested(dir: &Path, depth: usize, max: usize, budget: usize, out: &mut Vec<(usize, String)>) {
+fn walk_nested(
+    dir: &Path,
+    depth: usize,
+    max: usize,
+    budget: usize,
+    out: &mut Vec<(usize, String)>,
+) {
     if depth > max || out.len() >= budget {
         return;
     }
@@ -377,7 +378,8 @@ mod tests {
             r.content
         );
         assert!(
-            r.content.contains("f000.txt") && r.content.contains(&format!("f{:03}.txt", MAX_ENTRIES - 1)),
+            r.content.contains("f000.txt")
+                && r.content.contains(&format!("f{:03}.txt", MAX_ENTRIES - 1)),
             "all entries present: {}",
             r.content
         );
@@ -416,7 +418,11 @@ mod tests {
             r.content
         );
         // An elided middle entry must NOT leak into the output.
-        assert!(!r.content.contains(&format!("f{:03}.txt", FOLD_HALF)), "{}", r.content);
+        assert!(
+            !r.content.contains(&format!("f{:03}.txt", FOLD_HALF)),
+            "{}",
+            r.content
+        );
     }
 
     /// The regression this fix targets: on a multi-project workspace the rows

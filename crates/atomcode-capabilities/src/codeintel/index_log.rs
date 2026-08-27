@@ -73,7 +73,10 @@ fn civil_from_unix(secs: u64) -> (i32, u32, u32, u32, u32, u32) {
 }
 
 pub fn log_dir(root: &Path) -> PathBuf {
-    super::canonical(root).join(".atomcode").join("codegraph").join("logs")
+    super::canonical(root)
+        .join(".atomcode")
+        .join("codegraph")
+        .join("logs")
 }
 
 fn append(root: &Path, event: Value) {
@@ -118,7 +121,10 @@ mod tests {
             json!({"symbols": 3}),
         );
         let dir = log_dir(d.path());
-        let files: Vec<_> = std::fs::read_dir(&dir).unwrap().filter_map(|e| e.ok()).collect();
+        let files: Vec<_> = std::fs::read_dir(&dir)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .collect();
         assert_eq!(files.len(), 1);
         let body = std::fs::read_to_string(files[0].path()).unwrap();
         assert!(body.contains("\"event\":\"index_refresh\""));

@@ -106,11 +106,9 @@ impl IndexDb {
     /// Loads the stored walk fingerprint, if present.
     pub fn get_walk_fp(&self) -> Option<u64> {
         let conn = self.conn.lock().ok()?;
-        if let Ok(s) = conn.query_row(
-            "SELECT value FROM meta WHERE key = 'walk_fp'",
-            [],
-            |row| row.get::<_, String>(0),
-        ) {
+        if let Ok(s) = conn.query_row("SELECT value FROM meta WHERE key = 'walk_fp'", [], |row| {
+            row.get::<_, String>(0)
+        }) {
             if let Ok(fp) = s.parse::<u64>() {
                 return Some(fp);
             }
@@ -471,7 +469,8 @@ mod tests {
 
     #[test]
     fn test_index_db_roundtrip() {
-        let temp_dir = std::env::temp_dir().join(format!("atomcode_test_db_{}", std::process::id()));
+        let temp_dir =
+            std::env::temp_dir().join(format!("atomcode_test_db_{}", std::process::id()));
         let _ = std::fs::create_dir_all(&temp_dir);
         let db_path = temp_dir.join("test_index.db");
 

@@ -172,11 +172,14 @@ fn classify_serde_message(message: &str) -> ArgErrorCategory {
 
 /// Pull `missing field \`foo\`` / `unknown field \`bar\`` style names out of serde text.
 fn extract_field_path(message: &str) -> Option<String> {
-    for marker in ["missing field `", "unknown field `", "missing field \"", "unknown field \""] {
+    for marker in [
+        "missing field `",
+        "unknown field `",
+        "missing field \"",
+        "unknown field \"",
+    ] {
         if let Some(rest) = message.find(marker).map(|i| &message[i + marker.len()..]) {
-            let end = rest
-                .find(['`', '"', ',', ' ', '\n'])
-                .unwrap_or(rest.len());
+            let end = rest.find(['`', '"', ',', ' ', '\n']).unwrap_or(rest.len());
             let name = rest[..end].trim();
             if !name.is_empty() {
                 return Some(name.to_string());
@@ -337,9 +340,8 @@ fn find_similar_entries(path: &Path, cwd: &Path) -> Vec<PathBuf> {
             .unwrap_or(&name)
             .to_lowercase();
         let forward = name_stem.contains(&base_stem) || name.contains(&base);
-        let reverse = !forward
-            && name_stem.len() >= MIN_REVERSE_STEM_LEN
-            && base_stem.contains(&name_stem);
+        let reverse =
+            !forward && name_stem.len() >= MIN_REVERSE_STEM_LEN && base_stem.contains(&name_stem);
         if forward || reverse {
             matches.push(entry.path());
             if matches.len() >= MAX_SIMILAR {
@@ -351,8 +353,7 @@ fn find_similar_entries(path: &Path, cwd: &Path) -> Vec<PathBuf> {
     matches.sort_by(|a, b| {
         let la = a.file_name().map(|n| n.len()).unwrap_or(0);
         let lb = b.file_name().map(|n| n.len()).unwrap_or(0);
-        la.cmp(&lb)
-            .then_with(|| a.file_name().cmp(&b.file_name()))
+        la.cmp(&lb).then_with(|| a.file_name().cmp(&b.file_name()))
     });
     matches.truncate(MAX_SIMILAR);
     matches
@@ -411,8 +412,12 @@ mod tests {
 
     #[test]
     fn missing_field_is_structured() {
-        let err = parse_tool_args::<Sample>("write_file", r#"{"file_path":"a"}"#, r#"{"file_path","content"}"#)
-            .unwrap_err();
+        let err = parse_tool_args::<Sample>(
+            "write_file",
+            r#"{"file_path":"a"}"#,
+            r#"{"file_path","content"}"#,
+        )
+        .unwrap_err();
         assert_eq!(err.category, ArgErrorCategory::MissingField);
         assert_eq!(err.field_path.as_deref(), Some("content"));
         let text = err.format_for_model();

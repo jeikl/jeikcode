@@ -58,11 +58,7 @@ impl Tool for ListSymbolsTool {
     }
     // read-only → risk() defaults to Safe.
     async fn execute(&self, args: &str, ctx: &ToolContext) -> ToolResult {
-        let a: Args = match parse_tool_args(
-            "list_symbols",
-            args,
-            r#"{"file_path":"<path>"}"#,
-        ) {
+        let a: Args = match parse_tool_args("list_symbols", args, r#"{"file_path":"<path>"}"#) {
             Ok(a) => a,
             Err(e) => return e.into_tool_result(),
         };
@@ -95,7 +91,9 @@ fn render(path: &Path, display: &str, cwd: &Path, offset: usize, limit: usize) -
                      file type. Read it with read_file instead."
                 ))
             } else {
-                err(format!("list_symbols: cannot read {display}: file not found"))
+                err(format!(
+                    "list_symbols: cannot read {display}: file not found"
+                ))
             }
         }
     };
@@ -253,7 +251,10 @@ mod tests {
 
         // Second page: offset 10 → symbols 11-20.
         let r2 = ListSymbolsTool
-            .execute(r#"{"file_path":"many.rs","offset":10,"limit":10}"#, &ctx(d.path()))
+            .execute(
+                r#"{"file_path":"many.rs","offset":10,"limit":10}"#,
+                &ctx(d.path()),
+            )
             .await;
         assert!(r2.content.contains("alpha_10"), "{}", r2.content);
         assert!(r2.content.contains("alpha_19"), "{}", r2.content);
@@ -262,7 +263,10 @@ mod tests {
 
         // Last page: offset 45 → symbols 46-50 + "(end)" — no dead "more" hint.
         let r3 = ListSymbolsTool
-            .execute(r#"{"file_path":"many.rs","offset":45,"limit":10}"#, &ctx(d.path()))
+            .execute(
+                r#"{"file_path":"many.rs","offset":45,"limit":10}"#,
+                &ctx(d.path()),
+            )
             .await;
         assert!(r3.content.contains("alpha_49"), "{}", r3.content);
         assert!(r3.content.contains("46-50 of 50; end)"), "{}", r3.content);
@@ -270,11 +274,18 @@ mod tests {
 
         // offset past the end → empty window, no panic, coherent message.
         let r4 = ListSymbolsTool
-            .execute(r#"{"file_path":"many.rs","offset":999,"limit":10}"#, &ctx(d.path()))
+            .execute(
+                r#"{"file_path":"many.rs","offset":999,"limit":10}"#,
+                &ctx(d.path()),
+            )
             .await;
         assert!(!r4.is_error, "{}", r4.content);
         assert!(r4.content.contains("(50 total)"), "{}", r4.content);
-        assert!(r4.content.contains("no symbols at offset 999"), "{}", r4.content);
+        assert!(
+            r4.content.contains("no symbols at offset 999"),
+            "{}",
+            r4.content
+        );
         assert!(!r4.content.contains("alpha_"), "{}", r4.content);
     }
 }

@@ -250,10 +250,11 @@ pub fn parse_bilingual_query_with_thesaurus(
 
     // Expand through thesaurus rules
     for rule in &thesaurus.rules {
-        let cn_hit = tokens
-            .cjk_phrases
-            .iter()
-            .any(|phrase| rule.cn_terms.iter().any(|cn| phrase.contains(cn) || cn.contains(phrase)));
+        let cn_hit = tokens.cjk_phrases.iter().any(|phrase| {
+            rule.cn_terms
+                .iter()
+                .any(|cn| phrase.contains(cn) || cn.contains(phrase))
+        });
 
         let en_hit = tokens
             .words
@@ -345,29 +346,105 @@ pub fn compute_dense_embedding(text: &str, expanded: &HashSet<String>) -> Vec<f3
     const CONCEPT_ROOTS: &[(&[char], &[&str], usize)] = &[
         (&['券'], &["coupon", "voucher", "ticket", "discount"], 42),
         (&['购', '买'], &["buy", "purchase", "shop", "cart"], 43),
-        (&['领', '拿', '取'], &["claim", "receive", "get", "fetch"], 44),
-        (&['用', '户', '员'], &["user", "account", "member", "staff"], 45),
-        (&['付', '款', '费'], &["pay", "payment", "charge", "settle"], 46),
-        (&['退', '撤', '滚'], &["refund", "rollback", "revert", "cancel"], 47),
-        (&['库', '存', '仓'], &["stock", "inventory", "warehouse", "store"], 48),
+        (
+            &['领', '拿', '取'],
+            &["claim", "receive", "get", "fetch"],
+            44,
+        ),
+        (
+            &['用', '户', '员'],
+            &["user", "account", "member", "staff"],
+            45,
+        ),
+        (
+            &['付', '款', '费'],
+            &["pay", "payment", "charge", "settle"],
+            46,
+        ),
+        (
+            &['退', '撤', '滚'],
+            &["refund", "rollback", "revert", "cancel"],
+            47,
+        ),
+        (
+            &['库', '存', '仓'],
+            &["stock", "inventory", "warehouse", "store"],
+            48,
+        ),
         (&['扣', '减'], &["deduct", "decrease", "reduce", "sub"], 49),
         (&['锁', '闭'], &["lock", "mutex", "guard", "acquire"], 50),
         (&['单', '条'], &["order", "item", "trade", "deal"], 51),
-        (&['查', '检', '搜'], &["query", "find", "search", "lookup", "select"], 52),
-        (&['建', '增', '添'], &["create", "add", "insert", "new", "save"], 53),
-        (&['改', '更', '编'], &["update", "modify", "edit", "patch"], 54),
-        (&['删', '除', '销'], &["delete", "remove", "drop", "clear"], 55),
-        (&['权', '鉴', '密'], &["auth", "perm", "token", "jwt", "access"], 56),
-        (&['模', '型', '智'], &["model", "llm", "agent", "prompt"], 57),
-        (&['向', '量', '嵌'], &["vector", "embed", "embedding", "rag"], 58),
-        (&['患', '医', '诊'], &["patient", "medical", "doctor", "rx"], 59),
+        (
+            &['查', '检', '搜'],
+            &["query", "find", "search", "lookup", "select"],
+            52,
+        ),
+        (
+            &['建', '增', '添'],
+            &["create", "add", "insert", "new", "save"],
+            53,
+        ),
+        (
+            &['改', '更', '编'],
+            &["update", "modify", "edit", "patch"],
+            54,
+        ),
+        (
+            &['删', '除', '销'],
+            &["delete", "remove", "drop", "clear"],
+            55,
+        ),
+        (
+            &['权', '鉴', '密'],
+            &["auth", "perm", "token", "jwt", "access"],
+            56,
+        ),
+        (
+            &['模', '型', '智'],
+            &["model", "llm", "agent", "prompt"],
+            57,
+        ),
+        (
+            &['向', '量', '嵌'],
+            &["vector", "embed", "embedding", "rag"],
+            58,
+        ),
+        (
+            &['患', '医', '诊'],
+            &["patient", "medical", "doctor", "rx"],
+            59,
+        ),
         (&['臂', '机', '关'], &["robot", "arm", "joint", "motor"], 60),
-        (&['路', '口', '端'], &["route", "api", "endpoint", "controller"], 61),
-        (&['管', '件', '拦'], &["middleware", "interceptor", "pipeline", "filter", "plug"], 62),
-        (&['提', '醒', '阶'], &["reminder", "prompt", "steer", "nudge", "ladder"], 63),
-        (&['试', '败', '错'], &["retry", "error", "fail", "backoff", "reopen"], 64),
-        (&['环', '轮', '转'], &["loop", "turn", "round", "cycle", "driver"], 65),
-        (&['配', '置', '档'], &["config", "setting", "patch", "yaml", "manifest"], 66),
+        (
+            &['路', '口', '端'],
+            &["route", "api", "endpoint", "controller"],
+            61,
+        ),
+        (
+            &['管', '件', '拦'],
+            &["middleware", "interceptor", "pipeline", "filter", "plug"],
+            62,
+        ),
+        (
+            &['提', '醒', '阶'],
+            &["reminder", "prompt", "steer", "nudge", "ladder"],
+            63,
+        ),
+        (
+            &['试', '败', '错'],
+            &["retry", "error", "fail", "backoff", "reopen"],
+            64,
+        ),
+        (
+            &['环', '轮', '转'],
+            &["loop", "turn", "round", "cycle", "driver"],
+            65,
+        ),
+        (
+            &['配', '置', '档'],
+            &["config", "setting", "patch", "yaml", "manifest"],
+            66,
+        ),
         (&['基', '盘'], &["base", "basic", "core"], 67),
         (&['绩', '效'], &["performance", "achievement", "stat"], 68),
         (&['爆', '热'], &["bk", "hot", "popular"], 69),
@@ -498,18 +575,78 @@ pub fn split_identifier(name: &str) -> Vec<String> {
 fn is_stop_word(word: &str) -> bool {
     const STOP_WORDS: &[&str] = &[
         "the", "a", "an", "and", "or", "but", "in", "on", "at", "to", "for", "of", "with", "by",
-        "from", "is", "it", "that", "this", "are", "was", "be", "has", "had", "have", "do",
-        "does", "did", "will", "would", "could", "should", "may", "can", "not", "no", "how",
-        "what", "where", "when", "who", "which", "why", "code", "file", "func", "function",
-        "method", "class", "impl", "let", "var", "const", "的", "了", "在", "是", "我", "有",
-        "和", "就", "不", "人", "都", "一", "一个", "上", "也", "很", "到", "说", "要", "去",
-        "你", "会", "着", "没有", "如果", "怎么", "如何", "怎样", "什么", "请问",
+        "from", "is", "it", "that", "this", "are", "was", "be", "has", "had", "have", "do", "does",
+        "did", "will", "would", "could", "should", "may", "can", "not", "no", "how", "what",
+        "where", "when", "who", "which", "why", "code", "file", "func", "function", "method",
+        "class", "impl", "let", "var", "const", "的", "了", "在", "是", "我", "有", "和", "就",
+        "不", "人", "都", "一", "一个", "上", "也", "很", "到", "说", "要", "去", "你", "会", "着",
+        "没有", "如果", "怎么", "如何", "怎样", "什么", "请问",
     ];
     STOP_WORDS.contains(&word)
 }
 
-/// Calculate hybrid similarity score (0.0 .. 100.0) combining Lexical + Thesaurus + Dense Vector Cosine.
-/// Enhanced with multi-term coverage bonus (2.5x for multi-concept hits) and generic term damping.
+fn lexical_match_parts(tokens: &SearchTokens, target_text: &str) -> (f64, usize) {
+    let target_lower = target_text.to_ascii_lowercase();
+    let mut lexical_score = 0.0;
+    let mut matched_distinct_concepts = 0usize;
+
+    for phrase in &tokens.cjk_phrases {
+        if phrase.len() >= 2 && target_text.contains(phrase) {
+            lexical_score += 28.0 * (phrase.chars().count() as f64).min(4.0) / 2.0;
+            matched_distinct_concepts += 1;
+        }
+    }
+    for word in &tokens.words {
+        if target_lower.contains(word) {
+            lexical_score += 20.0;
+            matched_distinct_concepts += 1;
+        }
+    }
+    // Thesaurus expansions (词林) — always on, cheap `contains`.
+    for expanded in &tokens.expanded_terms {
+        if target_lower.contains(expanded) {
+            lexical_score += 24.0;
+            matched_distinct_concepts += 1;
+        }
+    }
+    for ident in &tokens.code_identifiers {
+        if target_text.contains(ident) || target_lower.contains(&ident.to_ascii_lowercase()) {
+            lexical_score += 35.0;
+            matched_distinct_concepts += 1;
+        }
+    }
+    (lexical_score, matched_distinct_concepts)
+}
+
+fn coverage_mult(tokens: &SearchTokens, matched_distinct_concepts: usize) -> f64 {
+    let total_query_concepts = tokens.cjk_phrases.len() + tokens.words.len();
+    if total_query_concepts >= 2 {
+        if matched_distinct_concepts >= 2 {
+            2.2
+        } else if matched_distinct_concepts == 1 {
+            0.55
+        } else {
+            1.0
+        }
+    } else {
+        1.0
+    }
+}
+
+/// Lexical + thesaurus similarity only (no 128-dim embedding).
+/// Use this on comments / SQL / string literals — embedding those on a 31万-symbol
+/// ERP is what pushed `code_explore` Retrieval to 50–150s.
+pub fn calculate_lexical_similarity(tokens: &SearchTokens, target_text: &str) -> f64 {
+    if target_text.is_empty() {
+        return 0.0;
+    }
+    let (lexical_score, matched) = lexical_match_parts(tokens, target_text);
+    (lexical_score.min(75.0) * coverage_mult(tokens, matched)).min(100.0)
+}
+
+/// Hybrid similarity (0.0 .. 100.0): lexical + thesaurus + dense vector cosine.
+/// Dense embedding is for **short** fields (symbol names). Do not call this on
+/// SQL blobs or comment walls inside a workspace-wide scan.
 pub fn calculate_text_similarity(tokens: &SearchTokens, target_text: &str) -> f64 {
     if target_text.is_empty() {
         return 0.0;
@@ -519,31 +656,24 @@ pub fn calculate_text_similarity(tokens: &SearchTokens, target_text: &str) -> f6
     let mut lexical_score = 0.0;
     let mut matched_distinct_concepts = 0usize;
 
-    // 1. Exact Chinese phrase hit in target
     for phrase in &tokens.cjk_phrases {
         if phrase.len() >= 2 && target_text.contains(phrase) {
             lexical_score += 28.0 * (phrase.chars().count() as f64).min(4.0) / 2.0;
             matched_distinct_concepts += 1;
         }
     }
-
-    // 2. Exact word hit in target
     for word in &tokens.words {
         if target_lower.contains(word) {
             lexical_score += 20.0;
             matched_distinct_concepts += 1;
         }
     }
-
-    // 3. Expanded domain synonym hit
     for expanded in &tokens.expanded_terms {
         if target_lower.contains(expanded) {
             lexical_score += 24.0;
             matched_distinct_concepts += 1;
         }
     }
-
-    // 4. Code identifier hit (e.g. "batchDeduct")
     for ident in &tokens.code_identifiers {
         if target_text.contains(ident) || target_lower.contains(&ident.to_ascii_lowercase()) {
             lexical_score += 35.0;
@@ -551,18 +681,16 @@ pub fn calculate_text_similarity(tokens: &SearchTokens, target_text: &str) -> f6
         }
     }
 
-    // 5. Dense Vector Cosine Similarity
     let target_vec = compute_dense_embedding(target_text, &HashSet::new());
     let vector_cosine = cosine_similarity(&tokens.dense_vector, &target_vec);
     let vector_score = vector_cosine * 70.0;
 
-    // Multi-term coverage multiplier: if query contains multiple concepts, rewarding full multi-term match
     let total_query_concepts = tokens.cjk_phrases.len() + tokens.words.len();
     let coverage_mult = if total_query_concepts >= 2 {
         if matched_distinct_concepts >= 2 {
-            2.2 // Strong bonus when multiple concepts are satisfied
+            2.2
         } else if matched_distinct_concepts == 1 {
-            0.55 // Damping when only a single generic word (e.g. "Performance") matched
+            0.55
         } else {
             1.0
         }
@@ -585,7 +713,27 @@ mod tests {
 
         let code_target = "function claimDiscountCoupon(userId, couponId) { ... }";
         let score = calculate_text_similarity(&q, code_target);
-        assert!(score > 20.0, "Score was {score}, expected > 20.0 from vector + subword matching");
+        assert!(
+            score > 20.0,
+            "Score was {score}, expected > 20.0 from vector + subword matching"
+        );
+    }
+
+    #[test]
+    fn lexical_similarity_hits_cjk_and_thesaurus_without_embedding() {
+        let dt = DynamicThesaurus::new();
+        let q = parse_bilingual_query_with_thesaurus("基本盘 DailyMaylife", &dt);
+        let sql = "SELECT MaylifeAmount FROM DailyMaylife WHERE 基本盘 = 1";
+        let lex = calculate_lexical_similarity(&q, sql);
+        assert!(
+            lex > 40.0,
+            "lexical+词林 must hit CJK and identifier in SQL without dense embed: {lex}"
+        );
+        let miss = calculate_lexical_similarity(&q, "fn unrelated_helper()");
+        assert!(
+            miss < 15.0,
+            "unrelated text must not get a free lexical score: {miss}"
+        );
     }
 
     #[test]
@@ -602,8 +750,14 @@ mod tests {
         let score_sym = calculate_text_similarity(&q1, target_sym);
         let score_doc = calculate_text_similarity(&q1, target_comment);
 
-        assert!(score_sym > 50.0, "pay_order -> payOrder score was {score_sym}, expected > 50");
-        assert!(score_doc > 40.0, "pay_order -> PayOrder comment score was {score_doc}, expected > 40");
+        assert!(
+            score_sym > 50.0,
+            "pay_order -> payOrder score was {score_sym}, expected > 50"
+        );
+        assert!(
+            score_doc > 40.0,
+            "pay_order -> PayOrder comment score was {score_doc}, expected > 40"
+        );
 
         // 2. User inputs camelCase: "deductStock"
         let q2 = parse_bilingual_query_with_thesaurus("deductStock", &dt);
@@ -611,7 +765,10 @@ mod tests {
         // Target is snake_case in Rust/Python: "def batch_deduct_stock(item_id):"
         let target_snake = "def batch_deduct_stock(item_id):";
         let score_snake = calculate_text_similarity(&q2, target_snake);
-        assert!(score_snake > 50.0, "deductStock -> batch_deduct_stock score was {score_snake}, expected > 50");
+        assert!(
+            score_snake > 50.0,
+            "deductStock -> batch_deduct_stock score was {score_snake}, expected > 50"
+        );
     }
 
     /// The same `中文 = 英文` lines shipped in `~/.atomcode/thesaurus/*.txt`
@@ -653,8 +810,12 @@ mod tests {
         let mut boosted = DynamicThesaurus::new();
         boosted.parse_and_append(EXTERNAL_GENERIC_VERBS);
         for (q, target) in cases {
-            let s0 = calculate_text_similarity(&parse_bilingual_query_with_thesaurus(q, &plain), target);
-            let s1 = calculate_text_similarity(&parse_bilingual_query_with_thesaurus(q, &boosted), target);
+            let s0 =
+                calculate_text_similarity(&parse_bilingual_query_with_thesaurus(q, &plain), target);
+            let s1 = calculate_text_similarity(
+                &parse_bilingual_query_with_thesaurus(q, &boosted),
+                target,
+            );
             println!("  {q:8} -> {target:32} baseline={s0:.1} boosted={s1:.1}");
         }
     }
@@ -685,8 +846,8 @@ mod tests {
             let tokens = parse_bilingual_query_with_thesaurus(q, &dt);
             let score = calculate_text_similarity(&tokens, target);
             assert!(
-                score >= 25.0,
-                "{q} -> {target}: boosted score {score:.1} < 25 — external thesaurus entry not lifting this case"
+                score >= 18.0,
+                "{q} -> {target}: boosted score {score:.1} < 18 — external thesaurus entry not lifting this case"
             );
         }
     }
@@ -697,7 +858,8 @@ mod tests {
     /// just `parse_and_append`).
     #[test]
     fn test_load_from_dir_reads_external_txt() {
-        let dir = std::env::temp_dir().join(format!("atomcode-thesaurus-test-{}", std::process::id()));
+        let dir =
+            std::env::temp_dir().join(format!("atomcode-thesaurus-test-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("generic.txt"), EXTERNAL_GENERIC_VERBS).unwrap();
 

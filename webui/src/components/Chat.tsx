@@ -56,6 +56,7 @@ import {
 } from '../lib/atMention';
 import {
   appendReasoningPart,
+  appendToolOutput,
   toolResultStatus,
   updateToolProgress,
   upsertToolPart,
@@ -95,7 +96,7 @@ import {
   type ChatRecoveryEvent,
   type ChatRecoveryState,
 } from '../lib/chatTerminal';
-import { formatTurnElapsed, stampLastAssistantElapsed } from '../lib/turnTimer';
+import { formatTurnElapsed, stampLastAssistantElapsed, turnDurationMs } from '../lib/turnTimer';
 import {
   acknowledgeLiveSteers,
   pendingSteersToDraft,
@@ -172,6 +173,13 @@ function sameDay(a: Date, b: Date): boolean {
  *  pure top-level helper). Local time, because a chat send time is a
  *  wall-clock fact the user reads the same way they read a timestamp in
  *  any messaging app. */
+function precedingUserTs(msgs: Message[], idx: number): number | undefined {
+  for (let i = idx - 1; i >= 0; i--) {
+    if (msgs[i]!.role === 'user') return msgs[i]!.ts;
+  }
+  return undefined;
+}
+
 function formatMsgTime(ts: number | undefined, t: (key: MsgKey, params?: Record<string, string | number>) => string): string {
   // P3 修复: 用 ts == null 而非 !ts,避免把 ts=0 (epoch 1970) 误判为无效。
   // 实际消息时间戳不会是 0,但严格区分 "缺失" 与 "值为 0" 更正确。
@@ -1828,7 +1836,7 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
       case 'text': return { type: 'text', content: e.content };
       case 'reasoning': return { type: 'reasoning', content: e.content };
       case 'tool_start': return { type: 'tool_start', id: e.id, name: e.name, arguments: e.arguments };
-      case 'tool_output': return { type: 'tool_output', chunk: e.chunk };
+      case 'tool_output': return { type: 'tool_output', id: e.id, chunk: e.chunk };
       case 'tool_progress': return { type: 'tool_progress', id: e.id, progress: e.progress };
       case 'tool_result': return { type: 'tool_result', id: e.id, name: e.name, output: e.output, success: e.success, duration_ms: e.duration_ms };
       case 'tokens': return { type: 'tokens', prompt: e.prompt, completion: e.completion, total: e.total };
@@ -2443,30 +2451,6 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
     });
   }
 
-  function appendToolOutput(chunk: string) {
-    setMessages((prev) => {
-      if (prev.length === 0) return prev;
-      const last = prev[prev.length - 1];
-      if (last.role !== 'assistant') return prev;
-      // Append to the most recent tool segment's output.
-      let idx = -1;
-      for (let i = last.parts.length - 1; i >= 0; i--) {
-        if (last.parts[i].kind === 'tool') {
-          idx = i;
-          break;
-        }
-      }
-      if (idx < 0) return prev;
-      const parts = last.parts.slice();
-      const tp = parts[idx] as { kind: 'tool'; tool: ToolRow };
-      parts[idx] = {
-        kind: 'tool',
-        tool: { ...tp.tool, output: (tp.tool.output ?? '') + chunk },
-      };
-      return [...prev.slice(0, -1), { ...last, parts }];
-    });
-  }
-
   function addToolToLastAssistant(tool: ToolRow) {
     setMessages((prev) => {
       if (prev.length === 0) return prev;
@@ -2618,9 +2602,28 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
         break;
       }
 
-      case 'tool_output':
-        appendToolOutput(event.chunk);
+      case 'tool_output': {
+        const callId = event.id;
+        setMessages((prev) => {
+          if (prev.length === 0) return prev;
+          const last = prev[prev.length - 1];
+          if (last.role !== 'assistant') return prev;
+          let parts = appendToolOutput(last.parts, callId, event.chunk);
+          if (callId) {
+            parts = parts.map((p) => {
+              if (p.kind === 'tool' && p.tool.id === callId && p.tool.subtasks) {
+                const next = applySubtaskProgress(p.tool.subtasks, event.chunk);
+                if (next !== p.tool.subtasks) {
+                  return { kind: 'tool' as const, tool: { ...p.tool, subtasks: next } };
+                }
+              }
+              return p;
+            });
+          }
+          return [...prev.slice(0, -1), { ...last, parts }];
+        });
         break;
+      }
 
       case 'tool_progress':
         setMessages((prev) => {
@@ -3631,8 +3634,8 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
           <span class="footer-spacer" />
           {busy && turnStartedAt != null && (
             <span class="footer-turn-elapsed" aria-live="polite">
-              {t('chat.turnElapsedLive', {
-                time: formatTurnElapsed(nowMs - turnStartedAt),
+              {t('chat.turnClockLive', {
+                current: formatTurnElapsed(nowMs - turnStartedAt),
               })}
             </span>
           )}
@@ -4156,6 +4159,15 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
             // 因为这两者是基于完整 messages 序列算的。
             const nextRole = nextNonSystemRole(origIdx + 1);
             const isLastInTurn = nextRole === 'user' || nextRole === undefined;
+            const userTs = precedingUserTs(messages, origIdx);
+            const liveFromUser =
+              isLastInTurn && busy && isLast
+                ? turnDurationMs(userTs ?? turnStartedAt ?? undefined, nowMs)
+                : undefined;
+            const fromUser = turnDurationMs(userTs, msg.ts);
+            const doneTotal = isLastInTurn && !busy
+              ? (fromUser && fromUser > 0 ? fromUser : msg.elapsedMs)
+              : undefined;
 
             return (
               <AssistantMessageView
@@ -4170,11 +4182,8 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
                 searchRef={setMatchRef}
                 timeLabel={timeLabel}
                 timeFull={timeFull}
-                liveElapsedMs={
-                  isLast && busy && turnStartedAt != null
-                    ? nowMs - turnStartedAt
-                    : undefined
-                }
+                liveElapsedMs={liveFromUser}
+                turnTotalMs={doneTotal}
                 search={search}
                 isActiveSearchMatch={isActiveSearchMatch}
               />
@@ -4358,6 +4367,7 @@ function AssistantMessageView({
   timeLabel,
   timeFull,
   liveElapsedMs,
+  turnTotalMs,
   search,
   isActiveSearchMatch,
 }: {
@@ -4372,6 +4382,8 @@ function AssistantMessageView({
   timeLabel?: string;
   timeFull?: string;
   liveElapsedMs?: number;
+  /** User-bubble → this final answer. Only set on the last assistant of the turn. */
+  turnTotalMs?: number;
   search: string;
   isActiveSearchMatch: boolean;
 }) {
@@ -4485,29 +4497,34 @@ function AssistantMessageView({
         </>
       )}
       {copyBtn}
-      {streaming && liveElapsedMs != null && (
+      {isLastInTurn && streaming && liveElapsedMs != null && (
         <div class="msg-time msg-turn-elapsed is-live" aria-live="polite">
-          {t('chat.turnElapsedLive', { time: formatTurnElapsed(liveElapsedMs) })}
+          {t('chat.turnClockLive', { current: formatTurnElapsed(liveElapsedMs) })}
         </div>
       )}
-      {/* PR #562 send-time label — under the reply, dimmed; full timestamp in
-          the tooltip. Suppressed while streaming (turn isn't done yet), on
-          error turns, and on tool-only turns with no text. */}
-      {timeLabel && !streaming && (text || msg.elapsedMs != null) && !isError && (
+      {/* Clock = reply time. Duration = user bubble → this final answer, not
+          per-round kernel elapsed. Only the last assistant of the turn. */}
+      {timeLabel && !streaming && (text || turnTotalMs != null) && !isError && (
         <div class="msg-time" title={timeFull}>
           {timeLabel}
-          {msg.elapsedMs != null && (
+          {isLastInTurn && turnTotalMs != null && (
             <span class="msg-turn-elapsed">
               {' · '}
-              {t('chat.turnElapsedDone', { time: formatTurnElapsed(msg.elapsedMs) })}
+              {t('chat.turnClockDone', {
+                current: formatTurnElapsed(turnTotalMs),
+                total: formatTurnElapsed(turnTotalMs),
+              })}
             </span>
           )}
         </div>
       )}
-      {!timeLabel && !streaming && msg.elapsedMs != null && !isError && (
+      {!timeLabel && !streaming && isLastInTurn && turnTotalMs != null && !isError && (
         <div class="msg-time">
           <span class="msg-turn-elapsed">
-            {t('chat.turnElapsedDone', { time: formatTurnElapsed(msg.elapsedMs) })}
+            {t('chat.turnClockDone', {
+              current: formatTurnElapsed(turnTotalMs),
+              total: formatTurnElapsed(turnTotalMs),
+            })}
           </span>
         </div>
       )}
@@ -4933,7 +4950,23 @@ function ToolStatusIcon({ cls }: { cls: string }) {
 function ToolRowView({ tool }: { tool: ToolRow }) {
   const t = useT();
   const [expanded, setExpanded] = useState(false);
+  const userCollapsedRef = useRef(false);
+  const outputRef = useRef<HTMLDivElement>(null);
   const hasSubtasks = !!(tool.subtasks && tool.subtasks.length > 0);
+
+  // While a tool is still running, open the body as soon as stdout/stderr
+  // arrives so the user can watch it like a terminal. Stay open after it
+  // finishes unless they collapsed it themselves.
+  useEffect(() => {
+    if (tool.status === 'pending' && tool.output && !userCollapsedRef.current) {
+      setExpanded(true);
+    }
+  }, [tool.status, tool.output]);
+
+  useEffect(() => {
+    if (!expanded || !tool.output || !outputRef.current) return;
+    outputRef.current.scrollTop = outputRef.current.scrollHeight;
+  }, [expanded, tool.output]);
 
   let annotation: { cls: string; label: string } | null = null;
   if (tool.status === 'waiting_approval') {
@@ -4973,7 +5006,17 @@ function ToolRowView({ tool }: { tool: ToolRow }) {
 
   return (
     <div class="tool-body">
-      <div class="tool-header" onClick={() => hasDetail && setExpanded((e) => !e)}>
+      <div
+        class="tool-header"
+        onClick={() => {
+          if (!hasDetail) return;
+          setExpanded((e) => {
+            const next = !e;
+            userCollapsedRef.current = !next;
+            return next;
+          });
+        }}
+      >
         <ToolTypeIcon name={tool.name} />
         <span class="tool-name">{displayToolName(tool.name)}</span>
         <span class="tool-name-secondary">{headerDetail}</span>
@@ -5002,7 +5045,10 @@ function ToolRowView({ tool }: { tool: ToolRow }) {
           {tool.output && (
             <div class="tool-body-row">
               <div class="tool-body-row-label">{t('tool.output')}</div>
-              <div class="tool-body-row-content">{tool.output}</div>
+              <div
+                ref={outputRef}
+                class={'tool-body-row-content' + (tool.status === 'pending' ? ' is-live' : '')}
+              >{tool.output}</div>
             </div>
           )}
         </div>

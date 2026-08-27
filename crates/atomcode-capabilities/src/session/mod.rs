@@ -35,7 +35,6 @@ pub mod transcript;
 mod usage_provider;
 pub mod user_wrap;
 pub use context::SessionContextHook;
-pub use user_wrap::UserWrapHook;
 pub use manager::{
     aggregate_session_cost, CatalogDiagnostic, CatalogDiagnosticKind, CatalogEntry,
     CatalogLocation, CatalogPresence, CatalogScan, DetachedUsageRecorder, ForkInfo, ImportInfo,
@@ -56,6 +55,7 @@ pub use snapshot::{RewindTransactionReceipt, SnapshotHook};
 pub use status_reminder::StatusReminderHook;
 pub use transcript::{ToolRecord, TranscriptHook, TurnRecord, UsageRecord};
 pub use usage_provider::UsageRecordingProvider;
+pub use user_wrap::UserWrapHook;
 
 /// Current wall-clock as epoch MILLISECONDS, UTC. The single L1 time source the
 /// persistence hooks stamp records with (the kernel stays clock-free).

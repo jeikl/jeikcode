@@ -147,7 +147,9 @@ pub fn purge_legacy_brand_plugins() {
         let dirty_dir = mp_root.join(dirty_name);
         if dirty_dir.exists() {
             let _ = std::fs::remove_dir_all(&dirty_dir);
-            log_to_file(&format!("✓ Purged legacy brand marketplace `{dirty_name}`."));
+            log_to_file(&format!(
+                "✓ Purged legacy brand marketplace `{dirty_name}`."
+            ));
         }
     }
 
@@ -157,7 +159,9 @@ pub fn purge_legacy_brand_plugins() {
         let dirty_dir = installed_root.join(dirty_plugin);
         if dirty_dir.exists() {
             let _ = std::fs::remove_dir_all(&dirty_dir);
-            log_to_file(&format!("✓ Purged legacy brand installed plugin `{dirty_plugin}`."));
+            log_to_file(&format!(
+                "✓ Purged legacy brand installed plugin `{dirty_plugin}`."
+            ));
         }
     }
 
@@ -176,7 +180,10 @@ pub fn purge_legacy_brand_plugins() {
                             && !source.contains("atomgit.com/atomgit_atomcode")
                     });
                     if arr.len() != prev_len {
-                        let _ = std::fs::write(&mp_file, serde_json::to_string_pretty(&json_val).unwrap_or_default());
+                        let _ = std::fs::write(
+                            &mp_file,
+                            serde_json::to_string_pretty(&json_val).unwrap_or_default(),
+                        );
                     }
                 }
             }
@@ -192,11 +199,17 @@ pub fn purge_legacy_brand_plugins() {
                     let prev_len = arr.len();
                     arr.retain(|item| {
                         let plugin = item.get("plugin").and_then(|v| v.as_str()).unwrap_or("");
-                        let mp = item.get("marketplace").and_then(|v| v.as_str()).unwrap_or("");
+                        let mp = item
+                            .get("marketplace")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("");
                         !plugin.contains("atomcode") && !mp.contains("atomcode")
                     });
                     if arr.len() != prev_len {
-                        let _ = std::fs::write(&inst_file, serde_json::to_string_pretty(&json_val).unwrap_or_default());
+                        let _ = std::fs::write(
+                            &inst_file,
+                            serde_json::to_string_pretty(&json_val).unwrap_or_default(),
+                        );
                     }
                 }
             }

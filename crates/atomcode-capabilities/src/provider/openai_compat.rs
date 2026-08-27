@@ -179,7 +179,13 @@ impl OpenAiCompatProvider {
     pub fn new(cfg: OpenAiCompatConfig) -> Result<Self, ProviderError> {
         let policy = cfg
             .reasoning_model
-            .map(|rm| if rm { ReasoningPolicy::Include } else { ReasoningPolicy::Exclude })
+            .map(|rm| {
+                if rm {
+                    ReasoningPolicy::Include
+                } else {
+                    ReasoningPolicy::Exclude
+                }
+            })
             .or(cfg.reasoning_policy)
             .unwrap_or_else(|| ReasoningPolicy::derive(&cfg.model, &cfg.base_url));
         // Capture only what the builder needs so the rebuild closure is `'static`
@@ -2154,7 +2160,10 @@ mod tests {
         let out = format_messages(&[m], ReasoningPolicy::Exclude, true);
         let a = &out[0];
         assert_eq!(a["role"], "assistant");
-        assert!(a["content"].is_null(), "empty assistant content must be JSON null, not \"\"");
+        assert!(
+            a["content"].is_null(),
+            "empty assistant content must be JSON null, not \"\""
+        );
         assert_eq!(a["tool_calls"][0]["id"], "c1");
         assert_eq!(a["tool_calls"][0]["type"], "function");
         assert_eq!(a["tool_calls"][0]["function"]["name"], "read");
@@ -3317,11 +3326,7 @@ mod tests {
             fresh.flush().unwrap();
         });
 
-        let mut cfg = OpenAiCompatConfig::new(
-            "k",
-            format!("http://127.0.0.1:{port}"),
-            "glm-test",
-        );
+        let mut cfg = OpenAiCompatConfig::new("k", format!("http://127.0.0.1:{port}"), "glm-test");
         cfg.retry.base_delay = std::time::Duration::from_millis(1);
         cfg.retry.max_delay = std::time::Duration::from_millis(2);
         let provider = OpenAiCompatProvider::new(cfg).unwrap();
@@ -3348,7 +3353,9 @@ mod tests {
             .collect();
         assert_eq!(ids, vec!["resp_fresh"]);
         assert_eq!(models, vec!["model-fresh"]);
-        assert!(!events.iter().any(|event| matches!(event, StreamEvent::Error(_))));
+        assert!(!events
+            .iter()
+            .any(|event| matches!(event, StreamEvent::Error(_))));
 
         let _ = handle.join();
     }

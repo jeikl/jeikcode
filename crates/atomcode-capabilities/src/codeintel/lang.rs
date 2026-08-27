@@ -164,10 +164,19 @@ mod tests {
         assert_eq!(Lang::detect(Path::new("App.vue")), Some(Lang::Tsx));
         assert_eq!(Lang::detect(Path::new("Header.svelte")), Some(Lang::Tsx));
         assert_eq!(Lang::detect(Path::new("Index.astro")), Some(Lang::Tsx));
-        assert_eq!(Lang::detect(Path::new("EntryAbility.ets")), Some(Lang::TypeScript));
+        assert_eq!(
+            Lang::detect(Path::new("EntryAbility.ets")),
+            Some(Lang::TypeScript)
+        );
         assert_eq!(Lang::detect(Path::new("main.go")), Some(Lang::Go));
-        assert_eq!(Lang::detect(Path::new("MainActivity.kt")), Some(Lang::Kotlin));
-        assert_eq!(Lang::detect(Path::new("AppDelegate.swift")), Some(Lang::Swift));
+        assert_eq!(
+            Lang::detect(Path::new("MainActivity.kt")),
+            Some(Lang::Kotlin)
+        );
+        assert_eq!(
+            Lang::detect(Path::new("AppDelegate.swift")),
+            Some(Lang::Swift)
+        );
         assert_eq!(Lang::detect(Path::new("widget.dart")), Some(Lang::Dart));
         assert_eq!(Lang::detect(Path::new("app.rb")), Some(Lang::Ruby));
         assert_eq!(Lang::detect(Path::new("Token.sol")), Some(Lang::Solidity));
@@ -175,7 +184,10 @@ mod tests {
         assert_eq!(Lang::detect(Path::new("main.tf")), Some(Lang::Terraform));
         assert_eq!(Lang::detect(Path::new("init.lua")), Some(Lang::Lua));
         assert_eq!(Lang::detect(Path::new("a.hpp")), Some(Lang::Cpp));
-        assert_eq!(Lang::detect(Path::new("CouponService.cs")), Some(Lang::CSharp));
+        assert_eq!(
+            Lang::detect(Path::new("CouponService.cs")),
+            Some(Lang::CSharp)
+        );
         assert_eq!(Lang::detect(Path::new("a.unknownext")), None);
         assert_eq!(Lang::detect(Path::new("noext")), None);
     }
@@ -184,8 +196,11 @@ mod tests {
     fn csharp_is_fully_indexed_with_calls() {
         assert!(Lang::CSharp.is_indexed());
         assert!(Lang::CSharp.calls_query().is_some());
-        let q = tree_sitter::Query::new(&Lang::CSharp.grammar().unwrap(), Lang::CSharp.calls_query().unwrap())
-            .expect("csharp_calls.scm must compile");
+        let q = tree_sitter::Query::new(
+            &Lang::CSharp.grammar().unwrap(),
+            Lang::CSharp.calls_query().unwrap(),
+        )
+        .expect("csharp_calls.scm must compile");
         assert!(q.capture_index_for_name("callee").is_some());
     }
 
@@ -206,8 +221,12 @@ mod tests {
             Lang::Html,
             Lang::Php,
         ] {
-            let Some(grammar) = lang.grammar() else { continue; };
-            let Some(query_str) = lang.symbols_query() else { continue; };
+            let Some(grammar) = lang.grammar() else {
+                continue;
+            };
+            let Some(query_str) = lang.symbols_query() else {
+                continue;
+            };
             match tree_sitter::Query::new(&grammar, query_str) {
                 Ok(q) => {
                     if q.capture_index_for_name("name").is_none()

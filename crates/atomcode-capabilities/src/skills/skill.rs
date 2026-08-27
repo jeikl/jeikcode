@@ -149,13 +149,7 @@ fn xml_attr_escape(s: &str) -> String {
 }
 
 /// Depth-bounded walk collecting non-SKILL.md files as absolute display paths.
-fn collect_skill_files(
-    root: &Path,
-    dir: &Path,
-    out: &mut Vec<String>,
-    limit: usize,
-    depth: usize,
-) {
+fn collect_skill_files(root: &Path, dir: &Path, out: &mut Vec<String>, limit: usize, depth: usize) {
     const MAX_DEPTH: usize = 4;
     if out.len() >= limit || depth > MAX_DEPTH {
         return;
@@ -710,7 +704,11 @@ mod tests {
         // Directory name must be a valid skill name (tempdir basenames often start with `.`).
         let skill_dir = dir.path().join("demo-skill");
         std::fs::create_dir_all(skill_dir.join("scripts")).unwrap();
-        std::fs::write(skill_dir.join("SKILL.md"), "---\ndescription: d\n---\nDo X\n").unwrap();
+        std::fs::write(
+            skill_dir.join("SKILL.md"),
+            "---\ndescription: d\n---\nDo X\n",
+        )
+        .unwrap();
         std::fs::write(skill_dir.join("scripts/db_executor.py"), "print(1)\n").unwrap();
         let skill = parse_skill_dir(&skill_dir, &skill_dir.join("SKILL.md"), None).unwrap();
         let out = skill.expand_for_injection("", "");

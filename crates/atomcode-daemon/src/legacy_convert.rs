@@ -4,6 +4,7 @@ use atomcode_kernel::message::{
 };
 use serde::{Deserialize, Serialize};
 
+use atomcode_capabilities::session::manager::SessionOrigin;
 use atomcode_capabilities::session::manager::{NativeImportCommitOutcome, META_VERSION};
 use atomcode_capabilities::session::presentation::PRESENTATION_VERSION;
 use atomcode_capabilities::session::{
@@ -11,7 +12,6 @@ use atomcode_capabilities::session::{
     PresentationEntry, PresentationFile, PresentationRole, SessionLease, SessionManager,
     SessionMeta, SessionResult, SessionStoreError, StorageOwner, TurnStat,
 };
-use atomcode_capabilities::session::manager::SessionOrigin;
 
 /// In-memory result of the one legacy → native conversion. S2b owns persistence
 /// and commit; keeping this function side-effect free makes conversion testable.

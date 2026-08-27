@@ -452,13 +452,23 @@ impl CodeGraph {
         if !pipelines.is_empty() {
             out.push(format!(
                 "**Pipelines/Methods**: {}",
-                pipelines.iter().take(8).cloned().collect::<Vec<_>>().join(", ")
+                pipelines
+                    .iter()
+                    .take(8)
+                    .cloned()
+                    .collect::<Vec<_>>()
+                    .join(", ")
             ));
         }
         if !plugins.is_empty() {
             out.push(format!(
                 "**Plugins/Configs**: {}",
-                plugins.iter().take(6).cloned().collect::<Vec<_>>().join(", ")
+                plugins
+                    .iter()
+                    .take(6)
+                    .cloned()
+                    .collect::<Vec<_>>()
+                    .join(", ")
             ));
         }
         out

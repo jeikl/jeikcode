@@ -106,7 +106,9 @@ impl DirIndex {
 
     /// Direct children of a directory, sorted.
     pub fn children_of(&self, dir: &Path) -> Option<&[String]> {
-        self.children.get(&normalize_dir_path(dir)).map(|v| v.as_slice())
+        self.children
+            .get(&normalize_dir_path(dir))
+            .map(|v| v.as_slice())
     }
 
     /// All indexed directory keys (normalized absolute paths).

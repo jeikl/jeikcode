@@ -155,7 +155,11 @@ fn answer_clause(resp: &UserInputResponse) -> String {
 pub fn format_batch_result(reqs: &[UserInputRequest], resps: &[UserInputResponse]) -> ToolResult {
     if resps.len() >= reqs.len() && resps.iter().all(|r| r.declined) {
         // Prefer an explicit driver handoff message (e.g. YOLO residual → final answer).
-        if let Some(t) = resps.iter().find_map(|r| r.text.as_ref()).filter(|t| !t.is_empty()) {
+        if let Some(t) = resps
+            .iter()
+            .find_map(|r| r.text.as_ref())
+            .filter(|t| !t.is_empty())
+        {
             return ok_result(t.clone());
         }
         return ok_result(

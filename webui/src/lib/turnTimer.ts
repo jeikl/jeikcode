@@ -18,6 +18,14 @@ export function formatTurnElapsed(ms: number): string {
   return `${s}s`;
 }
 
+/** Wall-clock from the user bubble to `endTs` (final answer or now). */
+export function turnDurationMs(userTs?: number, endTs?: number): number | undefined {
+  if (userTs == null || endTs == null) return undefined;
+  if (!Number.isFinite(userTs) || !Number.isFinite(endTs)) return undefined;
+  if (endTs < userTs) return undefined;
+  return endTs - userTs;
+}
+
 /** Stamp `elapsedMs` (and optional completion time) onto the latest assistant
  *  message that does not already have a duration. */
 export function stampLastAssistantElapsed<T extends { role: string; elapsedMs?: number; ts?: number }>(

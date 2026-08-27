@@ -155,7 +155,8 @@ impl Tool for RepoMapTool {
                 };
                 crate::pathnorm::canonicalize(&resolved).unwrap_or(resolved)
             }
-            _ => crate::pathnorm::canonicalize(&ctx.working_dir).unwrap_or_else(|_| ctx.working_dir.clone()),
+            _ => crate::pathnorm::canonicalize(&ctx.working_dir)
+                .unwrap_or_else(|_| ctx.working_dir.clone()),
         };
 
         if !target_dir.exists() {
@@ -165,7 +166,10 @@ impl Tool for RepoMapTool {
             ));
         }
 
-        let max_files = a.max_files.unwrap_or(DEFAULT_MAX_FILES).clamp(1, MAX_ALLOWED_FILES);
+        let max_files = a
+            .max_files
+            .unwrap_or(DEFAULT_MAX_FILES)
+            .clamp(1, MAX_ALLOWED_FILES);
         let mode = a
             .mode
             .unwrap_or_else(|| "tree".to_string())
@@ -204,7 +208,10 @@ impl Tool for RepoMapTool {
                         }),
                     }),
                 );
-                ok(format!("> ⏱️ **Cost Time**: {}ms\n\n{content}", cost_time.as_millis()))
+                ok(format!(
+                    "> ⏱️ **Cost Time**: {}ms\n\n{content}",
+                    cost_time.as_millis()
+                ))
             }
             Err(e) => err(format!("repo_map execution failed: {e}")),
         }
@@ -283,10 +290,7 @@ fn build_repo_map(
 
     let mut out = String::new();
     out.push_str("=== CODEBASE ARCHITECTURE MAP (index-backed) ===\n");
-    out.push_str(&format!(
-        "Overview: {} indexed source files\n",
-        files.len()
-    ));
+    out.push_str(&format!("Overview: {} indexed source files\n", files.len()));
 
     // Language distribution by extension (same matrix the index walks).
     let mut lang_counts: BTreeMap<String, usize> = BTreeMap::new();
@@ -319,8 +323,7 @@ fn build_repo_map(
             .filter_map(|entry| {
                 let p = entry.path();
                 if p.is_dir() && p.join(".git").exists() {
-                    p.file_name()
-                        .map(|n| n.to_string_lossy().into_owned())
+                    p.file_name().map(|n| n.to_string_lossy().into_owned())
                 } else {
                     None
                 }
@@ -423,8 +426,7 @@ fn path_within(p: &Path, dir: &Path) -> bool {
     };
     let p_n = norm(p);
     let d_n = norm(dir).trim_end_matches('\\').to_string();
-    p_n.starts_with(&d_n)
-        && (p_n.len() == d_n.len() || p_n[d_n.len()..].starts_with('\\'))
+    p_n.starts_with(&d_n) && (p_n.len() == d_n.len() || p_n[d_n.len()..].starts_with('\\'))
 }
 
 fn render_dir_tree(root: &Path, files: &[PathBuf]) -> String {
@@ -446,9 +448,7 @@ fn rel_path(p: &Path, root: &Path) -> Option<PathBuf> {
     };
     let p_n = norm(p);
     let r_n = norm(root).trim_end_matches('\\').to_string();
-    if !(p_n.starts_with(&r_n)
-        && (p_n.len() == r_n.len() || p_n[r_n.len()..].starts_with('\\')))
-    {
+    if !(p_n.starts_with(&r_n) && (p_n.len() == r_n.len() || p_n[r_n.len()..].starts_with('\\'))) {
         return None;
     }
     // Normalization is length-preserving (lowercase + `/`→`\` only), so slice
@@ -527,15 +527,25 @@ fn render_dir_tree_indented(root: &Path, files: &[PathBuf], indent: &str) -> Str
 
 /// Render per-file symbol outlines from the shared graph, priority-ranked and
 /// budgeted. Returns (text, was_cut).
-fn render_symbols(graph: &CodeGraph, working_dir: &Path, max_symbol_files: usize) -> (String, bool) {
+fn render_symbols(
+    graph: &CodeGraph,
+    working_dir: &Path,
+    max_symbol_files: usize,
+) -> (String, bool) {
     // Rank files by architectural priority for the SYMBOL section.
     let mut ranked: Vec<(&PathBuf, &Vec<u64>)> = graph.file_symbols.iter().collect();
     ranked.sort_by(|a, b| {
         let ra = file_priority_score(
-            &a.0.strip_prefix(working_dir).unwrap_or(a.0).to_string_lossy().replace('\\', "/"),
+            &a.0.strip_prefix(working_dir)
+                .unwrap_or(a.0)
+                .to_string_lossy()
+                .replace('\\', "/"),
         );
         let rb = file_priority_score(
-            &b.0.strip_prefix(working_dir).unwrap_or(b.0).to_string_lossy().replace('\\', "/"),
+            &b.0.strip_prefix(working_dir)
+                .unwrap_or(b.0)
+                .to_string_lossy()
+                .replace('\\', "/"),
         );
         rb.cmp(&ra).then_with(|| a.0.cmp(b.0))
     });
@@ -611,7 +621,10 @@ mod tests {
     #[test]
     fn test_file_priority_scoring() {
         assert!(file_priority_score("src/main.rs") > file_priority_score("tests/fixture.rs"));
-        assert!(file_priority_score("crates/auth/src/types.rs") > file_priority_score("crates/auth/src/util_mock.rs"));
+        assert!(
+            file_priority_score("crates/auth/src/types.rs")
+                > file_priority_score("crates/auth/src/util_mock.rs")
+        );
     }
 
     #[tokio::test]

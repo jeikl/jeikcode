@@ -231,17 +231,19 @@ fn validate_actions_mix(arr: &[serde_json::Value]) -> Result<(), String> {
     let has = |k: &str| kinds.contains(k);
     if has("delete") && kinds.iter().any(|k| *k != "delete") {
         return Err(
-            "todowrite: `delete` can only be batched with other deletes (ids would shift)."
-                .into(),
+            "todowrite: `delete` can only be batched with other deletes (ids would shift).".into(),
         );
     }
     if has("insert") && kinds.iter().any(|k| *k != "insert" && *k != "update") {
         return Err(
-            "todowrite: `insert` can only be batched with other inserts and/or updates."
-                .into(),
+            "todowrite: `insert` can only be batched with other inserts and/or updates.".into(),
         );
     }
-    if has("clear") && kinds.iter().any(|k| *k != "clear" && *k != "add" && *k != "update") {
+    if has("clear")
+        && kinds
+            .iter()
+            .any(|k| *k != "clear" && *k != "add" && *k != "update")
+    {
         return Err(
             "todowrite: `clear` can only be batched with `add` and/or `update` (`clear` runs first)."
                 .into(),
@@ -268,8 +270,7 @@ fn apply_actions_batch(
 ) -> Result<Vec<TodoItem>, String> {
     validate_actions_mix(arr)?;
     let mut tmp = list.to_vec();
-    let kinds: std::collections::BTreeSet<&str> =
-        arr.iter().filter_map(action_kind).collect();
+    let kinds: std::collections::BTreeSet<&str> = arr.iter().filter_map(action_kind).collect();
 
     if kinds.contains("clear") {
         tmp.clear();
@@ -278,8 +279,8 @@ fn apply_actions_batch(
     if kinds.contains("delete") {
         let mut delete_ids: Vec<usize> = Vec::new();
         for item in arr {
-            let id = json_id(item)
-                .ok_or_else(|| "todowrite: `delete` needs an `id`.".to_string())?;
+            let id =
+                json_id(item).ok_or_else(|| "todowrite: `delete` needs an `id`.".to_string())?;
             if id == 0 || (id as usize) > tmp.len() {
                 return Err(format!("todowrite: unknown task id {id}."));
             }
@@ -449,7 +450,10 @@ fn try_apply_one_action(list: &mut Vec<TodoItem>, v: &serde_json::Value) -> Resu
             list.clear();
             Ok(())
         }
-        _ => Err("todowrite: `action` must be `add`, `insert`, `update`, `delete`/`remove`, or `clear`.".into()),
+        _ => Err(
+            "todowrite: `action` must be `add`, `insert`, `update`, `delete`/`remove`, or `clear`."
+                .into(),
+        ),
     }
 }
 
@@ -734,7 +738,9 @@ fn summarize_todo_action(v: &serde_json::Value) -> Result<String, String> {
             let id = json_id(v);
             let status = v.get("status").and_then(|x| x.as_str());
             match (id, status.and_then(TodoStatus::parse)) {
-                (Some(id), Some(_)) if id >= 1 => Ok(format!("#{} \u{2192} {}", id, status.unwrap())),
+                (Some(id), Some(_)) if id >= 1 => {
+                    Ok(format!("#{} \u{2192} {}", id, status.unwrap()))
+                }
                 (None, _) => Err("`update` needs an `id` (the task number).".into()),
                 (Some(_), _) => {
                     Err("`update` needs a `status` of pending|in_progress|completed.".into())
@@ -1156,7 +1162,11 @@ mod tests {
             .execute(r#"{"action":"update","id":1,"status":"completed"}"#, &ctx())
             .await;
         assert!(!upd.is_error, "{}", upd.content);
-        assert!(upd.content.contains("#1 \u{2192} completed"), "{}", upd.content);
+        assert!(
+            upd.content.contains("#1 \u{2192} completed"),
+            "{}",
+            upd.content
+        );
         assert!(upd.content.contains("1. write tests"), "{}", upd.content);
         let bad = t
             .execute(r#"{"action":"update","id":9,"status":"completed"}"#, &ctx())
@@ -1175,15 +1185,15 @@ mod tests {
                 &ctx(),
             )
             .await;
-        let del = t
-            .execute(r#"{"action":"delete","id":2}"#, &ctx())
-            .await;
+        let del = t.execute(r#"{"action":"delete","id":2}"#, &ctx()).await;
         assert!(!del.is_error, "{}", del.content);
-        assert!(del.content.contains("#2 \u{2192} removed"), "{}", del.content);
+        assert!(
+            del.content.contains("#2 \u{2192} removed"),
+            "{}",
+            del.content
+        );
         assert!(del.content.contains("1. a"), "{}", del.content);
-        let rm = t
-            .execute(r#"{"action":"remove","id":1}"#, &ctx())
-            .await;
+        let rm = t.execute(r#"{"action":"remove","id":1}"#, &ctx()).await;
         assert!(!rm.is_error, "{}", rm.content);
         assert!(rm.content.contains("#1 \u{2192} removed"), "{}", rm.content);
         let clr = t.execute(r#"{"action":"clear"}"#, &ctx()).await;
@@ -1191,9 +1201,7 @@ mod tests {
         assert!(clr.content.contains("all tasks cleared"), "{}", clr.content);
         let bad = t.execute(r#"{"action":"delete"}"#, &ctx()).await;
         assert!(bad.is_error);
-        let ghost = t
-            .execute(r#"{"action":"delete","id":2}"#, &ctx())
-            .await;
+        let ghost = t.execute(r#"{"action":"delete","id":2}"#, &ctx()).await;
         assert!(ghost.is_error, "delete on empty list must fail");
         assert!(ghost.content.contains("Current list"), "{}", ghost.content);
     }
@@ -1274,7 +1282,11 @@ mod tests {
         assert!(!r.is_error, "{}", r.content);
         assert!(r.content.contains("Added task: one"), "{}", r.content);
         assert!(r.content.contains("#1"), "{}", r.content);
-        assert!(r.content.contains("1. one"), "reprints numbered list: {}", r.content);
+        assert!(
+            r.content.contains("1. one"),
+            "reprints numbered list: {}",
+            r.content
+        );
         let noop = t
             .execute(
                 r#"{"actions":[{"action":"update","id":1,"status":"in_progress"}]}"#,
@@ -1290,7 +1302,11 @@ mod tests {
                 &ctx(),
             )
             .await;
-        assert!(mixed.is_error, "delete+update must be rejected: {}", mixed.content);
+        assert!(
+            mixed.is_error,
+            "delete+update must be rejected: {}",
+            mixed.content
+        );
         assert!(mixed.content.contains("delete"), "{}", mixed.content);
     }
 
@@ -1310,7 +1326,11 @@ mod tests {
             &mut list,
             r#"{"actions":[{"action":"update","id":1,"status":"completed"},{"action":"update","id":99,"status":"in_progress"}]}"#,
         );
-        assert_eq!(list[0].status, TodoStatus::Pending, "failed batch must not apply");
+        assert_eq!(
+            list[0].status,
+            TodoStatus::Pending,
+            "failed batch must not apply"
+        );
         apply_todo_action(
             &mut list,
             r#"{"actions":[{"action":"update","id":1,"status":"completed"},{"action":"update","id":2,"status":"in_progress"}]}"#,
@@ -1419,7 +1439,11 @@ mod tests {
             &mut list,
             r#"{"actions":[{"action":"add","content":"next-1"},{"action":"add","content":"next-2"},{"action":"update","id":1,"status":"in_progress"}]}"#,
         );
-        assert_eq!(list.len(), 2, "finished list must be replaced, not appended");
+        assert_eq!(
+            list.len(),
+            2,
+            "finished list must be replaced, not appended"
+        );
         assert_eq!(list[0].content, "next-1");
         assert_eq!(list[0].status, TodoStatus::InProgress);
         assert_eq!(list[1].content, "next-2");
@@ -1480,7 +1504,11 @@ mod tests {
             ),
             ("todowrite", mixed),
         ]);
-        assert_eq!(list.len(), 2, "must fold actions on top of prior plan, not replace with todos");
+        assert_eq!(
+            list.len(),
+            2,
+            "must fold actions on top of prior plan, not replace with todos"
+        );
         assert_eq!(list[0].content, "keep");
         assert_eq!(list[1].content, "from-actions");
     }
@@ -1551,18 +1579,12 @@ mod tests {
     fn description_covers_both_plan_and_update_modes() {
         let t = TodoTool::new();
         let d = t.description();
-        assert!(
-            d.contains("actions"),
-            "prefers batch actions: {d}"
-        );
+        assert!(d.contains("actions"), "prefers batch actions: {d}");
         assert!(
             d.contains("add") && d.contains("update") && d.contains("insert"),
             "covers add/update/insert: {d}"
         );
-        assert!(
-            d.contains("in_progress"),
-            "sets in_progress rule: {d}"
-        );
+        assert!(d.contains("in_progress"), "sets in_progress rule: {d}");
         assert!(
             d.contains("already in that status") && d.contains("do not retry"),
             "discourages no-op / blind retry: {d}"
@@ -1580,7 +1602,8 @@ mod tests {
             .await;
         assert!(!ins.is_error, "{}", ins.content);
         assert!(
-            ins.content.contains("#2 \u{2192} inserted: intermediate step"),
+            ins.content
+                .contains("#2 \u{2192} inserted: intermediate step"),
             "{}",
             ins.content
         );
@@ -1593,7 +1616,8 @@ mod tests {
 
     #[tokio::test]
     async fn apply_todo_action_insert_between_items() {
-        let plan = r#"{"todos":[{"content":"a","status":"pending"},{"content":"c","status":"pending"}]}"#;
+        let plan =
+            r#"{"todos":[{"content":"a","status":"pending"},{"content":"c","status":"pending"}]}"#;
         let mut list = parse_todos(plan).unwrap();
         assert_eq!(list.len(), 2);
 
@@ -1625,4 +1649,3 @@ mod tests {
         assert_eq!(list[4].content, "tail");
     }
 }
-

@@ -94,13 +94,7 @@ pub fn token_from_header(value: Option<&str>) -> Option<String> {
         .strip_prefix("Bearer ")
         .or_else(|| v.strip_prefix("bearer "))
         // Some clients send the raw key without a scheme.
-        .or_else(|| {
-            if v.contains(' ') {
-                None
-            } else {
-                Some(v)
-            }
-        })?;
+        .or_else(|| if v.contains(' ') { None } else { Some(v) })?;
     let rest = rest.trim();
     if rest.is_empty() {
         None
@@ -174,14 +168,8 @@ pub async fn require_webui_token(
         .get(AUTHORIZATION)
         .and_then(|h| h.to_str().ok());
     // Anthropic: x-api-key；OpenAI Azure: api-key
-    let x_api_key = req
-        .headers()
-        .get("x-api-key")
-        .and_then(|h| h.to_str().ok());
-    let api_key = req
-        .headers()
-        .get("api-key")
-        .and_then(|h| h.to_str().ok());
+    let x_api_key = req.headers().get("x-api-key").and_then(|h| h.to_str().ok());
+    let api_key = req.headers().get("api-key").and_then(|h| h.to_str().ok());
     let cookie = req.headers().get(COOKIE).and_then(|h| h.to_str().ok());
     // Read THIS instance's port-scoped cookie name so a sibling `/webui` on a
     // different localhost port (which shares the cookie jar) can't shadow us.

@@ -436,15 +436,12 @@ impl LiveViewHub {
         } else {
             false
         };
-        let receipt = handle
-            .submit(runtime_input)
-            .await
-            .map_err(|error| {
-                if correlation_registered {
-                    self.remove_pending_web_steer(client_input_id.as_deref());
-                }
-                HubError::RuntimeRejected(error.to_string())
-            })?;
+        let receipt = handle.submit(runtime_input).await.map_err(|error| {
+            if correlation_registered {
+                self.remove_pending_web_steer(client_input_id.as_deref());
+            }
+            HubError::RuntimeRejected(error.to_string())
+        })?;
         let receipt_generation = match receipt {
             SubmitReceipt::Started { generation, .. }
             | SubmitReceipt::Steered { generation, .. } => generation,
@@ -1590,8 +1587,13 @@ mod tests {
         assert!(!hub.turn_in_progress());
 
         let (control, _) = control();
-        hub.bind("session-1", PathBuf::from("/one"), snapshot("old"), control.clone())
-            .unwrap();
+        hub.bind(
+            "session-1",
+            PathBuf::from("/one"),
+            snapshot("old"),
+            control.clone(),
+        )
+        .unwrap();
         // Ready phase, no active turn → a provider reload is safe.
         assert!(!hub.turn_in_progress());
 

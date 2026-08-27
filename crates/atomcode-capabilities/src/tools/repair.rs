@@ -126,7 +126,9 @@ fn repair_stringified_structured_fields(args: &str, schema: &serde_json::Value) 
     // String-only unions stay untouched (ambiguous); `null` is left alone
     // (serde handles it). Never touches non-string values.
     for (name, property_schema) in properties {
-        let Some(raw) = arguments.get(name) else { continue };
+        let Some(raw) = arguments.get(name) else {
+            continue;
+        };
         let Some(s) = raw.as_str() else { continue };
         let mut types = std::collections::BTreeSet::new();
         collect_schema_types(property_schema, &mut types, 0);
@@ -146,8 +148,7 @@ fn repair_stringified_structured_fields(args: &str, schema: &serde_json::Value) 
                 if types.contains("integer") {
                     Some(serde_json::Value::Number(n.into()))
                 } else {
-                    serde_json::Number::from_f64(n as f64)
-                        .map(serde_json::Value::Number)
+                    serde_json::Number::from_f64(n as f64).map(serde_json::Value::Number)
                 }
             } else if let Ok(f) = t.parse::<f64>() {
                 serde_json::Number::from_f64(f).map(serde_json::Value::Number)
@@ -1655,15 +1656,19 @@ impl RepairToolArgsMiddleware {
 /// tool name (absorption 3). Lets the deny diagnostic tell a stuck model how
 /// many times it has re-emitted the same bad arguments, so it changes approach
 /// instead of blindly retrying — the repair chain's own micro loop guard.
-static REPAIR_FAIL_COUNTS: std::sync::LazyLock<std::sync::Mutex<std::collections::HashMap<String, u32>>> =
-    std::sync::LazyLock::new(|| std::sync::Mutex::new(std::collections::HashMap::new()));
+static REPAIR_FAIL_COUNTS: std::sync::LazyLock<
+    std::sync::Mutex<std::collections::HashMap<String, u32>>,
+> = std::sync::LazyLock::new(|| std::sync::Mutex::new(std::collections::HashMap::new()));
 
 /// Build a compact field-level schema description for diagnostic feedback:
 /// `field: type` per property, capped to avoid flooding the model.
 /// grok-inspired: when repair fails, the model gets the EXPECTED shape instead
 /// of a generic parse error, so it can fix the call in one round.
 fn describe_schema(schema: &serde_json::Value) -> String {
-    let Some(props) = schema.get("properties").and_then(serde_json::Value::as_object) else {
+    let Some(props) = schema
+        .get("properties")
+        .and_then(serde_json::Value::as_object)
+    else {
         return "(no properties in schema)".to_string();
     };
     let mut descs: Vec<String> = Vec::new();
@@ -1892,7 +1897,11 @@ mod middleware_tests {
             fn parameters_schema(&self) -> serde_json::Value {
                 schema()
             }
-            async fn execute(&self, _args: &str, _ctx: &atomcode_kernel::tool::ToolContext) -> ToolResult {
+            async fn execute(
+                &self,
+                _args: &str,
+                _ctx: &atomcode_kernel::tool::ToolContext,
+            ) -> ToolResult {
                 ToolResult {
                     call_id: String::new(),
                     content: String::new(),
@@ -1912,8 +1921,14 @@ mod middleware_tests {
         let outcome = futures::executor::block_on(mw.before(&mut c, &tool, &rt));
         match outcome {
             atomcode_kernel::middleware::BeforeOutcome::Deny { reason } => {
-                assert!(reason.contains("Expected fields"), "diagnostic must list schema: {reason}");
-                assert!(reason.contains("todos: array"), "must name the field + type: {reason}");
+                assert!(
+                    reason.contains("Expected fields"),
+                    "diagnostic must list schema: {reason}"
+                );
+                assert!(
+                    reason.contains("todos: array"),
+                    "must name the field + type: {reason}"
+                );
             }
             other => panic!("unrepairable args must be denied, got: {other:?}"),
         }
@@ -1936,7 +1951,11 @@ mod middleware_tests {
             fn parameters_schema(&self) -> serde_json::Value {
                 schema()
             }
-            async fn execute(&self, _args: &str, _ctx: &atomcode_kernel::tool::ToolContext) -> ToolResult {
+            async fn execute(
+                &self,
+                _args: &str,
+                _ctx: &atomcode_kernel::tool::ToolContext,
+            ) -> ToolResult {
                 ToolResult {
                     call_id: String::new(),
                     content: String::new(),
@@ -1971,7 +1990,8 @@ mod middleware_tests {
             }
         }
         assert!(
-            first_reason.contains("rejected 3 times in a row") && first_reason.contains("STOP re-emitting"),
+            first_reason.contains("rejected 3 times in a row")
+                && first_reason.contains("STOP re-emitting"),
             "3rd denial must carry the stop nudge: {first_reason}"
         );
     }

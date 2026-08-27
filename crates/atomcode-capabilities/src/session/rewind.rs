@@ -998,15 +998,24 @@ mod tests {
             .expect("a v1 ledger must remain readable after the bump");
 
         // The current version validates; a future version is rejected.
-        RewindLedger { version: LEDGER_VERSION, points: vec![] }
-            .validate()
-            .unwrap();
-        assert!(RewindLedger { version: LEDGER_VERSION + 1, points: vec![] }
-            .validate()
-            .is_err());
-        assert!(RewindLedger { version: 0, points: vec![] }
-            .validate()
-            .is_err());
+        RewindLedger {
+            version: LEDGER_VERSION,
+            points: vec![],
+        }
+        .validate()
+        .unwrap();
+        assert!(RewindLedger {
+            version: LEDGER_VERSION + 1,
+            points: vec![]
+        }
+        .validate()
+        .is_err());
+        assert!(RewindLedger {
+            version: 0,
+            points: vec![]
+        }
+        .validate()
+        .is_err());
     }
 
     #[test]

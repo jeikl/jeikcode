@@ -77,10 +77,18 @@ impl Tool for FindSymbolTool {
 
         let mut query_names: Vec<String> = Vec::new();
         if let Some(ref list) = a.symbols {
-            query_names.extend(list.iter().map(|s| s.trim().to_string()).filter(|s| !s.is_empty()));
+            query_names.extend(
+                list.iter()
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty()),
+            );
         }
         if let Some(ref list) = a.names {
-            query_names.extend(list.iter().map(|s| s.trim().to_string()).filter(|s| !s.is_empty()));
+            query_names.extend(
+                list.iter()
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty()),
+            );
         }
         if let Some(ref n) = a.name {
             let trimmed = n.trim().to_string();
@@ -100,9 +108,11 @@ impl Tool for FindSymbolTool {
         let index = self.index.clone();
         let root = ctx.working_dir.clone();
         let progress = ctx.progress.clone();
-        tokio::task::spawn_blocking(move || render_symbols(&index, &root, &query_names, limit, &progress))
-            .await
-            .unwrap_or_else(|_| err("find_symbol: task failed"))
+        tokio::task::spawn_blocking(move || {
+            render_symbols(&index, &root, &query_names, limit, &progress)
+        })
+        .await
+        .unwrap_or_else(|_| err("find_symbol: task failed"))
     }
 }
 
@@ -188,7 +198,10 @@ fn render_symbols(
     }
 
     if !found_any {
-        return err(format!("None of the {} requested symbols were found in the code graph.", names.len()));
+        return err(format!(
+            "None of the {} requested symbols were found in the code graph.",
+            names.len()
+        ));
     }
 
     ok(out)

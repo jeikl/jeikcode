@@ -270,7 +270,11 @@ pub(crate) fn stream_read_error_message(
                     .to_string()
             }
         };
-        format!("{lead}{}详情: {}", connection_reset_hint(err), err_chain(err))
+        format!(
+            "{lead}{}详情: {}",
+            connection_reset_hint(err),
+            err_chain(err)
+        )
     } else {
         format!("stream read error: {}", err_chain(err))
     }
@@ -788,7 +792,10 @@ mod tests {
             "Connection reset by peer (os error 54)",
         ));
         let msg = stream_read_error_message(&e, StreamReadRecovery::RetryExhausted { attempts: 1 });
-        assert!(msg.contains("网络连接中断"), "still a plain-language notice: {msg}");
+        assert!(
+            msg.contains("网络连接中断"),
+            "still a plain-language notice: {msg}"
+        );
         assert!(
             !msg.contains("公司网络或代理环境"),
             "generic reset must not claim a proxy cause: {msg}"
@@ -827,9 +834,15 @@ mod tests {
             TokenUsage::default()
         )));
         assert!(!is_replay_sensitive_event(&StreamEvent::Malformed));
-        assert!(is_attempt_metadata_event(&StreamEvent::ResponseId("r".into())));
-        assert!(is_attempt_metadata_event(&StreamEvent::ResponseModel("m".into())));
-        assert!(is_attempt_metadata_event(&StreamEvent::Usage(TokenUsage::default())));
+        assert!(is_attempt_metadata_event(&StreamEvent::ResponseId(
+            "r".into()
+        )));
+        assert!(is_attempt_metadata_event(&StreamEvent::ResponseModel(
+            "m".into()
+        )));
+        assert!(is_attempt_metadata_event(&StreamEvent::Usage(
+            TokenUsage::default()
+        )));
         assert!(!is_attempt_metadata_event(&StreamEvent::Malformed));
         assert!(is_replay_sensitive_event(&StreamEvent::TextDelta(
             "x".into()

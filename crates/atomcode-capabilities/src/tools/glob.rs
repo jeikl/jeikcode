@@ -57,11 +57,8 @@ impl Tool for GlobTool {
     }
     // read-only → risk() defaults to Safe.
     async fn execute(&self, args: &str, ctx: &ToolContext) -> ToolResult {
-        let a: Args = match parse_tool_args(
-            "glob",
-            args,
-            r#"{"pattern":"<glob>","path":"<dir>"}"#,
-        ) {
+        let a: Args = match parse_tool_args("glob", args, r#"{"pattern":"<glob>","path":"<dir>"}"#)
+        {
             Ok(a) => a,
             Err(e) => return e.into_tool_result(),
         };

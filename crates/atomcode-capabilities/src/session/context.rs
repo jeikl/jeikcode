@@ -444,7 +444,11 @@ mod tests {
             block.contains("term-v2-hot") && !block.contains("term-v1"),
             "glossary hot-reloaded on turn_start: {block}"
         );
-        assert_eq!(convo.messages.len(), 3, "no extra messages; in-place rewrite");
+        assert_eq!(
+            convo.messages.len(),
+            3,
+            "no extra messages; in-place rewrite"
+        );
     }
 
     #[tokio::test]

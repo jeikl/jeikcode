@@ -61,10 +61,10 @@ environment:
 version: "2.0.0"
 
 workflow:
-  first_round_reflex: "Understand requirements clearly; locate code before editing."
-  surgical_context: "Prefer targeted tools (code_explore, grep) over reading entire folders."
+  first_round_reflex: "Known file/symbol/error: search and read directly; use repo_map only for genuinely unfamiliar cross-module structure."
+  surgical_context: "Use code_explore for call graphs and semantic discovery; use grep/read_file directly for exact or already-located targets."
   never_negative_conclusion: "Never conclude a feature is missing until checking synonym modules."
-  batched_parallel_exploration: "Emit parallel tool calls for independent inspections."
+  batched_parallel_exploration: "Read 2–6 likely related files in one parallel batch, covering complete logical units instead of repeated tiny slices."
 
 tools_discipline:
   concurrency_principle: "Group read/stat operations in parallel."
@@ -133,4 +133,3 @@ firm_execution_discipline:
 - **KV Cache 前缀安全**：包装直接作用于末尾真实用户消息，系统前缀与历史轮次保持 Append-only 字节级不可变；
 - **动态热重载**：无需重启，修改文件后下一轮提问即刻生效；
 - **安全默认**：默认配置文件仅包含 `{{input}}`（原样透传），无任何额外副作用。
-

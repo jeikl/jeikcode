@@ -612,6 +612,32 @@ doing_tasks:
             surgical.contains("crates/atomcode-coding") && surgical.contains("src/auth.rs"),
             "surgical_context must show directory GOOD / file BAD: {surgical}"
         );
+        let first_round = rules
+            .workflow
+            .as_ref()
+            .unwrap()
+            .first_round_reflex
+            .as_deref()
+            .unwrap();
+        assert!(
+            first_round.contains("CONDITIONAL CONTEXT ROUTING")
+                && first_round.contains("do NOT call `repo_map` first")
+                && !first_round.contains("repo_map` ONLY"),
+            "concrete targets must not pay an obligatory repo_map round: {first_round}"
+        );
+        let batched = rules
+            .workflow
+            .as_ref()
+            .unwrap()
+            .batched_parallel_exploration
+            .as_deref()
+            .unwrap();
+        assert!(
+            batched.contains("2–6 independent")
+                && batched.contains("complete functions")
+                && !batched.contains("hot spans"),
+            "batched exploration must favor broad useful context over tiny slices: {batched}"
+        );
         assert!(
             rules
                 .locating_code

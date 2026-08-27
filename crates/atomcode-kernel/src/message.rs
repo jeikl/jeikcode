@@ -221,6 +221,11 @@ pub struct Message {
     /// empty). See [`ReasoningBlock`].
     #[serde(default)]
     pub reasoning_blocks: Vec<ReasoningBlock>,
+    /// Wall-clock epoch milliseconds when this message was authored (user send)
+    /// or finalized (assistant round). Sidecar — never rendered into the LLM
+    /// prefix. `0` = unknown (older snapshots). ADDITIVE: `#[serde(default)]`.
+    #[serde(default)]
+    pub created_at_ms: u64,
 }
 
 impl Message {
@@ -237,6 +242,7 @@ impl Message {
             reasoning: None,
             images: vec![],
             reasoning_blocks: vec![],
+            created_at_ms: 0,
         }
     }
     pub fn user(text: impl Into<String>) -> Self {
@@ -252,6 +258,7 @@ impl Message {
             reasoning: None,
             images: vec![],
             reasoning_blocks: vec![],
+            created_at_ms: 0,
         }
     }
     pub fn assistant(text: impl Into<String>, tool_calls: Vec<ToolCall>) -> Self {
@@ -267,6 +274,7 @@ impl Message {
             reasoning: None,
             images: vec![],
             reasoning_blocks: vec![],
+            created_at_ms: 0,
         }
     }
     /// A tool RESULT. `is_error` is now STORED (a real adapter must echo it to the
@@ -288,6 +296,7 @@ impl Message {
             reasoning: None,
             images: vec![],
             reasoning_blocks: vec![],
+            created_at_ms: 0,
         }
     }
     /// A KERNEL-INJECTED synthetic `Role::User` message (compaction cold summary or
@@ -310,6 +319,7 @@ impl Message {
             reasoning: None,
             images: vec![],
             reasoning_blocks: vec![],
+            created_at_ms: 0,
         }
     }
     /// A user message carrying inline `images` (multimodal input). Identical to
@@ -327,6 +337,7 @@ impl Message {
             reasoning: None,
             images,
             reasoning_blocks: vec![],
+            created_at_ms: 0,
         }
     }
     /// A KERNEL-INJECTED `Role::User` message carrying `images` — used by the agent
@@ -347,6 +358,7 @@ impl Message {
             reasoning: None,
             images,
             reasoning_blocks: vec![],
+            created_at_ms: 0,
         }
     }
 
@@ -379,6 +391,13 @@ impl Message {
     }
 }
 
+fn wall_now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct Conversation {
     pub messages: Vec<Message>,
@@ -397,7 +416,13 @@ impl Conversation {
     pub fn new() -> Self {
         Self::default()
     }
-    pub fn push(&mut self, m: Message) {
+    pub fn push(&mut self, mut m: Message) {
+        // Wall-clock sidecar for WebUI send/reply labels. User = send time;
+        // assistant = the moment this round is persisted (turn complete for
+        // that bubble). Never sent to the model.
+        if m.created_at_ms == 0 && matches!(m.role, Role::User | Role::Assistant) && !m.synthetic {
+            m.created_at_ms = wall_now_ms();
+        }
         self.messages.push(m);
     }
 

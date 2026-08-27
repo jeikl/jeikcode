@@ -18,16 +18,22 @@ export function formatTurnElapsed(ms: number): string {
   return `${s}s`;
 }
 
-/** Stamp `elapsedMs` onto the latest assistant message that does not already have one. */
-export function stampLastAssistantElapsed<T extends { role: string; elapsedMs?: number }>(
+/** Stamp `elapsedMs` (and optional completion time) onto the latest assistant
+ *  message that does not already have a duration. */
+export function stampLastAssistantElapsed<T extends { role: string; elapsedMs?: number; ts?: number }>(
   msgs: T[],
   elapsedMs: number,
+  finishedAt?: number,
 ): T[] {
   for (let i = msgs.length - 1; i >= 0; i--) {
     if (msgs[i]!.role !== 'assistant') continue;
     if (msgs[i]!.elapsedMs != null) return msgs;
     const next = msgs.slice();
-    next[i] = { ...msgs[i]!, elapsedMs };
+    next[i] = {
+      ...msgs[i]!,
+      elapsedMs,
+      ts: finishedAt ?? Date.now(),
+    };
     return next;
   }
   return msgs;

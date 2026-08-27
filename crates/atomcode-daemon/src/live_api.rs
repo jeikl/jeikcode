@@ -2298,6 +2298,7 @@ mod tests {
                 missing: true,
             }]),
             created_at: None,
+            elapsed_ms: None,
         }
     }
 

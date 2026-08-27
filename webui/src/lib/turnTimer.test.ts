@@ -20,8 +20,9 @@ test('stampLastAssistantElapsed writes the latest unstamped assistant only', () 
     { role: 'assistant' as const },
     { role: 'system' as const },
   ];
-  const next = stampLastAssistantElapsed(msgs, 4200);
+  const next = stampLastAssistantElapsed(msgs, 4200, 1_700_000_000_000);
   assert.equal(next[1]!.elapsedMs, 4200);
+  assert.equal(next[1]!.ts, 1_700_000_000_000);
   assert.equal(next[0]!.elapsedMs, undefined);
   const again = stampLastAssistantElapsed(next, 9999);
   assert.equal(again[1]!.elapsedMs, 4200);

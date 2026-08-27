@@ -1150,6 +1150,10 @@ pub struct MessageInfo {
     /// (kernel 内部 `Session.created_at` 为秒, API 响应边界乘 1000 转换, bot review P2)。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub created_at: Option<u64>,
+    /// Assistant-turn wall-clock duration from kernel `MessageMeta.elapsed_ms`.
+    /// Survives refresh / session switch so the WebUI can show "用时 Xs".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub elapsed_ms: Option<u64>,
 }
 
 /// Serializable image payload returned in session history.
@@ -1287,7 +1291,12 @@ impl MessageInfo {
             tool_result,
             artifacts,
             images,
-            created_at: None,
+            created_at: (msg.created_at_ms > 0).then_some(msg.created_at_ms),
+            elapsed_ms: msg
+                .meta
+                .as_ref()
+                .map(|m| m.elapsed_ms)
+                .filter(|&ms| ms > 0),
         }
     }
 }
@@ -2679,13 +2688,16 @@ fn merge_catalog_session_messages_for_display(
                 artifacts: None,
                 images: None,
                 created_at: timestamp,
+                elapsed_ms: None,
             });
         }
     };
     append_presentation(0, &mut messages);
     for (index, message) in runtime_messages.into_iter().enumerate() {
         let mut info = MessageInfo::from_kernel(message);
-        info.created_at = timestamp;
+        if info.created_at.is_none() {
+            info.created_at = timestamp;
+        }
         messages.push(info);
         append_presentation(index + 1, &mut messages);
     }
@@ -2709,6 +2721,7 @@ fn merge_catalog_session_messages_for_display(
                 artifacts: None,
                 images: None,
                 created_at: timestamp,
+                elapsed_ms: None,
             });
         }
     }
@@ -8967,6 +8980,27 @@ mod tests {
     }
 
     #[test]
+    fn message_info_exposes_created_at_and_elapsed_from_kernel() {
+        use atomcode_kernel::message::{Message, MessageMeta};
+
+        let mut user = Message::user("hello");
+        user.created_at_ms = 1_700_000_000_000;
+        let user_info = MessageInfo::from_kernel(&user);
+        assert_eq!(user_info.created_at, Some(1_700_000_000_000));
+        assert_eq!(user_info.elapsed_ms, None);
+
+        let mut assistant = Message::assistant("done", vec![]);
+        assistant.created_at_ms = 1_700_000_012_000;
+        assistant.meta = Some(MessageMeta {
+            elapsed_ms: 12_000,
+            ..Default::default()
+        });
+        let asst = MessageInfo::from_kernel(&assistant);
+        assert_eq!(asst.created_at, Some(1_700_000_012_000));
+        assert_eq!(asst.elapsed_ms, Some(12_000));
+    }
+
+    #[test]
     fn message_info_preserves_internal_origin() {
         use atomcode_kernel::message::Message;
 
@@ -9149,6 +9183,7 @@ mod tests {
                 artifacts: None,
                 images,
                 created_at: None,
+                elapsed_ms: None,
             }
         }
         let real = |tag: &str| ImageData {

@@ -621,7 +621,7 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
     turnStartedAtRef.current = null;
     setTurnStartedAt(null);
     if (started == null || opts?.stamp === false) return;
-    setMessages((prev) => stampLastAssistantElapsed(prev, Date.now() - started));
+    setMessages((prev) => stampLastAssistantElapsed(prev, Date.now() - started, Date.now()));
   }
   function setBusyAndClock(next: boolean) {
     if (next) startTurnClock();
@@ -836,7 +836,7 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
       }
       return [
         ...prev,
-        { role: 'assistant' as const, parts: [], ts: Date.now() },
+        { role: 'assistant' as const, parts: [] },
       ];
     });
   }
@@ -1775,7 +1775,12 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
             turnTodoCalls.push({ name: tc.name, args: rawArgs });
           }
         }
-        loaded.push({ role: 'assistant', parts, ts: msg.created_at });
+        loaded.push({
+          role: 'assistant',
+          parts,
+          ts: msg.created_at,
+          elapsedMs: msg.elapsed_ms,
+        });
       } else if (msg.role === 'tool' && msg.tool_result) {
         const result = msg.tool_result;
         // Prefer full `content` over truncated `summary` so history reload still
@@ -1987,7 +1992,7 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
         setMessages((prev) => [
           ...prev,
           { role: 'user', parts: [{ kind: 'text', text: e.text }], images: e.images && e.images.length ? e.images : undefined, ts: now },
-          { role: 'assistant', parts: [], ts: now },
+          { role: 'assistant', parts: [] },
         ]);
         break;
       }
@@ -2904,7 +2909,7 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
           ts: now,
           pendingSteerId: pendingSteer.id,
         },
-        { role: 'assistant', parts: [], ts: now, pendingSteerId: pendingSteer.id },
+        { role: 'assistant', parts: [], pendingSteerId: pendingSteer.id },
       ]);
       // Register before the HTTP round-trip. A very fast round boundary can
       // emit `steered` on SSE before the submit response reaches this tab.
@@ -2963,7 +2968,7 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
     setMessages((prev) => [
       ...prev,
       { role: 'user', parts: [{ kind: 'text', text }], images: images.length ? images : undefined, ts: now },
-      { role: 'assistant', parts: [], ts: now },
+      { role: 'assistant', parts: [] },
     ]);
 
     const controller = new AbortController();

@@ -26,8 +26,24 @@ strip = true
 [profile.test]
 debug = "line-tables-only" # Smaller binaries, faster linker
 
+# Full-product debugging (the `jeikcode` / `atomcode` binary), not unit tests.
+#   cargo build -p atomcode --bin jeikcode --profile dbg
+# Output: target/dbg/jeikcode  (Windows: target/dbg/jeikcode.exe)
+#
+# Isolated from `target/debug` (tests) and `target/release` (stripped).
+# debug=1 = line tables + function/var names, not debug=2's huge DWARF.
+# opt-level=1 keeps `jeikcode init` usable; opt-0 makes a 15k-file index crawl.
+[profile.dbg]
+inherits = "release"
+opt-level = 1
+debug = 1
+strip = false
+lto = false
+incremental = true
+codegen-units = 16
+
 [workspace.package]
-version = "6.0.37"
+version = "6.0.38"
 edition = "2021"
 license = "MIT"
 repository = "https://github.com/jeikl/jeikcode"

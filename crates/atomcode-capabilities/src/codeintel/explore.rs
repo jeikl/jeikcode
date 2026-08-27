@@ -615,6 +615,14 @@ impl Tool for CodeExploreTool {
                 Vec::new()
             }
         };
+        // Concept vectors are opt-in. Building them walks every symbol in the
+        // graph (31万 on a full ERP) — that was the 40–50s "Retrieval" stall
+        // even when ATOMCODE_EXPLORE_CONCEPT was unset and the vectors unused.
+        let concept_vectors = if concept_enabled {
+            self.index.get_concept_vectors(&root)
+        } else {
+            None
+        };
         let scored_files = score_workspace_symbols(
             &graph,
             &query_tokens,
@@ -623,7 +631,7 @@ impl Tool for CodeExploreTool {
             scope_path.as_deref(),
             &bm25_scores,
             &query_concept_vec,
-            self.index.get_concept_vectors(&root).as_deref(),
+            concept_vectors.as_deref(),
         );
 
         if scored_files.is_empty() {
@@ -1372,9 +1380,11 @@ fn score_workspace_symbols(
 
 /// Trace flow spine bidirectionally from the scored seed symbols.
 ///
-/// COMPLETENESS CONTRACT: the spine is a true panorama, not a sample —
-/// every scored candidate symbol is a seed, and for each seed EVERY caller /
-/// callee within the hop budget is traced (no `.take()` truncation). The
+/// Seeds come from the top-ranked files only. A 15k-file ERP scores thousands
+/// of weak hits; tracing callers/callees for every one of them produced
+/// 2万+ hops (then the renderer threw 99% away). Completeness still holds
+/// *per seed*: every workspace-internal caller/callee within the hop budget
+/// is traced (no `.take()` on edges).
 /// Whether a symbol lives in a workspace file that the graph indexes. External
 /// crates / std-library calls are NOT in `file_symbols`, so this filters the
 /// flow spine down to in-repo business edges (an `iter → map → collect` tail
@@ -1386,21 +1396,30 @@ fn is_workspace_symbol(graph: &CodeGraph, id: SymbolId) -> bool {
         .unwrap_or(false)
 }
 
+/// Max candidate files whose symbols seed the flow spine. Candidates are
+/// already score-sorted; the rest still appear in CATALOG.
+const MAX_SPINE_SEED_FILES: usize = 32;
+/// Hard cap on seed symbols so a single noisy file cannot explode the walk.
+const MAX_SPINE_SEEDS: usize = 128;
+
 /// renderer may still cap the mermaid drawing, but it reports the omitted
 /// count/names via the Coverage line and the omitted-edge list.
 fn extract_flow_spine(
     graph: &CodeGraph,
     candidates: &[FileCandidate],
 ) -> (Vec<(SymbolId, Option<SymbolId>, EdgeKind)>, bool) {
-    // Seeds: every scored symbol in every candidate file (all already passed the
-    // >= 12 workspace bar), so a hit in a 5th-place symbol of a file is not
-    // starved of its own caller/callee panorama.
     let mut seeds = Vec::new();
-    for fc in candidates {
+    for fc in candidates.iter().take(MAX_SPINE_SEED_FILES) {
         for s in &fc.symbols {
             if s.total_score >= 12.0 {
                 seeds.push(s.node.id);
+                if seeds.len() >= MAX_SPINE_SEEDS {
+                    break;
+                }
             }
+        }
+        if seeds.len() >= MAX_SPINE_SEEDS {
+            break;
         }
     }
 

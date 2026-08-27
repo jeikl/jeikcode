@@ -1,94 +1,166 @@
 #!/usr/bin/env bash
 # =============================================================
-# atomcode 自建无感更新发版脚本(不依赖官方更新源)
+# JeikCode 一键发版脚本
 #
 # 用法:
-#   ./scripts/release-self-update.sh <version>   # 例: ... 6.0.30
+#   ./scripts/release-self-update.sh <version>   # 例: ./scripts/release-self-update.sh 6.0.35
+#
+# 功能:
+#   1. 自动更新 Cargo.toml workspace.package.version
+#   2. 编译 webui 静态资源
+#   3. 交叉编译 linux-x64 + windows-x64 release 二进制
+#   4. 生成正确的 latest.json (sha256 + size 各自独立)
+#   5. 打印 Release 上传命令 (gh release create)
 # =============================================================
 set -euo pipefail
 
-VERSION="${1:?usage: release-self-update.sh <version>}"
+VERSION="${1:?用法: $0 <version>   # 例: $0 6.0.35}"
+
+# 校验版本格式 (纯数字+点, 如 6.0.34, 不要 v 前缀)
+if [[ ! "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[a-zA-Z0-9.]+)?$ ]]; then
+    echo "错误: 版本号格式不合法: '$VERSION'"
+    echo "       请使用纯数字版本如 6.0.35, 不要带 v 前缀"
+    exit 1
+fi
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
 
-# 1. 确保 webui 打包
+echo "=========================================="
+echo "  JeikCode 发版 v${VERSION}"
+echo "=========================================="
+echo ""
+
+# --- 1. 更新版本号 ---
+echo "[1/5] 更新版本号到 ${VERSION} ..."
+if ! grep -q "^\[workspace\.package\]" Cargo.toml; then
+    echo "错误: Cargo.toml 中没有 [workspace.package] 段"
+    exit 1
+fi
+# 用 sed 替换 version 字段 (只改 workspace.package.version)
+sed -i "s/^version = \".*\"$/version = \"${VERSION}\"/" Cargo.toml
+# 验证是否更新成功
+CURRENT=$(grep '^version = ' Cargo.toml | head -1 | sed 's/version = "//;s/"//')
+if [ "$CURRENT" != "$VERSION" ]; then
+    echo "错误: Cargo.toml 版本号更新失败"
+    exit 1
+fi
+echo "  -> Cargo.toml version = \"${VERSION}\""
+
+# --- 2. 编译 webui ---
+echo ""
+echo "[2/5] 编译 webui 静态资源..."
 if [ -d "$ROOT/webui" ]; then
-  echo "==> 编译 webui 静态资源..."
-  (cd "$ROOT/webui" && npm run build)
+    (cd "$ROOT/webui" && npm run build)
+    echo "  -> webui/dist/ 已更新"
+else
+    echo "  !! 跳过: webui/ 目录不存在"
 fi
 
-# C crates (ring / sqlite / zstd / tree-sitter) look up a target CC, not rustc's linker.
+# --- 3. 交叉编译 ---
+echo ""
+echo "[3/5] 交叉编译 release 二进制..."
+
+# 设置 zig 工具链 (Linux musl cross-compile on Windows)
 if [ -f "$ROOT/tools/zig-cc.cmd" ]; then
-  export CC_x86_64_unknown_linux_musl="$ROOT/tools/zig-cc.cmd"
-  export CFLAGS_x86_64_unknown_linux_musl="-fPIC"
-  export AR_x86_64_unknown_linux_musl="$ROOT/tools/zig-ar.cmd"
+    export CC_x86_64_unknown_linux_musl="$ROOT/tools/zig-cc.cmd"
+    export CFLAGS_x86_64_unknown_linux_musl="-fPIC"
+    export AR_x86_64_unknown_linux_musl="$ROOT/tools/zig-ar.cmd"
 fi
 
 rm -rf dist
 mkdir -p dist
-echo "==> 交叉编译 release 二进制(按需启用 target; 先 rustup target add <target>)"
+echo "  dist/ 目录已清空"
 
-build_target() { # <rust-target> <atomcode-asset> <jeikcode-asset>
-  local rt="$1" asset1="$2" asset2="$3"
-  echo "    building ${rt} -> ${asset1} & ${asset2}"
-  cargo build --release --target "$rt" --bin atomcode || {
-    echo "    !! 跳过 ${rt}(缺 target 或链接失败: rustup target add ${rt})"; return; }
-  local src="target/${rt}/release/atomcode"
-  [ -f "${src}.exe" ] && src="${src}.exe"
-  cp "$src" "dist/${asset1}"
-  cp "$src" "dist/${asset2}"
-}
-
-# target key 与 updater detect_target() 完全一致; 本 fork 仅发布两个平台.
-build_target x86_64-unknown-linux-musl     "atomcode-${VERSION}-linux-x64"       "jeikcode-${VERSION}-linux-x64"
-build_target x86_64-pc-windows-gnu         "atomcode-${VERSION}-windows-x64.exe" "jeikcode-${VERSION}-windows-x64.exe"
-build_target x86_64-pc-windows-msvc        "atomcode-${VERSION}-windows-x64.exe" "jeikcode-${VERSION}-windows-x64.exe"
-
-# 生成每个文件的 sha256
-(
-  cd dist
-  for f in *; do
-    [ -f "$f" ] && [[ ! "$f" =~ \.sha256$ ]] && sha256sum "$f" > "${f}.sha256"
-  done
+BUILD_TARGETS=(
+    "x86_64-unknown-linux-musl linux-x64"
+    "x86_64-pc-windows-gnu windows-x64"
 )
 
-echo "==> 生成 latest.json"
-PYTHON_BIN="${PYTHON:-python3}"
-if ! command -v "$PYTHON_BIN" >/dev/null 2>&1; then
-    if [ -f "/f/Python/Python312/python.exe" ]; then PYTHON_BIN="/f/Python/Python312/python.exe"; elif command -v py >/dev/null 2>&1; then
-        PYTHON_BIN="py"
-    elif [ -f "/f/Python/Python312/python.exe" ]; then
-        PYTHON_BIN="/f/Python/Python312/python.exe"
+for entry in "${BUILD_TARGETS[@]}"; do
+    read -r TARGET PLATFORM <<< "$entry"
+    echo "  编译 ${TARGET} ..."
+    if cargo build --release --target "$TARGET" --bin atomcode 2>&1; then
+        SRC="target/${TARGET}/release/atomcode"
+        [ -f "${SRC}.exe" ] && SRC="${SRC}.exe"
+        cp "$SRC" "dist/atomcode-${VERSION}-${PLATFORM}.exe" 2>/dev/null || \
+        cp "$SRC"  "dist/atomcode-${VERSION}-${PLATFORM}"
+        echo "    -> dist/atomcode-${VERSION}-${PLATFORM} ($(du -h dist/atomcode-${VERSION}-${PLATFORM} | cut -f1))"
     else
-        PYTHON_BIN="python"
+        echo "    !! 跳过 ${TARGET} (缺 target 或链接失败: rustup target add ${TARGET})"
     fi
+done
+
+# --- 4. 生成 latest.json ---
+echo ""
+echo "[4/5] 生成 latest.json ..."
+
+# 用 Node.js 生成 (比 Python 更可靠，项目本身就有 node)
+NODE_BIN="${NODE:-node}"
+if ! command -v "$NODE_BIN" >/dev/null 2>&1; then
+    echo "错误: 找不到 node，请安装 Node.js"
+    exit 1
 fi
 
-"$PYTHON_BIN" - "$VERSION" <<'PY'
-import hashlib, json, os, sys, datetime
-version = sys.argv[1]
-target_map = {
-    f"atomcode-{version}-linux-x64": "linux-x64",
-    f"atomcode-{version}-windows-x64.exe": "windows-x64",
-}
-binaries = {}
-for asset, key in target_map.items():
-    p = os.path.join("dist", asset)
-    if not os.path.exists(p):
-        continue
-    h = hashlib.sha256(open(p, "rb").read()).hexdigest()
-    binaries[key] = {"sha256": h, "size": os.path.getsize(p)}
-    print(f"    {key}: {os.path.getsize(p)} bytes, sha256 {h[:12]}...")
-if not binaries:
-    sys.exit("!! dist/ 下没有任何二进制,检查编译步骤")
-manifest = {
-    "version": version,
-    "released_at": datetime.date.today().isoformat(),
-    "binaries": binaries,
-}
-open("latest.json", "w").write(json.dumps(manifest, indent=2, ensure_ascii=False) + "\n")
-print(f"==> latest.json 已生成({len(binaries)} 个 target)")
-PY
+node -e "
+const fs = require('fs');
+const crypto = require('crypto');
+const version = '$VERSION';
+const binaries = {};
 
-echo "==> 发版产物准备完成"
+const targets = [
+  ['linux-x64',    'atomcode-' + version + '-linux-x64'],
+  ['windows-x64',  'atomcode-' + version + '-windows-x64.exe'],
+];
+
+for (const [key, asset] of targets) {
+  const p = 'dist/' + asset;
+  if (!fs.existsSync(p)) {
+    console.log('  !! 缺失: ' + asset);
+    continue;
+  }
+  const data = fs.readFileSync(p);
+  const h = crypto.createHash('sha256').update(data).digest('hex');
+  binaries[key] = { sha256: h, size: data.length };
+  console.log('  ' + key + ': ' + (data.length / 1048576).toFixed(2) + ' MB, sha256 ' + h.slice(0, 12) + '...');
+}
+
+if (Object.keys(binaries).length === 0) {
+  console.error('!! dist/ 下没有任何二进制文件');
+  process.exit(1);
+}
+
+const manifest = {
+  version: version,
+  released_at: new Date().toISOString().slice(0, 10),
+  binaries: binaries
+};
+fs.writeFileSync('latest.json', JSON.stringify(manifest, null, 2) + '\n');
+console.log('  -> latest.json 已生成 (' + Object.keys(binaries).length + ' 个 target)');
+"
+
+echo ""
+cat latest.json
+
+# --- 5. 上传指引 ---
+echo ""
+echo "[5/5] 发版产物准备完成!"
+echo "=========================================="
+echo ""
+echo "下一步操作:"
+echo ""
+echo "  # 1. 提交代码"
+echo "  git add Cargo.toml latest.json dist/"
+echo "  git commit -m \"release: v${VERSION} for linux-x64 and windows-x64\""
+echo "  git push origin local-dev"
+echo ""
+echo "  # 2. 创建 GitHub Release (需要 gh CLI)"
+echo "  gh release create ${VERSION} dist/* --title \"v${VERSION}\""
+echo ""
+echo "  # 3. 验证升级源"
+echo "  curl -s https://raw.githubusercontent.com/jeikl/jeikcode/local-dev/latest.json"
+echo ""
+echo "  # 4. 本机测试升级"
+echo "  atomcode upgrade"
+echo ""
+echo "=========================================="

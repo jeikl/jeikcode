@@ -220,9 +220,22 @@ pub fn parse_bilingual_query_with_thesaurus(
                 tokens.path_fragments.push(ascii.to_ascii_lowercase());
             }
             let sub_tokens = split_identifier(ascii);
+            let mixed_ident = is_mixed_ident_token(ascii);
             for st in sub_tokens {
                 let low = st.to_ascii_lowercase();
-                if low.len() >= 2 && !is_stop_word(&low) {
+                if low.len() < 2 || is_stop_word(&low) {
+                    continue;
+                }
+                // CamelCase / snake_case fragments like `order` from
+                // `BKOrderType` must not substring-hit every `*Order*Service`.
+                // Distinctive parts (`maylife`) still go to `words`.
+                // Cross-style matching (`pay_order` ↔ `payOrder`) uses
+                // compact identifier compare, not these crumbs.
+                if mixed_ident {
+                    if low.len() >= 4 && !is_generic_ident_fragment(&low) {
+                        tokens.words.push(low);
+                    }
+                } else {
                     tokens.words.push(low);
                 }
             }
@@ -256,10 +269,21 @@ pub fn parse_bilingual_query_with_thesaurus(
                 .any(|cn| phrase.contains(cn) || cn.contains(phrase))
         });
 
-        let en_hit = tokens
-            .words
-            .iter()
-            .any(|w| rule.en_terms.iter().any(|en| w == en || en.starts_with(w)));
+        let en_hit = tokens.words.iter().any(|w| {
+            rule.en_terms.iter().any(|en| {
+                w == en || (w.len() >= 4 && (en == w || en.starts_with(w)))
+            })
+        }) || tokens.code_identifiers.iter().any(|id| {
+            let compact = compact_ident(id);
+            compact.len() >= 6
+                && rule.en_terms.iter().any(|en| {
+                    let ec = compact_ident(en);
+                    !ec.is_empty()
+                        && (compact == ec
+                            || (ec.len() >= 6 && compact.contains(&ec))
+                            || (ec.len() >= 6 && ec.contains(&compact)))
+                })
+        });
 
         if cn_hit || en_hit {
             for en in &rule.en_terms {
@@ -585,8 +609,129 @@ fn is_stop_word(word: &str) -> bool {
     STOP_WORDS.contains(&word)
 }
 
+/// Generic crumbs split out of `BKOrderType` / `OrderItemService` / `MaylifeAmount`.
+/// Standalone user input (`order` typed as its own word) still goes to `words`.
+fn is_generic_ident_fragment(word: &str) -> bool {
+    matches!(
+        word,
+        "order"
+            | "type"
+            | "item"
+            | "data"
+            | "info"
+            | "list"
+            | "name"
+            | "code"
+            | "date"
+            | "time"
+            | "user"
+            | "amount"
+            | "total"
+            | "count"
+            | "status"
+            | "flag"
+            | "base"
+            | "core"
+            | "work"
+            | "task"
+            | "id"
+            | "no"
+            | "num"
+            | "key"
+            | "val"
+            | "str"
+            | "int"
+            | "sql"
+            | "row"
+            | "col"
+            | "obj"
+            | "tmp"
+            | "src"
+            | "dst"
+            | "new"
+            | "old"
+            | "min"
+            | "max"
+            | "all"
+            | "get"
+            | "set"
+            | "add"
+            | "del"
+            | "svc"
+            | "api"
+            | "dto"
+            | "impl"
+            | "test"
+            | "main"
+            | "util"
+            | "view"
+            | "page"
+            | "form"
+            | "mode"
+            | "kind"
+            | "part"
+            | "unit"
+            | "file"
+            | "path"
+            | "text"
+            | "html"
+            | "json"
+            | "http"
+            | "xml"
+            | "db"
+            | "dao"
+            | "cfg"
+            | "config"
+            | "service"
+            | "manager"
+            | "controller"
+            | "model"
+            | "entity"
+            | "handler"
+            | "helper"
+            | "common"
+            | "shared"
+            | "global"
+            | "default"
+            | "value"
+            | "result"
+            | "request"
+            | "response"
+            | "param"
+            | "args"
+            | "option"
+            | "detail"
+            | "index"
+            | "record"
+            | "table"
+            | "field"
+            | "column"
+            | "query"
+            | "select"
+            | "where"
+            | "from"
+            | "join"
+    )
+}
+
+/// CamelCase / snake_case / kebab-case — fragments of these are not user words.
+fn is_mixed_ident_token(s: &str) -> bool {
+    s.contains('_')
+        || s.contains('-')
+        || (s.chars().any(|c| c.is_ascii_uppercase()) && s.chars().any(|c| c.is_ascii_lowercase()))
+}
+
+/// `pay_order` / `payOrder` / `PayOrder` → `payorder` for cross-style ident hits.
+fn compact_ident(s: &str) -> String {
+    s.chars()
+        .filter(|c| c.is_ascii_alphanumeric())
+        .flat_map(|c| c.to_lowercase())
+        .collect()
+}
+
 fn lexical_match_parts(tokens: &SearchTokens, target_text: &str) -> (f64, usize) {
     let target_lower = target_text.to_ascii_lowercase();
+    let target_compact = compact_ident(target_text);
     let mut lexical_score = 0.0;
     let mut matched_distinct_concepts = 0usize;
 
@@ -602,7 +747,6 @@ fn lexical_match_parts(tokens: &SearchTokens, target_text: &str) -> (f64, usize)
             matched_distinct_concepts += 1;
         }
     }
-    // Thesaurus expansions (词林) — always on, cheap `contains`.
     for expanded in &tokens.expanded_terms {
         if target_lower.contains(expanded) {
             lexical_score += 24.0;
@@ -611,6 +755,12 @@ fn lexical_match_parts(tokens: &SearchTokens, target_text: &str) -> (f64, usize)
     }
     for ident in &tokens.code_identifiers {
         if target_text.contains(ident) || target_lower.contains(&ident.to_ascii_lowercase()) {
+            lexical_score += 35.0;
+            matched_distinct_concepts += 1;
+            continue;
+        }
+        let compact = compact_ident(ident);
+        if compact.len() >= 6 && target_compact.contains(&compact) {
             lexical_score += 35.0;
             matched_distinct_concepts += 1;
         }
@@ -651,55 +801,11 @@ pub fn calculate_text_similarity(tokens: &SearchTokens, target_text: &str) -> f6
     if target_text.is_empty() {
         return 0.0;
     }
-
-    let target_lower = target_text.to_ascii_lowercase();
-    let mut lexical_score = 0.0;
-    let mut matched_distinct_concepts = 0usize;
-
-    for phrase in &tokens.cjk_phrases {
-        if phrase.len() >= 2 && target_text.contains(phrase) {
-            lexical_score += 28.0 * (phrase.chars().count() as f64).min(4.0) / 2.0;
-            matched_distinct_concepts += 1;
-        }
-    }
-    for word in &tokens.words {
-        if target_lower.contains(word) {
-            lexical_score += 20.0;
-            matched_distinct_concepts += 1;
-        }
-    }
-    for expanded in &tokens.expanded_terms {
-        if target_lower.contains(expanded) {
-            lexical_score += 24.0;
-            matched_distinct_concepts += 1;
-        }
-    }
-    for ident in &tokens.code_identifiers {
-        if target_text.contains(ident) || target_lower.contains(&ident.to_ascii_lowercase()) {
-            lexical_score += 35.0;
-            matched_distinct_concepts += 1;
-        }
-    }
-
+    let (lexical_score, matched) = lexical_match_parts(tokens, target_text);
     let target_vec = compute_dense_embedding(target_text, &HashSet::new());
     let vector_cosine = cosine_similarity(&tokens.dense_vector, &target_vec);
     let vector_score = vector_cosine * 70.0;
-
-    let total_query_concepts = tokens.cjk_phrases.len() + tokens.words.len();
-    let coverage_mult = if total_query_concepts >= 2 {
-        if matched_distinct_concepts >= 2 {
-            2.2
-        } else if matched_distinct_concepts == 1 {
-            0.55
-        } else {
-            1.0
-        }
-    } else {
-        1.0
-    };
-
-    let total_score = (lexical_score.min(75.0) + vector_score) * coverage_mult;
-    total_score.min(100.0)
+    ((lexical_score.min(75.0) + vector_score) * coverage_mult(tokens, matched)).min(100.0)
 }
 
 #[cfg(test)]
@@ -872,5 +978,36 @@ mod tests {
             score >= 25.0,
             "load_from_dir did not apply external txt: score {score:.1} < 25"
         );
+    }
+
+    #[test]
+    fn bkordertype_fragments_must_not_hit_order_service_names() {
+        let dt = DynamicThesaurus::new();
+        let q = parse_bilingual_query_with_thesaurus(
+            "DailyMaylife 基本盘 BKOrderType MaylifeAmount",
+            &dt,
+        );
+        assert!(
+            q.code_identifiers.iter().any(|id| id == "BKOrderType"),
+            "full identifier must be kept: {:?}",
+            q.code_identifiers
+        );
+        assert!(
+            !q.words.iter().any(|w| w == "order" || w == "type" || w == "amount"),
+            "CamelCase crumbs must not enter words: {:?}",
+            q.words
+        );
+        let noise = calculate_lexical_similarity(&q, "OrderItemService");
+        assert!(
+            noise < 10.0,
+            "BKOrderType must not lexically hit OrderItemService: {noise}"
+        );
+        let sql = calculate_lexical_similarity(&q, "AND po.BKOrderType IN (0,2) AND MaylifeAmount > 0");
+        assert!(
+            sql > 40.0,
+            "full identifiers in SQL must still hit: {sql}"
+        );
+        let cjk = calculate_lexical_similarity(&q, "// 总业绩(基本盘)");
+        assert!(cjk > 20.0, "CJK 基本盘 must still hit: {cjk}");
     }
 }

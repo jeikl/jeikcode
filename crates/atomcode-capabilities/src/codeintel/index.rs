@@ -45,11 +45,11 @@ const PARSE_BATCH_FILES: usize = 256;
 /// SQLite upsert chunk. Sibling codegraph commits as results arrive; a single
 /// 15k-row WAL transaction is the other half of the OOM.
 const UNIT_WRITE_CHUNK: usize = 256;
-/// Per-symbol caps so a Java/C# ERP method with a wall of SQL strings cannot
-/// inflate a `FileUnit` to megabytes.
-const MAX_STRING_LITERALS_PER_SYMBOL: usize = 32;
-const MAX_LITERAL_CHARS: usize = 240;
-const MAX_SQL_PREDICATES_PER_SYMBOL: usize = 16;
+/// Per-symbol caps. Keep CJK/SQL/CamelCase first (see `keep_priority_*`);
+/// a plain first-N cut after `sort()` dropped `基本盘` behind ASCII columns.
+const MAX_STRING_LITERALS_PER_SYMBOL: usize = 80;
+const MAX_LITERAL_CHARS: usize = 1024;
+const MAX_SQL_PREDICATES_PER_SYMBOL: usize = 48;
 
 /// How many dirty files [`sync_units`] may re-parse in one pass.
 #[derive(Debug, Clone, Copy)]
@@ -601,15 +601,11 @@ fn enrich_symbol_microstructure(nodes: &mut [SymbolNode], source: &str) {
 
         literals.sort();
         literals.dedup();
-        if literals.len() > MAX_STRING_LITERALS_PER_SYMBOL {
-            literals.truncate(MAX_STRING_LITERALS_PER_SYMBOL);
-        }
+        keep_priority_literals(&mut literals, MAX_STRING_LITERALS_PER_SYMBOL);
         for lit in &mut literals {
             truncate_to_char_boundary(lit, MAX_LITERAL_CHARS);
         }
-        if sqls.len() > MAX_SQL_PREDICATES_PER_SYMBOL {
-            sqls.truncate(MAX_SQL_PREDICATES_PER_SYMBOL);
-        }
+        keep_priority_sqls(&mut sqls, MAX_SQL_PREDICATES_PER_SYMBOL);
         for pred in &mut sqls {
             truncate_to_char_boundary(&mut pred.raw_clause, MAX_LITERAL_CHARS);
         }
@@ -646,22 +642,22 @@ fn enrich_symbol_microstructure(nodes: &mut [SymbolNode], source: &str) {
 }
 
 fn extract_literals_from_line(line: &str, out: &mut Vec<String>) {
+    // Char-wise: a byte walk turns 汉字 into Latin-1 garbage, so `基本盘`
+    // never matches at query time even if we keep the slot.
+    let chars: Vec<char> = line.chars().collect();
     let mut in_str = false;
     let mut quote_char = '"';
     let mut buf = String::new();
-    let bytes = line.as_bytes();
-    let len = bytes.len();
-
     let mut i = 0;
-    while i < len {
-        let b = bytes[i];
+    while i < chars.len() {
+        let ch = chars[i];
         if in_str {
-            if b == b'\\' && i + 1 < len {
-                buf.push(bytes[i + 1] as char);
+            if ch == '\\' && i + 1 < chars.len() {
+                buf.push(chars[i + 1]);
                 i += 2;
                 continue;
             }
-            if b as char == quote_char {
+            if ch == quote_char {
                 in_str = false;
                 let trimmed = buf.trim();
                 if trimmed.len() >= 2 && !is_trivial_literal(trimmed) {
@@ -669,19 +665,89 @@ fn extract_literals_from_line(line: &str, out: &mut Vec<String>) {
                 }
                 buf.clear();
             } else {
-                buf.push(b as char);
+                buf.push(ch);
             }
-        } else if b == b'"' || (b == b'\'' && !is_char_literal_bytes(bytes, i)) {
+        } else if ch == '"' || (ch == '\'' && !is_char_literal_at(&chars, i)) {
             in_str = true;
-            quote_char = b as char;
+            quote_char = ch;
         }
         i += 1;
     }
 }
 
-#[inline(always)]
-fn is_char_literal_bytes(bytes: &[u8], idx: usize) -> bool {
-    idx + 2 < bytes.len() && bytes[idx + 2] == b'\''
+fn is_char_literal_at(chars: &[char], idx: usize) -> bool {
+    idx + 2 < chars.len() && chars[idx + 2] == '\''
+}
+
+fn has_cjk_char(s: &str) -> bool {
+    s.chars().any(|c| {
+        matches!(
+            c,
+            '\u{4E00}'..='\u{9FFF}' | '\u{3400}'..='\u{4DBF}' | '\u{F900}'..='\u{FAFF}'
+        )
+    })
+}
+
+fn has_camel_ident(s: &str) -> bool {
+    s.chars().any(|c| c.is_ascii_uppercase())
+        && s.chars().any(|c| c.is_ascii_lowercase())
+        && s.chars().filter(|c| c.is_ascii_alphabetic()).count() >= 6
+}
+
+/// Prefer CJK / SQL / CamelCase over an alphabetic first-N cut.
+/// ERP methods dump 80+ ASCII column names first; `基本盘` sits at the tail
+/// and was dropped when we `sort` + `truncate`.
+fn literal_keep_priority(s: &str) -> u32 {
+    let mut p = s.chars().count().min(40) as u32;
+    if has_cjk_char(s) {
+        p += 1000;
+    }
+    if is_sql_or_qs_clause(s) {
+        p += 200;
+    }
+    if has_camel_ident(s) {
+        p += 80;
+    }
+    p
+}
+
+fn keep_priority_literals(literals: &mut Vec<String>, cap: usize) {
+    if literals.len() <= cap {
+        return;
+    }
+    literals.sort_by(|a, b| {
+        literal_keep_priority(b)
+            .cmp(&literal_keep_priority(a))
+            .then_with(|| b.len().cmp(&a.len()))
+    });
+    literals.truncate(cap);
+}
+
+fn sql_keep_priority(p: &super::graph::SqlPredicate) -> u32 {
+    let mut s = p.raw_clause.chars().count().min(80) as u32;
+    if has_cjk_char(&p.raw_clause) {
+        s += 1000;
+    }
+    if p.target_fields.iter().any(|f| has_camel_ident(f) || has_cjk_char(f)) {
+        s += 200;
+    }
+    if has_camel_ident(&p.raw_clause) {
+        s += 80;
+    }
+    s
+}
+
+fn keep_priority_sqls(sqls: &mut Vec<super::graph::SqlPredicate>, cap: usize) {
+    if sqls.len() <= cap {
+        return;
+    }
+    sqls.sort_by(|a, b| {
+        sql_keep_priority(b)
+            .cmp(&sql_keep_priority(a))
+            .then_with(|| a.line.cmp(&b.line))
+    });
+    sqls.truncate(cap);
+    sqls.sort_by_key(|p| p.line);
 }
 
 /// Byte cap that never panics on CJK (ERP Chinese string literals).
@@ -4554,7 +4620,7 @@ public class OrderController
 
     #[test]
     fn truncate_to_char_boundary_stops_before_cjk() {
-        let mut s = "业绩统计".repeat(80);
+        let mut s = "业绩统计".repeat(200);
         assert!(s.len() > MAX_LITERAL_CHARS);
         truncate_to_char_boundary(&mut s, MAX_LITERAL_CHARS);
         assert!(s.len() <= MAX_LITERAL_CHARS);
@@ -4565,9 +4631,9 @@ public class OrderController
     #[test]
     fn cjk_literal_cap_does_not_panic_on_char_boundary() {
         let d = tempfile::tempdir().unwrap();
-        // 汉字 = 3 bytes. 100 of them = 300 bytes > MAX_LITERAL_CHARS (240),
-        // so a naive `truncate(240)` lands mid-character and panics.
-        let cjk: String = "业绩统计报表客户回访".chars().cycle().take(100).collect();
+        // 汉字 = 3 bytes. 400 of them exceeds MAX_LITERAL_CHARS, so a naive
+        // `truncate(n)` can land mid-character and panic.
+        let cjk: String = "业绩统计报表客户回访".chars().cycle().take(400).collect();
         let src = format!("pub fn report() {{ let _s = \"{cjk}\"; }}\n");
         std::fs::write(d.path().join("cjk.rs"), src).unwrap();
         let g = build_graph(d.path());
@@ -4588,5 +4654,69 @@ public class OrderController
                 .all(|s| std::str::from_utf8(s.as_bytes()).is_ok()),
             "truncated literal must stay valid UTF-8"
         );
+    }
+
+    #[test]
+    fn cjk_and_sql_literals_survive_ascii_flood() {
+        let d = tempfile::tempdir().unwrap();
+        let mut src = String::from("pub fn daily_maylife() {\n");
+        for i in 0..120 {
+            src.push_str(&format!("    let _c{i} = \"col_{i:04}_ascii_padding\";\n"));
+        }
+        src.push_str("    let _hint = \"总业绩(基本盘)\";\n");
+        src.push_str("    let _sql = \"AND po.BKOrderType IN (0,2) AND MaylifeAmount > 0\";\n");
+        src.push_str("}\n");
+        std::fs::write(d.path().join("stat.rs"), src).unwrap();
+        let g = build_graph(d.path());
+        let n = g
+            .find_by_name("daily_maylife")
+            .into_iter()
+            .next()
+            .expect("daily_maylife");
+        assert!(
+            n.string_literals.iter().any(|s| s.contains("基本盘")),
+            "CJK tail must survive ASCII flood: {:?}",
+            n.string_literals
+        );
+        assert!(
+            n.string_literals
+                .iter()
+                .any(|s| s.contains("BKOrderType") || s.contains("MaylifeAmount")),
+            "SQL ident tail must survive ASCII flood: {:?}",
+            n.string_literals
+        );
+        assert!(n.string_literals.len() <= MAX_STRING_LITERALS_PER_SYMBOL);
+    }
+
+    #[test]
+    fn sql_tail_predicates_survive_select_flood() {
+        let d = tempfile::tempdir().unwrap();
+        let mut src = String::from("pub fn daily_sql() {\n");
+        for i in 0..80 {
+            src.push_str(&format!(
+                "    let _q{i} = \"SELECT a FROM t{i} WHERE id = {i}\";\n"
+            ));
+        }
+        src.push_str(
+            "    let _tail = \"AND po.BKOrderType IN (0,2) /* 总业绩(基本盘) */\";\n}\n",
+        );
+        std::fs::write(d.path().join("sql.rs"), src).unwrap();
+        let g = build_graph(d.path());
+        let n = g
+            .find_by_name("daily_sql")
+            .into_iter()
+            .next()
+            .expect("daily_sql");
+        let joined: String = n
+            .sql_predicates
+            .iter()
+            .map(|p| p.raw_clause.as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            joined.contains("BKOrderType") || joined.contains("基本盘"),
+            "tail SQL with 基本盘/BKOrderType must be kept: {joined}"
+        );
+        assert!(n.sql_predicates.len() <= MAX_SQL_PREDICATES_PER_SYMBOL);
     }
 }

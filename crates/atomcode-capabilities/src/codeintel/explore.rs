@@ -1196,7 +1196,14 @@ fn score_workspace_symbols(
                 }
             }
 
-            let name_sim = calculate_text_similarity(tokens, &node.name);
+            let name_lex = calculate_lexical_similarity(tokens, &node.name);
+            // Dense name embedding only after a real token hit — not on every
+            // `*Order*Service` just because BKOrderType split to "order".
+            let name_sim = if name_lex > 0.0 {
+                calculate_text_similarity(tokens, &node.name)
+            } else {
+                0.0
+            };
             let mut name_bonus = 0.0;
             let node_name_lower = node.name.to_ascii_lowercase();
 
@@ -1204,15 +1211,21 @@ fn score_workspace_symbols(
                 name_bonus += 100.0;
             }
             for id in &tokens.code_identifiers {
-                if id.eq_ignore_ascii_case(&node.name) {
-                    name_bonus += if *id == node.name { 70.0 } else { 50.0 };
+                if id.eq_ignore_ascii_case(&node.name)
+                    || node_name_lower.contains(&id.to_ascii_lowercase())
+                {
+                    name_bonus += if id.eq_ignore_ascii_case(&node.name) {
+                        70.0
+                    } else if id.len() >= 8 {
+                        50.0
+                    } else {
+                        0.0
+                    };
                 }
             }
-            if tokens
-                .expanded_terms
-                .iter()
-                .any(|term| node_name_lower == *term || node_name_lower.contains(term))
-            {
+            if tokens.expanded_terms.iter().any(|term| {
+                term.len() >= 8 && (node_name_lower == *term || node_name_lower.contains(term))
+            }) {
                 name_bonus += 30.0;
             }
             if project_tokens.contains(&node_name_lower)
@@ -1227,7 +1240,7 @@ fn score_workspace_symbols(
             let mut doc_sim = 0.0f64;
             let mut plain_inline_sim = 0.0f64;
             let mut sql_sim = 0.0f64;
-            let scan_body = name_bonus < 70.0 || !tokens.cjk_phrases.is_empty();
+            let scan_body = true;
             if scan_body {
                 if let Some(doc) = &node.docstring {
                     doc_sim = doc_sim.max(calculate_lexical_similarity(tokens, doc));
@@ -1475,9 +1488,17 @@ fn score_workspace_symbols(
         if let Some(parent) = cand.file.parent() {
             if let Some(&(top, count)) = dir_stats.get(parent) {
                 if top >= 45.0 {
-                    let boost_factor = if count >= 2 { 1.50 } else { 1.25 };
-                    if cand.top_score < top {
-                        cand.top_score = (cand.top_score * boost_factor).min(top * 0.98);
+                    // Only lift peers that already have a real ident/SQL/CJK hit.
+                    // Otherwise Ailai.Order/Service rides AllPerformanceStatSqlStr
+                    // and 11 unrelated *Order*Service files flood the catalog.
+                    let own_anchor = cand.symbols.iter().any(|s| {
+                        s.name_score >= 40.0 || s.inline_score >= 25.0 || s.doc_score >= 25.0
+                    });
+                    if own_anchor {
+                        let boost_factor = if count >= 2 { 1.50 } else { 1.25 };
+                        if cand.top_score < top {
+                            cand.top_score = (cand.top_score * boost_factor).min(top * 0.98);
+                        }
                     }
                 }
             }
@@ -1511,11 +1532,15 @@ fn is_workspace_symbol(graph: &CodeGraph, id: SymbolId) -> bool {
         .unwrap_or(false)
 }
 
-/// Max candidate files whose symbols seed the flow spine. Candidates are
-/// already score-sorted; the rest still appear in CATALOG.
-const MAX_SPINE_SEED_FILES: usize = 32;
-/// Hard cap on seed symbols so a single noisy file cannot explode the walk.
-const MAX_SPINE_SEEDS: usize = 128;
+/// Seed high-score files so STAT↔ORDER call edges come back. Walking every
+/// weak hit (9k files) was 2万 hops; 32 files was too small and lost modules.
+/// Ranking itself does **not** use spine size — catalog order is `top_score`.
+const MAX_SPINE_SEED_FILES: usize = 96;
+const MAX_SPINE_SEEDS: usize = 384;
+const MAX_SPINE_EDGES: usize = 8192;
+const MAX_EDGES_PER_SEED: usize = 64;
+/// Files at or above this score always seed the spine (cross-module SQL/STAT).
+const SPINE_ALWAYS_SEED_SCORE: f64 = 180.0;
 
 /// renderer may still cap the mermaid drawing, but it reports the omitted
 /// count/names via the Coverage line and the omitted-edge list.
@@ -1523,18 +1548,31 @@ fn extract_flow_spine(
     graph: &CodeGraph,
     candidates: &[FileCandidate],
 ) -> (Vec<(SymbolId, Option<SymbolId>, EdgeKind)>, bool) {
-    let mut seeds = Vec::new();
-    for fc in candidates.iter().take(MAX_SPINE_SEED_FILES) {
+    let mut high_seeds = Vec::new();
+    let mut rest_seeds = Vec::new();
+    for (i, fc) in candidates.iter().enumerate() {
+        if i >= MAX_SPINE_SEED_FILES && fc.top_score < SPINE_ALWAYS_SEED_SCORE {
+            continue;
+        }
         for s in &fc.symbols {
-            if s.total_score >= 12.0 {
-                seeds.push(s.node.id);
-                if seeds.len() >= MAX_SPINE_SEEDS {
-                    break;
-                }
+            if s.total_score < 12.0 {
+                continue;
+            }
+            if fc.top_score >= SPINE_ALWAYS_SEED_SCORE {
+                high_seeds.push(s.node.id);
+            } else {
+                rest_seeds.push(s.node.id);
             }
         }
+    }
+    high_seeds.truncate(MAX_SPINE_SEEDS);
+    let mut seeds = high_seeds;
+    for id in rest_seeds {
         if seeds.len() >= MAX_SPINE_SEEDS {
             break;
+        }
+        if !seeds.contains(&id) {
+            seeds.push(id);
         }
     }
 
@@ -1546,14 +1584,26 @@ fn extract_flow_spine(
     let mut visited = HashSet::new();
 
     for &seed in &seeds {
+        if spine_edges.len() >= MAX_SPINE_EDGES {
+            break;
+        }
+        let seed_start = spine_edges.len();
+        let over_seed = |n: usize| n - seed_start >= MAX_EDGES_PER_SEED;
         visited.insert(seed);
-        // Trace Callees (forward 2 hops) — ALL workspace-internal ones.
         if let Some(callees) = graph.callees(seed) {
             for e in callees {
+                if spine_edges.len() >= MAX_SPINE_EDGES || over_seed(spine_edges.len()) {
+                    break;
+                }
                 if visited.insert(e.to) && is_workspace_symbol(graph, e.to) {
                     spine_edges.push((seed, Some(e.to), e.kind.clone()));
                     if let Some(sub_callees) = graph.callees(e.to) {
                         for sub_e in sub_callees {
+                            if spine_edges.len() >= MAX_SPINE_EDGES
+                                || over_seed(spine_edges.len())
+                            {
+                                break;
+                            }
                             if visited.insert(sub_e.to) && is_workspace_symbol(graph, sub_e.to) {
                                 spine_edges.push((e.to, Some(sub_e.to), sub_e.kind.clone()));
                             }
@@ -1562,9 +1612,11 @@ fn extract_flow_spine(
                 }
             }
         }
-        // Trace Callers (backward 1 hop) — ALL workspace-internal ones.
         if let Some(callers) = graph.callers(seed) {
             for e in callers {
+                if spine_edges.len() >= MAX_SPINE_EDGES || over_seed(spine_edges.len()) {
+                    break;
+                }
                 if visited.insert(e.to) && is_workspace_symbol(graph, e.to) {
                     spine_edges.push((e.to, Some(seed), e.kind.clone()));
                 }
@@ -4333,6 +4385,184 @@ mod tests {
             candidates[0].top_score >= 80.0,
             "核心类得分必须高权（>= 80.0），实际得分: {:.2}",
             candidates[0].top_score
+        );
+    }
+
+    fn stat_core(
+        id: u64,
+        name: &str,
+        file: &str,
+        extra_sql: &str,
+    ) -> SymbolNode {
+        SymbolNode {
+            id,
+            name: name.into(),
+            kind: SymbolKind::Method,
+            visibility: super::super::graph::Visibility::Public,
+            file: PathBuf::from(file),
+            start_line: 40,
+            end_line: 120,
+            docstring: Some("/// 每日业绩 / 基本盘".into()),
+            inline_comments: vec!["// 总业绩(基本盘)".into()],
+            sql_predicates: vec![super::super::graph::SqlPredicate {
+                raw_clause: extra_sql.into(),
+                target_fields: vec!["BKOrderType".into(), "MaylifeAmount".into()],
+                line: 80,
+            }],
+            string_literals: vec!["基本盘".into(), extra_sql.into()],
+            metrics: super::super::graph::AstMetrics {
+                has_sql_or_qs: true,
+                is_active_logic: true,
+                branch_count: 4,
+                ..Default::default()
+            },
+            ..Default::default()
+        }
+    }
+
+    fn order_noise(id: u64, name: &str, file: &str) -> SymbolNode {
+        SymbolNode {
+            id,
+            name: name.into(),
+            kind: SymbolKind::Method,
+            visibility: super::super::graph::Visibility::Public,
+            file: PathBuf::from(file),
+            start_line: 10,
+            end_line: 80,
+            docstring: Some("/// 订单服务".into()),
+            sql_predicates: vec![super::super::graph::SqlPredicate {
+                raw_clause: "SELECT * FROM PurchaseOrder WHERE OrderId = @id".into(),
+                target_fields: vec!["OrderId".into()],
+                line: 20,
+            }],
+            metrics: super::super::graph::AstMetrics {
+                is_active_logic: true,
+                has_sql_or_qs: true,
+                branch_count: 8,
+                ..Default::default()
+            },
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn bkordertype_must_not_rank_order_services_above_stat_sql() {
+        let mut graph = CodeGraph::new();
+        graph.add_symbol(stat_core(
+            201,
+            "DailyMaylife",
+            "sources/ERP.API/Apis/Ailai.Statistics/Models/Data/StatCustomerModuleData.cs",
+            "AND po.BKOrderType IN (0,2) AND MaylifeAmount > 0",
+        ));
+        graph.add_symbol(stat_core(
+            202,
+            "DailyPerformanceStatSqlStr",
+            "sources/ERP.API/Apis/Ailai.Order/Models/Data/WhereModel/DailyPerformanceStatSqlStr.cs",
+            "AND po.BKOrderType IN (0,2)",
+        ));
+        graph.add_symbol(stat_core(
+            203,
+            "HomeStatisticsSqlStr",
+            "sources/ERP.API/Apis/Ailai.Statistics/Models/Data/HomeStatisticsSqlStr.cs",
+            "AND po.BKOrderType IN (0,2) /* 基本盘 */",
+        ));
+        graph.add_symbol(stat_core(
+            204,
+            "NewPersonNewPerformanceData",
+            "sources/ERP.API/Apis/Ailai.Statistics/Models/Data/NewPersonNewPerformanceData.cs",
+            "MaylifeAmount + BKOrderType",
+        ));
+        graph.add_symbol(stat_core(
+            205,
+            "AllPerformanceStatSqlStr",
+            "sources/ERP.API/Apis/Ailai.Order/Models/Data/WhereModel/AllPerformanceStatSqlStr.cs",
+            "AND po.BKOrderType IN (0,2) AND MaylifeAmount > 0",
+        ));
+        for (id, name, file) in [
+            (
+                301,
+                "DeleteOrderItem",
+                "sources/ERP.API/Apis/Ailai.Order/Models/Service/OrderItemService.cs",
+            ),
+            (
+                302,
+                "PurchaseWorkOrder",
+                "sources/ERP.API/Apis/Ailai.Order/Models/Service/PurchaseWorkOrderService.cs",
+            ),
+            (
+                303,
+                "PromotionOrder",
+                "sources/ERP.API/Apis/Ailai.Order/Models/Service/PromotionOrderService.cs",
+            ),
+            (
+                304,
+                "SyncDBOrder",
+                "sources/ERP.API/Apis/Ailai.Order/Models/Service/SyncDBOrderService.cs",
+            ),
+            (
+                305,
+                "CanDelivery",
+                "sources/ERP.API/Apis/Ailai.Order/Models/Service/CanDeliveryService.cs",
+            ),
+        ] {
+            graph.add_symbol(order_noise(id, name, file));
+        }
+
+        let dt = super::super::bilingual_nlp::DynamicThesaurus::new();
+        let query = "DailyMaylife 基本盘 BKOrderType MaylifeAmount";
+        let tokens = super::super::bilingual_nlp::parse_bilingual_query_with_thesaurus(query, &dt);
+        let parsed = super::super::bilingual_nlp::parse_field_qualified_query(query);
+        let candidates = score_workspace_symbols(
+            &graph,
+            &tokens,
+            &parsed,
+            &HashSet::new(),
+            None,
+            &HashMap::new(),
+            &[],
+            None,
+        );
+        assert!(!candidates.is_empty());
+        let files: Vec<String> = candidates
+            .iter()
+            .map(|c| c.file.file_name().unwrap().to_string_lossy().into_owned())
+            .collect();
+        let cores = [
+            "StatCustomerModuleData.cs",
+            "DailyPerformanceStatSqlStr.cs",
+            "HomeStatisticsSqlStr.cs",
+            "NewPersonNewPerformanceData.cs",
+            "AllPerformanceStatSqlStr.cs",
+        ];
+        let noise = [
+            "OrderItemService.cs",
+            "PurchaseWorkOrderService.cs",
+            "PromotionOrderService.cs",
+            "SyncDBOrderService.cs",
+            "CanDeliveryService.cs",
+        ];
+        let core_hits: Vec<&str> = cores
+            .iter()
+            .copied()
+            .filter(|f| files.iter().any(|x| x == *f))
+            .collect();
+        assert!(
+            core_hits.len() >= 4,
+            "STAT/SQL cores must be recalled, got {core_hits:?} in {files:?}"
+        );
+        let first_noise = noise.iter().filter_map(|n| files.iter().position(|f| f == *n)).min();
+        let last_core = cores.iter().filter_map(|c| files.iter().position(|f| f == *c)).max();
+        if let (Some(good), Some(bad)) = (last_core, first_noise) {
+            assert!(
+                good < bad,
+                "ORDER services must not outrank STAT/SQL cores: {files:?}"
+            );
+        }
+        let top6: Vec<&str> = files.iter().take(6).map(|s| s.as_str()).collect();
+        let top6_cores = cores.iter().filter(|c| top6.contains(c)).count();
+        assert!(
+            top6_cores >= 4,
+            "top 6 must be STAT/SQL cores, got {top6:?}"
         );
     }
 

@@ -24,6 +24,7 @@ use std::collections::{HashMap, HashSet};
 use std::hash::{DefaultHasher, Hash, Hasher};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicBool;
+use std::sync::mpsc;
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant, UNIX_EPOCH};
 
@@ -2293,7 +2294,7 @@ fn take_reparse_budget<'a>(
 
 /// Same formula as sibling `codegraph` `resolveParsePoolSize`:
 /// `clamp(max(3, available_parallelism()) - 1, 1, 8)`.
-fn parse_parallelism() -> usize {
+pub(crate) fn parse_parallelism() -> usize {
     let cores = std::thread::available_parallelism()
         .map(|n| n.get())
         .unwrap_or(2);
@@ -2390,6 +2391,37 @@ fn sync_units(
     let mut reparsed = 0usize;
     let mut changed_paths = Vec::with_capacity(dirty_total);
 
+    // Parse on a dedicated Rayon pool; SQLite writes run on a sidecar thread
+    // so the 64MB WAL checkpoint is not on the parse critical path (the
+    // 6144-file stall). sync_channel(1) keeps at most one encoded batch in flight.
+    let mut persist_tx: Option<mpsc::SyncSender<Vec<super::index_db::PreparedUnitWrite>>> = None;
+    let mut persist_join = None;
+    if stream_persist {
+        if let Ok(db) = super::index_db::IndexDb::open_shared(root) {
+            db.set_bulk_ingest(true);
+        }
+        let (tx, rx) = mpsc::sync_channel::<Vec<super::index_db::PreparedUnitWrite>>(1);
+        let persist_root = root.to_path_buf();
+        match std::thread::Builder::new()
+            .name("codegraph-persist".into())
+            .spawn(move || {
+                let Ok(db) = super::index_db::IndexDb::open_shared(&persist_root) else {
+                    return;
+                };
+                while let Ok(batch) = rx.recv() {
+                    if !batch.is_empty() {
+                        let _ = db.upsert_units_prepared(&batch, &[]);
+                    }
+                }
+            }) {
+            Ok(h) => {
+                persist_tx = Some(tx);
+                persist_join = Some(h);
+            }
+            Err(_) => {}
+        }
+    }
+
     // Dedicated pool so per-thread tree-sitter Parser/Query TLS dies with
     // the pool — before compose / graph serialize — instead of living on
     // the process-global Rayon workers for the rest of the CLI run.
@@ -2433,11 +2465,41 @@ fn sync_units(
                 }
             }
             if stream_persist {
-                persist_paths(root, units, &changed_paths[flush_from..], &[]);
+                let encode = || {
+                    changed_paths[flush_from..]
+                        .par_iter()
+                        .filter_map(|p| {
+                            let u = units.get(p)?;
+                            super::index_db::PreparedUnitWrite::from_unit(p.clone(), u)
+                        })
+                        .collect::<Vec<_>>()
+                };
+                let prepared = match pool.as_ref() {
+                    Some(p) => p.install(encode),
+                    None => encode(),
+                };
+                let sent = persist_tx
+                    .as_ref()
+                    .map(|tx| tx.send(prepared).is_ok())
+                    .unwrap_or(false);
+                if !sent {
+                    persist_paths(root, units, &changed_paths[flush_from..], &[]);
+                }
             }
             on_progress(&format!(
                 "Code graph: re-parsed {reparsed}/{dirty_total} dirty files..."
             ));
+        }
+    }
+
+    drop(persist_tx);
+    if let Some(h) = persist_join.take() {
+        let _ = h.join();
+    }
+    if stream_persist {
+        on_progress("Code graph: compacting SQLite WAL...");
+        if let Ok(db) = super::index_db::IndexDb::open_shared(root) {
+            db.set_bulk_ingest(false);
         }
     }
 

@@ -1156,21 +1156,42 @@ fn score_workspace_symbols(
             .collect(),
         None => graph.file_symbols.iter().collect(),
     };
-    let path_sims: HashMap<PathBuf, f64> = scoped_files
-        .par_iter()
-        .map(|(file, _)| {
-            (
-                (*file).clone(),
-                calculate_lexical_similarity(tokens, &file.to_string_lossy()),
-            )
-        })
-        .collect();
+    // Ranking formula is unchanged; this only caps/binds the existing rayon
+    // scan so a 31万-symbol ERP uses the same 2–8 worker band as indexing.
+    let score_threads = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(4)
+        .clamp(2, 8);
+    let score_pool = rayon::ThreadPoolBuilder::new()
+        .num_threads(score_threads)
+        .thread_name(|i| format!("codegraph-score-{i}"))
+        .build()
+        .ok();
+    let path_sims: HashMap<PathBuf, f64> = {
+        let job = || {
+            scoped_files
+                .par_iter()
+                .map(|(file, _)| {
+                    (
+                        (*file).clone(),
+                        calculate_lexical_similarity(tokens, &file.to_string_lossy()),
+                    )
+                })
+                .collect()
+        };
+        match score_pool.as_ref() {
+            Some(p) => p.install(job),
+            None => job(),
+        }
+    };
     let nodes: Vec<&SymbolNode> = scoped_files
         .iter()
         .flat_map(|(_, ids)| ids.iter().filter_map(|id| graph.nodes.get(id)))
         .collect();
 
-    let scored: Vec<(PathBuf, ScoredSymbol)> = nodes
+    let scored: Vec<(PathBuf, ScoredSymbol)> = {
+        let job = || {
+            nodes
         .into_par_iter()
         .filter_map(|node| {
             if !parsed_query.kind_filters.is_empty() {
@@ -1391,7 +1412,13 @@ fn score_workspace_symbols(
                 None
             }
         })
-        .collect();
+        .collect()
+        };
+        match score_pool.as_ref() {
+            Some(p) => p.install(job),
+            None => job(),
+        }
+    };
 
     // Merge parallel hits into per-file buckets.
     let mut file_map: HashMap<PathBuf, Vec<ScoredSymbol>> = HashMap::new();
@@ -2747,6 +2774,27 @@ fn render_explore_output(
     let mut folded_spans: usize = 0;
     let mut folded_lines: usize = 0;
     let mut evidence_chars: usize = 0;
+    let evidence_files: Vec<PathBuf> = {
+        let mut seen = HashSet::new();
+        evidence
+            .iter()
+            .filter_map(|e| {
+                if seen.insert(&e.fc.file) {
+                    Some(e.fc.file.clone())
+                } else {
+                    None
+                }
+            })
+            .collect()
+    };
+    let evidence_text: HashMap<PathBuf, String> = evidence_files
+        .into_par_iter()
+        .filter_map(|p| {
+            std::fs::read_to_string(&p)
+                .ok()
+                .map(|c| (p, super::strip_utf8_bom(&c).to_string()))
+        })
+        .collect();
     let mut session_spans = SESSION_SENT_SPANS.write().unwrap();
 
     out.push("### EVIDENCE (budgeted, layer-diverse)".to_string());
@@ -2774,8 +2822,7 @@ fn render_explore_output(
             }
             out.push("".to_string());
         }
-        if let Ok(content) = std::fs::read_to_string(&e.fc.file) {
-            let content = super::strip_utf8_bom(&content);
+        if let Some(content) = evidence_text.get(&e.fc.file) {
             let lines: Vec<&str> = content.lines().collect();
             let start = e.sym.node.start_line.saturating_sub(2).max(1);
             let end = (e.sym.node.end_line + 3).min(lines.len());

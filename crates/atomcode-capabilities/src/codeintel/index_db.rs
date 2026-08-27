@@ -263,9 +263,30 @@ impl IndexDb {
         let tx = conn.transaction()?;
         apply_prepared_unit_writes(&tx, prepared, deleted)?;
         tx.commit()?;
-        drop(conn);
-        self.checkpoint();
+        // No checkpoint here. Streaming init used to PASSIVE-checkpoint every
+        // 256-file batch; around ~6k files the 64MB WAL limit stalled parse
+        // for 10s+. Callers checkpoint once at the end of a bulk ingest.
         Ok(())
+    }
+
+    /// Disable WAL auto-checkpoint for a full `init --force` so parse is not
+    /// blocked folding a 64MB journal back into the db every few thousand files.
+    /// `on = false` restores the online pragmas and folds the WAL once.
+    pub fn set_bulk_ingest(&self, on: bool) {
+        if let Ok(conn) = self.conn.lock() {
+            if on {
+                let _ = conn.execute_batch(
+                    "PRAGMA wal_autocheckpoint = 0;
+                     PRAGMA journal_size_limit = -1;",
+                );
+            } else {
+                let _ = conn.execute_batch("PRAGMA wal_checkpoint(PASSIVE);");
+                let _ = conn.execute_batch(
+                    "PRAGMA wal_autocheckpoint = 1000;
+                     PRAGMA journal_size_limit = 67108864;",
+                );
+            }
+        }
     }
 
     /// Optimized version using pre-compressed unit blobs produced in parallel workers.

@@ -2,6 +2,7 @@
 //!
 //! Replaces giant monolithic JSON/bin rewrites with row-level atomic upserts/deletions.
 
+use std::cell::RefCell;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};
@@ -269,20 +270,39 @@ impl IndexDb {
         Ok(())
     }
 
-    /// Disable WAL auto-checkpoint for a full `init --force` so parse is not
-    /// blocked folding a 64MB journal back into the db every few thousand files.
-    /// `on = false` restores the online pragmas and folds the WAL once.
+    /// Bulk-ingest pragmas for a large `init --force`.
+    ///
+    /// An empty db uses `journal_mode=OFF` so 15k inserts never grow a WAL that
+    /// later stalls parse (the ~6144-file checkpoint). A populated db keeps WAL
+    /// but disables auto-checkpoint. `on = false` switches back to WAL for
+    /// incremental edits — no PASSIVE fold of a giant journal.
     pub fn set_bulk_ingest(&self, on: bool) {
         if let Ok(conn) = self.conn.lock() {
             if on {
-                let _ = conn.execute_batch(
-                    "PRAGMA wal_autocheckpoint = 0;
-                     PRAGMA journal_size_limit = -1;",
-                );
+                let empty = conn
+                    .query_row("SELECT COUNT(*) FROM file_units", [], |row| {
+                        row.get::<_, i64>(0)
+                    })
+                    .unwrap_or(1)
+                    == 0;
+                if empty {
+                    let _ = conn.execute_batch(
+                        "PRAGMA journal_mode = OFF;
+                         PRAGMA synchronous = OFF;
+                         PRAGMA locking_mode = EXCLUSIVE;",
+                    );
+                } else {
+                    let _ = conn.execute_batch(
+                        "PRAGMA wal_autocheckpoint = 0;
+                         PRAGMA journal_size_limit = -1;",
+                    );
+                }
             } else {
-                let _ = conn.execute_batch("PRAGMA wal_checkpoint(PASSIVE);");
                 let _ = conn.execute_batch(
-                    "PRAGMA wal_autocheckpoint = 1000;
+                    "PRAGMA locking_mode = NORMAL;
+                     PRAGMA journal_mode = WAL;
+                     PRAGMA synchronous = OFF;
+                     PRAGMA wal_autocheckpoint = 1000;
                      PRAGMA journal_size_limit = 67108864;",
                 );
             }
@@ -422,7 +442,7 @@ pub struct PreparedUnitWrite {
 impl PreparedUnitWrite {
     pub fn from_unit(path: PathBuf, unit: &FileUnit) -> Option<Self> {
         let serialized = bincode::serialize(unit).ok()?;
-        let compressed_blob = zstd::stream::encode_all(&serialized[..], 1).ok()?;
+        let compressed_blob = compress_unit_blob(&serialized)?;
         Some(Self {
             path,
             mtime_ns: unit.mtime_ns,
@@ -430,6 +450,24 @@ impl PreparedUnitWrite {
             compressed_blob,
         })
     }
+}
+
+/// Reuse a per-thread zstd compressor. `encode_all` rebuilds CDict/context on
+/// every 1–10KB unit; 15k files pay that setup cost more than the deflate.
+fn compress_unit_blob(bytes: &[u8]) -> Option<Vec<u8>> {
+    thread_local! {
+        static COMPRESSOR: RefCell<Option<zstd::bulk::Compressor<'static>>> = RefCell::new(None);
+    }
+    COMPRESSOR.with(|slot| {
+        let mut slot = slot.borrow_mut();
+        if slot.is_none() {
+            *slot = zstd::bulk::Compressor::new(1).ok();
+        }
+        match slot.as_mut() {
+            Some(c) => c.compress(bytes).ok(),
+            None => zstd::bulk::compress(bytes, 1).ok(),
+        }
+    })
 }
 
 fn apply_unit_writes(

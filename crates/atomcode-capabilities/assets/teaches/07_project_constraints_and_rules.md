@@ -61,7 +61,7 @@
 | **项目级提问包装** | `<workspace>/.atomcode/user-wrap.md` 或 `user-wrap.md` | 当前项目专属的提问包装模板（`{{input}}` 占位符，覆盖全局）。 |
 | **项目级专属 MCP** | `<workspace>/.mcp.json` | 仅在当前项目生效的外部 MCP 工具服务。 |
 | **项目级专属词林** | `<workspace>/.atomcode/thesaurus/*.txt` | 当前项目特定业务名词的双语检索词林。 |
-| **项目级索引忽略** | `<workspace>/.codegraphignore` | 符号索引与图谱构建时忽略的特定文件或目录。 |
+| **项目级索引忽略** | `<workspace>/.codegraphignore` | 符号索引与图谱构建时忽略的特定文件或目录。Git 跟踪的文件也会被忽略（不再只对无 git 的 Walk 生效）。 |
 
 ---
 

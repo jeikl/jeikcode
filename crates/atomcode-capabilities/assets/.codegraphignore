@@ -23,6 +23,11 @@
 *.chunk.css
 *.map
 
+# In-tree copies of npm UI kits. The UMD entry is often `lib/index.js`,
+# not `*.min.js` — tree-sitter on a 500KB+ one-liner can stall init for 40s+.
+element-ui/
+element-plus/
+
 # ------------------------------------------------------------------------------
 # 2. 前端与 JavaScript / TypeScript / Node.js
 # ------------------------------------------------------------------------------

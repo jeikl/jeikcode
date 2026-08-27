@@ -23,7 +23,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::hash::{DefaultHasher, Hash, Hasher};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::mpsc;
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant, UNIX_EPOCH};
@@ -40,9 +40,19 @@ const MAX_REPARSE_PER_QUERY: usize = 128;
 /// `clamp(max(3, cores) - 1, 1, 8)` — leave a core for the main thread / SQLite
 /// writer, never more than 8, and a 2-core box still gets 2 parse workers.
 const MAX_PARSE_THREADS: usize = 8;
-/// Files parsed (and flushed to SQLite) per batch. Bounds in-flight tree-sitter
-/// trees + source strings + prepared blobs.
+/// Progress-print interval and the dirty-set size that triggers streaming
+/// SQLite ingest. Parse itself is unbatched (work-stealing) so one large
+/// file cannot freeze the counter the way a 256-file barrier did at 6144.
 const PARSE_BATCH_FILES: usize = 256;
+/// Persist-channel depth. Parse workers encode zstd themselves and send one
+/// row at a time; this is back-pressure only, not a parse barrier.
+/// 512 filled around ~14k files on the ERP corpus and froze progress; 2048
+/// plus "report parse before persist-send" keeps the counter moving.
+const PERSIST_QUEUE_CAP: usize = 2048;
+/// A file taking this long is recorded as a stall candidate.
+const SLOW_PARSE: Duration = Duration::from_millis(250);
+/// Progress interval slower than this gets a stall footnote.
+const SLOW_INTERVAL: Duration = Duration::from_millis(800);
 /// SQLite upsert chunk. Sibling codegraph commits as results arrive; a single
 /// 15k-row WAL transaction is the other half of the OOM.
 const UNIT_WRITE_CHUNK: usize = 256;
@@ -558,6 +568,14 @@ fn enrich_symbol_microstructure(nodes: &mut [SymbolNode], source: &str) {
     let lines: Vec<&str> = source.lines().collect();
 
     for sym in nodes.iter_mut() {
+        // Vue/HTML templates emit hundreds of 1-line UiElement nodes; scanning
+        // them for SQL/literals is wasted CPU on ERP-scale frontends.
+        if matches!(
+            sym.kind,
+            SymbolKind::UiElement | SymbolKind::Import | SymbolKind::Module
+        ) {
+            continue;
+        }
         let sym_start = sym.start_line.saturating_sub(1);
         let sym_end = sym.end_line.min(lines.len());
         if sym_start >= lines.len() || sym_start > sym_end {
@@ -1077,6 +1095,11 @@ const SKIP_DIR_NAMES: &[&str] = &[
     "bower_components",
     "jspm_packages",
     "vendor",
+    // In-tree npm UI kits. `element-ui/2.0.5/lib/index.js` is a 500KB+ UMD
+    // bundle named `index.js` (not `*.min.js`) that tree-sitter can chew for
+    // 40s+ and balloon RSS by ~3GB.
+    "element-ui",
+    "element-plus",
     "__pycache__",
     ".venv",
     "venv",
@@ -1093,6 +1116,85 @@ const SKIP_DIR_NAMES: &[&str] = &[
 
 /// Skip huge / minified / generated sources that blow up tree-sitter time.
 const MAX_INDEX_FILE_BYTES: u64 = 768 * 1024;
+/// JS/CSS UMD bundles are far denser than C#; 256KB already means a vendor kit,
+/// not application source. The ERP `element-ui/.../lib/index.js` is 564KB.
+const MAX_WEB_ASSET_BYTES: u64 = 256 * 1024;
+
+fn max_index_file_bytes(path: &Path) -> u64 {
+    match path
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(|s| s.to_ascii_lowercase())
+        .as_deref()
+    {
+        Some("js" | "mjs" | "cjs" | "css" | "jsx") => MAX_WEB_ASSET_BYTES,
+        _ => MAX_INDEX_FILE_BYTES,
+    }
+}
+
+fn load_codegraph_ignore(root: &Path) -> ignore::gitignore::Gitignore {
+    let mut builder = ignore::gitignore::GitignoreBuilder::new(root);
+    let cfg = crate::paths::config_dir();
+    for p in [
+        root.join(".codegraphignore"),
+        root.join(".codegraignore"),
+        root.join(".atomcode").join(".codegraphignore"),
+        cfg.join(".codegraphignore"),
+        cfg.join(".codegraignore"),
+    ] {
+        if p.is_file() {
+            let _ = builder.add(&p);
+        }
+    }
+    builder.build().unwrap_or_else(|_| {
+        ignore::gitignore::GitignoreBuilder::new(root)
+            .build()
+            .expect("empty gitignore")
+    })
+}
+
+fn codegraph_ignored(gi: &ignore::gitignore::Gitignore, root: &Path, path: &Path) -> bool {
+    let rel = path.strip_prefix(root).unwrap_or(path);
+    gi.matched_path_or_any_parents(rel, false).is_ignore()
+}
+
+/// One-line UMD/`lib/index.js` kits are not named `*.min.js` but still explode
+/// tree-sitter. Peek only JS/CSS above 32KB.
+fn is_minified_web_bundle(path: &Path, len: u64) -> bool {
+    const PEEK_MIN: u64 = 32 * 1024;
+    let Some(ext) = path.extension().and_then(|e| e.to_str()) else {
+        return false;
+    };
+    let ext = ext.to_ascii_lowercase();
+    if !matches!(ext.as_str(), "js" | "mjs" | "cjs" | "css" | "jsx") {
+        return false;
+    }
+    if len < PEEK_MIN {
+        return false;
+    }
+    let Ok(mut f) = std::fs::File::open(path) else {
+        return false;
+    };
+    let mut buf = [0u8; 4096];
+    let Ok(n) = std::io::Read::read(&mut f, &mut buf) else {
+        return false;
+    };
+    n > 0 && buf[..n].iter().filter(|&&b| b == b'\n').count() < 4
+}
+
+fn skip_index_file(
+    root: &Path,
+    path: &Path,
+    len: u64,
+    gi: &ignore::gitignore::Gitignore,
+) -> bool {
+    is_generated_source(path)
+        || path_under_skip_dir(path)
+        || codegraph_ignored(gi, root, path)
+        || len == 0
+        || len > max_index_file_bytes(path)
+        || is_minified_web_bundle(path, len)
+}
 
 /// Generated / designer C# sources — huge and low value for call-graph tools.
 fn is_generated_source(path: &Path) -> bool {
@@ -1116,6 +1218,10 @@ fn should_skip_dir(name: &std::ffi::OsStr) -> bool {
     name.to_str()
         .map(|n| SKIP_DIR_NAMES.iter().any(|s| s.eq_ignore_ascii_case(n)))
         .unwrap_or(false)
+}
+
+fn path_under_skip_dir(p: &Path) -> bool {
+    p.components().any(|c| should_skip_dir(c.as_os_str()))
 }
 
 /// A walked source file + the inputs to its staleness fingerprint.
@@ -1169,6 +1275,8 @@ fn collect_files_via_git(root: &Path) -> Option<Vec<Walked>> {
     let raw = output.stdout;
     let paths: Vec<&[u8]> = raw.split(|&b| b == 0).filter(|p| !p.is_empty()).collect();
 
+    let gi = load_codegraph_ignore(root);
+
     let out: Vec<Walked> = paths
         .into_par_iter()
         .filter_map(|rel_bytes| {
@@ -1182,15 +1290,12 @@ fn collect_files_via_git(root: &Path) -> Option<Vec<Walked>> {
             if !ext_ok {
                 return None;
             }
-            if is_generated_source(&full_p) {
-                return None;
-            }
             let md = std::fs::metadata(&full_p).ok()?;
             if !md.is_file() {
                 return None;
             }
             let len = md.len();
-            if len > MAX_INDEX_FILE_BYTES {
+            if skip_index_file(root, &full_p, len, &gi) {
                 return None;
             }
             let mtime_ns = md
@@ -1268,7 +1373,7 @@ fn collect_files_fallback(root: &Path) -> Vec<Walked> {
         }
         let md = entry.metadata().ok();
         let len = md.as_ref().map(|m| m.len()).unwrap_or(0);
-        if len > MAX_INDEX_FILE_BYTES {
+        if len == 0 || len > max_index_file_bytes(p) || is_minified_web_bundle(p, len) {
             continue;
         }
         let mtime_ns = md
@@ -1964,7 +2069,10 @@ fn restat_one(path: &Path, unit: &FileUnit, focus: Option<&Path>) -> Result<Walk
     match std::fs::metadata(&norm) {
         Ok(md) => {
             let len = md.len();
-            if len > MAX_INDEX_FILE_BYTES {
+            if path_under_skip_dir(&norm)
+                || is_generated_source(&norm)
+                || len > max_index_file_bytes(&norm)
+            {
                 return Err(norm);
             }
             let mtime_ns = md
@@ -2013,7 +2121,7 @@ fn restat_known_units(
 
 fn walked_from_disk(path: &Path) -> Option<Walked> {
     let norm = normalize_index_path(path);
-    if is_generated_source(&norm) {
+    if is_generated_source(&norm) || path_under_skip_dir(&norm) {
         return None;
     }
     let ext_ok = norm
@@ -2029,7 +2137,7 @@ fn walked_from_disk(path: &Path) -> Option<Walked> {
         return None;
     }
     let len = md.len();
-    if len > MAX_INDEX_FILE_BYTES || len == 0 {
+    if len > max_index_file_bytes(&norm) || len == 0 || is_minified_web_bundle(&norm, len) {
         return None;
     }
     let mtime_ns = md
@@ -2043,10 +2151,6 @@ fn walked_from_disk(path: &Path) -> Option<Walked> {
         mtime_ns,
         len,
     })
-}
-
-fn path_under_skip_dir(p: &Path) -> bool {
-    p.components().any(|c| should_skip_dir(c.as_os_str()))
 }
 
 /// Git roots we already index: the workspace itself, its immediate children,
@@ -2310,6 +2414,151 @@ fn resolve_parse_pool_size(cpu_count: usize) -> usize {
         .clamp(1, MAX_PARSE_THREADS)
 }
 
+#[derive(Clone)]
+struct SlowParse {
+    path: PathBuf,
+    len: u64,
+    parse: Duration,
+    persist_wait: Duration,
+}
+
+struct PipelineProbe {
+    persist_q: AtomicUsize,
+    persist_q_peak: AtomicUsize,
+    persist_block_ns: AtomicU64,
+    sqlite_ns: AtomicU64,
+    sqlite_batches: AtomicUsize,
+    sqlite_rows: AtomicU64,
+    peak_rss_mb: AtomicU64,
+    window_slow: Mutex<Option<SlowParse>>,
+    top_slow: Mutex<Vec<SlowParse>>,
+}
+
+impl PipelineProbe {
+    fn new() -> Arc<Self> {
+        Arc::new(Self {
+            persist_q: AtomicUsize::new(0),
+            persist_q_peak: AtomicUsize::new(0),
+            persist_block_ns: AtomicU64::new(0),
+            sqlite_ns: AtomicU64::new(0),
+            sqlite_batches: AtomicUsize::new(0),
+            sqlite_rows: AtomicU64::new(0),
+            peak_rss_mb: AtomicU64::new(0),
+            window_slow: Mutex::new(None),
+            top_slow: Mutex::new(Vec::new()),
+        })
+    }
+
+    fn note_rss(&self) {
+        let Some(mb) = current_rss_mb() else {
+            return;
+        };
+        let mut peak = self.peak_rss_mb.load(Ordering::Relaxed);
+        while mb > peak {
+            match self.peak_rss_mb.compare_exchange_weak(
+                peak,
+                mb,
+                Ordering::Relaxed,
+                Ordering::Relaxed,
+            ) {
+                Ok(_) => break,
+                Err(cur) => peak = cur,
+            }
+        }
+    }
+
+    fn note_sqlite(&self, rows: usize, write: Duration) {
+        self.sqlite_ns
+            .fetch_add(write.as_nanos() as u64, Ordering::Relaxed);
+        self.sqlite_batches.fetch_add(1, Ordering::Relaxed);
+        self.sqlite_rows.fetch_add(rows as u64, Ordering::Relaxed);
+    }
+
+    fn note_slow(&self, slow: SlowParse) {
+        if let Ok(mut w) = self.window_slow.lock() {
+            let worse = w.as_ref().map(|p| slow.parse > p.parse).unwrap_or(true);
+            if worse {
+                *w = Some(slow.clone());
+            }
+        }
+        if let Ok(mut top) = self.top_slow.lock() {
+            top.push(slow);
+            top.sort_by(|a, b| b.parse.cmp(&a.parse));
+            top.truncate(8);
+        }
+    }
+
+    fn take_window_slow(&self) -> Option<SlowParse> {
+        self.window_slow.lock().ok().and_then(|mut g| g.take())
+    }
+}
+
+fn current_rss_mb() -> Option<u64> {
+    #[cfg(windows)]
+    {
+        windows_rss_mb()
+    }
+    #[cfg(target_os = "linux")]
+    {
+        let text = std::fs::read_to_string("/proc/self/status").ok()?;
+        for line in text.lines() {
+            if let Some(rest) = line.strip_prefix("VmRSS:") {
+                let kb: u64 = rest.split_whitespace().next()?.parse().ok()?;
+                return Some(kb / 1024);
+            }
+        }
+        None
+    }
+    #[cfg(not(any(windows, target_os = "linux")))]
+    {
+        None
+    }
+}
+
+#[cfg(windows)]
+fn windows_rss_mb() -> Option<u64> {
+    #[repr(C)]
+    struct ProcessMemoryCounters {
+        cb: u32,
+        page_fault_count: u32,
+        peak_working_set_size: usize,
+        working_set_size: usize,
+        quota_peak_paged_pool_usage: usize,
+        quota_paged_pool_usage: usize,
+        quota_peak_non_paged_pool_usage: usize,
+        quota_non_paged_pool_usage: usize,
+        pagefile_usage: usize,
+        peak_pagefile_usage: usize,
+    }
+    extern "system" {
+        fn GetCurrentProcess() -> *mut core::ffi::c_void;
+    }
+    #[link(name = "psapi")]
+    extern "system" {
+        fn GetProcessMemoryInfo(
+            process: *mut core::ffi::c_void,
+            ppsmemcounters: *mut ProcessMemoryCounters,
+            cb: u32,
+        ) -> i32;
+    }
+    unsafe {
+        let mut pmc = std::mem::zeroed::<ProcessMemoryCounters>();
+        pmc.cb = std::mem::size_of::<ProcessMemoryCounters>() as u32;
+        if GetProcessMemoryInfo(GetCurrentProcess(), &mut pmc, pmc.cb) == 0 {
+            return None;
+        }
+        Some((pmc.working_set_size as u64) / (1024 * 1024))
+    }
+}
+
+fn fmt_dur(d: Duration) -> String {
+    if d.as_secs_f64() >= 1.0 {
+        format!("{:.2}s", d.as_secs_f64())
+    } else {
+        format!("{:.0}ms", d.as_secs_f64() * 1000.0)
+    }
+}
+
 /// Result of [`sync_units`]. `changed_paths` are keys in `units` (no cloned
 /// `FileUnit`s). `units_flushed` means every changed row is already in SQLite.
 struct UnitSync {
@@ -2371,13 +2620,17 @@ fn sync_units(
     }
 
     let dirty_found = dirty.len();
-    let dirty = take_reparse_budget(dirty, units, budget, focus, on_progress);
+    let mut dirty = take_reparse_budget(dirty, units, budget, focus, on_progress);
     let dirty_total = dirty.len();
     let deferred = dirty_found.saturating_sub(dirty_total);
 
+    // Largest files first so a 700KB Vue/JS file cannot sit at the end of a
+    // 256-file barrier and freeze the progress counter (the 6144 stall).
+    dirty.sort_by(|a, b| b.len.cmp(&a.len));
+
     let threads = parse_parallelism();
     on_progress(&format!(
-        "Code graph: re-parsing {dirty_total} changed/new file(s) ({kept} unchanged{}) with {threads} threads in batches of {PARSE_BATCH_FILES}...",
+        "Code graph: re-parsing {dirty_total} changed/new file(s) ({kept} unchanged{}) with {threads} threads...",
         if deferred > 0 {
             format!(", {deferred} deferred")
         } else {
@@ -2390,27 +2643,60 @@ fn sync_units(
     let stream_persist = dirty_total >= PARSE_BATCH_FILES;
     let mut reparsed = 0usize;
     let mut changed_paths = Vec::with_capacity(dirty_total);
+    units.reserve(dirty_total);
 
-    // Parse on a dedicated Rayon pool; SQLite writes run on a sidecar thread
-    // so the 64MB WAL checkpoint is not on the parse critical path (the
-    // 6144-file stall). sync_channel(1) keeps at most one encoded batch in flight.
-    let mut persist_tx: Option<mpsc::SyncSender<Vec<super::index_db::PreparedUnitWrite>>> = None;
+    // Parse workers encode + send rows as they finish. SQLite batches on a
+    // sidecar thread. Result is reported to the UI *before* persist-send so a
+    // full queue cannot freeze the 256-file counter (the ~14140 stall).
+    let probe = PipelineProbe::new();
+    let persist_failed = Arc::new(AtomicBool::new(false));
+    let mut persist_tx: Option<mpsc::SyncSender<super::index_db::PreparedUnitWrite>> = None;
     let mut persist_join = None;
     if stream_persist {
         if let Ok(db) = super::index_db::IndexDb::open_shared(root) {
             db.set_bulk_ingest(true);
         }
-        let (tx, rx) = mpsc::sync_channel::<Vec<super::index_db::PreparedUnitWrite>>(1);
+        let (tx, rx) = mpsc::sync_channel::<super::index_db::PreparedUnitWrite>(PERSIST_QUEUE_CAP);
         let persist_root = root.to_path_buf();
+        let persist_probe = probe.clone();
         match std::thread::Builder::new()
             .name("codegraph-persist".into())
             .spawn(move || {
                 let Ok(db) = super::index_db::IndexDb::open_shared(&persist_root) else {
                     return;
                 };
-                while let Ok(batch) = rx.recv() {
-                    if !batch.is_empty() {
-                        let _ = db.upsert_units_prepared(&batch, &[]);
+                let mut batch = Vec::with_capacity(UNIT_WRITE_CHUNK);
+                let flush = |batch: &mut Vec<super::index_db::PreparedUnitWrite>| {
+                    if batch.is_empty() {
+                        return;
+                    }
+                    let n = batch.len();
+                    let t = Instant::now();
+                    let _ = db.upsert_units_prepared(batch, &[]);
+                    persist_probe.note_sqlite(n, t.elapsed());
+                    persist_probe
+                        .persist_q
+                        .fetch_sub(n, Ordering::Relaxed);
+                    batch.clear();
+                };
+                loop {
+                    match rx.recv() {
+                        Ok(item) => {
+                            batch.push(item);
+                            while batch.len() < UNIT_WRITE_CHUNK {
+                                match rx.try_recv() {
+                                    Ok(i) => batch.push(i),
+                                    Err(_) => break,
+                                }
+                            }
+                            if batch.len() >= UNIT_WRITE_CHUNK {
+                                flush(&mut batch);
+                            }
+                        }
+                        Err(_) => {
+                            flush(&mut batch);
+                            break;
+                        }
                     }
                 }
             }) {
@@ -2418,13 +2704,15 @@ fn sync_units(
                 persist_tx = Some(tx);
                 persist_join = Some(h);
             }
-            Err(_) => {}
+            Err(_) => persist_failed.store(true, Ordering::Relaxed),
         }
     }
 
     // Dedicated pool so per-thread tree-sitter Parser/Query TLS dies with
     // the pool — before compose / graph serialize — instead of living on
     // the process-global Rayon workers for the rest of the CLI run.
+    let parse_wall = Instant::now();
+    let mut last_mark = parse_wall;
     {
         let pool = rayon::ThreadPoolBuilder::new()
             .num_threads(threads)
@@ -2432,26 +2720,61 @@ fn sync_units(
             .build()
             .ok();
 
-        let parse_chunk = |chunk: &[&Walked]| -> Vec<(PathBuf, Option<FileUnit>)> {
-            let job = || {
-                chunk
-                    .par_iter()
-                    .map(|w| {
-                        let norm_p = normalize_index_path(&w.path);
-                        (norm_p, parse_unit(w))
-                    })
-                    .collect()
-            };
-            match pool.as_ref() {
-                Some(p) => p.install(job),
-                None => job(),
-            }
-        };
+        let (result_tx, result_rx) = mpsc::channel::<(PathBuf, Option<FileUnit>)>();
+        let persist_failed_w = persist_failed.clone();
+        let worker_probe = probe.clone();
 
-        for chunk in dirty.chunks(PARSE_BATCH_FILES) {
-            let parsed = parse_chunk(chunk);
-            let flush_from = changed_paths.len();
-            for (path, unit) in parsed {
+        std::thread::scope(|s| {
+            s.spawn(|| {
+                let job = || {
+                    dirty.par_iter().for_each_with(
+                        (result_tx, persist_tx, worker_probe),
+                        |(rtx, ptx, probe), w| {
+                            let t_parse = Instant::now();
+                            let unit = parse_unit(w);
+                            let parse_d = t_parse.elapsed();
+                            let norm_p = normalize_index_path(&w.path);
+                            let prepared = match (ptx.as_ref(), unit.as_ref()) {
+                                (Some(_), Some(u)) => {
+                                    super::index_db::PreparedUnitWrite::from_unit(norm_p.clone(), u)
+                                }
+                                _ => None,
+                            };
+                            let _ = rtx.send((norm_p, unit));
+                            let mut persist_wait = Duration::ZERO;
+                            if let (Some(tx), Some(prep)) = (ptx.as_ref(), prepared) {
+                                let t_send = Instant::now();
+                                match tx.send(prep) {
+                                    Ok(()) => {
+                                        persist_wait = t_send.elapsed();
+                                        let q = probe.persist_q.fetch_add(1, Ordering::Relaxed) + 1;
+                                        probe.persist_q_peak.fetch_max(q, Ordering::Relaxed);
+                                        probe.persist_block_ns.fetch_add(
+                                            persist_wait.as_nanos() as u64,
+                                            Ordering::Relaxed,
+                                        );
+                                    }
+                                    Err(_) => persist_failed_w.store(true, Ordering::Relaxed),
+                                }
+                            }
+                            if parse_d >= SLOW_PARSE || persist_wait >= SLOW_PARSE {
+                                probe.note_slow(SlowParse {
+                                    path: w.path.clone(),
+                                    len: w.len,
+                                    parse: parse_d,
+                                    persist_wait,
+                                });
+                            }
+                        },
+                    );
+                };
+                match pool.as_ref() {
+                    Some(p) => p.install(job),
+                    None => job(),
+                }
+            });
+
+            while let Ok((path, unit)) = result_rx.recv() {
                 reparsed += 1;
                 match unit {
                     Some(u) => {
@@ -2463,57 +2786,116 @@ fn sync_units(
                         deleted_paths.push(path);
                     }
                 }
-            }
-            if stream_persist {
-                let encode = || {
-                    changed_paths[flush_from..]
-                        .par_iter()
-                        .filter_map(|p| {
-                            let u = units.get(p)?;
-                            super::index_db::PreparedUnitWrite::from_unit(p.clone(), u)
-                        })
-                        .collect::<Vec<_>>()
-                };
-                let prepared = match pool.as_ref() {
-                    Some(p) => p.install(encode),
-                    None => encode(),
-                };
-                let sent = persist_tx
-                    .as_ref()
-                    .map(|tx| tx.send(prepared).is_ok())
-                    .unwrap_or(false);
-                if !sent {
-                    persist_paths(root, units, &changed_paths[flush_from..], &[]);
+                if reparsed % PARSE_BATCH_FILES == 0 || reparsed == dirty_total {
+                    let interval = last_mark.elapsed();
+                    last_mark = Instant::now();
+                    probe.note_rss();
+                    let q = probe.persist_q.load(Ordering::Relaxed);
+                    let rss = current_rss_mb();
+                    let n = if reparsed % PARSE_BATCH_FILES == 0 {
+                        PARSE_BATCH_FILES
+                    } else {
+                        reparsed % PARSE_BATCH_FILES
+                    };
+                    let rate = if interval.as_secs_f64() > 0.0 {
+                        n as f64 / interval.as_secs_f64()
+                    } else {
+                        0.0
+                    };
+                    let mut line = format!(
+                        "Code graph: re-parsed {reparsed}/{dirty_total}  {}  {rate:.0}/s  persist_q={q}/{PERSIST_QUEUE_CAP}",
+                        fmt_dur(interval)
+                    );
+                    if let Some(mb) = rss {
+                        line.push_str(&format!("  rss={mb}MB"));
+                    }
+                    on_progress(&line);
+                    if interval >= SLOW_INTERVAL {
+                        if let Some(slow) = probe.take_window_slow() {
+                            on_progress(&format!(
+                                "  stall: {} ({}KB, parse={}, persist_wait={})",
+                                path_for_display(&slow.path),
+                                slow.len / 1024,
+                                fmt_dur(slow.parse),
+                                fmt_dur(slow.persist_wait)
+                            ));
+                        } else {
+                            on_progress(&format!(
+                                "  stall: no single slow file (queue/memory pressure more likely)"
+                            ));
+                        }
+                    } else {
+                        let _ = probe.take_window_slow();
+                    }
                 }
             }
-            on_progress(&format!(
-                "Code graph: re-parsed {reparsed}/{dirty_total} dirty files..."
-            ));
-        }
+        });
     }
-
-    drop(persist_tx);
-    if let Some(h) = persist_join.take() {
-        let _ = h.join();
-    }
-    if stream_persist {
-        on_progress("Code graph: compacting SQLite WAL...");
-        if let Ok(db) = super::index_db::IndexDb::open_shared(root) {
-            db.set_bulk_ingest(false);
-        }
-    }
+    let parse_wall_d = parse_wall.elapsed();
 
     on_progress(&format!(
         "Code graph: finished parse of {dirty_total} dirty files ({threads} threads)."
     ));
 
+    let t_flush = Instant::now();
+    if let Some(h) = persist_join.take() {
+        let _ = h.join();
+    }
+    let flush_d = t_flush.elapsed();
+    let t_wal = Instant::now();
+    if stream_persist {
+        if let Ok(db) = super::index_db::IndexDb::open_shared(root) {
+            db.set_bulk_ingest(false);
+        }
+        if persist_failed.load(Ordering::Relaxed) {
+            persist_paths(root, units, &changed_paths, &[]);
+        }
+    }
+    let wal_d = t_wal.elapsed();
+
+    if stream_persist || dirty_total >= PARSE_BATCH_FILES {
+        let sqlite = Duration::from_nanos(probe.sqlite_ns.load(Ordering::Relaxed));
+        let blocked = Duration::from_nanos(probe.persist_block_ns.load(Ordering::Relaxed));
+        let peak_q = probe.persist_q_peak.load(Ordering::Relaxed);
+        let batches = probe.sqlite_batches.load(Ordering::Relaxed);
+        let rows = probe.sqlite_rows.load(Ordering::Relaxed);
+        let peak_rss = probe.peak_rss_mb.load(Ordering::Relaxed);
+        let mut summary = format!(
+            "Code graph: pipeline wall={}  sqlite={} ({} batches, {} rows)  persist_block={}  peak_q={peak_q}  flush={}  wal_switch={}",
+            fmt_dur(parse_wall_d),
+            fmt_dur(sqlite),
+            batches,
+            rows,
+            fmt_dur(blocked),
+            fmt_dur(flush_d),
+            fmt_dur(wal_d)
+        );
+        if peak_rss > 0 {
+            summary.push_str(&format!("  peak_rss={peak_rss}MB"));
+        }
+        on_progress(&summary);
+        if let Ok(top) = probe.top_slow.lock() {
+            for (i, s) in top.iter().take(5).enumerate() {
+                on_progress(&format!(
+                    "  slow[{}]: {} ({}KB, parse={}, persist_wait={})",
+                    i + 1,
+                    path_for_display(&s.path),
+                    s.len / 1024,
+                    fmt_dur(s.parse),
+                    fmt_dur(s.persist_wait)
+                ));
+            }
+        }
+    }
+
+    let units_flushed = stream_persist && !persist_failed.load(Ordering::Relaxed);
     UnitSync {
         reparsed,
         removed,
         kept,
         changed_paths,
         deleted_paths,
-        units_flushed: stream_persist,
+        units_flushed,
     }
 }
 
@@ -2642,7 +3024,7 @@ impl CodeIndex {
             .and_then(|e| e.to_str())
             .map(is_indexed_ext)
             .unwrap_or(false);
-        if !ext_ok || is_generated_source(&norm_path) {
+        if !ext_ok || is_generated_source(&norm_path) || path_under_skip_dir(&norm_path) {
             return false;
         }
 
@@ -2700,7 +3082,7 @@ impl CodeIndex {
             }
         };
 
-        if len > MAX_INDEX_FILE_BYTES {
+        if len > max_index_file_bytes(&norm_path) {
             return false;
         }
 
@@ -4202,6 +4584,50 @@ public class OrderController
         assert!(
             g.find_by_name("gen").is_empty(),
             "test_generated.rs should be ignored"
+        );
+    }
+
+    #[test]
+    fn skips_vendored_element_ui_and_minified_js() {
+        let d = tempfile::tempdir().unwrap();
+        std::fs::write(d.path().join("app.js"), "export function app() {}\n").unwrap();
+
+        let ui = d.path().join("element-ui").join("2.0.5").join("lib");
+        std::fs::create_dir_all(&ui).unwrap();
+        std::fs::write(ui.join("index.js"), format!("{};\n", "x".repeat(2000))).unwrap();
+
+        let minified = d.path().join("vendor-kit.js");
+        std::fs::write(&minified, "a".repeat(40_000)).unwrap();
+
+        let pretty = d.path().join("pretty.js");
+        let pretty_src = (0..800)
+            .map(|i| format!("export function f{i}() {{}}\n"))
+            .collect::<String>();
+        std::fs::write(&pretty, pretty_src).unwrap();
+
+        let g = build_graph(d.path());
+        assert!(
+            !g.find_by_name("app").is_empty(),
+            "application JS must stay indexed"
+        );
+        assert!(
+            path_under_skip_dir(&ui.join("index.js")),
+            "element-ui/ must be a skip dir"
+        );
+        let gi = load_codegraph_ignore(d.path());
+        let min_len = std::fs::metadata(&minified).unwrap().len();
+        assert!(
+            skip_index_file(d.path(), &minified, min_len, &gi),
+            "one-line 40KB JS must be treated as a minified bundle"
+        );
+        let pretty_len = std::fs::metadata(&pretty).unwrap().len();
+        assert!(
+            !skip_index_file(d.path(), &pretty, pretty_len, &gi),
+            "normal multi-line JS must stay"
+        );
+        assert!(
+            g.find_by_name("f0").into_iter().next().is_some(),
+            "pretty.js functions must be indexed"
         );
     }
 

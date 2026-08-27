@@ -34,7 +34,7 @@ JeikCode 统一将全局运行时数据与用户级配置保存在 `~/.atomcode/
 | `auth-refresh.lock` | 🔒 运行锁 | 凭据刷新时的并发互斥锁。 |
 | **`mcp.json`** | 🔌 外部扩展 | 全局 MCP 外部工具服务配置（filesystem, github, postgres 等）。 |
 | **`memory.md`** | 🧠 长期记忆 | 跨会话长期记忆存储文件，Agent 在每次会话启动时读取。 |
-| `.codegraphignore` | 🚫 索引忽略 | 代码图谱与符号索引忽略规则（语法同 `.gitignore`）。 |
+| `.codegraphignore` | 🚫 索引忽略 | 代码图谱与符号索引忽略规则（语法同 `.gitignore`）。**Git 工作区走 `git ls-files` 时同样应用**（项目根、`<workspace>/.atomcode/`、以及 `~/.atomcode/` 三处）。 |
 | `builtin-tools.txt` | 📋 工具清单 | 当前版本所有可用内置工具的名称与参数摘要。 |
 | `config_teachs.md` | 📖 历史教程 | 兼容保留的单文件完整配置指南。 |
 | `history` | 📜 历史输入 | 交互式 TUI 终端的历史命令记录文件。 |

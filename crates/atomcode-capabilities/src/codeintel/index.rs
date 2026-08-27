@@ -574,17 +574,13 @@ fn enrich_symbol_microstructure(nodes: &mut [SymbolNode], source: &str) {
             literals.truncate(MAX_STRING_LITERALS_PER_SYMBOL);
         }
         for lit in &mut literals {
-            if lit.len() > MAX_LITERAL_CHARS {
-                lit.truncate(MAX_LITERAL_CHARS);
-            }
+            truncate_to_char_boundary(lit, MAX_LITERAL_CHARS);
         }
         if sqls.len() > MAX_SQL_PREDICATES_PER_SYMBOL {
             sqls.truncate(MAX_SQL_PREDICATES_PER_SYMBOL);
         }
         for pred in &mut sqls {
-            if pred.raw_clause.len() > MAX_LITERAL_CHARS {
-                pred.raw_clause.truncate(MAX_LITERAL_CHARS);
-            }
+            truncate_to_char_boundary(&mut pred.raw_clause, MAX_LITERAL_CHARS);
         }
 
         let has_sql = !sqls.is_empty();
@@ -655,6 +651,20 @@ fn extract_literals_from_line(line: &str, out: &mut Vec<String>) {
 #[inline(always)]
 fn is_char_literal_bytes(bytes: &[u8], idx: usize) -> bool {
     idx + 2 < bytes.len() && bytes[idx + 2] == b'\''
+}
+
+/// Byte cap that never panics on CJK (ERP Chinese string literals).
+/// `String::truncate(n)` requires a char boundary; a 240-byte cut can land
+/// in the middle of a 3-byte 汉字 and abort `atomcode init`.
+fn truncate_to_char_boundary(s: &mut String, max_bytes: usize) {
+    if s.len() <= max_bytes {
+        return;
+    }
+    let mut end = max_bytes;
+    while end > 0 && !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    s.truncate(end);
 }
 
 fn is_trivial_literal(s: &str) -> bool {
@@ -4385,6 +4395,37 @@ public class OrderController
                 .iter()
                 .all(|s| s.len() <= MAX_LITERAL_CHARS),
             "a literal exceeded the char cap"
+        );
+    }
+
+    #[test]
+    fn truncate_to_char_boundary_stops_before_cjk() {
+        let mut s = "业绩统计".repeat(80);
+        assert!(s.len() > MAX_LITERAL_CHARS);
+        truncate_to_char_boundary(&mut s, MAX_LITERAL_CHARS);
+        assert!(s.len() <= MAX_LITERAL_CHARS);
+        assert!(s.is_char_boundary(s.len()));
+        assert!(!s.is_empty());
+    }
+
+    #[test]
+    fn cjk_literal_cap_does_not_panic_on_char_boundary() {
+        let d = tempfile::tempdir().unwrap();
+        // 汉字 = 3 bytes. 100 of them = 300 bytes > MAX_LITERAL_CHARS (240),
+        // so a naive `truncate(240)` lands mid-character and panics.
+        let cjk: String = "业绩统计报表客户回访".chars().cycle().take(100).collect();
+        let src = format!("pub fn report() {{ let _s = \"{cjk}\"; }}\n");
+        std::fs::write(d.path().join("cjk.rs"), src).unwrap();
+        let g = build_graph(d.path());
+        let n = g.find_by_name("report").into_iter().next().expect("report");
+        assert!(
+            n.string_literals.iter().all(|s| s.len() <= MAX_LITERAL_CHARS),
+            "CJK literal exceeded byte cap: {:?}",
+            n.string_literals.iter().map(|s| s.len()).collect::<Vec<_>>()
+        );
+        assert!(
+            n.string_literals.iter().all(|s| std::str::from_utf8(s.as_bytes()).is_ok()),
+            "truncated literal must stay valid UTF-8"
         );
     }
 }

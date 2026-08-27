@@ -1,11 +1,11 @@
-//! Directory aggregate index (`dirindex.v1.json`): per-directory file/symbol
-//! counts plus the directory tree, precomputed at index-build time.
+//! Directory aggregate index: per-directory file/symbol counts plus the
+//! directory tree, precomputed at index-build time and stored in SQLite meta.
 //!
 //! Lets the code_explore directory panorama resolve "which directories exist,
-//! how many files/symbols each holds" from a compact sidecar instead of
+//! how many files/symbols each holds" from a compact blob instead of
 //! re-walking the whole `file_symbols` map on every query. Pure statistics,
-//! no model inference. Missing / stale sidecar degrades gracefully: the
-//! panorama falls back to the live graph walk (see `explore.rs`).
+//! no model inference. Missing stats degrade gracefully: the panorama falls
+//! back to the live graph walk (see `explore.rs`).
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -13,9 +13,6 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 
 use super::super::graph::CodeGraph;
-
-/// On-disk sidecar name next to `units.v3.json`.
-pub const DIRINDEX_REL: &str = ".atomcode/codegraph/dirindex.v1.json";
 
 const DIRINDEX_VERSION: u32 = 1;
 
@@ -30,7 +27,7 @@ pub struct DirEntry {
 
 /// Directory aggregate index. Paths are stored as lossy absolute strings
 /// (matching how `CodeGraph` keys `file_symbols`), so a query can use it
-/// without a root join; a moved workspace simply misses the sidecar and
+/// without a root join; a moved workspace simply misses the stored index and
 /// falls back to the graph walk.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct DirIndex {

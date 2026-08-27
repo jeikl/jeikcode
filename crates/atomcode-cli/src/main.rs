@@ -3192,7 +3192,7 @@ fn run_setup_command(force: bool, _non_interactive: bool) -> i32 {
 
 /// `atomcode init` — build/refresh the workspace code graph and persist it.
 fn run_init_command(dir: Option<PathBuf>, force: bool) -> i32 {
-    use atomcode_capabilities::codeintel::{init_workspace_index, DISK_CACHE_REL};
+    use atomcode_capabilities::codeintel::{init_workspace_index, DISK_CACHE_REL_DB};
 
     let root = match dir {
         Some(p) => {
@@ -3254,7 +3254,7 @@ fn run_init_command(dir: Option<PathBuf>, force: bool) -> i32 {
             }
             println!();
             println!(
-                "  Tip: agent graph tools load `{DISK_CACHE_REL}` automatically when up to date."
+                "  Tip: agent graph tools load `{DISK_CACHE_REL_DB}` automatically when up to date."
             );
             println!("  Re-run after large git pulls, or rely on incremental background refresh.");
             0

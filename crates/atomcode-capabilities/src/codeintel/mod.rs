@@ -55,9 +55,8 @@ pub use file_deps::FileDependenciesTool;
 pub use find_references::FindReferencesTool;
 pub use find_symbol::FindSymbolTool;
 pub use graph::{CodeGraph, Edge, EdgeKind, SymbolId, SymbolKind, SymbolNode, Visibility};
-pub use index::{
-    build_graph, disk_cache_path, init_workspace_index, CodeIndex, IndexReport, DISK_CACHE_REL,
-};
+pub use index::{build_graph, disk_cache_path, init_workspace_index, CodeIndex, IndexReport};
+pub use index_db::DISK_CACHE_REL_DB;
 pub use lang::Lang;
 pub use list_symbols::ListSymbolsTool;
 pub use read_symbol::ReadSymbolTool;

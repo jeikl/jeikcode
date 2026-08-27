@@ -168,10 +168,9 @@ codeintel = [
     "dep:tree-sitter-c-sharp", "dep:tree-sitter-html", "dep:tree-sitter-php",
     # the cross-file graph layer (build_graph) walks the repo gitignore-aware
     "dep:ignore",
-    # binary index cache (units.v4.bin): bincode for fast (de)serialization,
-    # zstd for ~10× smaller on-disk size (crate is already a build dependency).
+    # sqlite-backed index: bincode+zstd blobs inside index.v1.db,
+    # rusqlite for incremental row-level upserts.
     "dep:bincode", "dep:zstd",
-    # sqlite-backed index storage for fast incremental disk cache updates.
     "dep:rusqlite",
     # fs2 file lock serializes concurrent cache writes across processes.
     "dep:fs2",

@@ -1,6 +1,6 @@
 //! SQLite-backed incremental index storage for `CodeGraph` & `FileUnit` cache.
 //!
-//! Replaces giant monolithic JSON/bin rewrites with row-level atomic upserts/deletions.
+//! On-disk layout is `.atomcode/codegraph/index.v1.db` with row-level upserts.
 
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -393,7 +393,7 @@ impl IndexDb {
         Ok(())
     }
 
-    /// Store a small sidecar blob (dirindex / idf stats) inside SQLite so we
+    /// Store a small derived blob (dirindex / idf stats) inside SQLite so we
     /// do not emit sibling `.json` files next to the database.
     pub fn put_meta_blob(&self, key: &str, blob: &[u8]) -> Result<(), rusqlite::Error> {
         let conn = self.conn.lock().map_err(|_| {

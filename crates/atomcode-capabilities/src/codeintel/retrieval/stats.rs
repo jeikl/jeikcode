@@ -13,9 +13,6 @@ use serde::{Deserialize, Serialize};
 use super::super::bilingual_nlp::is_cjk;
 use super::super::graph::{CodeGraph, SymbolNode};
 
-/// On-disk sidecar name next to `units.v3.json` for corpus statistics.
-pub const STATS_REL: &str = ".atomcode/codegraph/stats.v1.json";
-
 const STATS_VERSION: u32 = 1;
 
 /// Tokenization helpers shared by corpus stats and query scoring.
@@ -118,7 +115,7 @@ pub struct IdfStats {
     pub total_ascii_terms: u64,
     /// total CJK phrase occurrences across the corpus (for avgdl).
     pub total_cjk_phrases: u64,
-    /// sidecar format version (gate for loading).
+    /// blob format version (gate for loading).
     pub version: u32,
 }
 
@@ -208,7 +205,7 @@ impl IdfStats {
         (total / n).max(1.0)
     }
 
-    /// Persist to disk (atomic tmp+rename, mirrors units.v3.json).
+    /// Persist as JSON (used by tests and SQLite meta blobs).
     pub fn save(&self, path: &std::path::Path) -> std::io::Result<()> {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
@@ -221,8 +218,7 @@ impl IdfStats {
         Ok(())
     }
 
-    /// Load from disk. Returns `None` on missing/corrupt/version-mismatch so
-    /// the caller falls back to `IdfStats::build`.
+    /// Load from a JSON file. Returns `None` on missing/corrupt/version-mismatch.
     pub fn load(path: &std::path::Path) -> Option<Self> {
         let bytes = std::fs::read(path).ok()?;
         let stats: IdfStats = serde_json::from_slice(&bytes).ok()?;

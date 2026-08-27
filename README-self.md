@@ -11,7 +11,7 @@
 | 更新源 | 官方 `main` 分支 + 官方 releases | **内置 `local-dev` 分支 + 你的 releases**(env/config 可覆盖) |
 | 工具参数容错 | 基础 repair | **五级修复链 + schema 类型层 + 结构化诊断 + 失败计数熔断** |
 | 代码检索 | 基础词林 + 哈希向量 | **六类目录全景 + BM25 + 概念向量 + 查询缓存 + 并行评分** |
-| 索引性能 | 单会话独立索引 + JSON | **进程级共享索引 + 二进制缓存(zstd)+ sidecar 落盘 + 增量保存** |
+| 索引性能 | 单会话独立索引 + JSON | **进程级共享索引 + SQLite (`index.v1.db`) 增量落盘** |
 | 默认配置 | 官方模板 | **内嵌自建词林(9 个领域)+ builtin-tools + `prompts/` 模板,首次启动自动写入(不覆盖已有文件)** |
 | 跨平台 | Windows/Linux/macOS/HarmonyOS | 同 + **路径/BOM/大小写全面适配修复** |
 
@@ -34,7 +34,7 @@
 - **锚点软降权**:命名平淡的核心文件(`run_loop.rs`/`turn.rs`)不再被硬门槛挡掉;
 - **查询结果缓存**(fingerprint+query+scope+max_files+开关 六元 key)+ 会话去重 root 隔离;
 - **前端全覆盖**:Vue2/3/Svelte/Astro SFC 双解析(script+template 元素)、React/TSX JSX 元素、CSS/SCSS/LESS 样式类、HTML;
-- **性能**:rayon 并行评分 + 进程级共享 CodeIndex + units.v4.bin(zstd)冷启动 + stats/dirindex sidecar 落盘。
+- **性能**:rayon 并行评分 + 进程级共享 CodeIndex + SQLite (`index.v1.db`) 冷启动与增量保存。
 
 ### 3. 自建无感更新(本 fork 最核心的部署差异)
 

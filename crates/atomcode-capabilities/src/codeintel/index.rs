@@ -97,15 +97,9 @@ pub fn normalize_index_path(p: &Path) -> PathBuf {
     }
 }
 
-/// On-disk cache layout version. Bump when AST queries / DiskCache / unit schema changes.
+/// In-memory unit schema version carried on [`DiskCache`]. Bump when AST
+/// queries / `FileUnit` layout changes. On-disk store is SQLite (`index.v1.db`).
 const DISK_CACHE_VERSION: u32 = 3;
-
-/// Relative path under the workspace root for the persisted unit+graph cache.
-pub const DISK_CACHE_REL: &str = ".atomcode/codegraph/units.v3.json";
-
-/// Relative path for the BINARY (bincode+zstd) index cache. Written whenever
-/// possible; `units.v3.json` stays as a read fallback for older workspaces.
-pub const DISK_CACHE_REL_BIN: &str = ".atomcode/codegraph/units.v4.bin";
 
 /// Map a tree-sitter node-kind string to a [`SymbolKind`]. From production
 /// `classify_symbol_kind`.
@@ -1427,14 +1421,9 @@ pub struct IndexReport {
     pub phases: IndexPhaseTimings,
 }
 
-/// Absolute path of the on-disk codegraph cache for `root`.
+/// Absolute path of the SQLite codegraph cache for `root`.
 pub fn disk_cache_path(root: &Path) -> PathBuf {
-    super::canonical(root).join(DISK_CACHE_REL)
-}
-
-/// Absolute path of the BINARY (bincode+zstd) codegraph cache for `root`.
-pub fn disk_cache_path_bin(root: &Path) -> PathBuf {
-    super::canonical(root).join(DISK_CACHE_REL_BIN)
+    super::index_db::disk_cache_path_db(root)
 }
 
 fn top_component_str<'a>(p: &'a Path, root: &Path) -> Option<&'a str> {
@@ -1559,8 +1548,7 @@ pub struct FileUnit {
     pub calls: Vec<RawCall>,
 }
 
-/// Persisted workspace index written by `atomcode init` / after in-process builds.
-#[derive(Serialize, Deserialize)]
+/// In-memory workspace index loaded from SQLite (`index.v1.db`).
 pub struct DiskCache {
     pub version: u32,
     /// Canonical root path string (informational; validity is walk_fp).
@@ -1571,22 +1559,8 @@ pub struct DiskCache {
     pub graph: CodeGraph,
 }
 
-/// Load the binary cache (`units.v4.bin`): bincode-decode + zstd-decompress.
-fn load_disk_cache_bin(root: &Path) -> Option<DiskCache> {
-    let path = disk_cache_path_bin(root);
-    let bytes = std::fs::read(&path).ok()?;
-    let decompressed = zstd::stream::decode_all(&bytes[..]).ok()?;
-    let mut cache: DiskCache = bincode::deserialize(&decompressed).ok()?;
-    if cache.version != DISK_CACHE_VERSION {
-        return None;
-    }
-    cache.graph.rebuild_name_index();
-    Some(cache)
-}
-
-fn units_from_disk(cache: DiskCache) -> HashMap<PathBuf, FileUnit> {
-    cache
-        .units
+fn units_from_disk(units: HashMap<String, FileUnit>) -> HashMap<PathBuf, FileUnit> {
+    units
         .into_iter()
         .map(|(p, u)| (normalize_index_path(&PathBuf::from(p)), u))
         .collect()
@@ -1602,65 +1576,32 @@ fn rekey_units(units: &mut HashMap<PathBuf, FileUnit>) {
     }
 }
 
-/// Write the binary cache (`units.v4.bin`): zstd-compress + bincode-encode.
-fn save_disk_cache_bin(root: &Path, cache: &DiskCache) -> std::io::Result<PathBuf> {
-    let path = disk_cache_path_bin(root);
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-    let bytes = bincode::serialize(cache)
-        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
-    let compressed = zstd::stream::encode_all(&bytes[..], 3)
-        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
-    let tmp = path.with_extension("bin.tmp");
-    std::fs::write(&tmp, compressed)?;
-    std::fs::rename(&tmp, &path)?;
-    Ok(path)
-}
-
 fn load_disk_cache(root: &Path) -> Option<DiskCache> {
-    // 1. Prefer SQLite-backed cache (`index.v1.db`) — fast incremental row-level upserts.
-    //    Units are sufficient to recompose a graph; the graph blob is optional.
     let db_path = super::index_db::disk_cache_path_db(root);
-    if db_path.is_file() {
-        if let Ok(db) = super::index_db::IndexDb::open_shared(root) {
-            let units_map = db.load_units();
-            if !units_map.is_empty() {
-                let mut unit_str_map = HashMap::with_capacity(units_map.len());
-                for (p, u) in units_map {
-                    unit_str_map.insert(normalize_index_path(&p).to_string_lossy().into_owned(), u);
-                }
-                let graph = db.load_graph().unwrap_or_else(CodeGraph::new);
-                let walk_fp = db.get_walk_fp().unwrap_or(0);
-                return Some(DiskCache {
-                    version: DISK_CACHE_VERSION,
-                    root: root.display().to_string(),
-                    walk_fp,
-                    units: unit_str_map,
-                    graph,
-                });
-            }
-        }
-    }
-
-    // 2. Binary cache (`units.v4.bin`)
-    if let Some(bin) = load_disk_cache_bin(root) {
-        return Some(bin);
-    }
-
-    // 3. Fall back to the legacy JSON cache (old workspaces / downgrade path).
-    let path = disk_cache_path(root);
-    let bytes = std::fs::read(&path).ok()?;
-    let mut cache: DiskCache = serde_json::from_slice(&bytes).ok()?;
-    if cache.version != DISK_CACHE_VERSION {
+    if !db_path.is_file() {
         return None;
     }
-    cache.graph.rebuild_name_index();
-    Some(cache)
+    let db = super::index_db::IndexDb::open_shared(root).ok()?;
+    let units_map = db.load_units();
+    if units_map.is_empty() {
+        return None;
+    }
+    let mut unit_str_map = HashMap::with_capacity(units_map.len());
+    for (p, u) in units_map {
+        unit_str_map.insert(normalize_index_path(&p).to_string_lossy().into_owned(), u);
+    }
+    let graph = db.load_graph().unwrap_or_else(CodeGraph::new);
+    let walk_fp = db.get_walk_fp().unwrap_or(0);
+    Some(DiskCache {
+        version: DISK_CACHE_VERSION,
+        root: root.display().to_string(),
+        walk_fp,
+        units: unit_str_map,
+        graph,
+    })
 }
 
-/// Persist only the dirty file-unit rows. Never serializes the whole graph or
-/// rewrites the giant JSON/bin snapshots — those belong on first build / init.
+/// Persist only the dirty file-unit rows in SQLite.
 ///
 /// Writes in [`UNIT_WRITE_CHUNK`]-sized transactions so the WAL cannot grow to
 /// the size of the whole corpus (the 15k-file one-shot commit).
@@ -1748,9 +1689,6 @@ fn persist_units_chunked(root: &Path, units: &HashMap<PathBuf, FileUnit>, delete
     }
 }
 
-/// Remove leftover JSON/bin sidecars from the pre-SQLite layout. Serializing
-/// the whole graph to `units.v3.json` (hundreds of MB) is what made a 1-file
-/// edit take tens of seconds.
 const META_DIRINDEX: &str = "dirindex.v1";
 const META_IDF_STATS: &str = "idf_stats.v1";
 
@@ -1780,13 +1718,14 @@ fn load_idf_stats_sqlite(root: &Path) -> Option<super::retrieval::IdfStats> {
     serde_json::from_slice(&bytes).ok()
 }
 
+/// Delete leftover pre-SQLite snapshot files if a workspace still has them.
 fn cleanup_legacy_sidecars(root: &Path) {
     let root = super::canonical(root);
     for rel in [
-        DISK_CACHE_REL,
-        DISK_CACHE_REL_BIN,
-        super::retrieval::DIRINDEX_REL,
-        super::retrieval::stats::STATS_REL,
+        ".atomcode/codegraph/units.v3.json",
+        ".atomcode/codegraph/units.v4.bin",
+        ".atomcode/codegraph/dirindex.v1.json",
+        ".atomcode/codegraph/stats.v1.json",
         ".atomcode/codegraph/units.v3.json.tmp",
         ".atomcode/codegraph/units.v4.bin.tmp",
     ] {
@@ -1808,9 +1747,7 @@ fn save_disk_cache(
     }
 
     // SQLite is the only on-disk store. Units are the source of truth; the
-    // graph is recomposed in memory on cold start. No JSON, no bin snapshot.
-    // Never compress the whole corpus + graph in one shot — that WAL+bincode
-    // spike is what OOM-killed large `atomcode init` runs.
+    // graph is recomposed in memory on cold start.
     let incremental = !changed_units.is_empty() || !deleted_paths.is_empty();
     if incremental {
         persist_units_incremental(root, changed_units, deleted_paths);
@@ -2935,13 +2872,12 @@ struct IndexState {
     units: HashMap<PathBuf, FileUnit>,
     /// Composed query graph (derived from `units`).
     graph: Option<Arc<CodeGraph>>,
-    /// Directory aggregate index (derived from `graph`), persisted as a
-    /// sidecar `dirindex.v1.json` next to `units.v3.json`. `None` = not yet
-    /// built / sidecar missing → tools fall back to a live graph walk.
+    /// Directory aggregate index (derived from `graph`), persisted in SQLite
+    /// meta. `None` = not yet built → tools fall back to a live graph walk.
     dirindex: Option<Arc<super::retrieval::DirIndex>>,
-    /// Corpus statistics for BM25 (IDF / avgdl), persisted as
-    /// `stats.v1.json` and reused across sessions. `None` = not yet built →
-    /// the query path builds once and caches here.
+    /// Corpus statistics for BM25 (IDF / avgdl), persisted in SQLite meta
+    /// and reused across sessions. `None` = not yet built → the query path
+    /// builds once and caches here.
     idf_stats: Option<Arc<super::retrieval::IdfStats>>,
     /// Per-symbol concept vectors (symbol name → concept projection), lazily
     /// built and cached so every query / session sharing this `CodeIndex`
@@ -3179,8 +3115,8 @@ impl CodeIndex {
         }
     }
 
-    /// Directory aggregate index for `root` (lazily built if the sidecar is
-    /// missing). Returns `None` if no graph is loaded for `root`.
+    /// Directory aggregate index for `root` (lazily built if missing).
+    /// Returns `None` if no graph is loaded for `root`.
     pub fn get_dirindex(&self, root: &Path) -> Option<Arc<super::retrieval::DirIndex>> {
         let root = super::canonical(root);
         let guard = self.inner.lock().unwrap();
@@ -3191,9 +3127,9 @@ impl CodeIndex {
         }
     }
 
-    /// Corpus statistics for BM25 (`IdfStats`) for `root`. Lazily loads the
-    /// `stats.v1.json` sidecar; if missing/stale it builds from the graph once
-    /// and caches in memory so every subsequent query (any session sharing this
+    /// Corpus statistics for BM25 (`IdfStats`) for `root`. Lazily loads from
+    /// SQLite meta; if missing/stale it builds from the graph once and caches
+    /// in memory so every subsequent query (any session sharing this
     /// `CodeIndex`) reuses it instead of re-scanning all symbols.
     pub fn get_idf_stats(&self, root: &Path) -> Option<Arc<super::retrieval::IdfStats>> {
         let root = super::canonical(root);
@@ -3268,8 +3204,9 @@ impl CodeIndex {
     /// Ensure the index matches `root` on disk. Unchanged files keep their units;
     /// only dirty/new files are re-parsed, then the graph is recomposed if needed.
     ///
-    /// Cold start path: if memory is empty, try loading
-    /// [`.atomcode/codegraph/units.v1.json`](DISK_CACHE_REL) written by `atomcode init`.
+    /// Cold start path: if memory is empty, load
+    /// [`.atomcode/codegraph/index.v1.db`](super::index_db::DISK_CACHE_REL_DB)
+    /// written by `atomcode init`.
     pub fn get_with_progress(&self, root: &Path, on_progress: &dyn Fn(&str)) -> Arc<CodeGraph> {
         self.reconcile_workspace(root, None, on_progress, ReparseBudget::Query)
     }
@@ -3439,11 +3376,7 @@ impl CodeIndex {
                     let disk_fp = disk.walk_fp;
                     let disk_graph_ok = disk.graph.node_count() > 0;
                     let disk_graph = disk.graph;
-                    let mut loaded = disk
-                        .units
-                        .into_iter()
-                        .map(|(p, u)| (normalize_index_path(&PathBuf::from(p)), u))
-                        .collect::<HashMap<PathBuf, FileUnit>>();
+                    let mut loaded = units_from_disk(disk.units);
                     if !loaded.is_empty() {
                         let n_files = loaded.len();
                         let (mut walked_known, missing) = restat_known_units(&loaded, focus);
@@ -4142,20 +4075,20 @@ export function CouponPanel() {
             calls: vec![],
         };
         let units = HashMap::from([(file.clone(), unit.clone())]);
-        // Plant leftover sidecar junk — save must delete them.
-        let json_path = disk_cache_path(d.path());
-        let bin_path = disk_cache_path_bin(d.path());
-        std::fs::create_dir_all(json_path.parent().unwrap()).unwrap();
-        std::fs::write(&json_path, b"stale").unwrap();
-        std::fs::write(&bin_path, b"stale").unwrap();
+        let graph_dir = d.path().join(".atomcode").join("codegraph");
+        std::fs::create_dir_all(&graph_dir).unwrap();
+        let leftover_json = graph_dir.join("units.v3.json");
+        let leftover_bin = graph_dir.join("units.v4.bin");
+        std::fs::write(&leftover_json, b"stale").unwrap();
+        std::fs::write(&leftover_bin, b"stale").unwrap();
 
         let _ = save_disk_cache(d.path(), 1, &units, &g, &[], &[]);
         assert!(
             crate::codeintel::index_db::disk_cache_path_db(d.path()).is_file(),
             "SQLite db must be written"
         );
-        assert!(!json_path.exists(), "units.v3.json must not be written");
-        assert!(!bin_path.exists(), "units.v4.bin must not be written");
+        assert!(!leftover_json.exists(), "pre-SQLite json snapshot must be removed");
+        assert!(!leftover_bin.exists(), "pre-SQLite bin snapshot must be removed");
 
         let loaded = load_disk_cache(d.path()).expect("sqlite cache must load");
         assert_eq!(loaded.units.len(), 1);

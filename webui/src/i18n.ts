@@ -184,6 +184,8 @@ const zh = {
   'tool.incomplete': '未完成',
   'tool.args': '参数',
   'tool.output': '输出',
+  'tool.diffApplied': '已写入文件的变更',
+  'tool.diffPlanned': '预期替换（未写入，仅供参考）',
   'chat.thinking': '思考过程',
   'subtask.summary': '子代理 · {done}/{total} 完成 · {running} 运行中 · {pending} 等待 · {failed} 失败',
 
@@ -554,6 +556,8 @@ const en: Record<MsgKey, string> = {
   'tool.incomplete': 'Incomplete',
   'tool.args': 'Arguments',
   'tool.output': 'Output',
+  'tool.diffApplied': 'Changes written to file',
+  'tool.diffPlanned': 'Planned replacement (not applied)',
   'chat.thinking': 'Thinking',
   'subtask.summary': 'Subtasks · {done}/{total} done · {running} running · {pending} pending · {failed} failed',
 

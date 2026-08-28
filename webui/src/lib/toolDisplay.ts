@@ -132,6 +132,61 @@ function parseHunkStarts(header: string): { oldStart: number; newStart: number }
   return oldStart != null && newStart != null ? { oldStart, newStart } : null;
 }
 
+/** Build a synthetic unified-diff preview from edit args when tool output
+ *  has no `@@` hunk (failed edits, write_file stats, etc.). */
+export function buildEditArgsDiff(oldStr: string, newStr: string): DiffPreviewLine[] {
+  const oldLines = oldStr.replace(/\r\n/g, '\n').split('\n');
+  const newLines = newStr.replace(/\r\n/g, '\n').split('\n');
+  if (oldLines.length === 0 && newLines.length === 0) return [];
+  const header = `@@ -1,${Math.max(oldLines.length, 1)} +1,${Math.max(newLines.length, 1)} @@`;
+  const body: string[] = [header];
+  for (const line of oldLines) body.push(`-${line}`);
+  for (const line of newLines) body.push(`+${line}`);
+  return parseDiffPreview(body.join('\n'));
+}
+
+/** Format synthetic diff as copyable unified-diff text. */
+export function formatEditArgsDiffRaw(oldStr: string, newStr: string): string {
+  const oldLines = oldStr.replace(/\r\n/g, '\n').split('\n');
+  const newLines = newStr.replace(/\r\n/g, '\n').split('\n');
+  const header = `@@ -1,${Math.max(oldLines.length, 1)} +1,${Math.max(newLines.length, 1)} @@`;
+  const body: string[] = [header];
+  for (const line of oldLines) body.push(`-${line}`);
+  for (const line of newLines) body.push(`+${line}`);
+  return body.join('\n');
+}
+
+export function normalizeToolOutputText(raw: string): string {
+  return raw
+    .replace(/\\r\\n/g, '\n')
+    .replace(/\\n/g, '\n')
+    .replace(/\\t/g, '\t')
+    .replace(/\\"/g, '"');
+}
+
+/** Resolve diff lines: prefer real unified diff in output, else old/new args. */
+export function resolveToolDiffPreview(
+  name: string,
+  output: string | undefined,
+  args: string | undefined,
+): { lines: DiffPreviewLine[]; raw: string; source: 'output' | 'args' } | null {
+  if (!toolRendersAsDiff(name)) return null;
+  const normalized = output ? normalizeToolOutputText(output) : '';
+  if (normalized && looksLikeUnifiedDiff(normalized)) {
+    const lines = parseDiffPreview(normalized);
+    if (lines.some((l) => l.kind === 'add' || l.kind === 'del')) {
+      return { lines, raw: normalized, source: 'output' };
+    }
+  }
+  if (!args) return null;
+  const oldStr = jsonArgString(args, 'old_string');
+  const newStr = jsonArgString(args, 'new_string');
+  if (!oldStr && !newStr) return null;
+  const lines = buildEditArgsDiff(oldStr, newStr);
+  if (!lines.some((l) => l.kind === 'add' || l.kind === 'del')) return null;
+  return { lines, raw: formatEditArgsDiffRaw(oldStr, newStr), source: 'args' };
+}
+
 /** Best-effort unified-diff preview with per-line numbers from `@@` hunks.
  *  `+/-` lines are only colored after a real diff header — never on first sight. */
 export function parseDiffPreview(output: string, maxLines = 2000): DiffPreviewLine[] {

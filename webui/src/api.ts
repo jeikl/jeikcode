@@ -447,11 +447,12 @@ export interface SessionDetail {
   messages: SessionMessage[];
   /** Per-session model selection. Absent on older sessions. */
   preferred_model?: string | null;
-  /** Footer token/cache from last completed turn (persists across restart). */
+  /** Last-request occupancy for the footer (persists across restart). Not turn-cumulative billing. */
   token_usage?: SessionTokenUsage | null;
 }
 
-/** Token footer snapshot from session turn_stats (GET /projects/:hash/sessions/:id). */
+/** Token footer snapshot from session turn_stats (GET /projects/:hash/sessions/:id).
+ *  `prompt` is last-request occupancy (`used_tokens`), not summed model_usage. */
 export interface SessionTokenUsage {
   prompt: number;
   completion: number;

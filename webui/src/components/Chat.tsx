@@ -65,8 +65,7 @@ import {
   type MsgPart,
 } from '../lib/toolRows';
 import {
-  looksLikeUnifiedDiff,
-  parseDiffPreview,
+  resolveToolDiffPreview,
   formatToolPayload,
   prettyToolText,
   toolCategory,
@@ -109,6 +108,8 @@ import {
   estimateCacheFromHistoryPrompt,
   type TokenCacheState,
   estimatePrefixCached,
+  clampCachedToPrompt,
+  isStackedTurnBillingUsage,
   userMessageAlreadyOnCanvas,
   syncAttachDisposition,
   type ChatRecoveryEvent,
@@ -842,15 +843,20 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
   };
 
   const applyServerTokenUsage = (usage: SessionTokenUsage) => {
+    // Same formula as the live `tokens` event: last-request prompt + completion.
+    // Never take a larger persisted `total` — that used to be turn-billing sum.
+    const prompt = Math.max(0, usage.prompt);
+    const completion = Math.max(0, usage.completion);
+    const cached = clampCachedToPrompt(usage.cached, prompt);
     const cacheState: TokenCacheState = {
-      lastPrompt: usage.prompt,
-      providerReportsCache: usage.cached > 0 && !usage.cached_estimated,
+      lastPrompt: prompt,
+      providerReportsCache: cached > 0 && !usage.cached_estimated,
     };
     applyTokenUsage({
-      prompt: usage.prompt,
-      completion: usage.completion,
-      total: usage.total,
-      cached: usage.cached,
+      prompt,
+      completion,
+      total: prompt + completion,
+      cached,
       cached_estimated: Boolean(usage.cached_estimated),
       reasoning: 0,
     }, cacheState, true);
@@ -875,9 +881,16 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
         applyTokenUsage(mem.tokens, mem.cacheState, true);
         return;
       }
-      applyServerTokenUsage(serverUsage);
-      saveTokenSnapshot(sid, true);
-      return;
+      // Older daemons restored turn-cumulative billing (every LLM round summed)
+      // as occupancy. That is a different 口径 from the live last-frame
+      // (prompt+completion of the last request). Ignore the stacked payload
+      // rather than paint 1.7M; fall through to occupancy from messages/mem.
+      const windowLimit = serverUsage.ctx_window ?? null;
+      if (!isStackedTurnBillingUsage(serverUsage, windowLimit)) {
+        applyServerTokenUsage(serverUsage);
+        saveTokenSnapshot(sid, true);
+        return;
+      }
     }
 
     if (mem && (running || mem.authoritative)) {
@@ -3880,6 +3893,7 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
             const cached = tokens.cached ?? 0;
             const isEstimated = Boolean(tokens.cached_estimated);
             const reasoning = tokens.reasoning ?? 0;
+            // Live last-frame 口径: 总上下文 = last request prompt + completion.
             const total = tokens.total ?? (prompt + completion);
             const cachedPct = formatCacheHitRate(cached, prompt);
             const pctOfLimit = contextLimit && contextLimit > 0 ? Math.min(100, Math.round((total / contextLimit) * 100)) : null;
@@ -5187,11 +5201,22 @@ function CopyableCodeBlock({
   );
 }
 
-function DiffBody({ lines, raw }: { lines: DiffPreviewLine[]; raw?: string }) {
+function DiffBody({
+  lines,
+  raw,
+  variant = 'applied',
+  caption,
+}: {
+  lines: DiffPreviewLine[];
+  raw?: string;
+  variant?: 'applied' | 'planned';
+  caption?: string;
+}) {
   const t = useT();
   const [copied, setCopied] = useState(false);
   return (
-    <div class="code-block-wrapper tool-code-block">
+    <div class={'code-block-wrapper tool-code-block tool-diff-block is-' + variant}>
+      {caption ? <div class="tool-diff-caption">{caption}</div> : null}
       <pre class="tool-diff-body">
         {lines.map((line, i) => {
           if (line.kind === 'meta') {
@@ -5245,11 +5270,9 @@ function ToolExpandedBody({
   const live = tool.status === 'pending';
   const argsPretty = tool.args ? prettyToolText(tool.args) : null;
   const outputPretty = tool.output ? prettyToolText(tool.output) : null;
-  const showDiff =
-    !!tool.output &&
-    toolRendersAsDiff(tool.name) &&
-    looksLikeUnifiedDiff(tool.output);
-  const diffLines = showDiff ? parseDiffPreview(tool.output || '') : [];
+  const diffPreview = resolveToolDiffPreview(tool.name, tool.output, tool.args);
+  const diffIsPlanned = diffPreview?.source === 'args';
+  const diffCaption = diffIsPlanned ? t('tool.diffPlanned') : t('tool.diffApplied');
 
   return (
     <div class={'tool-cli' + (live ? ' is-live' : '')}>
@@ -5262,8 +5285,18 @@ function ToolExpandedBody({
       {tool.output && (
         <div class="tool-cli-row">
           <div class="tool-cli-label">{t('tool.output')}</div>
-          {diffLines.length > 0 ? (
-            <DiffBody lines={diffLines} raw={tool.output} />
+          {diffPreview ? (
+            <>
+              {diffIsPlanned && tool.output.trim() ? (
+                <pre class="tool-edit-error">{tool.output.trim()}</pre>
+              ) : null}
+              <DiffBody
+                lines={diffPreview.lines}
+                raw={diffPreview.raw}
+                variant={diffIsPlanned ? 'planned' : 'applied'}
+                caption={diffCaption}
+              />
+            </>
           ) : (
             <CopyableCodeBlock
               text={outputPretty?.text || tool.output}

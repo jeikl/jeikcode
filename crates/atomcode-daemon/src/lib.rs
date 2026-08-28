@@ -322,8 +322,8 @@ pub struct SessionDetail {
     /// Per-session model selection. Absent on older sessions.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub preferred_model: Option<String>,
-    /// Footer token/cache snapshot from the last completed turn's persisted stats.
-    /// Mirrors TUI `restore_context` + turn token tallies so WebUI survives refresh/restart.
+    /// Footer occupancy from the last completed turn (`used_tokens` / last request).
+    /// Must not be turn-cumulative `model_usage` billing, or restart paints over-budget.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub token_usage: Option<SessionTokenUsage>,
 }
@@ -351,23 +351,164 @@ fn estimate_prefix_cached_tokens(current_prompt: usize, previous_prompt: usize) 
     current_prompt.min(previous_prompt)
 }
 
-fn turn_stat_prompt_tokens(stat: &atomcode_capabilities::session::TurnStat) -> usize {
+fn turn_stat_billing_prompt_tokens(stat: &atomcode_capabilities::session::TurnStat) -> usize {
     let mut uncached_input = 0u64;
     let mut cached_input = 0u64;
     for usage in &stat.model_usage {
         uncached_input = uncached_input.saturating_add(usage.tokens.input);
         cached_input = cached_input.saturating_add(usage.tokens.cached_input);
     }
-    if uncached_input + cached_input > 0 {
-        usize::try_from(uncached_input + cached_input).unwrap_or(usize::MAX)
-    } else if stat.used_tokens > 0 {
+    usize::try_from(uncached_input.saturating_add(cached_input)).unwrap_or(usize::MAX)
+}
+
+fn turn_stat_billing_output_tokens(stat: &atomcode_capabilities::session::TurnStat) -> usize {
+    let output = stat
+        .model_usage
+        .iter()
+        .fold(0u64, |acc, usage| acc.saturating_add(usage.tokens.output));
+    usize::try_from(output).unwrap_or(0)
+}
+
+fn turn_stat_billing_cached_tokens(stat: &atomcode_capabilities::session::TurnStat) -> usize {
+    let cached = stat.model_usage.iter().fold(0u64, |acc, usage| {
+        acc.saturating_add(usage.tokens.cached_input)
+    });
+    usize::try_from(cached).unwrap_or(0)
+}
+
+/// Last-request prompt occupancy for the context-window gauge.
+///
+/// `TurnStat.model_usage` is **turn-cumulative billing** (every LLM round in
+/// the user turn is added). Using that sum as `prompt` made a restart paint
+/// 1.7M/1.0M until the next live `Usage` event replaced it with occupancy.
+fn turn_stat_occupancy_tokens(stat: &atomcode_capabilities::session::TurnStat) -> usize {
+    if stat.used_tokens > 0 {
         stat.used_tokens as usize
-    } else {
+    } else if stat.total_tokens > 0 {
         stat.total_tokens as usize
+    } else if stat.round_count <= 1 {
+        // Legacy rows without occupancy: a single-round billing total is the
+        // last request. Multi-round sums are not occupancy — refuse them.
+        turn_stat_billing_prompt_tokens(stat)
+    } else {
+        0
     }
 }
 
-/// Build WebUI footer tokens from persisted turn stats (same source as TUI resume).
+fn turn_stat_last_completion_tokens(stat: &atomcode_capabilities::session::TurnStat) -> usize {
+    if stat.used_tokens > 0 && stat.total_tokens > stat.used_tokens {
+        stat.total_tokens.saturating_sub(stat.used_tokens) as usize
+    } else if stat.round_count <= 1 {
+        turn_stat_billing_output_tokens(stat)
+    } else {
+        0
+    }
+}
+
+/// Live WebUI last-frame formula (also the restart restore formula):
+///
+/// ```text
+/// prompt     = last LLM request prompt   (occupancy; includes tools in that request)
+/// completion = last LLM request completion
+/// total      = prompt + completion       // footer 总上下文
+/// cached     = last LLM request cached
+/// ```
+///
+/// Each `Usage` event **replaces** the footer. Never sum rounds.
+/// `TurnStat.model_usage` is turn-cumulative billing for `/cost` and must not
+/// feed this gauge — that is how a 200k last frame became 1.7M after restart.
+fn footer_from_last_request(
+    prompt: usize,
+    completion: usize,
+    cached: usize,
+    ctx_window: Option<usize>,
+    cached_estimated: bool,
+) -> SessionTokenUsage {
+    let cached = if prompt == 0 { 0 } else { cached.min(prompt) };
+    SessionTokenUsage {
+        prompt,
+        completion,
+        total: prompt.saturating_add(completion),
+        cached,
+        cached_estimated,
+        ctx_window,
+    }
+}
+
+fn last_assistant_request_usage(
+    messages: &[atomcode_kernel::message::Message],
+) -> Option<(usize, usize, usize, usize)> {
+    use atomcode_kernel::message::Role;
+    let meta = messages
+        .iter()
+        .rev()
+        .find(|message| message.role == Role::Assistant)?
+        .meta
+        .as_ref()?;
+    let prompt = if meta.tokens.prompt > 0 {
+        meta.tokens.prompt as usize
+    } else {
+        meta.used_tokens as usize
+    };
+    let completion = meta.tokens.completion as usize;
+    let cached = meta.tokens.cached as usize;
+    let ctx_window = meta.ctx_window as usize;
+    if prompt == 0 && completion == 0 {
+        return None;
+    }
+    Some((prompt, completion, cached, ctx_window))
+}
+
+fn estimate_cache_from_previous_turn(
+    meta: &atomcode_capabilities::session::SessionMeta,
+    prompt: usize,
+) -> Option<usize> {
+    if prompt == 0 {
+        return None;
+    }
+    let previous = meta
+        .turn_stats
+        .iter()
+        .rev()
+        .filter(|stat| stat.position_valid)
+        .skip(1)
+        .map(turn_stat_occupancy_tokens)
+        .find(|value| *value > 0)?;
+    let estimated = estimate_prefix_cached_tokens(prompt, previous);
+    (estimated > 0).then_some(estimated)
+}
+
+/// Restore the footer from the last assistant `MessageMeta` (same payload the
+/// live `Usage` event painted) and only fall back to turn-stat occupancy.
+pub(crate) fn session_token_usage_from_session(
+    meta: &atomcode_capabilities::session::SessionMeta,
+    snapshot: &atomcode_kernel::message::SessionSnapshot,
+) -> Option<SessionTokenUsage> {
+    if let Some((prompt, completion, cached, ctx_window)) =
+        last_assistant_request_usage(&snapshot.messages)
+    {
+        let mut cached_estimated = false;
+        let cached = if cached > 0 && cached <= prompt {
+            cached
+        } else if let Some(estimated) = estimate_cache_from_previous_turn(meta, prompt) {
+            cached_estimated = true;
+            estimated
+        } else {
+            0
+        };
+        return Some(footer_from_last_request(
+            prompt,
+            completion,
+            cached,
+            (ctx_window > 0).then_some(ctx_window),
+            cached_estimated,
+        ));
+    }
+    session_token_usage_from_meta(meta)
+}
+
+/// Occupancy fallback when the snapshot has no last-request `MessageMeta`.
+/// Uses `used_tokens` / `total_tokens` (last request), never `model_usage` sums.
 pub(crate) fn session_token_usage_from_meta(
     meta: &atomcode_capabilities::session::SessionMeta,
 ) -> Option<SessionTokenUsage> {
@@ -376,57 +517,30 @@ pub(crate) fn session_token_usage_from_meta(
         return None;
     }
 
-    let mut uncached_input = 0u64;
-    let mut output = 0u64;
-    let mut cached_input = 0u64;
-    for usage in &stat.model_usage {
-        uncached_input = uncached_input.saturating_add(usage.tokens.input);
-        output = output.saturating_add(usage.tokens.output);
-        cached_input = cached_input.saturating_add(usage.tokens.cached_input);
+    let prompt = turn_stat_occupancy_tokens(stat);
+    let completion = turn_stat_last_completion_tokens(stat);
+    if prompt == 0 && completion == 0 {
+        return None;
     }
 
-    let prompt = turn_stat_prompt_tokens(stat);
-    let completion = if output > 0 {
-        usize::try_from(output).unwrap_or(0)
-    } else {
-        stat.total_tokens.saturating_sub(stat.used_tokens) as usize
-    };
-    let total = prompt.saturating_add(completion);
-    let mut cached = usize::try_from(cached_input).unwrap_or(0);
+    let billing_cached = turn_stat_billing_cached_tokens(stat);
+    let mut cached = 0usize;
     let mut cached_estimated = false;
-
-    if cached == 0 && prompt > 0 {
-        let previous_prompt = meta
-            .turn_stats
-            .iter()
-            .rev()
-            .filter(|s| s.position_valid)
-            .skip(1)
-            .map(turn_stat_prompt_tokens)
-            .find(|p| *p > 0);
-        if let Some(prev) = previous_prompt {
-            let estimated = estimate_prefix_cached_tokens(prompt, prev);
-            if estimated > 0 {
-                cached = estimated;
-                cached_estimated = true;
-            }
-        }
+    if billing_cached > 0 && billing_cached <= prompt {
+        cached = billing_cached;
+    } else if let Some(estimated) = estimate_cache_from_previous_turn(meta, prompt) {
+        cached = estimated;
+        cached_estimated = true;
     }
 
-    let ctx_window = if stat.ctx_window > 0 {
-        Some(stat.ctx_window as usize)
-    } else {
-        None
-    };
-
-    Some(SessionTokenUsage {
+    let ctx_window = (stat.ctx_window > 0).then_some(stat.ctx_window as usize);
+    Some(footer_from_last_request(
         prompt,
         completion,
-        total,
         cached,
-        cached_estimated,
         ctx_window,
-    })
+        cached_estimated,
+    ))
 }
 
 /// Global project state store (current working directory)
@@ -2634,7 +2748,7 @@ async fn get_session_detail(Path((hash, id)): Path<(String, String)>) -> impl In
                     return (StatusCode::NOT_FOUND, Json(msg)).into_response();
                 }
             };
-            let token_usage = session_token_usage_from_meta(&session.meta);
+            let token_usage = session_token_usage_from_session(&session.meta, &session.snapshot);
             let detail = SessionDetail {
                 id: session.meta.id,
                 name: session.meta.name,
@@ -3890,10 +4004,12 @@ pub(crate) fn stop_reason_wire(reason: atomcode_kernel::event::StopReason) -> &'
 
 #[cfg(test)]
 mod session_token_usage_tests {
-    use super::{session_token_usage_from_meta, SessionTokenUsage};
-    use atomcode_capabilities::session::{
-        ModelUsageStat, SessionMeta, TokenBreakdown, TurnStat,
+    use super::{
+        session_token_usage_from_meta, session_token_usage_from_session, SessionTokenUsage,
     };
+    use atomcode_capabilities::session::{ModelUsageStat, SessionMeta, TokenBreakdown, TurnStat};
+    use atomcode_kernel::message::{Message, MessageMeta, SessionSnapshot};
+    use atomcode_kernel::stream::TokenUsage as KernelTokenUsage;
 
     fn usage_stat(prompt: u32, completion: u32, cached: u32) -> TurnStat {
         TurnStat {
@@ -3976,6 +4092,150 @@ mod session_token_usage_tests {
         assert_eq!(usage.prompt, 38_555);
         assert_eq!(usage.cached, 10_000);
         assert!(usage.cached_estimated);
+    }
+
+    #[test]
+    fn restart_footer_uses_last_request_occupancy_not_turn_billing_sum() {
+        // A tool-heavy turn records occupancy on the FINAL request, but
+        // `model_usage` accumulates every round's prompt/cache. Restart must
+        // restore the gauge (used_tokens), not 1.7M of summed billing.
+        let mut meta = SessionMeta::new("s1", "/p", 1);
+        meta.turn_stats = vec![
+            usage_stat(48_000, 80, 40_000),
+            TurnStat {
+                after_message: 4,
+                position_valid: true,
+                turn_id: 2,
+                round_count: 12,
+                tool_call_count: 11,
+                duration_ms: 90_000,
+                total_tokens: 51_311,
+                errored: false,
+                used_tokens: 50_000,
+                ctx_window: 1_000_000,
+                model_usage: vec![ModelUsageStat {
+                    provider_id: "main".into(),
+                    model_id: "test".into(),
+                    tokens: TokenBreakdown {
+                        input: 2_337,
+                        output: 1_311,
+                        cached_input: 1_721_920,
+                    },
+                    pricing: None,
+                }],
+            },
+        ];
+        let usage = session_token_usage_from_meta(&meta).unwrap();
+        assert_eq!(
+            usage,
+            SessionTokenUsage {
+                prompt: 50_000,
+                completion: 1_311,
+                total: 51_311,
+                cached: 48_000,
+                cached_estimated: true,
+                ctx_window: Some(1_000_000),
+            }
+        );
+        assert!(
+            usage.prompt <= usage.ctx_window.unwrap(),
+            "restart gauge must not exceed the context window from stacked billing"
+        );
+        assert!(usage.cached <= usage.prompt);
+    }
+
+    #[test]
+    fn refuses_multi_round_billing_sum_when_occupancy_fields_are_missing() {
+        let mut meta = SessionMeta::new("s1", "/p", 1);
+        meta.turn_stats = vec![TurnStat {
+            after_message: 2,
+            position_valid: true,
+            turn_id: 1,
+            round_count: 8,
+            tool_call_count: 7,
+            duration_ms: 1,
+            total_tokens: 0,
+            errored: false,
+            used_tokens: 0,
+            ctx_window: 1_000_000,
+            model_usage: vec![ModelUsageStat {
+                provider_id: "main".into(),
+                model_id: "test".into(),
+                tokens: TokenBreakdown {
+                    input: 2_337,
+                    output: 1_311,
+                    cached_input: 1_721_920,
+                },
+                pricing: None,
+            }],
+        }];
+        assert_eq!(session_token_usage_from_meta(&meta), None);
+    }
+
+    #[test]
+    fn restart_matches_live_last_request_not_billing_sum() {
+        // Live footer last frame: prompt 200_000 + completion 1_500 = 201_500.
+        // Disk model_usage is the 12-round billing sum (~1.7M). Restart must
+        // restore the last assistant MessageMeta — the same Usage the WebUI
+        // painted — not the billing sum.
+        let mut assistant = Message::assistant("ok", Vec::new());
+        assistant.meta = Some(MessageMeta {
+            tokens: KernelTokenUsage {
+                prompt: 200_000,
+                completion: 1_500,
+                cached: 180_000,
+            },
+            used_tokens: 200_000,
+            ctx_window: 1_000_000,
+            ..MessageMeta::default()
+        });
+        let snapshot = SessionSnapshot::new(vec![Message::user("go"), assistant]);
+
+        let mut meta = SessionMeta::new("s1", "/p", 1);
+        meta.turn_stats = vec![TurnStat {
+            after_message: 2,
+            position_valid: true,
+            turn_id: 1,
+            round_count: 12,
+            tool_call_count: 11,
+            duration_ms: 90_000,
+            total_tokens: 201_500,
+            errored: false,
+            used_tokens: 200_000,
+            ctx_window: 1_000_000,
+            model_usage: vec![ModelUsageStat {
+                provider_id: "main".into(),
+                model_id: "test".into(),
+                tokens: TokenBreakdown {
+                    input: 2_337,
+                    output: 1_311,
+                    cached_input: 1_721_920,
+                },
+                pricing: None,
+            }],
+        }];
+
+        let usage = session_token_usage_from_session(&meta, &snapshot).unwrap();
+        assert_eq!(
+            usage,
+            SessionTokenUsage {
+                prompt: 200_000,
+                completion: 1_500,
+                total: 201_500,
+                cached: 180_000,
+                cached_estimated: false,
+                ctx_window: Some(1_000_000),
+            }
+        );
+        assert_eq!(
+            usage.total,
+            usage.prompt.saturating_add(usage.completion),
+            "restart 总上下文 must use the live formula prompt+completion"
+        );
+        assert!(
+            usage.total < 300_000,
+            "must not restore the 1.7M billing sum"
+        );
     }
 }
 

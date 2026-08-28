@@ -20,6 +20,8 @@ import {
   estimateCacheFromHistoryPrompt,
   createTokenCacheState,
   resetTokenCacheState,
+  clampCachedToPrompt,
+  isStackedTurnBillingUsage,
   userMessageAlreadyOnCanvas,
 } from './chatTerminal.ts';
 
@@ -272,4 +274,32 @@ test('cache hit rate follows provider cached over total prompt tokens', () => {
   assert.equal(formatCacheHitRate(6200, 10_000), '62%');
   assert.equal(formatCacheHitRate(9996, 10_000), '99.9%');
   assert.equal(formatCacheHitRate(10_000, 10_000), '100%');
+});
+
+test('clampCachedToPrompt never exceeds occupancy', () => {
+  assert.equal(clampCachedToPrompt(1_721_920, 50_000), 50_000);
+  assert.equal(clampCachedToPrompt(8_000, 10_000), 8_000);
+  assert.equal(clampCachedToPrompt(10, 0), 0);
+});
+
+test('stacked turn billing is occupancy over the window with ~100% cache', () => {
+  assert.equal(
+    isStackedTurnBillingUsage(
+      { prompt: 1_724_257, cached: 1_721_920 },
+      1_000_000,
+    ),
+    true,
+  );
+  assert.equal(
+    isStackedTurnBillingUsage({ prompt: 50_000, cached: 48_000 }, 1_000_000),
+    false,
+  );
+  assert.equal(
+    isStackedTurnBillingUsage({ prompt: 1_100_000, cached: 10_000 }, 1_000_000),
+    false,
+  );
+  assert.equal(
+    isStackedTurnBillingUsage({ prompt: 1_724_257, cached: 1_721_920 }, null),
+    false,
+  );
 });

@@ -540,7 +540,11 @@ pub(crate) async fn list_upstream_models(
     }
     let mut api_key = req.api_key.unwrap_or_default();
     if api_key.trim().is_empty() {
-        if let Some(name) = req.provider_name.as_deref().map(str::trim).filter(|s| !s.is_empty())
+        if let Some(name) = req
+            .provider_name
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
         {
             if let Ok(config) = load_config() {
                 if let Some(p) = config.provider_config_for_selection(name) {
@@ -551,13 +555,8 @@ pub(crate) async fn list_upstream_models(
             }
         }
     }
-    match fetch_upstream_model_ids(
-        &req.protocol,
-        &req.base_url,
-        &api_key,
-        req.skip_tls_verify,
-    )
-    .await
+    match fetch_upstream_model_ids(&req.protocol, &req.base_url, &api_key, req.skip_tls_verify)
+        .await
     {
         Ok(models) => Json(serde_json::json!({ "models": models })).into_response(),
         Err(error) => json_error(StatusCode::BAD_GATEWAY, error).into_response(),

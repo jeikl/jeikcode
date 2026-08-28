@@ -278,6 +278,12 @@ export function estimatePrefixCached(currentPrompt: number, previousPrompt: numb
   return Math.min(currentPrompt, previousPrompt);
 }
 
+/** Cached tokens cannot exceed the prompt they were read from. */
+export function clampCachedToPrompt(cached: number, prompt: number): number {
+  if (cached <= 0 || prompt <= 0) return 0;
+  return Math.min(cached, prompt);
+}
+
 /** Resolve cache telemetry for the footer pill. Provider `cached > 0` wins;
  * once a provider has reported cache hits we also trust explicit zeros;
  * otherwise fall back to prefix estimation against the prior usage prompt. */
@@ -294,7 +300,7 @@ export function resolveTokenCache(
   let cached_estimated = false;
 
   if (reported != null && reported > 0) {
-    cached = reported;
+    cached = clampCachedToPrompt(reported, prompt);
   } else if (reported === 0 && providerReportsCache) {
     // Provider may report cached=0 on the first usage event of a new turn
     // before prefix cache warms up. Prefer prefix estimation when plausible.
@@ -365,4 +371,21 @@ export function formatCacheHitRate(cached: number, prompt: number): string | nul
   if (ratio >= 99.95) return '99.9%';
   if (ratio >= 10) return `${Math.round(ratio)}%`;
   return `${ratio.toFixed(1)}%`;
+}
+
+/**
+ * Detect persisted footer usage that is turn-cumulative billing rather than
+ * last-request occupancy. Older daemons summed every LLM round's prompt/cache
+ * into `token_usage`, so a restart painted e.g. 1.7M/1.0M (100% cache) until
+ * the next live Usage event replaced it.
+ */
+export function isStackedTurnBillingUsage(
+  usage: { prompt?: number; cached?: number } | null | undefined,
+  contextLimit?: number | null,
+): boolean {
+  if (!usage || !contextLimit || contextLimit <= 0) return false;
+  const prompt = usage.prompt ?? 0;
+  const cached = usage.cached ?? 0;
+  if (prompt <= contextLimit) return false;
+  return cached >= prompt * 0.9;
 }

@@ -4,6 +4,8 @@ import {
   jsonArgString,
   looksLikeUnifiedDiff,
   parseDiffPreview,
+  buildEditArgsDiff,
+  resolveToolDiffPreview,
   formatToolPayload,
   prettyToolText,
   structuredToolFields,
@@ -77,6 +79,38 @@ test('bullet lists and code_explore output are not treated as diffs', () => {
   assert.equal(toolRendersAsDiff('code_explore'), false);
   assert.equal(toolRendersAsDiff('edit_file'), true);
   assert.equal(toolRendersAsDiff('bash'), true);
+});
+
+test('buildEditArgsDiff colors old/new args when output has no unified diff', () => {
+  const oldStr = '| **常规查询** | `sql-server-company` |\n| **通话相关** | `sql-server-company` |';
+  const newStr = '| **常规查询** | `sql-server-company` |\n| **微信相关** | `pgsql-company` |';
+  const lines = buildEditArgsDiff(oldStr, newStr);
+  assert.ok(lines.some((l) => l.kind === 'del'));
+  assert.ok(lines.some((l) => l.kind === 'add'));
+  const resolved = resolveToolDiffPreview(
+    'edit_file',
+    'edit_file: hunk 1/1 failed. old_string not found.',
+    JSON.stringify({ old_string: oldStr, new_string: newStr }),
+  );
+  assert.ok(resolved);
+  assert.ok(resolved!.lines.some((l) => l.kind === 'del'));
+  assert.ok(resolved!.lines.some((l) => l.kind === 'add'));
+  assert.equal(resolved!.source, 'args');
+});
+
+test('resolveToolDiffPreview prefers output unified diff over args', () => {
+  const output = [
+    'Edited foo.md (1 replacement)',
+    '@@ -1,2 +1,2 @@',
+    ' ctx',
+    '- old',
+    '+ new',
+  ].join('\n');
+  const args = JSON.stringify({ old_string: 'other', new_string: 'ignored' });
+  const resolved = resolveToolDiffPreview('edit_file', output, args);
+  assert.ok(resolved);
+  assert.equal(resolved!.source, 'output');
+  assert.ok(resolved!.raw.includes('@@ -1,2'));
 });
 
 test('formatToolPayload pretty-prints JSON for copyable code blocks', () => {

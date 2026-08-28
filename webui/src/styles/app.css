@@ -2896,6 +2896,36 @@ body {
   margin-bottom: 4px;
   opacity: 0.75;
 }
+.tool-edit-error {
+  margin: 0 0 8px;
+  padding: 8px 10px;
+  border-radius: 6px;
+  background: color-mix(in srgb, var(--app-diff-deletion-foreground) 8%, transparent);
+  color: var(--app-secondary-foreground);
+  font-size: 12px;
+  line-height: 1.45;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+.tool-diff-block.is-applied {
+  border: 1px solid color-mix(in srgb, var(--app-diff-addition-foreground) 28%, transparent);
+}
+.tool-diff-block.is-planned {
+  border: 1px dashed color-mix(in srgb, var(--app-warning-foreground, #d4a017) 45%, transparent);
+  background: color-mix(in srgb, var(--app-warning-foreground, #d4a017) 4%, transparent);
+}
+.tool-diff-caption {
+  padding: 6px 10px 0;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.01em;
+}
+.tool-diff-block.is-applied .tool-diff-caption {
+  color: var(--app-diff-addition-foreground);
+}
+.tool-diff-block.is-planned .tool-diff-caption {
+  color: var(--app-warning-foreground, #d4a017);
+}
 .tool-cli-content {
   margin: 0;
   max-height: 280px;

@@ -1,10 +1,13 @@
-//! Regression tests for the opt-in cross-round exact tool-loop guard.
+//! Regression tests for the opt-in cross-round exact tool-loop guard and the
+//! always-on echo/coarse fuses.
 //!
-//! The guard is deliberately narrower than the `max_rounds` safety fuse: it only
-//! terminates consecutive calls with the same final arguments, cwd, result, and
+//! The exact guard is deliberately narrower than the `max_rounds` safety fuse: it
+//! only terminates consecutive calls with the same final arguments, cwd, result, and
 //! success state after the model has seen a warning and failed to course-correct.
-//! Every proposed tool call still executes and is paired with a result before the
-//! turn terminates, keeping provider history valid.
+//! The echo fuse is faster: identical substantial reasoning/text plus the same tool
+//! pattern warns on the first replay and stops on the second. Every proposed tool
+//! call still executes and is paired with a result before the turn terminates,
+//! keeping provider history valid.
 
 use async_trait::async_trait;
 use atomcode_kernel::agent::{Agent, AgentHandle, ToolLoopPolicy};
@@ -708,4 +711,241 @@ async fn coarse_repeat_fuse_does_not_stop_distinct_arguments() {
     assert_eq!(calls.lock().unwrap().len(), 8);
     assert_eq!(started_ids(&events).len(), 7);
     assert_eq!(result_ids(&events).len(), 7);
+}
+
+/// Long enough to clear `ECHO_MIN_CHARS` (32 Unicode scalars). Mirrors the
+/// stuck-model failure: restating the whole diagnosis instead of acting.
+const ECHO_THINKING: &str = "明白问题了。发起聊天数和互动微信数在Excel中显示为小数（因为平均分配），但它们应该是整数（按客户统计，是/否）。修正：";
+
+fn echo_round(id: &str, args: &str, thinking: &str) -> Vec<StreamEvent> {
+    vec![
+        StreamEvent::Reasoning(thinking.into()),
+        StreamEvent::ToolCall(tool_call(id, args)),
+        StreamEvent::Done { truncated: false },
+    ]
+}
+
+fn text_echo_round(id: &str, args: &str, text: &str) -> Vec<StreamEvent> {
+    vec![
+        StreamEvent::TextDelta(text.into()),
+        StreamEvent::ToolCall(tool_call(id, args)),
+        StreamEvent::Done { truncated: false },
+    ]
+}
+
+#[tokio::test]
+async fn echo_loop_warns_on_second_and_stops_after_third_without_fourth_request() {
+    let provider = Arc::new(RecordingProvider::new(vec![
+        echo_round("c1", r#"{"path":"same"}"#, ECHO_THINKING),
+        echo_round("c2", r#"{"path":"same"}"#, ECHO_THINKING),
+        echo_round("c3", r#"{"path":"same"}"#, ECHO_THINKING),
+        echo_round("c4", r#"{"path":"same"}"#, ECHO_THINKING),
+        stop_round("must never be requested"),
+    ]));
+    let calls = provider.calls();
+    let mut handle = Agent::builder()
+        .provider(provider)
+        .tools(mounted_probe(ReadProbeTool::stable("unchanged")))
+        .tool_loop_policy(ToolLoopPolicy::default())
+        .max_rounds(20)
+        .build()
+        .spawn();
+
+    let events = drive_turn(&mut handle, user("fix the spreadsheet")).await;
+    shutdown(handle).await;
+
+    assert_eq!(
+        terminal_reason(&events),
+        Some(StopReason::RepeatLoop),
+        "identical thinking plus the same tool call must stop as an echo, not wait for exact 3/4"
+    );
+    assert_eq!(
+        calls.lock().unwrap().len(),
+        3,
+        "termination after the third replay must prevent a fourth provider request"
+    );
+    assert_eq!(started_ids(&events), vec!["c1", "c2", "c3"]);
+    assert_eq!(result_ids(&events), vec!["c1", "c2", "c3"]);
+
+    let loop_warnings = warnings(&events);
+    assert_eq!(
+        loop_warnings.len(),
+        1,
+        "echo must emit one course-correction and not also fire the exact-guard warning"
+    );
+    assert!(
+        loop_warnings[0].1.contains("echo loop"),
+        "the warning must name the echo fuse: {}",
+        loop_warnings[0].1
+    );
+    let results_before_warning = events[..loop_warnings[0].0]
+        .iter()
+        .filter(|event| matches!(event, AgentEvent::ToolResult { .. }))
+        .count();
+    assert_eq!(
+        results_before_warning, 2,
+        "the echo warning must fire only after the second identical narrative is applied"
+    );
+}
+
+#[tokio::test]
+async fn echo_loop_still_fires_when_exact_policy_is_disabled() {
+    let provider = Arc::new(RecordingProvider::new(vec![
+        echo_round("c1", r#"{"path":"same"}"#, ECHO_THINKING),
+        echo_round("c2", r#"{"path":"same"}"#, ECHO_THINKING),
+        echo_round("c3", r#"{"path":"same"}"#, ECHO_THINKING),
+        stop_round("must never be requested"),
+    ]));
+    let calls = provider.calls();
+    let mut handle = Agent::builder()
+        .provider(provider)
+        .tools(mounted_probe(ReadProbeTool::stable("unchanged")))
+        .max_rounds(20)
+        .build()
+        .spawn();
+
+    let events = drive_turn(&mut handle, user("repeat forever")).await;
+    shutdown(handle).await;
+
+    assert_eq!(terminal_reason(&events), Some(StopReason::RepeatLoop));
+    assert_eq!(calls.lock().unwrap().len(), 3);
+}
+
+#[tokio::test]
+async fn visible_text_echo_is_detected_without_a_reasoning_channel() {
+    let provider = Arc::new(RecordingProvider::new(vec![
+        text_echo_round("c1", r#"{"path":"same"}"#, ECHO_THINKING),
+        text_echo_round("c2", r#"{"path":"same"}"#, ECHO_THINKING),
+        text_echo_round("c3", r#"{"path":"same"}"#, ECHO_THINKING),
+        stop_round("must never be requested"),
+    ]));
+    let calls = provider.calls();
+    let mut handle = Agent::builder()
+        .provider(provider)
+        .tools(mounted_probe(ReadProbeTool::stable("unchanged")))
+        .max_rounds(20)
+        .build()
+        .spawn();
+
+    let events = drive_turn(&mut handle, user("fix the spreadsheet")).await;
+    shutdown(handle).await;
+
+    assert_eq!(terminal_reason(&events), Some(StopReason::RepeatLoop));
+    assert_eq!(calls.lock().unwrap().len(), 3);
+}
+
+#[tokio::test]
+async fn whitespace_only_changes_still_count_as_an_echo() {
+    let spaced = format!("  {ECHO_THINKING}  \n");
+    let provider = Arc::new(RecordingProvider::new(vec![
+        echo_round("c1", r#"{"path":"same"}"#, ECHO_THINKING),
+        echo_round("c2", r#"{"path":"same"}"#, &spaced),
+        echo_round("c3", r#"{"path":"same"}"#, ECHO_THINKING),
+        stop_round("must never be requested"),
+    ]));
+    let calls = provider.calls();
+    let mut handle = Agent::builder()
+        .provider(provider)
+        .tools(mounted_probe(ReadProbeTool::stable("unchanged")))
+        .max_rounds(20)
+        .build()
+        .spawn();
+
+    let events = drive_turn(&mut handle, user("fix the spreadsheet")).await;
+    shutdown(handle).await;
+
+    assert_eq!(terminal_reason(&events), Some(StopReason::RepeatLoop));
+    assert_eq!(calls.lock().unwrap().len(), 3);
+}
+
+#[tokio::test]
+async fn short_reasoning_does_not_trip_echo_still_uses_exact_guard() {
+    let provider = Arc::new(RecordingProvider::new(vec![
+        echo_round("c1", r#"{"path":"same"}"#, "明白了。"),
+        echo_round("c2", r#"{"path":"same"}"#, "明白了。"),
+        echo_round("c3", r#"{"path":"same"}"#, "明白了。"),
+        echo_round("c4", r#"{"path":"same"}"#, "明白了。"),
+        stop_round("must never be requested"),
+    ]));
+    let calls = provider.calls();
+    let mut handle = Agent::builder()
+        .provider(provider)
+        .tools(mounted_probe(ReadProbeTool::stable("unchanged")))
+        .tool_loop_policy(ToolLoopPolicy::default())
+        .max_rounds(20)
+        .build()
+        .spawn();
+
+    let events = drive_turn(&mut handle, user("inspect repeatedly")).await;
+    shutdown(handle).await;
+
+    assert_eq!(
+        terminal_reason(&events),
+        Some(StopReason::ToolLoopDetected),
+        "a short restatement is not an echo; the exact 3/4 guard remains the owner"
+    );
+    assert_eq!(calls.lock().unwrap().len(), 4);
+}
+
+#[tokio::test]
+async fn changing_reasoning_does_not_trip_echo_even_with_identical_tools() {
+    let provider = Arc::new(RecordingProvider::new(vec![
+        echo_round("c1", r#"{"path":"same"}"#, &format!("{ECHO_THINKING} one")),
+        echo_round("c2", r#"{"path":"same"}"#, &format!("{ECHO_THINKING} two")),
+        echo_round(
+            "c3",
+            r#"{"path":"same"}"#,
+            &format!("{ECHO_THINKING} three"),
+        ),
+        echo_round("c4", r#"{"path":"same"}"#, &format!("{ECHO_THINKING} four")),
+        stop_round("must never be requested"),
+    ]));
+    let calls = provider.calls();
+    let mut handle = Agent::builder()
+        .provider(provider)
+        .tools(mounted_probe(ReadProbeTool::stable("unchanged")))
+        .tool_loop_policy(ToolLoopPolicy::default())
+        .max_rounds(20)
+        .build()
+        .spawn();
+
+    let events = drive_turn(&mut handle, user("keep thinking differently")).await;
+    shutdown(handle).await;
+
+    assert_eq!(
+        terminal_reason(&events),
+        Some(StopReason::ToolLoopDetected),
+        "progress in the narrative is not an echo; exact stable-result detection still stops at 4"
+    );
+    assert_eq!(calls.lock().unwrap().len(), 4);
+}
+
+#[tokio::test]
+async fn echo_nudge_allows_course_correction_instead_of_stopping() {
+    let provider = Arc::new(RecordingProvider::new(vec![
+        echo_round("c1", r#"{"path":"same"}"#, ECHO_THINKING),
+        echo_round("c2", r#"{"path":"same"}"#, ECHO_THINKING),
+        tool_round("c3", r#"{"path":"other"}"#),
+        stop_round("changed approach after the echo warning"),
+    ]));
+    let calls = provider.calls();
+    let mut handle = Agent::builder()
+        .provider(provider)
+        .tools(mounted_probe(ReadProbeTool::stable("unchanged")))
+        .tool_loop_policy(ToolLoopPolicy::default())
+        .max_rounds(20)
+        .build()
+        .spawn();
+
+    let events = drive_turn(&mut handle, user("fix the spreadsheet")).await;
+    shutdown(handle).await;
+
+    assert_eq!(terminal_reason(&events), Some(StopReason::Stopped));
+    assert_eq!(calls.lock().unwrap().len(), 4);
+    assert_eq!(started_ids(&events).len(), 3);
+    assert_eq!(
+        warnings(&events).len(),
+        1,
+        "the second identical narrative must warn, then a different call must be allowed to finish"
+    );
 }

@@ -37,6 +37,9 @@ pub const DEFAULT_MAX_TOOL_RESULT_BYTES: usize = 256 * 1024;
 /// state, then stops after the fourth. Products may choose higher thresholds for
 /// intentional polling/repetition, or leave the policy disabled. The kernel default
 /// is OFF — a runtime opts in explicitly through [`AgentBuilder::tool_loop_policy`].
+/// Identical substantial reasoning/text plus the same tool pattern is handled by
+/// the always-on echo fuse (warn on the first replay, stop on the second) and
+/// does not wait for these thresholds.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ToolLoopPolicy {
     warning_threshold: u32,
@@ -181,7 +184,7 @@ const MAX_TRUNCATION_CONTINUATIONS: u32 = 2;
 /// covers the broader failure mode where the model keeps choosing the same action
 /// even while results change, or when a product has disabled exact detection.
 const MAX_REPEAT_ROUNDS: u32 = 6;
-const REPEAT_NUDGE_AT: u32 = 3;
+const REPEAT_NUDGE_AT: u32 = 2;
 const REPEAT_LOOP_NUDGE: &str =
     "You have issued the SAME tool call with the SAME arguments several rounds in a row. \
      Stop repeating it and change your approach. If you are trying to ask the user something, \
@@ -189,16 +192,66 @@ const REPEAT_LOOP_NUDGE: &str =
      request-user-input tool when available. If the task is done, reply with a short summary \
      and no tool calls. If you are blocked, explain what you need.";
 
+/// Fast path for the "stuck tape" failure: the model re-emits the same substantial
+/// reasoning/visible text AND the same tool pattern. That is stronger evidence than
+/// tool identity alone (a legitimate retry or poll), so this fuse warns on the first
+/// replay and stops on the second. Narratives shorter than [`ECHO_MIN_CHARS`] are
+/// ignored; the exact/coarse guards still cover those.
+const ECHO_MIN_CHARS: usize = 32;
+const ECHO_NUDGE_AT: u32 = 2;
+const ECHO_STOP_AT: u32 = 3;
+const ECHO_LOOP_NUDGE: &str =
+    "You just repeated the SAME reasoning (or visible text) and the SAME tool call as the \
+     previous round. That is a loop, not progress. Do not restate the problem. Take a \
+     different action now, or reply in plain text explaining what is blocking you.";
+
 /// Order-independent signature of the model-emitted calls in one round. Call ids
 /// are deliberately excluded because providers commonly mint a new id for every
-/// otherwise-identical retry.
+/// otherwise-identical retry. Arguments are canonicalized so JSON key order cannot
+/// evade the coarse/echo fuses.
 fn round_tool_signature(calls: &[ToolCall]) -> String {
     let mut parts: Vec<String> = calls
         .iter()
-        .map(|call| format!("{}\u{0}{}", call.name, call.arguments))
+        .map(|call| {
+            format!(
+                "{}\u{0}{}",
+                call.name,
+                canonicalize_tool_args(&call.arguments)
+            )
+        })
         .collect();
     parts.sort();
     parts.join("\u{1}")
+}
+
+fn normalize_echo_narrative(s: &str) -> String {
+    s.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+/// Fingerprint a round as an echo only when the model produced a substantial
+/// narrative (reasoning and/or visible text) together with at least one tool call.
+/// `None` means "not enough text to call this an echo" — callers fall through to
+/// the exact/coarse tool-signature guards.
+fn round_echo_signature(reasoning: &str, text: &str, calls: &[ToolCall]) -> Option<String> {
+    if calls.is_empty() {
+        return None;
+    }
+    let reasoning = normalize_echo_narrative(reasoning);
+    let text = normalize_echo_narrative(text);
+    let mut narrative = String::new();
+    if !reasoning.is_empty() {
+        narrative.push_str(&reasoning);
+    }
+    if !text.is_empty() {
+        if !narrative.is_empty() {
+            narrative.push('\u{2}');
+        }
+        narrative.push_str(&text);
+    }
+    if narrative.chars().count() < ECHO_MIN_CHARS {
+        return None;
+    }
+    Some(format!("{narrative}\u{3}{}", round_tool_signature(calls)))
 }
 
 /// Maximum number of `parallel_safe` (read-only) tools that run CONCURRENTLY in
@@ -1903,6 +1956,10 @@ impl RunningAgent {
         let mut last_round_sig: Option<String> = None;
         let mut repeat_rounds: u32 = 0;
         let mut repeat_nudged = false;
+        // Fast path: identical substantial reasoning/text + same tool pattern.
+        let mut last_echo_sig: Option<String> = None;
+        let mut echo_rounds: u32 = 0;
+        let mut echo_nudged = false;
         // Re-armable round cap: on each checkpoint "continue" this grows by the base
         // `max_rounds`, giving a CONSTANT interval between confirmations.
         let mut round_cap = self.max_rounds;
@@ -1999,6 +2056,9 @@ impl RunningAgent {
                 last_round_sig = None;
                 repeat_rounds = 0;
                 repeat_nudged = false;
+                last_echo_sig = None;
+                echo_rounds = 0;
+                echo_nudged = false;
                 let n = steered.len();
                 let mut inputs = Vec::with_capacity(n);
                 for input in steered {
@@ -2183,9 +2243,8 @@ impl RunningAgent {
                     } else {
                         self.hooks.on_rate_limit(&hint).await
                     };
-                    let quiet_first_eligible = host_verdict.is_none()
-                        && hint.retry_after_secs.is_none()
-                        && !hint.terminal;
+                    let quiet_first_eligible =
+                        host_verdict.is_none() && hint.retry_after_secs.is_none() && !hint.terminal;
                     let decision = host_verdict
                         .unwrap_or_else(|| crate::hook::RateLimitDecision::from_hint(&hint));
                     match decision {
@@ -2529,7 +2588,11 @@ impl RunningAgent {
                     // boundary, paired with this opaque token + provider. A redacted
                     // block (no preceding text) yields an empty-text block. Pure storage
                     // — no live event (the text already streamed via Reasoning above).
-                    StreamEvent::ReasoningSignature { opaque, provider, id } => {
+                    StreamEvent::ReasoningSignature {
+                        opaque,
+                        provider,
+                        id,
+                    } => {
                         saw_stream_content = true; // provider streamed a (signed) reasoning block
                         if suppress_internal_stream {
                             continue;
@@ -2907,6 +2970,11 @@ impl RunningAgent {
             // Capture before `pending_calls` is consumed by execution. The coarse
             // fuse compares what the model chose, independent of tool results.
             let round_sig = round_tool_signature(&pending_calls);
+            let echo_sig = round_echo_signature(
+                assistant_msg.reasoning.as_deref().unwrap_or(""),
+                &assistant_msg.text,
+                &pending_calls,
+            );
             convo.push(assistant_msg);
             if pending_calls.is_empty() {
                 // Exact-loop evidence is consecutive across tool rounds only. A
@@ -2918,6 +2986,9 @@ impl RunningAgent {
                 last_round_sig = None;
                 repeat_rounds = 0;
                 repeat_nudged = false;
+                last_echo_sig = None;
+                echo_rounds = 0;
+                echo_nudged = false;
                 // A prompt steered in during this round keeps the turn going: loop back so the
                 // top-of-loop drain folds it in and the model responds to it in-turn.
                 // (needs_follow_up = model produced tool calls OR a steer is pending.)
@@ -3597,15 +3668,64 @@ impl RunningAgent {
             // ordering; there is never a pre-execution fake result. Cancel was
             // checked above and therefore wins over this terminal.
             let real_steer_pending = !steer.lock().unwrap_or_else(|e| e.into_inner()).is_empty();
+            // A steer can arrive while the provider streams or the tool runs.
+            // Honor that real user intent before warning/stopping; the next
+            // round's normal drain will append the prompt to the conversation.
+            if real_steer_pending {
+                if let Some(state) = tool_loop_state.as_deref_mut() {
+                    state.reset();
+                }
+                last_round_sig = None;
+                repeat_rounds = 0;
+                repeat_nudged = false;
+                last_echo_sig = None;
+                echo_rounds = 0;
+                echo_nudged = false;
+                continue;
+            }
+
+            if let Some(sig) = echo_sig.as_deref() {
+                if last_echo_sig.as_deref() == Some(sig) {
+                    echo_rounds = echo_rounds.saturating_add(1);
+                } else {
+                    last_echo_sig = Some(sig.to_string());
+                    echo_rounds = 1;
+                    echo_nudged = false;
+                }
+            } else {
+                last_echo_sig = None;
+                echo_rounds = 0;
+                echo_nudged = false;
+            }
+            if echo_rounds >= ECHO_STOP_AT {
+                self.rt.emit(AgentEvent::Error {
+                    message: format!(
+                        "stopped: the model replayed the same reasoning and tool-call pattern for \
+                         {echo_rounds} consecutive rounds"
+                    ),
+                    http_status: None,
+                    code: None,
+                });
+                self.finish_turn(convo, StopReason::RepeatLoop, &turn_ctx)
+                    .await;
+                return;
+            }
+            if echo_rounds >= ECHO_NUDGE_AT && !echo_nudged {
+                echo_nudged = true;
+                self.rt.emit(AgentEvent::Warning(
+                    "possible echo loop: the same reasoning and tool call repeated; asking the model to change course"
+                        .into(),
+                ));
+                convo.push(Message::synthetic_user(ECHO_LOOP_NUDGE.to_string()));
+            }
+            let echo_streak_active = echo_rounds > 1;
+
             let mut exact_streak_active = false;
             if let Some(state) = tool_loop_state.as_deref_mut() {
-                // A steer can arrive while the provider streams or the tool runs.
-                // Honor that real user intent before warning/stopping; the next
-                // round's normal drain will append the prompt to the conversation.
                 let policy = state.policy;
-                let exact_loop_decision = match (real_steer_pending, loop_fingerprint) {
-                    (false, Some(fingerprint)) => state.observe(fingerprint),
-                    _ => {
+                let exact_loop_decision = match loop_fingerprint {
+                    Some(fingerprint) => state.observe(fingerprint),
+                    None => {
                         state.reset();
                         ToolLoopDecision::Continue
                     }
@@ -3613,6 +3733,7 @@ impl RunningAgent {
                 exact_streak_active = state.consecutive > 1;
                 match exact_loop_decision {
                     ToolLoopDecision::Continue => {}
+                    ToolLoopDecision::Warn if echo_nudged => {}
                     ToolLoopDecision::Warn => {
                         self.rt.emit(AgentEvent::Warning(tool_loop_warning(policy)));
                         convo.push(Message::synthetic_user(tool_loop_course_correction(policy)));
@@ -3627,13 +3748,6 @@ impl RunningAgent {
                 }
             }
 
-            if real_steer_pending {
-                last_round_sig = None;
-                repeat_rounds = 0;
-                repeat_nudged = false;
-                continue;
-            }
-
             if last_round_sig.as_deref() == Some(round_sig.as_str()) {
                 repeat_rounds = repeat_rounds.saturating_add(1);
             } else {
@@ -3645,8 +3759,9 @@ impl RunningAgent {
             // A configured exact guard owns a stable-result streak so its custom
             // thresholds remain meaningful. The coarse fuse still tracks those
             // rounds and becomes active whenever exact evidence is absent (changing
-            // results, ineligible batches, or no exact policy).
-            if !exact_streak_active && repeat_rounds >= MAX_REPEAT_ROUNDS {
+            // results, ineligible batches, or no exact policy). The echo fuse
+            // similarly owns a replay of the model's own narrative.
+            if !exact_streak_active && !echo_streak_active && repeat_rounds >= MAX_REPEAT_ROUNDS {
                 self.rt.emit(AgentEvent::Error {
                     message: format!(
                         "stopped: the model repeated the same tool-call pattern for \
@@ -3659,7 +3774,11 @@ impl RunningAgent {
                     .await;
                 return;
             }
-            if !exact_streak_active && repeat_rounds >= REPEAT_NUDGE_AT && !repeat_nudged {
+            if !exact_streak_active
+                && !echo_streak_active
+                && repeat_rounds >= REPEAT_NUDGE_AT
+                && !repeat_nudged
+            {
                 repeat_nudged = true;
                 convo.push(Message::synthetic_user(REPEAT_LOOP_NUDGE.to_string()));
             }

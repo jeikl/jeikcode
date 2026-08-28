@@ -43,7 +43,9 @@ pub enum StopReason {
     MaxContinuations,
     /// The always-on coarse repetition fuse observed the same model-emitted tool
     /// call pattern for too many consecutive rounds, even though exact results may
-    /// have varied or the opt-in exact guard was disabled.
+    /// have varied or the opt-in exact guard was disabled. Also used when the
+    /// faster echo fuse sees the same substantial reasoning/text replayed with
+    /// the same tool pattern.
     RepeatLoop,
     /// The opt-in exact tool-loop guard reached its configured stop threshold for
     /// the same call (or all-read-only batch), model-visible result(s), and success

@@ -137,7 +137,9 @@ pub struct CodingAgentConfig {
     /// Exact no-progress loop policy. `None` disables it for explicitly intentional
     /// identical repetition. Defaults to 3/4 and is configurable through
     /// `ATOMCODE_TOOL_LOOP_WARNING_THRESHOLD` / `ATOMCODE_TOOL_LOOP_STOP_THRESHOLD`;
-    /// a stop threshold of `0` disables the policy.
+    /// a stop threshold of `0` disables the policy. The kernel's always-on echo
+    /// fuse (identical substantial thinking/text + same tool pattern) still warns
+    /// on the first replay and stops on the second, independent of this policy.
     pub tool_loop_policy: Option<ToolLoopPolicy>,
     /// Goal-mode round cap (0 = unbounded). Override via `ATOMCODE_GOAL_MAX_ROUNDS`.
     pub goal_max_rounds: u32,
@@ -446,13 +448,14 @@ impl CodingRuntimeConfig {
         config.chat_options.max_tokens = self.max_tokens;
         config.telemetry = self.telemetry.clone();
         config.datalog = self.datalog.clone();
-        config.chat_options.reasoning_effort = if let Some(effort) = self.reasoning_effort.as_deref() {
-            atomcode_kernel::provider::ReasoningEffort::from_config(Some(effort))
-        } else if self.model.to_ascii_lowercase().contains("grok") {
-            Some(atomcode_kernel::provider::ReasoningEffort::High)
-        } else {
-            None
-        };
+        config.chat_options.reasoning_effort =
+            if let Some(effort) = self.reasoning_effort.as_deref() {
+                atomcode_kernel::provider::ReasoningEffort::from_config(Some(effort))
+            } else if self.model.to_ascii_lowercase().contains("grok") {
+                Some(atomcode_kernel::provider::ReasoningEffort::High)
+            } else {
+                None
+            };
         config.provider_type = self.provider_type.clone();
         config.reasoning_history = self.reasoning_history.clone();
         config.thinking_enabled = self.thinking_enabled;
@@ -498,13 +501,14 @@ pub fn apply_provider_config(
     }
     config.context_window = provider.context_window as u32;
     config.chat_options.max_tokens = provider.max_tokens.map(|value| value as u32);
-    config.chat_options.reasoning_effort = if let Some(effort) = provider.reasoning_effort.as_deref() {
-        atomcode_kernel::provider::ReasoningEffort::from_config(Some(effort))
-    } else if provider.model.to_ascii_lowercase().contains("grok") {
-        Some(atomcode_kernel::provider::ReasoningEffort::High)
-    } else {
-        None
-    };
+    config.chat_options.reasoning_effort =
+        if let Some(effort) = provider.reasoning_effort.as_deref() {
+            atomcode_kernel::provider::ReasoningEffort::from_config(Some(effort))
+        } else if provider.model.to_ascii_lowercase().contains("grok") {
+            Some(atomcode_kernel::provider::ReasoningEffort::High)
+        } else {
+            None
+        };
     config.provider_type = provider.provider_type.clone();
     config.reasoning_history = provider.reasoning_history.clone();
     config.thinking_enabled = provider.thinking_enabled;

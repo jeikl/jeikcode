@@ -210,6 +210,9 @@ mode = "follow_system"
 # 相同结果，可提高这两个阈值；STOP 设为 0 可关闭。关闭后仍建议保留粗粒度轮次/时间上限：
 #   ATOMCODE_TOOL_LOOP_WARNING_THRESHOLD=3
 #   ATOMCODE_TOOL_LOOP_STOP_THRESHOLD=4
+# 更快的“回声”熔断（内核常开，不可关）：模型连续发出实质相同的思考/正文（≥32 字）
+# 并且工具签名也相同，视为原样重放。第 2 轮提醒、第 3 轮停止。短句不会触发，
+# 仍走上面的 3/4 精确守卫和 6 轮粗粒度签名熔断（粗粒度提醒已提前到第 2 轮）。
 # goal 另有独立轮次/墙钟上限（默认 200 轮、7200 秒；0 均表示不设上限）：
 #   ATOMCODE_GOAL_MAX_ROUNDS=200
 #   ATOMCODE_GOAL_MAX_DURATION_SECS=7200

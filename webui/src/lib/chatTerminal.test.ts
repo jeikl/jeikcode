@@ -249,8 +249,8 @@ test('resolveTokenCache prefers provider telemetry, otherwise estimates prefix',
   state = r.nextState;
 
   r = resolveTokenCache({ prompt: 40_000, cached: 0 }, state);
-  assert.equal(r.cached, 0);
-  assert.equal(r.cached_estimated, false);
+  assert.equal(r.cached, 38_555);
+  assert.equal(r.cached_estimated, true);
 });
 
 test('local prompt bumps keep estimated cache aligned with prior usage', () => {

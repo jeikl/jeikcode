@@ -481,6 +481,8 @@ interface ChatProps {
   onLanding?: (landing: boolean) => void;
   /** 侧栏「技能」菜单选中的技能：变化时把 `/name ` 插入输入框。 */
   skillInsert?: { name: string; seq: number } | null;
+  /** 打开会话侧栏（/resume 命令）。 */
+  onOpenSidebar?: () => void;
 }
 
 function formatArgs(args: unknown): string {
@@ -657,7 +659,7 @@ function detectSkillContent(text: string): string | null {
   return title || null;
 }
 
-export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionResolved, activeSession, restoring, onLiveTurnDone, onLiveRunningChange, onOptimisticSession, onOpenCwd, onCwdChanged, onLanding, skillInsert, onSessionRenamed }: ChatProps) {
+export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionResolved, activeSession, restoring, onLiveTurnDone, onLiveRunningChange, onOptimisticSession, onOpenCwd, onCwdChanged, onLanding, skillInsert, onSessionRenamed, onOpenSidebar }: ChatProps) {
   const t = useT();
   const [messages, setMessages] = useState<Message[]>([]);
   const [input, setInput] = useState('');
@@ -732,6 +734,7 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
   const [pendingSteers, setPendingSteersState] = useState<PendingLiveSteer[]>([]);
   const pendingSteersRef = useRef(pendingSteers);
   pendingSteersRef.current = pendingSteers;
+  const pendingSteersBySessionRef = useRef(new Map<string, PendingLiveSteer[]>());
   function setPendingSteers(
     update: PendingLiveSteer[] | ((current: PendingLiveSteer[]) => PendingLiveSteer[]),
   ) {
@@ -755,8 +758,12 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
     pushCommandNotice(t('chat.steerRecovered'));
   }
   const [tokens, setTokens] = useState<TokenUsage | null>(null);
+  const tokensRef = useRef<TokenUsage | null>(null);
+  tokensRef.current = tokens;
   const tokenCacheRef = useRef(createTokenCacheState());
   const tokenUsageCacheRef = useRef<Map<string, SessionTokenSnapshot>>(new Map());
+  /** Blocks token snapshots from bleeding across a session switch render. */
+  const tokenSaveGenerationRef = useRef(0);
   const lastUserTokensRef = useRef(0);
   const [showTokenDetails, setShowTokenDetails] = useState(false);
   const tokenPopoverRef = useRef<HTMLDivElement>(null);
@@ -834,7 +841,9 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
     }
     if (serverUsage && (serverUsage.prompt > 0 || serverUsage.total > 0)) {
       const mem = tokenUsageCacheRef.current.get(sid);
-      if (mem && (mem.tokens.total ?? 0) > serverUsage.total) {
+      const midTurn = busyRef.current
+        && (localTurnSessionsRef.current.has(sid) || liveSessionIdRef.current === sid);
+      if (midTurn && mem && (mem.tokens.total ?? 0) > serverUsage.total) {
         applyTokenUsage(mem.tokens, mem.cacheState);
         return;
       }
@@ -843,6 +852,17 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
     }
     const snap = tokenUsageCacheRef.current.get(sid);
     if (snap) {
+      if (!busyRef.current && messages.length > 0) {
+        const est = estimateSessionTokens(messages);
+        const snapTotal = snap.tokens.total ?? 0;
+        const estTotal = est.tokens.total ?? 0;
+        // Local streaming deltas can inflate the mem snapshot; prefer a message
+        // estimate while idle until authoritative server usage arrives.
+        if (snapTotal > estTotal * 1.25) {
+          applyTokenUsage(est.tokens, est.cacheState);
+          return;
+        }
+      }
       applyTokenUsage(snap.tokens, snap.cacheState);
       return;
     }
@@ -885,8 +905,34 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
   const [loading, setLoading] = useState(false);
   const [provider, setProvider] = useState<string | null>(null);
   const providerPinnedRef = useRef(false);
+  const NEW_SESSION_PROVIDER_KEY = '__new__';
+  const providerCacheRef = useRef(new Map<string, string>());
+  const localTurnSessionsRef = useRef(new Set<string>());
+  const defaultProviderName = useCallback(
+    () => modelCatalog.find((m) => m.is_default)?.provider
+      ?? modelCatalog[0]?.provider
+      ?? null,
+    [modelCatalog],
+  );
+  const providerCacheKey = useCallback(
+    (sid: string | null) => sid ?? NEW_SESSION_PROVIDER_KEY,
+    [],
+  );
+  const restoreProviderForSession = useCallback((sid: string | null) => {
+    const cached = providerCacheRef.current.get(providerCacheKey(sid));
+    if (cached) {
+      setProvider(cached);
+      providerPinnedRef.current = true;
+      return;
+    }
+    setProvider(defaultProviderName());
+    providerPinnedRef.current = false;
+  }, [defaultProviderName, providerCacheKey]);
   const followDefaultProvider = useCallback((name: string) => {
-    if (!providerPinnedRef.current) setProvider(name);
+    if (providerPinnedRef.current) return;
+    // Only follow global default on the new-session landing page.
+    if (activeIdRef.current) return;
+    setProvider(name);
   }, []);
 
   useEffect(() => {
@@ -1366,16 +1412,11 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
     // sessionId 变成自己的 id（activeIdRef 已同步），不重置，以免清空刚看到的对话。
     if (sessionId !== activeIdRef.current) {
       const prevId = activeIdRef.current;
-      // A correlated steer still belongs to the session being left. Recover it
-      // while that session is authoritative and reject this switch once; moving
-      // the draft after `activeIdRef` changes would leak it into another chat.
-      if (pendingSteersRef.current.length > 0) {
-        const pendingOwnerId = prevId ?? liveSessionIdRef.current;
-        if (pendingOwnerId) {
-          restorePendingSteers();
-          onSessionId(pendingOwnerId);
-          return;
-        }
+      if (prevId && provider) {
+        providerCacheRef.current.set(prevId, provider);
+      }
+      if (pendingSteersRef.current.length > 0 && prevId) {
+        pendingSteersBySessionRef.current.set(prevId, [...pendingSteersRef.current]);
       }
       const detachedController = abortRef.current;
       if (prevId && messagesRef.current.length > 0) {
@@ -1399,8 +1440,25 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
       // post-bump generation for async switch callbacks (A→B→A races).
       sessionGenerationRef.current += 1;
       const switchGeneration = sessionGenerationRef.current;
+      if (prevId && tokensRef.current) {
+        tokenUsageCacheRef.current.set(prevId, {
+          tokens: { ...tokensRef.current },
+          cacheState: { ...tokenCacheRef.current },
+        });
+      }
+      tokenSaveGenerationRef.current = switchGeneration;
+      resetTokenTelemetry();
       activeIdRef.current = sessionId;
-      providerPinnedRef.current = false;
+      restoreProviderForSession(sessionId);
+      const stashedSteers = sessionId
+        ? pendingSteersBySessionRef.current.get(sessionId)
+        : undefined;
+      if (stashedSteers?.length && sessionId) {
+        setPendingSteers(stashedSteers);
+        pendingSteersBySessionRef.current.delete(sessionId);
+      } else {
+        setPendingSteers([]);
+      }
       loadedForRef.current = null;
       stopDetachedHistoryPoll();
       optimisticFiredRef.current = false;
@@ -1492,9 +1550,16 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
           const preferred = sessionResult.value.preferred_model;
           if (preferred) {
             setProvider(preferred);
+            providerCacheRef.current.set(loadId, preferred);
             providerPinnedRef.current = true;
           } else {
-            providerPinnedRef.current = false;
+            const cachedProv = providerCacheRef.current.get(loadId);
+            if (cachedProv) {
+              setProvider(cachedProv);
+              providerPinnedRef.current = true;
+            } else {
+              restoreProviderForSession(loadId);
+            }
           }
           // Live reconnect already restores from the /live snapshot. Disk history
           // can race that snapshot (stale, missing in-flight turns) and must not
@@ -1532,7 +1597,11 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
 
         if (activeResult.status === 'fulfilled') {
           const active = activeResult.value.includes(loadId);
-          transitionChatRecovery({ type: 'active_check_succeeded', active: active && !isLiveSession });
+          const isLocalTurn = localTurnSessionsRef.current.has(loadId);
+          transitionChatRecovery({
+            type: 'active_check_succeeded',
+            active: active && !isLiveSession && !isLocalTurn,
+          });
           if (active && !isLiveSession) {
             requestIdRef.current = loadId;
             if (!syncRef.current) setBusyAndClock(false);
@@ -1635,7 +1704,8 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
   // 同 session 内 tokens 变化时写入内存快照（切换回来在 getSession 返回前也能恢复）。
   useEffect(() => {
     const sid = activeIdRef.current;
-    if (!sid || !tokens) return;
+    if (!sid || !tokens || sessionId !== sid) return;
+    if (sessionGenerationRef.current !== tokenSaveGenerationRef.current) return;
     tokenUsageCacheRef.current.set(sid, {
       tokens: { ...tokens },
       cacheState: { ...tokenCacheRef.current },
@@ -2064,9 +2134,16 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
     // Provider events belong to the live runtime's session only. Other open
     // sessions keep their own model selection.
     if (e.type === 'provider') {
-      if (!activeIdRef.current || activeIdRef.current === liveSessionIdRef.current) {
+      const liveSid = liveSessionIdRef.current;
+      if (liveSid) {
+        providerCacheRef.current.set(liveSid, e.provider);
+      }
+      if (!activeIdRef.current || activeIdRef.current === liveSid) {
         setProvider(e.provider);
-        providerPinnedRef.current = false;
+        if (activeIdRef.current) {
+          providerCacheRef.current.set(activeIdRef.current, e.provider);
+          providerPinnedRef.current = true;
+        }
       }
       return;
     }
@@ -2361,18 +2438,31 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
   /** Switch the active provider and notify the backend immediately so default model persists and syncs. */
   function switchProvider(name: string) {
     providerPinnedRef.current = true;
+    providerCacheRef.current.set(providerCacheKey(sessionId), name);
     const previous = provider;
     setProvider(name);
     void postLiveProvider(name, sessionId).then((res) => {
       if (res.ok) return;
-      // Rejected (e.g. a turn is running): undo the optimistic selection and unpin
-      // so the selector resumes following the runtime's authoritative model.
+      if (res.activeTurn) {
+        pushCommandNotice(t('cmd.model.deferred'));
+        return;
+      }
       setProvider(previous);
       providerPinnedRef.current = false;
-      pushCommandNotice(res.activeTurn ? t('cmd.model.syncBusy') : (res.error ?? t('cmd.model.syncBusy')));
+      if (previous) {
+        providerCacheRef.current.set(providerCacheKey(sessionId), previous);
+      } else {
+        providerCacheRef.current.delete(providerCacheKey(sessionId));
+      }
+      pushCommandNotice(res.error ?? t('cmd.model.syncBusy'));
     }).catch((error) => {
       setProvider(previous);
       providerPinnedRef.current = false;
+      if (previous) {
+        providerCacheRef.current.set(providerCacheKey(sessionId), previous);
+      } else {
+        providerCacheRef.current.delete(providerCacheKey(sessionId));
+      }
       setHistoryHint(t('chat.connError', { msg: String(error) }));
     });
   }
@@ -2400,7 +2490,7 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
         }
       },
       // openSessionSidebar: 侧栏开关状态在 App，Chat 无此 prop。
-      openSessionSidebar: () => { pushCommandNotice(t('cmd.resume.openHint')); },
+      openSessionSidebar: () => { onOpenSidebar?.(); },
       // reloadConfig: POST /config/reload。
       reloadConfig: async () => {
         await postConfigReload();
@@ -2869,6 +2959,7 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
           pushNoticeToLastAssistant(t('chat.incomplete', { msg: terminal.detail }));
         }
         transitionChatRecovery({ type: 'authoritative_terminal' });
+        localTurnSessionsRef.current.delete(event.session_id);
         setBusyAndClock(false);
         onPermissionResolved?.(null); // 回合结束：兜底清掉任何残留审批卡片
         setUserInputReq(null);
@@ -2877,6 +2968,7 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
 
       case 'stopped':
         transitionChatRecovery({ type: 'authoritative_terminal' });
+        if (activeIdRef.current) localTurnSessionsRef.current.delete(activeIdRef.current);
         setBusyAndClock(false);
         setQueued([]); // 用户中止：丢弃排队消息（对齐 VSCode 插件）
         onPermissionResolved?.(null);
@@ -2886,6 +2978,7 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
       case 'error':
         appendToLastAssistant('\n\n' + t('chat.error', { msg: event.message }));
         transitionChatRecovery({ type: 'authoritative_terminal' });
+        if (activeIdRef.current) localTurnSessionsRef.current.delete(activeIdRef.current);
         setBusyAndClock(false);
         setQueued([]); // 出错：丢弃排队消息
         onPermissionResolved?.(null);
@@ -3010,6 +3103,7 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
       //    case via `pendingSelfEchoRef`.
       const steering = busyRef.current;
       setBusyAndClock(true);
+      if (activeIdRef.current) localTurnSessionsRef.current.add(activeIdRef.current);
       const now = Date.now();
       const pendingSteer: PendingLiveSteer = {
         id: crypto.randomUUID(),
@@ -3077,6 +3171,8 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
     // ── Normal path ──
     setBusyAndClock(true);
     busyRef.current = true;
+    const turnOwnerSid = sessionId ?? activeIdRef.current;
+    if (turnOwnerSid) localTurnSessionsRef.current.add(turnOwnerSid);
     // 消息发出后延迟刷新侧栏列表，给后端落盘时间；
     // done 事件中 onSessionId 会再刷一次确保更新。
     setTimeout(() => onLiveTurnDone?.(), 200);

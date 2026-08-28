@@ -296,7 +296,15 @@ export function resolveTokenCache(
   if (reported != null && reported > 0) {
     cached = reported;
   } else if (reported === 0 && providerReportsCache) {
-    cached = 0;
+    // Provider may report cached=0 on the first usage event of a new turn
+    // before prefix cache warms up. Prefer prefix estimation when plausible.
+    const estimated = estimatePrefixCached(prompt, state.lastPrompt);
+    if (estimated > 0) {
+      cached = estimated;
+      cached_estimated = true;
+    } else {
+      cached = 0;
+    }
   } else {
     const estimated = estimatePrefixCached(prompt, state.lastPrompt);
     if (estimated > 0) {
@@ -319,10 +327,13 @@ export function estimateLocalCached(
   prev: { cached?: number; cached_estimated?: boolean } | null | undefined,
 ): { cached: number; cached_estimated: boolean } {
   const prevCached = prev?.cached ?? 0;
-  if (prev && !prev.cached_estimated && prevCached > 0) {
-    return { cached: prevCached, cached_estimated: false };
+  if (prev && prevCached > 0) {
+    return {
+      cached: prevCached,
+      cached_estimated: Boolean(prev.cached_estimated),
+    };
   }
-  if (state.providerReportsCache && prev && !prev.cached_estimated && prevCached === 0) {
+  if (state.providerReportsCache && prev && prevCached === 0) {
     return { cached: 0, cached_estimated: false };
   }
   const estimated = estimatePrefixCached(prompt, state.lastPrompt);

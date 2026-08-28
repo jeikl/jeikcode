@@ -481,6 +481,7 @@ export function App() {
             onLanding={setIsLanding}
             skillInsert={skillInsert}
             onSessionRenamed={(name) => setActiveSession((prev) => prev ? { ...prev, name } : prev)}
+            onOpenSidebar={() => setSidebarOpen(true)}
           />
         </div>
       </div>

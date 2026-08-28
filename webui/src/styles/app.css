@@ -298,6 +298,11 @@ body {
 }
 .chat-stage.has-turn-nav .turn-nav {
   grid-area: nav;
+  /* Grid items default to min-height:auto and grow with content; without this
+     the list is clipped by .chat-stage overflow instead of scrolling. */
+  min-height: 0;
+  max-height: 100%;
+  align-self: stretch;
 }
 .chat-stage.has-turn-nav .persistence-warning {
   grid-area: warning;
@@ -323,6 +328,7 @@ body {
   flex-direction: column;
   min-height: 0;
   height: 100%;
+  max-height: 100%;
   overflow: hidden;
   z-index: 3;
   width: 100%;
@@ -363,14 +369,30 @@ body {
   color: var(--app-input-placeholder-foreground);
 }
 .turn-nav-list {
-  flex: 1;
+  flex: 1 1 0%;
   min-height: 0;
   overflow-y: auto;
   overflow-x: hidden;
+  overscroll-behavior: contain;
+  scrollbar-gutter: stable;
+  scrollbar-width: thin;
+  scrollbar-color: color-mix(in srgb, var(--app-secondary-foreground) 70%, transparent)
+    color-mix(in srgb, var(--app-secondary-foreground) 14%, transparent);
   display: flex;
   flex-direction: column;
   gap: 2px;
   padding: 0 2px 8px 0;
+}
+.turn-nav-list::-webkit-scrollbar {
+  width: 8px;
+}
+.turn-nav-list::-webkit-scrollbar-track {
+  background: color-mix(in srgb, var(--app-secondary-foreground) 10%, transparent);
+  border-radius: 8px;
+}
+.turn-nav-list::-webkit-scrollbar-thumb {
+  background: color-mix(in srgb, var(--app-secondary-foreground) 55%, transparent);
+  border-radius: 8px;
 }
 .turn-nav-empty {
   padding: 8px 8px;

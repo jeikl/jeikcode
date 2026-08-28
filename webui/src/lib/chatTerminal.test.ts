@@ -20,6 +20,7 @@ import {
   estimateCacheFromHistoryPrompt,
   createTokenCacheState,
   resetTokenCacheState,
+  startTokenTurn,
   clampCachedToPrompt,
   isStackedTurnBillingUsage,
   userMessageAlreadyOnCanvas,
@@ -227,10 +228,13 @@ test('a live user-input terminal clears only its matching prompt', () => {
 test('prefix cache estimate reuses prior request prompt on warm paths', () => {
   assert.equal(estimatePrefixCached(0, 10_000), 0);
   assert.equal(estimatePrefixCached(38_555, 0), 0);
-  assert.equal(estimatePrefixCached(38_555, 32_540), 32_540);
-  assert.equal(estimatePrefixCached(40_000, 38_555), 38_555);
+  assert.equal(estimatePrefixCached(6_000, 5_000), 4_992); // 5000 floored to 64-token blocks
+  assert.equal(estimatePrefixCached(9_000, 8_000), 8_000); // 8000 is already block-aligned
   // Compaction / rewrite invalidates cache key.
   assert.equal(estimatePrefixCached(5_000, 38_555), 0);
+  // Near-equal prompts must not paint a fake 100%.
+  const near = estimatePrefixCached(200_000, 200_000);
+  assert.ok(near > 0 && near < 200_000);
 });
 
 test('resolveTokenCache prefers provider telemetry, otherwise estimates prefix', () => {
@@ -241,7 +245,7 @@ test('resolveTokenCache prefers provider telemetry, otherwise estimates prefix',
   state = r.nextState;
 
   r = resolveTokenCache({ prompt: 38_555, cached: 0 }, state);
-  assert.equal(r.cached, 10_000);
+  assert.equal(r.cached, estimatePrefixCached(38_555, 10_000));
   assert.equal(r.cached_estimated, true);
   state = r.nextState;
 
@@ -251,8 +255,35 @@ test('resolveTokenCache prefers provider telemetry, otherwise estimates prefix',
   state = r.nextState;
 
   r = resolveTokenCache({ prompt: 40_000, cached: 0 }, state);
-  assert.equal(r.cached, 38_555);
+  assert.equal(r.cached, estimatePrefixCached(40_000, 38_555));
   assert.equal(r.cached_estimated, true);
+});
+
+test('empty usage events do not wipe the prefix baseline', () => {
+  let state = createTokenCacheState();
+  state = resolveTokenCache({ prompt: 200_000, cached: 180_000 }, state).nextState;
+  const wiped = resolveTokenCache({ prompt: 0, cached: 0 }, state);
+  assert.equal(wiped.nextState.lastPrompt, 200_000);
+  const firstRound = resolveTokenCache({ prompt: 201_000, cached: 0 }, wiped.nextState);
+  assert.ok(firstRound.cached > 0, 'first round after send must estimate prefix cache');
+  assert.equal(firstRound.cached_estimated, true);
+});
+
+test('industrial loop hit rate matches the 5-step agent example', () => {
+  let state = startTokenTurn(createTokenCacheState());
+  const steps = [
+    { prompt: 5_000, cached: 0 },
+    { prompt: 6_000, cached: 5_000 },
+    { prompt: 7_000, cached: 6_000 },
+    { prompt: 8_000, cached: 7_000 },
+    { prompt: 9_000, cached: 8_000 },
+  ];
+  for (const step of steps) {
+    state = resolveTokenCache(step, state).nextState;
+  }
+  assert.equal(state.turnPromptSum, 35_000);
+  assert.equal(state.turnCachedSum, 26_000);
+  assert.equal(formatCacheHitRate(26_000, 35_000), '74%');
 });
 
 test('local prompt bumps keep estimated cache aligned with prior usage', () => {
@@ -265,15 +296,17 @@ test('local prompt bumps keep estimated cache aligned with prior usage', () => {
 
 test('history prompt estimate uses prefix before last user turn', () => {
   const cache = estimateCacheFromHistoryPrompt(38_555, 10_000);
-  assert.equal(cache.cached, 10_000);
+  assert.equal(cache.cached, estimatePrefixCached(38_555, 10_000));
   assert.equal(cache.cached_estimated, true);
 });
 
 test('cache hit rate follows provider cached over total prompt tokens', () => {
   assert.equal(formatCacheHitRate(0, 10_000), null);
   assert.equal(formatCacheHitRate(6200, 10_000), '62%');
-  assert.equal(formatCacheHitRate(9996, 10_000), '99.9%');
+  assert.equal(formatCacheHitRate(9_996, 10_000), '99%');
   assert.equal(formatCacheHitRate(10_000, 10_000), '100%');
+  assert.equal(formatCacheHitRate(10_000, 10_000, true), '99%');
+  assert.equal(formatCacheHitRate(199_000, 200_000), '99%');
 });
 
 test('clampCachedToPrompt never exceeds occupancy', () => {

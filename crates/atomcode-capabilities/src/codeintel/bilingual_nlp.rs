@@ -270,9 +270,9 @@ pub fn parse_bilingual_query_with_thesaurus(
         });
 
         let en_hit = tokens.words.iter().any(|w| {
-            rule.en_terms.iter().any(|en| {
-                w == en || (w.len() >= 4 && (en == w || en.starts_with(w)))
-            })
+            rule.en_terms
+                .iter()
+                .any(|en| w == en || (w.len() >= 4 && (en == w || en.starts_with(w))))
         }) || tokens.code_identifiers.iter().any(|id| {
             let compact = compact_ident(id);
             compact.len() >= 6
@@ -993,7 +993,9 @@ mod tests {
             q.code_identifiers
         );
         assert!(
-            !q.words.iter().any(|w| w == "order" || w == "type" || w == "amount"),
+            !q.words
+                .iter()
+                .any(|w| w == "order" || w == "type" || w == "amount"),
             "CamelCase crumbs must not enter words: {:?}",
             q.words
         );
@@ -1002,11 +1004,9 @@ mod tests {
             noise < 10.0,
             "BKOrderType must not lexically hit OrderItemService: {noise}"
         );
-        let sql = calculate_lexical_similarity(&q, "AND po.BKOrderType IN (0,2) AND MaylifeAmount > 0");
-        assert!(
-            sql > 40.0,
-            "full identifiers in SQL must still hit: {sql}"
-        );
+        let sql =
+            calculate_lexical_similarity(&q, "AND po.BKOrderType IN (0,2) AND MaylifeAmount > 0");
+        assert!(sql > 40.0, "full identifiers in SQL must still hit: {sql}");
         let cjk = calculate_lexical_similarity(&q, "// 总业绩(基本盘)");
         assert!(cjk > 20.0, "CJK 基本盘 must still hit: {cjk}");
     }

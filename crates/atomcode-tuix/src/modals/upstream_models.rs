@@ -154,7 +154,8 @@ mod tests {
 
     #[test]
     fn parse_openai_data_ids() {
-        let body = r#"{"object":"list","data":[{"id":"grok-4.6"},{"id":"grok-4.5"},{"id":"grok-4.6"}]}"#;
+        let body =
+            r#"{"object":"list","data":[{"id":"grok-4.6"},{"id":"grok-4.5"},{"id":"grok-4.6"}]}"#;
         assert_eq!(
             parse_model_ids(body),
             vec!["grok-4.5".to_string(), "grok-4.6".to_string()]

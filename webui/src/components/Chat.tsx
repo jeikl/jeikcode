@@ -104,6 +104,7 @@ import {
   formatCacheHitRate,
   createTokenCacheState,
   resetTokenCacheState,
+  startTokenTurn,
   estimateLocalCached,
   estimateCacheFromHistoryPrompt,
   type TokenCacheState,
@@ -442,6 +443,9 @@ interface TokenUsage {
   cached?: number;
   cached_estimated?: boolean;
   reasoning?: number;
+  /** Industrial loop sums for this user turn: Σ step prompt / Σ step cache. */
+  loop_prompt?: number;
+  loop_cached?: number;
 }
 
 interface PermissionRequestEvent {
@@ -792,6 +796,8 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
       cached: resolved.cached,
       cached_estimated: resolved.cached_estimated,
       reasoning: usage.reasoning ?? 0,
+      loop_prompt: resolved.nextState.turnPromptSum,
+      loop_cached: resolved.nextState.turnCachedSum,
     });
   };
 
@@ -851,6 +857,8 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
     const cacheState: TokenCacheState = {
       lastPrompt: prompt,
       providerReportsCache: cached > 0 && !usage.cached_estimated,
+      turnPromptSum: prompt,
+      turnCachedSum: cached,
     };
     applyTokenUsage({
       prompt,
@@ -2931,6 +2939,8 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
           cached: resolved.cached,
           cached_estimated: resolved.cached_estimated,
           reasoning: prev?.reasoning ?? 0,
+          loop_prompt: resolved.nextState.turnPromptSum,
+          loop_cached: resolved.nextState.turnCachedSum,
         }));
         break;
       }
@@ -3343,6 +3353,9 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
 
     const userDelta = estimateTextTokens(text);
     lastUserTokensRef.current = userDelta;
+    // New user turn: keep lastPrompt so the first LLM round can estimate
+    // prefix cache; zero the loop accumulators (industrial Σ-over-steps).
+    tokenCacheRef.current = startTokenTurn(tokenCacheRef.current);
     if (userDelta > 0) {
       setTokens((prev) => mergeLocalTokens(prev, {
         prompt: (prev?.prompt ?? 0) + userDelta,
@@ -3895,7 +3908,12 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
             const reasoning = tokens.reasoning ?? 0;
             // Live last-frame 口径: 总上下文 = last request prompt + completion.
             const total = tokens.total ?? (prompt + completion);
-            const cachedPct = formatCacheHitRate(cached, prompt);
+            const loopPrompt = tokens.loop_prompt ?? tokenCacheRef.current.turnPromptSum ?? prompt;
+            const loopCached = tokens.loop_cached ?? tokenCacheRef.current.turnCachedSum ?? cached;
+            const stepPct = formatCacheHitRate(cached, prompt, isEstimated);
+            const loopPct = formatCacheHitRate(loopCached, loopPrompt, isEstimated);
+            const multiStep = loopPrompt > prompt;
+            const cachedPct = multiStep && loopPct ? loopPct : stepPct;
             const pctOfLimit = contextLimit && contextLimit > 0 ? Math.min(100, Math.round((total / contextLimit) * 100)) : null;
             const billable = completion + Math.max(0, prompt - cached);
 
@@ -3914,10 +3932,13 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
             ];
             if (cached > 0) {
               if (isEstimated) {
-                tooltipLines.push(`⚡ 预估缓存: ${cachedStr} (${cachedPct} 预估)`);
+                tooltipLines.push(`⚡ 预估缓存: ${cachedStr} (${stepPct} 预估)`);
               } else {
-                tooltipLines.push(`⚡ 在线缓存命中: ${cachedStr} (${cachedPct} 命中)`);
+                tooltipLines.push(`⚡ 在线缓存命中: ${cachedStr} (${stepPct} 命中)`);
               }
+            }
+            if (multiStep && loopPct) {
+              tooltipLines.push(`⚡ 本轮综合命中: ${loopCached.toLocaleString()} / ${loopPrompt.toLocaleString()} (${loopPct})`);
             }
             if (reasoning > 0) {
               const contentTokens = Math.max(0, completion - reasoning);
@@ -3962,10 +3983,16 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
                     <span class="token-icon">↑</span>
                     <span>output: {formatTokenMetric(completion)}</span>
                   </span>
-                  {cached > 0 && (
+                  {(cached > 0 || (multiStep && loopCached > 0)) && (
                     <span
                       class={'token-pill token-cached' + (isEstimated ? ' is-estimated' : '')}
-                      title={isEstimated ? `预估缓存: ${cachedStr} (${cachedPct} 预估)` : `在线缓存命中: ${cachedStr} (${cachedPct})`}
+                      title={
+                        multiStep && loopPct
+                          ? `本轮综合命中: ${loopCached.toLocaleString()} / ${loopPrompt.toLocaleString()} (${loopPct})`
+                          : isEstimated
+                            ? `预估缓存: ${cachedStr} (${stepPct} 预估)`
+                            : `在线缓存命中: ${cachedStr} (${stepPct})`
+                      }
                     >
                       <span class="token-icon">⚡</span>
                       <span>cache: {cachedPct != null ? cachedPct : formatTokenMetric(cached)}</span>
@@ -4062,8 +4089,23 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
                           <div class="token-popover-row-val-group">
                             <span class="token-popover-row-val">{cachedStr}</span>
                             <span class="token-popover-row-badge">
-                              {cachedPct} {isEstimated ? '预估' : '命中'}
+                              {stepPct} {isEstimated ? '预估' : '命中'}
                             </span>
+                          </div>
+                        </div>
+                      )}
+
+                      {multiStep && loopPct && (
+                        <div class="token-popover-row is-cached">
+                          <div class="token-popover-row-left">
+                            <span class="token-row-icon">⚡</span>
+                            <span class="token-row-label">本轮综合命中</span>
+                          </div>
+                          <div class="token-popover-row-val-group">
+                            <span class="token-popover-row-val">
+                              {loopCached.toLocaleString()} / {loopPrompt.toLocaleString()}
+                            </span>
+                            <span class="token-popover-row-badge">{loopPct}</span>
                           </div>
                         </div>
                       )}

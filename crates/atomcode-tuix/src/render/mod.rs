@@ -495,9 +495,7 @@ impl MenuKind {
             // Leave one row for the surrounding footer rule/status chrome so
             // the complete `/cd` surface, not just its menu payload, stays at
             // roughly half of the terminal.
-            MenuKind::DirectoryList => {
-                item_count.min((screen_height / 2).saturating_sub(1).max(1))
-            }
+            MenuKind::DirectoryList => item_count.min((screen_height / 2).saturating_sub(1).max(1)),
             MenuKind::Plugin | MenuKind::SessionList => {
                 let plugin_count = item_count.saturating_sub(3);
                 let max_plugins = (screen_height / 4).max(2);

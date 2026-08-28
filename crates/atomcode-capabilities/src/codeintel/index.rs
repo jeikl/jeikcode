@@ -741,7 +741,10 @@ fn sql_keep_priority(p: &super::graph::SqlPredicate) -> u32 {
     if has_cjk_char(&p.raw_clause) {
         s += 1000;
     }
-    if p.target_fields.iter().any(|f| has_camel_ident(f) || has_cjk_char(f)) {
+    if p.target_fields
+        .iter()
+        .any(|f| has_camel_ident(f) || has_cjk_char(f))
+    {
         s += 200;
     }
     if has_camel_ident(&p.raw_clause) {
@@ -1176,12 +1179,7 @@ fn is_minified_web_bundle(path: &Path, len: u64) -> bool {
     n > 0 && buf[..n].iter().filter(|&&b| b == b'\n').count() < 4
 }
 
-fn skip_index_file(
-    root: &Path,
-    path: &Path,
-    len: u64,
-    gi: &ignore::gitignore::Gitignore,
-) -> bool {
+fn skip_index_file(root: &Path, path: &Path, len: u64, gi: &ignore::gitignore::Gitignore) -> bool {
     is_generated_source(path)
         || path_under_skip_dir(path)
         || codegraph_ignored(gi, root, path)
@@ -2611,9 +2609,7 @@ fn sync_units(
                     let t = Instant::now();
                     let _ = db.upsert_units_prepared(batch, &[]);
                     persist_probe.note_sqlite(n, t.elapsed());
-                    persist_probe
-                        .persist_q
-                        .fetch_sub(n, Ordering::Relaxed);
+                    persist_probe.persist_q.fetch_sub(n, Ordering::Relaxed);
                     batch.clear();
                 };
                 loop {
@@ -4087,8 +4083,14 @@ export function CouponPanel() {
             crate::codeintel::index_db::disk_cache_path_db(d.path()).is_file(),
             "SQLite db must be written"
         );
-        assert!(!leftover_json.exists(), "pre-SQLite json snapshot must be removed");
-        assert!(!leftover_bin.exists(), "pre-SQLite bin snapshot must be removed");
+        assert!(
+            !leftover_json.exists(),
+            "pre-SQLite json snapshot must be removed"
+        );
+        assert!(
+            !leftover_bin.exists(),
+            "pre-SQLite bin snapshot must be removed"
+        );
 
         let loaded = load_disk_cache(d.path()).expect("sqlite cache must load");
         assert_eq!(loaded.units.len(), 1);
@@ -5118,9 +5120,7 @@ public class OrderController
                 "    let _q{i} = \"SELECT a FROM t{i} WHERE id = {i}\";\n"
             ));
         }
-        src.push_str(
-            "    let _tail = \"AND po.BKOrderType IN (0,2) /* 总业绩(基本盘) */\";\n}\n",
-        );
+        src.push_str("    let _tail = \"AND po.BKOrderType IN (0,2) /* 总业绩(基本盘) */\";\n}\n");
         std::fs::write(d.path().join("sql.rs"), src).unwrap();
         let g = build_graph(d.path());
         let n = g

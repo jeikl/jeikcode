@@ -216,6 +216,27 @@ test('add on a finished list auto-clears so ids restart at 1', () => {
   ]);
 });
 
+test('add+update on a finished list accepts append-style ids', () => {
+  const list = applyTodoAction(
+    [{ content: '查询沉睡资源客户列表', status: 'completed' }],
+    JSON.stringify({
+      actions: [
+        { action: 'add', content: '导出Excel', id: 2 },
+        { action: 'update', id: 2, status: 'in_progress' },
+      ],
+    }),
+  );
+  assert.deepEqual(list, [{ content: '导出Excel', status: 'in_progress' }]);
+});
+
+test('duplicate titles upsert instead of duplicating', () => {
+  const list = applyTodoAction(
+    [{ content: '导出Excel', status: 'pending' }],
+    JSON.stringify({ actions: [{ action: 'add', content: '  导出Excel  ', status: 'in_progress' }] }),
+  );
+  assert.deepEqual(list, [{ content: '导出Excel', status: 'in_progress' }]);
+});
+
 test('add on an unfinished list does not auto-clear', () => {
   const list = applyTodoAction(
     [

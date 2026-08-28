@@ -1192,227 +1192,231 @@ fn score_workspace_symbols(
     let scored: Vec<(PathBuf, ScoredSymbol)> = {
         let job = || {
             nodes
-        .into_par_iter()
-        .filter_map(|node| {
-            if !parsed_query.kind_filters.is_empty() {
-                let kind_str = format!("{:?}", node.kind).to_ascii_lowercase();
-                if !parsed_query
-                    .kind_filters
-                    .iter()
-                    .any(|k| kind_str.contains(k))
-                {
-                    return None;
-                }
-            }
-            if !name_filters_lower.is_empty() {
-                let name_lower = node.name.to_ascii_lowercase();
-                if !name_filters_lower.iter().any(|n| name_lower.contains(n)) {
-                    return None;
-                }
-            }
-            if !path_filters_lower.is_empty() {
-                let f_lower = node.file.to_string_lossy().to_ascii_lowercase();
-                if !path_filters_lower.iter().any(|p| f_lower.contains(p)) {
-                    return None;
-                }
-            }
+                .into_par_iter()
+                .filter_map(|node| {
+                    if !parsed_query.kind_filters.is_empty() {
+                        let kind_str = format!("{:?}", node.kind).to_ascii_lowercase();
+                        if !parsed_query
+                            .kind_filters
+                            .iter()
+                            .any(|k| kind_str.contains(k))
+                        {
+                            return None;
+                        }
+                    }
+                    if !name_filters_lower.is_empty() {
+                        let name_lower = node.name.to_ascii_lowercase();
+                        if !name_filters_lower.iter().any(|n| name_lower.contains(n)) {
+                            return None;
+                        }
+                    }
+                    if !path_filters_lower.is_empty() {
+                        let f_lower = node.file.to_string_lossy().to_ascii_lowercase();
+                        if !path_filters_lower.iter().any(|p| f_lower.contains(p)) {
+                            return None;
+                        }
+                    }
 
-            let name_lex = calculate_lexical_similarity(tokens, &node.name);
-            // Dense name embedding only after a real token hit — not on every
-            // `*Order*Service` just because BKOrderType split to "order".
-            let name_sim = if name_lex > 0.0 {
-                calculate_text_similarity(tokens, &node.name)
-            } else {
-                0.0
-            };
-            let mut name_bonus = 0.0;
-            let node_name_lower = node.name.to_ascii_lowercase();
-
-            if tokens.raw_query.eq_ignore_ascii_case(&node.name) {
-                name_bonus += 100.0;
-            }
-            for id in &tokens.code_identifiers {
-                if id.eq_ignore_ascii_case(&node.name)
-                    || node_name_lower.contains(&id.to_ascii_lowercase())
-                {
-                    name_bonus += if id.eq_ignore_ascii_case(&node.name) {
-                        70.0
-                    } else if id.len() >= 8 {
-                        50.0
+                    let name_lex = calculate_lexical_similarity(tokens, &node.name);
+                    // Dense name embedding only after a real token hit — not on every
+                    // `*Order*Service` just because BKOrderType split to "order".
+                    let name_sim = if name_lex > 0.0 {
+                        calculate_text_similarity(tokens, &node.name)
                     } else {
                         0.0
                     };
-                }
-            }
-            if tokens.expanded_terms.iter().any(|term| {
-                term.len() >= 8 && (node_name_lower == *term || node_name_lower.contains(term))
-            }) {
-                name_bonus += 30.0;
-            }
-            if project_tokens.contains(&node_name_lower)
-                && !tokens.raw_query.eq_ignore_ascii_case(&node.name)
-            {
-                name_bonus *= 0.2;
-            }
+                    let mut name_bonus = 0.0;
+                    let node_name_lower = node.name.to_ascii_lowercase();
 
-            // Body fields: lexical + 词林 `contains` only. Dense 128-dim embedding on
-            // SQL/comment walls × 31万 symbols is what made Retrieval 50–150s.
-            let mut branch_comment_sim = 0.0f64;
-            let mut doc_sim = 0.0f64;
-            let mut plain_inline_sim = 0.0f64;
-            let mut sql_sim = 0.0f64;
-            let scan_body = true;
-            if scan_body {
-                if let Some(doc) = &node.docstring {
-                    doc_sim = doc_sim.max(calculate_lexical_similarity(tokens, doc));
-                }
-                for c in &node.inline_comments {
-                    plain_inline_sim =
-                        plain_inline_sim.max(calculate_lexical_similarity(tokens, c));
-                }
-                for sc in &node.comments {
-                    let sim = calculate_lexical_similarity(tokens, &sc.text);
-                    match sc.scope {
-                        super::graph::CommentScope::BranchInline { .. } => {
-                            branch_comment_sim = branch_comment_sim.max(sim);
-                        }
-                        super::graph::CommentScope::Docstring
-                        | super::graph::CommentScope::MethodHeader => {
-                            doc_sim = doc_sim.max(sim);
-                        }
-                        super::graph::CommentScope::PropertyDoc
-                        | super::graph::CommentScope::PlainInline => {
-                            plain_inline_sim = plain_inline_sim.max(sim);
+                    if tokens.raw_query.eq_ignore_ascii_case(&node.name) {
+                        name_bonus += 100.0;
+                    }
+                    for id in &tokens.code_identifiers {
+                        if id.eq_ignore_ascii_case(&node.name)
+                            || node_name_lower.contains(&id.to_ascii_lowercase())
+                        {
+                            name_bonus += if id.eq_ignore_ascii_case(&node.name) {
+                                70.0
+                            } else if id.len() >= 8 {
+                                50.0
+                            } else {
+                                0.0
+                            };
                         }
                     }
-                }
-                for sql in &node.sql_predicates {
-                    sql_sim = sql_sim.max(calculate_lexical_similarity(tokens, &sql.raw_clause));
-                    for f in &sql.target_fields {
-                        sql_sim = sql_sim.max(calculate_lexical_similarity(tokens, f));
+                    if tokens.expanded_terms.iter().any(|term| {
+                        term.len() >= 8
+                            && (node_name_lower == *term || node_name_lower.contains(term))
+                    }) {
+                        name_bonus += 30.0;
                     }
-                }
-                for lit in &node.string_literals {
-                    sql_sim = sql_sim.max(calculate_lexical_similarity(tokens, lit));
-                }
-            }
+                    if project_tokens.contains(&node_name_lower)
+                        && !tokens.raw_query.eq_ignore_ascii_case(&node.name)
+                    {
+                        name_bonus *= 0.2;
+                    }
 
-            let path_sim = path_sims.get(&node.file).copied().unwrap_or(0.0);
+                    // Body fields: lexical + 词林 `contains` only. Dense 128-dim embedding on
+                    // SQL/comment walls × 31万 symbols is what made Retrieval 50–150s.
+                    let mut branch_comment_sim = 0.0f64;
+                    let mut doc_sim = 0.0f64;
+                    let mut plain_inline_sim = 0.0f64;
+                    let mut sql_sim = 0.0f64;
+                    let scan_body = true;
+                    if scan_body {
+                        if let Some(doc) = &node.docstring {
+                            doc_sim = doc_sim.max(calculate_lexical_similarity(tokens, doc));
+                        }
+                        for c in &node.inline_comments {
+                            plain_inline_sim =
+                                plain_inline_sim.max(calculate_lexical_similarity(tokens, c));
+                        }
+                        for sc in &node.comments {
+                            let sim = calculate_lexical_similarity(tokens, &sc.text);
+                            match sc.scope {
+                                super::graph::CommentScope::BranchInline { .. } => {
+                                    branch_comment_sim = branch_comment_sim.max(sim);
+                                }
+                                super::graph::CommentScope::Docstring
+                                | super::graph::CommentScope::MethodHeader => {
+                                    doc_sim = doc_sim.max(sim);
+                                }
+                                super::graph::CommentScope::PropertyDoc
+                                | super::graph::CommentScope::PlainInline => {
+                                    plain_inline_sim = plain_inline_sim.max(sim);
+                                }
+                            }
+                        }
+                        for sql in &node.sql_predicates {
+                            sql_sim =
+                                sql_sim.max(calculate_lexical_similarity(tokens, &sql.raw_clause));
+                            for f in &sql.target_fields {
+                                sql_sim = sql_sim.max(calculate_lexical_similarity(tokens, f));
+                            }
+                        }
+                        for lit in &node.string_literals {
+                            sql_sim = sql_sim.max(calculate_lexical_similarity(tokens, lit));
+                        }
+                    }
 
-            let text_match = (name_sim + name_bonus) * 0.15
-                + branch_comment_sim * 0.35
-                + sql_sim * 0.30
-                + doc_sim * 0.20
-                + plain_inline_sim * 0.10
-                + path_sim * 0.05;
+                    let path_sim = path_sims.get(&node.file).copied().unwrap_or(0.0);
 
-            let has_strong_anchor = branch_comment_sim >= 20.0
-                || sql_sim >= 20.0
-                || doc_sim >= 25.0
-                || name_bonus >= 30.0;
+                    let text_match = (name_sim + name_bonus) * 0.15
+                        + branch_comment_sim * 0.35
+                        + sql_sim * 0.30
+                        + doc_sim * 0.20
+                        + plain_inline_sim * 0.10
+                        + path_sim * 0.05;
 
-            let genuine = bm25_scores.contains_key(&node.id)
-                || has_strong_anchor
-                || (scan_body && has_genuine_match_anchor(tokens, node));
-            let text_relevant = genuine || name_bonus >= 30.0 || text_match >= 12.0;
-            if !text_relevant {
-                return None;
-            }
+                    let has_strong_anchor = branch_comment_sim >= 20.0
+                        || sql_sim >= 20.0
+                        || doc_sim >= 25.0
+                        || name_bonus >= 30.0;
 
-            let anchor_decay = if genuine { 1.0 } else { 0.3 };
+                    let genuine = bm25_scores.contains_key(&node.id)
+                        || has_strong_anchor
+                        || (scan_body && has_genuine_match_anchor(tokens, node));
+                    let text_relevant = genuine || name_bonus >= 30.0 || text_match >= 12.0;
+                    if !text_relevant {
+                        return None;
+                    }
 
-            let callers_cnt = graph.callers(node.id).map(|v| v.len()).unwrap_or(0);
-            let callees_cnt = graph.callees(node.id).map(|v| v.len()).unwrap_or(0);
-            // Call-graph mass is a boost for hits, not a free ticket into the catalog.
-            let graph_mass = ((callers_cnt + callees_cnt) as f64).min(12.0);
+                    let anchor_decay = if genuine { 1.0 } else { 0.3 };
 
-            // 4. AST Role & Active Logic weighting
-            let kind_weight = match node.kind {
-                SymbolKind::SqlStatement => 1.50,
-                _ if node.metrics.has_sql_or_qs || branch_comment_sim >= 20.0 => 1.45,
-                SymbolKind::Enum => 1.30,
-                SymbolKind::Function
-                | SymbolKind::Method
-                | SymbolKind::Middleware
-                | SymbolKind::RouteEndpoint => {
-                    if node.metrics.is_active_logic {
-                        1.25
+                    let callers_cnt = graph.callers(node.id).map(|v| v.len()).unwrap_or(0);
+                    let callees_cnt = graph.callees(node.id).map(|v| v.len()).unwrap_or(0);
+                    // Call-graph mass is a boost for hits, not a free ticket into the catalog.
+                    let graph_mass = ((callers_cnt + callees_cnt) as f64).min(12.0);
+
+                    // 4. AST Role & Active Logic weighting
+                    let kind_weight = match node.kind {
+                        SymbolKind::SqlStatement => 1.50,
+                        _ if node.metrics.has_sql_or_qs || branch_comment_sim >= 20.0 => 1.45,
+                        SymbolKind::Enum => 1.30,
+                        SymbolKind::Function
+                        | SymbolKind::Method
+                        | SymbolKind::Middleware
+                        | SymbolKind::RouteEndpoint => {
+                            if node.metrics.is_active_logic {
+                                1.25
+                            } else {
+                                1.0
+                            }
+                        }
+                        SymbolKind::Class
+                        | SymbolKind::Struct
+                        | SymbolKind::Interface
+                        | SymbolKind::Trait => 0.95,
+                        SymbolKind::PluginDeclaration => 1.05,
+                        SymbolKind::ConfigProperty | SymbolKind::UiElement => 0.85,
+                        SymbolKind::Constant | SymbolKind::Variable => 0.75,
+                        _ if node.metrics.is_pure_dto => 0.45,
+                        _ => 0.7,
+                    };
+
+                    let active_bonus = if node.metrics.is_active_logic {
+                        let b = (node.metrics.branch_count as f64 * 6.0).min(18.0);
+                        let s = if node.metrics.has_sql_or_qs {
+                            15.0
+                        } else {
+                            0.0
+                        };
+                        b + s
+                    } else if node.metrics.is_pure_dto && name_sim < 60.0 {
+                        -10.0
                     } else {
-                        1.0
+                        0.0
+                    };
+
+                    // RRF-style BM25 fusion
+                    let bm25_bonus = if bm25_max > 0.0 {
+                        let norm = bm25_scores.get(&node.id).copied().unwrap_or(0.0) / bm25_max;
+                        norm * 25.0
+                    } else {
+                        0.0
+                    };
+
+                    let concept_bonus = if !query_concept_vec.is_empty() {
+                        let sim = match concept_vectors.and_then(|m| m.get(&node.id)) {
+                            Some(v) => super::retrieval::concept_cosine(query_concept_vec, v),
+                            None => {
+                                let node_vec = super::retrieval::concept_projection(
+                                    &node.name,
+                                    &HashSet::new(),
+                                );
+                                super::retrieval::concept_cosine(query_concept_vec, &node_vec)
+                            }
+                        };
+                        sim * 20.0
+                    } else {
+                        0.0
+                    };
+
+                    let raw_score = ((text_match * anchor_decay
+                        + graph_mass * 1.0
+                        + active_bonus
+                        + bm25_bonus
+                        + concept_bonus)
+                        * kind_weight)
+                        .max(0.0);
+
+                    if raw_score >= 10.0 || (has_strong_anchor && raw_score >= 5.0) {
+                        Some((
+                            node.file.clone(),
+                            ScoredSymbol {
+                                node: node.clone(),
+                                total_score: raw_score,
+                                name_score: name_sim + name_bonus,
+                                doc_score: doc_sim.max(branch_comment_sim),
+                                inline_score: plain_inline_sim.max(sql_sim),
+                                graph_mass,
+                            },
+                        ))
+                    } else {
+                        None
                     }
-                }
-                SymbolKind::Class
-                | SymbolKind::Struct
-                | SymbolKind::Interface
-                | SymbolKind::Trait => 0.95,
-                SymbolKind::PluginDeclaration => 1.05,
-                SymbolKind::ConfigProperty | SymbolKind::UiElement => 0.85,
-                SymbolKind::Constant | SymbolKind::Variable => 0.75,
-                _ if node.metrics.is_pure_dto => 0.45,
-                _ => 0.7,
-            };
-
-            let active_bonus = if node.metrics.is_active_logic {
-                let b = (node.metrics.branch_count as f64 * 6.0).min(18.0);
-                let s = if node.metrics.has_sql_or_qs {
-                    15.0
-                } else {
-                    0.0
-                };
-                b + s
-            } else if node.metrics.is_pure_dto && name_sim < 60.0 {
-                -10.0
-            } else {
-                0.0
-            };
-
-            // RRF-style BM25 fusion
-            let bm25_bonus = if bm25_max > 0.0 {
-                let norm = bm25_scores.get(&node.id).copied().unwrap_or(0.0) / bm25_max;
-                norm * 25.0
-            } else {
-                0.0
-            };
-
-            let concept_bonus = if !query_concept_vec.is_empty() {
-                let sim = match concept_vectors.and_then(|m| m.get(&node.id)) {
-                    Some(v) => super::retrieval::concept_cosine(query_concept_vec, v),
-                    None => {
-                        let node_vec =
-                            super::retrieval::concept_projection(&node.name, &HashSet::new());
-                        super::retrieval::concept_cosine(query_concept_vec, &node_vec)
-                    }
-                };
-                sim * 20.0
-            } else {
-                0.0
-            };
-
-            let raw_score = ((text_match * anchor_decay
-                + graph_mass * 1.0
-                + active_bonus
-                + bm25_bonus
-                + concept_bonus)
-                * kind_weight)
-                .max(0.0);
-
-            if raw_score >= 10.0 || (has_strong_anchor && raw_score >= 5.0) {
-                Some((
-                    node.file.clone(),
-                    ScoredSymbol {
-                        node: node.clone(),
-                        total_score: raw_score,
-                        name_score: name_sim + name_bonus,
-                        doc_score: doc_sim.max(branch_comment_sim),
-                        inline_score: plain_inline_sim.max(sql_sim),
-                        graph_mass,
-                    },
-                ))
-            } else {
-                None
-            }
-        })
-        .collect()
+                })
+                .collect()
         };
         match score_pool.as_ref() {
             Some(p) => p.install(job),
@@ -1626,8 +1630,7 @@ fn extract_flow_spine(
                     spine_edges.push((seed, Some(e.to), e.kind.clone()));
                     if let Some(sub_callees) = graph.callees(e.to) {
                         for sub_e in sub_callees {
-                            if spine_edges.len() >= MAX_SPINE_EDGES
-                                || over_seed(spine_edges.len())
+                            if spine_edges.len() >= MAX_SPINE_EDGES || over_seed(spine_edges.len())
                             {
                                 break;
                             }
@@ -4435,12 +4438,7 @@ mod tests {
         );
     }
 
-    fn stat_core(
-        id: u64,
-        name: &str,
-        file: &str,
-        extra_sql: &str,
-    ) -> SymbolNode {
+    fn stat_core(id: u64, name: &str, file: &str, extra_sql: &str) -> SymbolNode {
         SymbolNode {
             id,
             name: name.into(),
@@ -4597,8 +4595,14 @@ mod tests {
             core_hits.len() >= 4,
             "STAT/SQL cores must be recalled, got {core_hits:?} in {files:?}"
         );
-        let first_noise = noise.iter().filter_map(|n| files.iter().position(|f| f == *n)).min();
-        let last_core = cores.iter().filter_map(|c| files.iter().position(|f| f == *c)).max();
+        let first_noise = noise
+            .iter()
+            .filter_map(|n| files.iter().position(|f| f == *n))
+            .min();
+        let last_core = cores
+            .iter()
+            .filter_map(|c| files.iter().position(|f| f == *c))
+            .max();
         if let (Some(good), Some(bad)) = (last_core, first_noise) {
             assert!(
                 good < bad,

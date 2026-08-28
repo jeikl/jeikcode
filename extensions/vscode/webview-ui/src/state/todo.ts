@@ -70,23 +70,94 @@ function maybeAutoClearFinished(items: TodoItemData[]): TodoItemData[] {
   return items;
 }
 
+function normalizeTodoContent(content: string): string {
+  return content.split(/\s+/).filter(Boolean).join(' ');
+}
+
+function findTodoIndex(list: TodoItemData[], content: string): number {
+  return list.findIndex((item) => item.content === content);
+}
+
+function destinationIndex(position: number | undefined, len: number): number {
+  if (position === undefined) return len;
+  if (position <= 1) return 0;
+  if (position - 1 <= len) return position - 1;
+  return len;
+}
+
+function ensureSingleInProgress(items: TodoItemData[], idx: number): TodoItemData[] {
+  return items.map((item, i) => {
+    if (i === idx) return item;
+    if (item.status === 'in_progress') return { ...item, status: 'pending' as const };
+    return item;
+  });
+}
+
+function upsertTodo(
+  list: TodoItemData[],
+  content: string,
+  status: TodoStatus | undefined,
+  position: number | undefined,
+): { list: TodoItemData[]; landing: number } {
+  const existing = findTodoIndex(list, content);
+  if (existing >= 0 && position === undefined) {
+    const next = list.map((item, i) => (
+      i === existing && status ? { ...item, status } : item
+    ));
+    const ranked = status === 'in_progress' ? ensureSingleInProgress(next, existing) : next;
+    return { list: ranked, landing: existing + 1 };
+  }
+  let working = list.map((item) => ({ ...item }));
+  let item: TodoItemData;
+  if (existing >= 0) {
+    item = working.splice(existing, 1)[0]!;
+    if (status) item = { ...item, status };
+  } else {
+    item = { content, status: status ?? 'pending' };
+  }
+  const idx = destinationIndex(position, working.length);
+  working.splice(idx, 0, item);
+  if (working[idx]!.status === 'in_progress') working = ensureSingleInProgress(working, idx);
+  return { list: working, landing: idx + 1 };
+}
+
+function parseActionStatus(value: Record<string, unknown>): TodoStatus | undefined {
+  return typeof value.status === 'string' && TODO_STATUSES.has(value.status as TodoStatus)
+    ? value.status as TodoStatus
+    : undefined;
+}
+
+function resolveUpdateId(
+  id: number,
+  visibleLen: number,
+  addLandings: number[],
+  newLen: number,
+): number | undefined {
+  if (id < 1) return undefined;
+  if (addLandings.length > 0 && id > visibleLen) {
+    const k = id - visibleLen;
+    if (k >= 1 && k <= addLandings.length) return addLandings[k - 1];
+  }
+  return id <= newLen ? id : undefined;
+}
+
 function parsePlanItems(todos: unknown): TodoItemData[] | undefined {
   if (!Array.isArray(todos)) return undefined;
   const items: TodoItemData[] = [];
-  let inProgress = 0;
   for (const rawItem of todos) {
     if (!isRecord(rawItem)
       || typeof rawItem.content !== 'string'
-      || rawItem.content.trim().length === 0
       || typeof rawItem.status !== 'string'
       || !TODO_STATUSES.has(rawItem.status as TodoStatus)) {
       return undefined;
     }
-    const status = rawItem.status as TodoStatus;
-    if (status === 'in_progress') inProgress += 1;
-    items.push({ content: rawItem.content, status });
+    const content = normalizeTodoContent(rawItem.content);
+    if (!content) return undefined;
+    const next = upsertTodo(items, content, rawItem.status as TodoStatus, undefined);
+    items.length = 0;
+    items.push(...next.list);
   }
-  return inProgress <= 1 ? items : undefined;
+  return items;
 }
 
 function parseTodoOperation(name: string, args: string): TodoOperation | undefined {
@@ -132,25 +203,16 @@ function withSingleInProgress(items: TodoItemData[], index: number, status: Todo
 function applyOne(items: TodoItemData[], value: Record<string, unknown>): TodoItemData[] | undefined {
   const kind = actionKind(value);
   if (kind === 'add') {
-    if (typeof value.content !== 'string' || value.content.trim().length === 0) return undefined;
-    return [...maybeAutoClearFinished(items), { content: value.content.trim(), status: 'pending' }];
+    if (typeof value.content !== 'string') return undefined;
+    const content = normalizeTodoContent(value.content);
+    if (!content) return undefined;
+    return upsertTodo(maybeAutoClearFinished(items), content, parseActionStatus(value), undefined).list;
   }
   if (kind === 'insert') {
-    if (typeof value.content !== 'string' || value.content.trim().length === 0) return undefined;
-    const status = typeof value.status === 'string' && TODO_STATUSES.has(value.status as TodoStatus)
-      ? value.status as TodoStatus
-      : 'pending';
-    const pos = insertPosition(value);
-    const idx = pos === undefined
-      ? items.length
-      : (pos <= 1 ? 0 : (pos - 1 <= items.length ? pos - 1 : items.length));
-    const next = items.map((item) => (
-      status === 'in_progress' && item.status === 'in_progress'
-        ? { ...item, status: 'pending' as const }
-        : item
-    ));
-    next.splice(idx, 0, { content: value.content.trim(), status });
-    return next;
+    if (typeof value.content !== 'string') return undefined;
+    const content = normalizeTodoContent(value.content);
+    if (!content) return undefined;
+    return upsertTodo(items, content, parseActionStatus(value), insertPosition(value)).list;
   }
   if (kind === 'update' || kind === 'delete') {
     const id = jsonId(value);
@@ -158,13 +220,35 @@ function applyOne(items: TodoItemData[], value: Record<string, unknown>): TodoIt
     if (kind === 'delete') {
       return items.filter((_, index) => index !== id - 1);
     }
-    if (typeof value.status !== 'string' || !TODO_STATUSES.has(value.status as TodoStatus)) {
-      return undefined;
-    }
-    return withSingleInProgress(items, id - 1, value.status as TodoStatus);
+    const status = parseActionStatus(value);
+    const content = typeof value.content === 'string' ? normalizeTodoContent(value.content) : '';
+    if (!status && !content) return undefined;
+    return applyUpdateAt(items, id, status, content || undefined);
   }
   if (kind === 'clear') return [];
   return undefined;
+}
+
+function applyUpdateAt(
+  items: TodoItemData[],
+  id: number,
+  status: TodoStatus | undefined,
+  content: string | undefined,
+): TodoItemData[] {
+  const idx = id - 1;
+  let next = items.map((item) => ({ ...item }));
+  if (content) {
+    const other = findTodoIndex(next, content);
+    if (other >= 0 && other !== idx) {
+      if (status) next[other] = { ...next[other]!, status };
+      next.splice(idx, 1);
+      const kept = other > idx ? other - 1 : other;
+      return status === 'in_progress' ? ensureSingleInProgress(next, kept) : next;
+    }
+    next[idx] = { ...next[idx]!, content };
+  }
+  if (status) next = withSingleInProgress(next, idx, status);
+  return next;
 }
 
 function applyBatch(items: TodoItemData[], actions: Record<string, unknown>[]): TodoItemData[] | undefined {
@@ -185,14 +269,19 @@ function applyBatch(items: TodoItemData[], actions: Record<string, unknown>[]): 
     return deleted;
   }
 
+  const visibleLen = next.length;
+  const addLandings: number[] = [];
   if (actions.some((action) => actionKind(action) === 'add')) {
     next = maybeAutoClearFinished(next);
-  }
-  for (const action of actions) {
-    if (actionKind(action) !== 'add') continue;
-    const applied = applyOne(next, action);
-    if (!applied) return undefined;
-    next = applied;
+    for (const action of actions) {
+      if (actionKind(action) !== 'add') continue;
+      if (typeof action.content !== 'string') return undefined;
+      const content = normalizeTodoContent(action.content);
+      if (!content) return undefined;
+      const added = upsertTodo(next, content, parseActionStatus(action), undefined);
+      next = added.list;
+      addLandings.push(added.landing);
+    }
   }
 
   const inserts = actions
@@ -206,9 +295,14 @@ function applyBatch(items: TodoItemData[], actions: Record<string, unknown>[]): 
 
   for (const action of actions) {
     if (actionKind(action) !== 'update') continue;
-    const applied = applyOne(next, action);
-    if (!applied) return undefined;
-    next = applied;
+    const id = jsonId(action);
+    if (id === undefined) return undefined;
+    const resolved = resolveUpdateId(id, visibleLen, addLandings, next.length);
+    if (resolved === undefined) return undefined;
+    const status = parseActionStatus(action);
+    const content = typeof action.content === 'string' ? normalizeTodoContent(action.content) : '';
+    if (!status && !content) return undefined;
+    next = applyUpdateAt(next, resolved, status, content || undefined);
   }
   return next;
 }

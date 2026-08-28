@@ -417,7 +417,11 @@ impl<W: Write + Send> Renderer for PlainRenderer<W> {
             UiLine::EditDiffBlock(entries) => {
                 self.drop_transient();
                 let gutter = crate::render::diff::diff_gutter_width(&entries);
-                let bar = if self.caps.unicode_symbols { "│ " } else { "| " };
+                let bar = if self.caps.unicode_symbols {
+                    "│ "
+                } else {
+                    "| "
+                };
                 let title = if self.caps.unicode_symbols {
                     "← Edit"
                 } else {
@@ -440,13 +444,7 @@ impl<W: Write + Send> Renderer for PlainRenderer<W> {
                         ""
                     };
                     let body = crate::render::diff::diff_row_text(entry, gutter);
-                    let _ = writeln!(
-                        self.out,
-                        "{bar}{}{}{}",
-                        color,
-                        scrub_controls(&body),
-                        reset
-                    );
+                    let _ = writeln!(self.out, "{bar}{}{}{}", color, scrub_controls(&body), reset);
                 }
             }
             UiLine::Error(msg) => {

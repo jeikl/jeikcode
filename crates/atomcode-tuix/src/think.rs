@@ -318,7 +318,8 @@ mod tests {
 
     #[test]
     fn test_reasoning_summary() {
-        let (title, body) = reasoning_summary("**Inspecting PR workflow**\n\nChecking files now...");
+        let (title, body) =
+            reasoning_summary("**Inspecting PR workflow**\n\nChecking files now...");
         assert_eq!(title.as_deref(), Some("Inspecting PR workflow"));
         assert_eq!(body, "Checking files now...");
 
@@ -347,4 +348,3 @@ pub fn reasoning_summary(text: &str) -> (Option<String>, String) {
     }
     (None, trimmed.to_string())
 }
-

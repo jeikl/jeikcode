@@ -132,6 +132,29 @@ test('add on a finished list auto-clears so ids restart at 1', () => {
   ]);
 });
 
+test('add+update on a finished list accepts append-style ids', () => {
+  const items = applyTodoCall(
+    [{ content: '查询沉睡资源客户列表', status: 'completed' }],
+    'todowrite',
+    JSON.stringify({
+      actions: [
+        { action: 'add', content: '导出Excel', id: 2 },
+        { action: 'update', id: 2, status: 'in_progress' },
+      ],
+    }),
+  );
+  assert.deepEqual(items, [{ content: '导出Excel', status: 'in_progress' }]);
+});
+
+test('duplicate titles upsert instead of duplicating', () => {
+  const items = applyTodoCall(
+    [{ content: '导出Excel', status: 'pending' }],
+    'todowrite',
+    JSON.stringify({ actions: [{ action: 'add', content: '导出Excel', status: 'in_progress' }] }),
+  );
+  assert.deepEqual(items, [{ content: '导出Excel', status: 'in_progress' }]);
+});
+
 test('add on an unfinished list does not auto-clear', () => {
   const items = applyTodoCall(
     [
@@ -158,7 +181,7 @@ test('malformed and unsupported todo calls do not corrupt prior state', () => {
   const initial: TodoItemData[] = [{ content: '保留任务', status: 'in_progress' }];
   const invalidCalls = [
     '{"todos":[{"content":"","status":"pending"}]}',
-    '{"todos":[{"content":"a","status":"in_progress"},{"content":"b","status":"in_progress"}]}',
+    '{"todos":[{"content":"   ","status":"pending"}]}',
     '{"action":"update","id":0,"status":"completed"}',
     '{"action":"update","id":9,"status":"completed"}',
     '{"action":"update","id":1,"status":"unknown"}',

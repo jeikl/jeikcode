@@ -933,6 +933,11 @@ pub struct UiState {
     pub turn_prompt_tokens: usize,
     pub turn_completion_tokens: usize,
     pub turn_cached_tokens: usize,
+    /// Footer-only cache hits (provider reported, else prefix-estimated per step).
+    /// Not used for /cost — `turn_cached_tokens` stays provider-only.
+    pub turn_cached_display: usize,
+    /// Last LLM request prompt; prefix baseline for the next step's cache estimate.
+    pub last_request_prompt: usize,
     /// Chars of model OUTPUT streamed this turn — visible text + reasoning +
     /// tool-call arguments — accumulated live from the delta events (unlike
     /// `turn_completion_tokens`, which the provider only reports once per round,
@@ -1238,12 +1243,42 @@ pub struct PendingSeparator {
 ///     reported no cached tokens (so we never show a misleading `0% cached`).
 pub fn turn_token_summary(prompt: usize, completion: usize, cached: usize) -> (usize, Option<u8>) {
     let billable = completion + prompt.saturating_sub(cached);
-    let pct = if cached > 0 && prompt > 0 {
-        Some(((cached as u128 * 100 / prompt as u128).min(100)) as u8)
-    } else {
-        None
-    };
+    let pct = cache_hit_pct(cached, prompt, false);
     (billable, pct)
+}
+
+/// Industrial single-step / loop hit rate: cached / prompt.
+/// 100% only when a provider-reported hit covers the whole prompt.
+pub fn cache_hit_pct(cached: usize, prompt: usize, estimated: bool) -> Option<u8> {
+    if cached == 0 || prompt == 0 {
+        return None;
+    }
+    if cached >= prompt {
+        return Some(if estimated { 99 } else { 100 });
+    }
+    let pct = (cached as u128 * 100 / prompt as u128) as u8;
+    Some(if estimated { pct.min(99) } else { pct })
+}
+
+/// Prefix-cache estimate: cached_n ≈ prompt_{n-1}, block-aligned (64).
+pub fn estimate_prefix_cached(current_prompt: usize, previous_prompt: usize) -> usize {
+    const BLOCK: usize = 64;
+    if current_prompt == 0 || previous_prompt == 0 {
+        return 0;
+    }
+    if current_prompt < previous_prompt.saturating_mul(9) / 10 {
+        return 0;
+    }
+    let raw = current_prompt.min(previous_prompt);
+    let aligned = (raw / BLOCK) * BLOCK;
+    if aligned == 0 {
+        return 0;
+    }
+    if aligned >= current_prompt {
+        aligned.saturating_sub(BLOCK)
+    } else {
+        aligned
+    }
 }
 
 impl Default for UiState {
@@ -1289,6 +1324,8 @@ impl UiState {
             turn_prompt_tokens: 0,
             turn_completion_tokens: 0,
             turn_cached_tokens: 0,
+            turn_cached_display: 0,
+            last_request_prompt: 0,
             turn_output_chars: 0,
             turn_rendered_visible_text: false,
             turn_saw_reasoning: false,
@@ -1637,6 +1674,7 @@ impl UiState {
         self.turn_prompt_tokens = 0;
         self.turn_completion_tokens = 0;
         self.turn_cached_tokens = 0;
+        self.turn_cached_display = 0;
         self.turn_output_chars = 0;
         self.turn_rendered_visible_text = false;
         self.turn_saw_reasoning = false;
@@ -1674,6 +1712,7 @@ impl UiState {
         self.turn_prompt_tokens = 0;
         self.turn_completion_tokens = 0;
         self.turn_cached_tokens = 0;
+        self.turn_cached_display = 0;
         self.turn_output_chars = 0;
         self.turn_rendered_visible_text = false;
         self.turn_saw_reasoning = false;

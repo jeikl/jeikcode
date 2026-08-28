@@ -209,7 +209,10 @@ fn goal_row_parts(
 }
 
 fn goal_condition_preview(condition: &str) -> String {
-    let mut lines = condition.lines().map(str::trim).filter(|line| !line.is_empty());
+    let mut lines = condition
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty());
     let first = lines.next().unwrap_or_default();
     if lines.next().is_some() {
         format!("{first}…")
@@ -2361,7 +2364,11 @@ impl<W: Write + Send> RetainedRenderer<W> {
             push_str_cells_sgr(&mut row, &shown, name_style.clone());
             let rest = full_w.saturating_sub(indicator_w + shown_w);
             for _ in 0..rest {
-                row.push(Cell { ch: ' ', style: name_style.clone(), width: 1 });
+                row.push(Cell {
+                    ch: ' ',
+                    style: name_style.clone(),
+                    width: 1,
+                });
             }
         } else {
             let sep = 2usize;
@@ -2381,7 +2388,11 @@ impl<W: Write + Send> RetainedRenderer<W> {
             let used = indicator_w + shown_name_w + sep + desc_w;
             let rest = full_w.saturating_sub(used);
             for _ in 0..rest {
-                row.push(Cell { ch: ' ', style: name_style.clone(), width: 1 });
+                row.push(Cell {
+                    ch: ' ',
+                    style: name_style.clone(),
+                    width: 1,
+                });
             }
         }
         row
@@ -4003,9 +4014,7 @@ impl<W: Write + Send> RetainedRenderer<W> {
         // bordered search box and sticky bottom hint. Their entry heights differ.
         let plugin_like = matches!(
             menu_kind,
-            super::MenuKind::Plugin
-                | super::MenuKind::SessionList
-                | super::MenuKind::DirectoryList
+            super::MenuKind::Plugin | super::MenuKind::SessionList | super::MenuKind::DirectoryList
         );
         let (menu_items, selected_in_view, actual_offset) = if let Some(m) = self.menu.as_ref() {
             let len = m.items.len();
@@ -4451,9 +4460,7 @@ impl<W: Write + Send> RetainedRenderer<W> {
         // `/resume` and `/cd` share the plugin manager's chrome/layout.
         let plugin_like = matches!(
             menu_kind,
-            super::MenuKind::Plugin
-                | super::MenuKind::SessionList
-                | super::MenuKind::DirectoryList
+            super::MenuKind::Plugin | super::MenuKind::SessionList | super::MenuKind::DirectoryList
         );
         let mut menu_cells: Vec<Vec<Cell>> = Vec::new();
         let final_len = self.menu.as_ref().map(|m| m.items.len()).unwrap_or(0);
@@ -4880,9 +4887,7 @@ impl<W: Write + Send> RetainedRenderer<W> {
         let menu_top = attach_top + attachment_rows;
         let is_search_box_focused = matches!(
             menu_kind,
-            super::MenuKind::Plugin
-                | super::MenuKind::SessionList
-                | super::MenuKind::DirectoryList
+            super::MenuKind::Plugin | super::MenuKind::SessionList | super::MenuKind::DirectoryList
         ) && self
             .menu
             .as_ref()
@@ -5721,8 +5726,7 @@ impl<W: Write + Send> RetainedRenderer<W> {
         // A legacy-conhost resize first rebuilds the retained model without
         // terminal I/O. A bounded physical-row suffix is emitted once after
         // the semantic replay completes.
-        if (self.replaying
-            && (self.caps.legacy_conhost || self.history_replay_max_rows.is_some()))
+        if (self.replaying && (self.caps.legacy_conhost || self.history_replay_max_rows.is_some()))
             || self.initial_history_replay_active
         {
             return;
@@ -7064,12 +7068,12 @@ impl<W: Write + Send> RetainedRenderer<W> {
         self.reasoning_line_buf.clear();
         self.md_state.reset();
         self.live_group = None;
-            self.inflight_tool = None;
-            self.inflight_tool_rows = 0;
-            self.inflight_hint = None;
-            self.inflight_output.clear();
-            self.inflight_icon.clear();
-            self.inflight_meta.clear();
+        self.inflight_tool = None;
+        self.inflight_tool_rows = 0;
+        self.inflight_hint = None;
+        self.inflight_output.clear();
+        self.inflight_icon.clear();
+        self.inflight_meta.clear();
         self.live_spinner_active = false;
         self.live_spinner_spacer_active = false;
         self.live_spinner_tail_compacted = false;
@@ -7985,7 +7989,11 @@ impl<W: Write + Send> Renderer for RetainedRenderer<W> {
                 }
                 if collapsed.overflow {
                     let mut row = Vec::new();
-                    let expand_icon = if self.caps.unicode_symbols { "  ▼ " } else { "  v " };
+                    let expand_icon = if self.caps.unicode_symbols {
+                        "  ▼ "
+                    } else {
+                        "  v "
+                    };
                     let remaining = collapsed.total_lines.saturating_sub(3);
                     let expand_hint = format!("Click / Enter to expand (+{remaining} lines)");
                     push_str_cells(&mut row, expand_icon, &self.style_bold(Role::Accent));
@@ -9267,8 +9275,14 @@ mod tests {
             100,
             true,
         );
-        assert!(row.contains("查询长沙未来30天的天气预报…"), "first line: {row}");
-        assert!(!row.contains("表格展示"), "details stay out of footer: {row}");
+        assert!(
+            row.contains("查询长沙未来30天的天气预报…"),
+            "first line: {row}"
+        );
+        assert!(
+            !row.contains("表格展示"),
+            "details stay out of footer: {row}"
+        );
         assert!(!row.contains('\n'), "footer preview is one line: {row}");
     }
 
@@ -9315,11 +9329,11 @@ mod tests {
         );
         assert!(!row.is_empty(), "paused row must be non-empty: {row}");
         assert!(row.contains("暂停"), "pause text present: {row}");
+        assert!(row.contains("继续对话即推进"), "resume hint present: {row}");
         assert!(
-            row.contains("继续对话即推进"),
-            "resume hint present: {row}"
+            row.contains("已达 5 轮"),
+            "round substitution locked: {row}"
         );
-        assert!(row.contains("已达 5 轮"), "round substitution locked: {row}");
     }
 
     #[test]
@@ -10434,7 +10448,8 @@ mod tests {
         let (mut r, _counter) = new_counting(80, 24);
         r.caps.colors = true;
         r.caps.unicode_symbols = true;
-        let long_query = "a very long search query that definitely overflows the badge budget".to_string();
+        let long_query =
+            "a very long search query that definitely overflows the badge budget".to_string();
         let row = r.build_top_rule_with_context(
             40,
             None,
@@ -10484,8 +10499,13 @@ mod tests {
     fn directory_menu_row_places_current_label_after_path_in_muted() {
         let (mut r, _c) = new_counting(80, 24);
         r.caps.colors = true;
-        let row =
-            r.build_menu_row("~/proj", "current", false, 70, crate::render::MenuKind::DirectoryList);
+        let row = r.build_menu_row(
+            "~/proj",
+            "current",
+            false,
+            70,
+            crate::render::MenuKind::DirectoryList,
+        );
         let cells: Vec<(char, bool)> = row
             .iter()
             .filter(|c| c.width > 0)
@@ -10494,7 +10514,10 @@ mod tests {
         let s: String = cells.iter().map(|(c, _)| *c).collect();
         // The "current" label sits right after the path (2-space gap), not right-aligned
         // to the far edge.
-        assert!(s.contains("~/proj  current"), "label adjacent to path: {s:?}");
+        assert!(
+            s.contains("~/proj  current"),
+            "label adjacent to path: {s:?}"
+        );
         let idx = s.find("current").expect("current label present");
         // The label is muted (faint); the path is not.
         for (ch, faint) in &cells[idx..idx + "current".len()] {
@@ -11771,8 +11794,13 @@ mod tests {
         let mut vterm = crate::test_term::VirtualTerminal::new(80, 24);
         let status = status_basic();
         r.render(UiLine::StreamingBox {
-            buf: String::new(), cursor_byte: 0, frame: "⠋".into(), label: "Pondering".into(),
-            menu: None, status: status.clone(), attachments: Vec::new(),
+            buf: String::new(),
+            cursor_byte: 0,
+            frame: "⠋".into(),
+            label: "Pondering".into(),
+            menu: None,
+            status: status.clone(),
+            attachments: Vec::new(),
         });
         r.flush_deferred();
         for i in 0..25 {
@@ -11781,28 +11809,48 @@ mod tests {
         r.flush_deferred();
         // Multi-row Bash inflight strip (command + blank + Running row).
         r.render(UiLine::ToolCallInFlight {
-            id: "c1".into(), name: "Bash".into(), detail: "echo hi".into(), hint: None,
+            id: "c1".into(),
+            name: "Bash".into(),
+            detail: "echo hi".into(),
+            hint: None,
         });
-        r.render(UiLine::Spinner { frame: "⠙".into(), label: "Running · 1s".into() });
+        r.render(UiLine::Spinner {
+            frame: "⠙".into(),
+            label: "Running · 1s".into(),
+        });
         r.flush_deferred();
-        assert!(r.inflight_tool_rows >= 3, "expected multi-row strip, got {}", r.inflight_tool_rows);
+        assert!(
+            r.inflight_tool_rows >= 3,
+            "expected multi-row strip, got {}",
+            r.inflight_tool_rows
+        );
         drain_into_vterm(&buf, &mut vterm);
         // Stream permanent rows while overflowing, re-ticking the strip each time.
         for i in 0..6 {
             r.render(UiLine::CommandOutput(format!("STREAM{:02}\n", i)));
-            r.render(UiLine::Spinner { frame: "⠹".into(), label: format!("Running · {i}s") });
+            r.render(UiLine::Spinner {
+                frame: "⠹".into(),
+                label: format!("Running · {i}s"),
+            });
             r.flush_deferred();
             drain_into_vterm(&buf, &mut vterm);
         }
         // Every FILL row must appear exactly once across scrollback+viewport (no dup/loss).
-        let all: Vec<String> = vterm.scrollback_texts().into_iter()
+        let all: Vec<String> = vterm
+            .scrollback_texts()
+            .into_iter()
             .chain((0..24).map(|row| vterm.row_text(row).trim_end().to_string()))
             .collect();
         for i in 0..25 {
             let tag = format!("FILL{:02}", i);
             let n = all.iter().filter(|l| l.contains(&tag)).count();
-            assert_eq!(n, 1, "{tag} appeared {n} times (dup/loss)\nSCROLLBACK:\n{}\nSCREEN:\n{}",
-                vterm.scrollback_texts().join("\n"), vterm.dump());
+            assert_eq!(
+                n,
+                1,
+                "{tag} appeared {n} times (dup/loss)\nSCROLLBACK:\n{}\nSCREEN:\n{}",
+                vterm.scrollback_texts().join("\n"),
+                vterm.dump()
+            );
         }
     }
 
@@ -13298,14 +13346,19 @@ mod tests {
             .flatten()
             .filter(|c| c.ch != ' ')
             .collect();
-        assert!(!dark_cells.is_empty(), "muted line rendered no visible cells");
+        assert!(
+            !dark_cells.is_empty(),
+            "muted line rendered no visible cells"
+        );
         assert!(
             dark_cells.iter().all(|c| c.style.fg == Some(Color::Grey)),
             "dark-theme muted must be Color::Grey (legible), got {:?}",
             dark_cells.iter().map(|c| c.style.fg).collect::<Vec<_>>(),
         );
         assert!(
-            dark_cells.iter().all(|c| c.style.fg != Some(Color::DarkGrey)),
+            dark_cells
+                .iter()
+                .all(|c| c.style.fg != Some(Color::DarkGrey)),
             "dark-theme muted must NOT be DarkGrey (SGR 90 collapses into the bg)",
         );
 
@@ -16756,23 +16809,35 @@ mod tests {
         };
 
         let full = r.build_user_input_rows(&view, 40, 42);
-        let full_dump = full.iter()
+        let full_dump = full
+            .iter()
             .map(|row| row.iter().map(|cell| cell.ch).collect::<String>())
-            .collect::<Vec<_>>().join("\n");
+            .collect::<Vec<_>>()
+            .join("\n");
         assert!(full.len() > 11);
-        assert!(full_dump.contains("directly?")
-            && full_dump.contains("intentionally long label")
-            && full_dump.contains("draft checkpoint.")
-            && full_dump.contains("taking full-file snapshots."),
-            "wrapped text lost its tail:\n{full_dump}");
+        assert!(
+            full_dump.contains("directly?")
+                && full_dump.contains("intentionally long label")
+                && full_dump.contains("draft checkpoint.")
+                && full_dump.contains("taking full-file snapshots."),
+            "wrapped text lost its tail:\n{full_dump}"
+        );
 
         let fitted = r.build_user_input_panel_view(&view, 40, 42, 12);
-        let dump = fitted.iter()
+        let dump = fitted
+            .iter()
             .map(|row| row.iter().map(|cell| cell.ch).collect::<String>())
-            .collect::<Vec<_>>().join("\n");
+            .collect::<Vec<_>>()
+            .join("\n");
         assert!(fitted.len() <= 11);
-        assert!(dump.contains("Python snapshot"), "cursor option missing:\n{dump}");
-        assert!(dump.contains("hidden lines"), "overflow was silently clipped:\n{dump}");
+        assert!(
+            dump.contains("Python snapshot"),
+            "cursor option missing:\n{dump}"
+        );
+        assert!(
+            dump.contains("hidden lines"),
+            "overflow was silently clipped:\n{dump}"
+        );
 
         let mut scrollable = view.clone();
         scrollable.options[1].1 = Some(
@@ -18955,10 +19020,7 @@ mod tests {
             "committed tail must remain in the transcript:\n{}",
             vterm.dump()
         );
-        assert_eq!(
-            r.inflight_tool_rows, 0,
-            "strip must be frozen after commit"
-        );
+        assert_eq!(r.inflight_tool_rows, 0, "strip must be frozen after commit");
     }
 
     #[test]
@@ -20335,10 +20397,14 @@ mod tests {
         assert!(!out.contains("history-row-0"), "old prefix leaked: {out:?}");
         assert!(out.contains("history-row-9"), "newest row missing: {out:?}");
         assert!(r.body_lines.len() > 3, "retained model must stay complete");
-        let semantic_text = r.body_log.iter().filter_map(|line| match line {
-            UiLine::CommandOutput(text) => Some(text.as_str()),
-            _ => None,
-        }).collect::<String>();
+        let semantic_text = r
+            .body_log
+            .iter()
+            .filter_map(|line| match line {
+                UiLine::CommandOutput(text) => Some(text.as_str()),
+                _ => None,
+            })
+            .collect::<String>();
         assert!(semantic_text.contains("history-row-0"));
         assert!(semantic_text.contains("history-row-9"));
         assert_eq!(r.body_lines.len().saturating_sub(r.scrolled_off), 3);
@@ -20357,8 +20423,14 @@ mod tests {
         r.on_resize(41, 12);
 
         let out = String::from_utf8_lossy(&buf.lock().unwrap()).into_owned();
-        assert!(!out.contains("resize-history-0"), "old prefix leaked: {out:?}");
-        assert!(out.contains("resize-history-9"), "newest row missing: {out:?}");
+        assert!(
+            !out.contains("resize-history-0"),
+            "old prefix leaked: {out:?}"
+        );
+        assert!(
+            out.contains("resize-history-9"),
+            "newest row missing: {out:?}"
+        );
         assert_eq!(r.body_lines.len().saturating_sub(r.scrolled_off), 3);
     }
 
@@ -20548,7 +20620,10 @@ mod tests {
 
         let out_bytes = buf.lock().unwrap().clone();
         let out = String::from_utf8_lossy(&out_bytes);
-        assert!(out.contains("\x1b[2J\x1b[H"), "legacy resize must use ED2: {out:?}");
+        assert!(
+            out.contains("\x1b[2J\x1b[H"),
+            "legacy resize must use ED2: {out:?}"
+        );
         let cleared_rows = (1..=(new_h as usize))
             .filter(|row| {
                 let needle = format!("\x1b[{};1H\x1b[K", row);

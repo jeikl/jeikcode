@@ -394,7 +394,9 @@ mod tests {
     #[test]
     fn rewind_is_a_registered_command_with_i18n_desc() {
         assert!(
-            BUILTIN_COMMANDS.iter().any(|c| c.name == "rewind" && !c.needs_args),
+            BUILTIN_COMMANDS
+                .iter()
+                .any(|c| c.name == "rewind" && !c.needs_args),
             "/rewind must be a registered, no-arg builtin command"
         );
         assert!(

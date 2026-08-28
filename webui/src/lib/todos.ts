@@ -82,6 +82,76 @@ function maybeAutoClearFinished(list: TodoItem[]): TodoItem[] {
   return list;
 }
 
+function normalizeTodoContent(content: string): string {
+  return content.split(/\s+/).filter(Boolean).join(' ');
+}
+
+function findTodoIndex(list: TodoItem[], content: string): number {
+  return list.findIndex((item) => item.content === content);
+}
+
+function destinationIndex(position: number | null, len: number): number {
+  if (position === null) return len;
+  if (position <= 1) return 0;
+  if (position - 1 <= len) return position - 1;
+  return len;
+}
+
+function ensureSingleInProgress(list: TodoItem[], idx: number): TodoItem[] {
+  return list.map((item, i) => {
+    if (i === idx) return item;
+    if (item.status === 'in_progress') return { ...item, status: 'pending' as const };
+    return item;
+  });
+}
+
+/** Same title never appears twice. `position` is 1-based rank; omit to keep/append. */
+function upsertTodo(
+  list: TodoItem[],
+  content: string,
+  status: TodoStatus | null,
+  position: number | null,
+): { list: TodoItem[]; landing: number } {
+  const existing = findTodoIndex(list, content);
+  if (existing >= 0 && position === null) {
+    const next = list.map((item, i) => (
+      i === existing && status ? { ...item, status } : item
+    ));
+    const ranked = status === 'in_progress' ? ensureSingleInProgress(next, existing) : next;
+    return { list: ranked, landing: existing + 1 };
+  }
+  let working = list.map((item) => ({ ...item }));
+  let item: TodoItem;
+  if (existing >= 0) {
+    item = working.splice(existing, 1)[0]!;
+    if (status) item = { ...item, status };
+  } else {
+    item = { content, status: status ?? 'pending' };
+  }
+  const idx = destinationIndex(position, working.length);
+  working.splice(idx, 0, item);
+  if (working[idx]!.status === 'in_progress') working = ensureSingleInProgress(working, idx);
+  return { list: working, landing: idx + 1 };
+}
+
+function parseActionStatus(value: Record<string, unknown>): TodoStatus | null {
+  return typeof value.status === 'string' ? parseStatus(value.status) : null;
+}
+
+function resolveUpdateId(
+  id: number,
+  visibleLen: number,
+  addLandings: number[],
+  newLen: number,
+): number | null {
+  if (id < 1) return null;
+  if (addLandings.length > 0 && id > visibleLen) {
+    const k = id - visibleLen;
+    if (k >= 1 && k <= addLandings.length) return addLandings[k - 1]!;
+  }
+  return id <= newLen ? id : null;
+}
+
 /** Full-list plan shape. Returns null when args are not a valid plan. */
 export function parseTodoPlan(args: string): TodoItem[] | null {
   let value: unknown;
@@ -107,62 +177,36 @@ export function parseTodoPlan(args: string): TodoItem[] | null {
   }
   if (!Array.isArray(todos)) return null;
   const out: TodoItem[] = [];
-  let inProgress = 0;
   for (const raw of todos) {
     if (!isRecord(raw)) return null;
-    const content = typeof raw.content === 'string' ? raw.content.trim() : '';
+    const content = typeof raw.content === 'string' ? normalizeTodoContent(raw.content) : '';
     const status = typeof raw.status === 'string' ? parseStatus(raw.status) : null;
     if (!content || !status) return null;
-    if (status === 'in_progress') inProgress += 1;
-    out.push({ content, status });
+    const next = upsertTodo(out, content, status, null);
+    out.length = 0;
+    out.push(...next.list);
   }
-  if (inProgress > 1) return null;
   return out;
 }
 
 function applyOne(list: TodoItem[], v: Record<string, unknown>): TodoItem[] {
   const kind = actionKind(v);
   if (kind === 'add') {
-    const content = typeof v.content === 'string' ? v.content.trim() : '';
+    const content = typeof v.content === 'string' ? normalizeTodoContent(v.content) : '';
     if (!content) return list;
-    return [...maybeAutoClearFinished(list), { content, status: 'pending' as const }];
+    return upsertTodo(maybeAutoClearFinished(list), content, parseActionStatus(v), null).list;
   }
   if (kind === 'insert') {
-    const content = typeof v.content === 'string' ? v.content.trim() : '';
+    const content = typeof v.content === 'string' ? normalizeTodoContent(v.content) : '';
     if (!content) return list;
-    const status = typeof v.status === 'string' ? (parseStatus(v.status) ?? 'pending') : 'pending';
-    const next = list.map((item) => ({ ...item }));
-    if (status === 'in_progress') {
-      for (const item of next) {
-        if (item.status === 'in_progress') item.status = 'pending';
-      }
-    }
-    const pos = insertPosition(v);
-    let idx = next.length;
-    if (pos !== null) {
-      if (pos <= 1) idx = 0;
-      else if (pos - 1 <= next.length) idx = pos - 1;
-    }
-    next.splice(idx, 0, { content, status });
-    return next;
+    return upsertTodo(list, content, parseActionStatus(v), insertPosition(v)).list;
   }
   if (kind === 'update') {
     const id = jsonId(v);
-    const status = typeof v.status === 'string' ? parseStatus(v.status) : null;
-    const content = typeof v.content === 'string' ? v.content.trim() : null;
+    const status = parseActionStatus(v);
+    const content = typeof v.content === 'string' ? normalizeTodoContent(v.content) : '';
     if (id === null || id < 1 || id > list.length || (!status && !content)) return list;
-    const next = list.map((item) => ({ ...item }));
-    if (status === 'in_progress') {
-      for (const item of next) {
-        if (item.status === 'in_progress') item.status = 'pending';
-      }
-    }
-    const target = next[id - 1]!;
-    next[id - 1] = {
-      content: content && content.length > 0 ? content : target.content,
-      status: status ?? target.status,
-    };
-    return next;
+    return applyUpdateAt(list, id, status, content || null);
   }
   if (kind === 'delete') {
     const id = jsonId(v);
@@ -175,6 +219,31 @@ function applyOne(list: TodoItem[], v: Record<string, unknown>): TodoItem[] {
     return [];
   }
   return list;
+}
+
+function applyUpdateAt(
+  list: TodoItem[],
+  id: number,
+  status: TodoStatus | null,
+  content: string | null,
+): TodoItem[] {
+  const idx = id - 1;
+  let next = list.map((item) => ({ ...item }));
+  if (content) {
+    const other = findTodoIndex(next, content);
+    if (other >= 0 && other !== idx) {
+      if (status) next[other] = { ...next[other]!, status };
+      next.splice(idx, 1);
+      const kept = other > idx ? other - 1 : other;
+      return status === 'in_progress' ? ensureSingleInProgress(next, kept) : next;
+    }
+    next[idx] = { ...next[idx]!, content };
+  }
+  if (status) {
+    next[idx] = { ...next[idx]!, status };
+    if (status === 'in_progress') next = ensureSingleInProgress(next, idx);
+  }
+  return next;
 }
 
 function applyBatch(list: TodoItem[], actions: Record<string, unknown>[]): TodoItem[] {
@@ -196,12 +265,18 @@ function applyBatch(list: TodoItem[], actions: Record<string, unknown>[]): TodoI
     return deleted;
   }
 
+  const visibleLen = next.length;
+  const addLandings: number[] = [];
   if (actions.some((action) => actionKind(action) === 'add')) {
     next = maybeAutoClearFinished(next);
-  }
-  for (const action of actions) {
-    if (actionKind(action) !== 'add') continue;
-    next = applyOne(next, action);
+    for (const action of actions) {
+      if (actionKind(action) !== 'add') continue;
+      const content = typeof action.content === 'string' ? normalizeTodoContent(action.content) : '';
+      if (!content) return list;
+      const added = upsertTodo(next, content, parseActionStatus(action), null);
+      next = added.list;
+      addLandings.push(added.landing);
+    }
   }
 
   const inserts = actions
@@ -213,7 +288,14 @@ function applyBatch(list: TodoItem[], actions: Record<string, unknown>[]): TodoI
 
   for (const action of actions) {
     if (actionKind(action) !== 'update') continue;
-    next = applyOne(next, action);
+    const id = jsonId(action);
+    if (id === null) return list;
+    const resolved = resolveUpdateId(id, visibleLen, addLandings, next.length);
+    if (resolved === null) return list;
+    const status = parseActionStatus(action);
+    const content = typeof action.content === 'string' ? normalizeTodoContent(action.content) : '';
+    if (!status && !content) return list;
+    next = applyUpdateAt(next, resolved, status, content || null);
   }
   return next;
 }

@@ -434,4 +434,3 @@ pub fn collapse_tool_output(output: &str, max_lines: usize, max_chars: usize) ->
         total_lines,
     }
 }
-

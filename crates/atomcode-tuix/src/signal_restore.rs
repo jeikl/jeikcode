@@ -210,7 +210,8 @@ mod tests {
                 "sigaction query SIGTTIN"
             );
             assert_eq!(
-                old.sa_sigaction, libc::SIG_IGN,
+                old.sa_sigaction,
+                libc::SIG_IGN,
                 "SIGTTIN must be ignored so a background stdin read cannot Stop us"
             );
             assert_eq!(
@@ -219,7 +220,8 @@ mod tests {
                 "sigaction query SIGTTOU"
             );
             assert_eq!(
-                old.sa_sigaction, libc::SIG_IGN,
+                old.sa_sigaction,
+                libc::SIG_IGN,
                 "SIGTTOU must be ignored so a background tcsetattr/write cannot Stop us"
             );
             assert_eq!(

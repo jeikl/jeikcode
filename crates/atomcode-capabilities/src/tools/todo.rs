@@ -107,9 +107,9 @@ pub fn parse_todos(args: &str) -> Result<Vec<TodoItem>, String> {
     let a: Args = serde_json::from_value(value)
         .map_err(|e| format!("todowrite: invalid arguments: {e}. Expected {{\"todos\":[{{\"content\":\"…\",\"status\":\"pending|in_progress|completed\"}}]}}."))?;
     let mut out = Vec::with_capacity(a.todos.len());
-    let mut in_progress = 0usize;
     for item in a.todos {
-        if item.content.trim().is_empty() {
+        let content = normalize_todo_content(&item.content);
+        if content.is_empty() {
             return Err("todowrite: every task needs non-empty `content`.".to_string());
         }
         let status = TodoStatus::parse(&item.status).ok_or_else(|| {
@@ -118,16 +118,7 @@ pub fn parse_todos(args: &str) -> Result<Vec<TodoItem>, String> {
                 item.status
             )
         })?;
-        if status == TodoStatus::InProgress {
-            in_progress += 1;
-        }
-        out.push(TodoItem {
-            content: item.content,
-            status,
-        });
-    }
-    if in_progress > 1 {
-        return Err("todowrite: keep exactly ONE task `in_progress` at a time.".to_string());
+        upsert_todo(&mut out, content, Some(status), None);
     }
     Ok(out)
 }
@@ -209,7 +200,8 @@ fn action_kind(v: &serde_json::Value) -> Option<&'static str> {
 }
 
 /// Legal `actions` mixes (id-shifting ops cannot share a batch with a different kind):
-/// - `add` + `update` (add only appends; existing ids stay)
+/// - `add` + `update` (add only appends; existing ids stay unless the list was
+///   already a closed plan — see [`maybe_auto_clear_finished`])
 /// - `clear` + `add` + `update` (`clear` always runs first, then add, then update)
 /// - `insert` + `update` (internally: all inserts first, then updates by post-insert id)
 /// - `delete` only (any order; ids are pre-batch)
@@ -252,6 +244,82 @@ fn validate_actions_mix(arr: &[serde_json::Value]) -> Result<(), String> {
     Ok(())
 }
 
+fn normalize_todo_content(content: &str) -> String {
+    content.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+fn find_todo_index(list: &[TodoItem], content: &str) -> Option<usize> {
+    list.iter().position(|item| item.content == content)
+}
+
+fn ensure_single_in_progress(list: &mut [TodoItem], idx: usize) {
+    for (i, item) in list.iter_mut().enumerate() {
+        if i != idx && item.status == TodoStatus::InProgress {
+            item.status = TodoStatus::Pending;
+        }
+    }
+}
+
+fn unknown_task_id(id: u64, list: &[TodoItem]) -> String {
+    let n = list.len();
+    let mut msg = format!(
+        "todowrite: unknown task id {id} (list has {n} item{}).",
+        if n == 1 { "" } else { "s" }
+    );
+    if n > 0 && list.iter().all(|item| item.status == TodoStatus::Completed) {
+        msg.push_str(" Every task is completed, so the next `add` starts a NEW plan at id 1.");
+    }
+    msg
+}
+
+/// Insert / move destination as a 0-based index. `position` is 1-based rank.
+fn destination_index(position: Option<usize>, len: usize) -> usize {
+    match position {
+        Some(p) if p <= 1 => 0,
+        Some(p) if p - 1 <= len => p - 1,
+        _ => len,
+    }
+}
+
+/// Upsert by normalized title. Same `content` never appears twice.
+/// `position` = 1-based destination rank (`insert` / re-rank). `None` keeps
+/// the existing slot or appends a new item.
+fn upsert_todo(
+    list: &mut Vec<TodoItem>,
+    content: String,
+    status: Option<TodoStatus>,
+    position: Option<usize>,
+) -> usize {
+    if let Some(old_idx) = find_todo_index(list, &content) {
+        if position.is_none() {
+            if let Some(next_status) = status {
+                list[old_idx].status = next_status;
+                if next_status == TodoStatus::InProgress {
+                    ensure_single_in_progress(list, old_idx);
+                }
+            }
+            return old_idx + 1;
+        }
+        let mut item = list.remove(old_idx);
+        if let Some(next_status) = status {
+            item.status = next_status;
+        }
+        let idx = destination_index(position, list.len());
+        list.insert(idx, item);
+        if list[idx].status == TodoStatus::InProgress {
+            ensure_single_in_progress(list, idx);
+        }
+        return idx + 1;
+    }
+    let status = status.unwrap_or(TodoStatus::Pending);
+    let idx = destination_index(position, list.len());
+    list.insert(idx, TodoItem { content, status });
+    if status == TodoStatus::InProgress {
+        ensure_single_in_progress(list, idx);
+    }
+    idx + 1
+}
+
 /// A non-empty list whose every item is `completed` is a closed plan.
 /// The next `add` starts a new plan at id 1 instead of appending as 7,8,9…
 /// (models often skip `clear` when pivoting). An in-progress / pending list
@@ -262,8 +330,33 @@ fn maybe_auto_clear_finished(list: &mut Vec<TodoItem>) {
     }
 }
 
-/// Batch apply. Id-shifting work runs first; `update` always sees the list
-/// *after* those shifts so the model can address the post-change numbering.
+/// Map an `update` id onto the list after this batch's adds.
+///
+/// Models use two numberings:
+/// - post-add 1-based ids (`1..=new_len`)
+/// - append-style ids (`visible_len+1`, `visible_len+2`…) as if each `add`
+///   always appended, including when a closed plan was auto-cleared.
+fn resolve_update_id(
+    id: u64,
+    visible_len: usize,
+    add_landings: &[usize],
+    new_len: usize,
+) -> Option<usize> {
+    let id = id as usize;
+    if id == 0 {
+        return None;
+    }
+    if !add_landings.is_empty() && id > visible_len {
+        let k = id - visible_len;
+        if k >= 1 && k <= add_landings.len() {
+            return Some(add_landings[k - 1]);
+        }
+    }
+    (id <= new_len).then_some(id)
+}
+
+/// Batch apply. Execution order is fixed and must not be reordered:
+/// `clear` → `delete` (exclusive) → auto-clear closed plan → `add` → `insert` → `update`.
 fn apply_actions_batch(
     list: &[TodoItem],
     arr: &[serde_json::Value],
@@ -282,7 +375,7 @@ fn apply_actions_batch(
             let id =
                 json_id(item).ok_or_else(|| "todowrite: `delete` needs an `id`.".to_string())?;
             if id == 0 || (id as usize) > tmp.len() {
-                return Err(format!("todowrite: unknown task id {id}."));
+                return Err(unknown_task_id(id, &tmp));
             }
             let id = id as usize;
             if !delete_ids.contains(&id) {
@@ -296,19 +389,24 @@ fn apply_actions_batch(
         return Ok(tmp);
     }
 
+    // Length the model last saw: after explicit `clear`, else the incoming list
+    // (auto-clear of a closed plan has not run yet).
+    let visible_len = tmp.len();
+
     // Adds first: append-only, existing 1..n stay put. A finished list (every
     // item completed) is treated as a closed plan — auto-clear so a new batch
     // of adds restarts at id 1 instead of appending as 7,8,9…
+    let mut add_landings = Vec::new();
     if arr.iter().any(|item| action_kind(item) == Some("add")) {
         maybe_auto_clear_finished(&mut tmp);
-    }
-    for item in arr {
-        if action_kind(item) == Some("add") {
-            try_apply_one_action(&mut tmp, item)?;
+        for item in arr {
+            if action_kind(item) == Some("add") {
+                add_landings.push(apply_add(&mut tmp, item, false)?);
+            }
         }
     }
 
-    // Inserts next (id-shifting), so later updates use post-insert ids.
+    // Inserts next (id-shifting / re-rank), so later updates use post-insert ids.
     // `position` is the 1-based slot on the list *before this batch's inserts*
     // (after any adds). Apply high→low so two original positions don't scramble.
     let mut inserts: Vec<&serde_json::Value> = arr
@@ -321,14 +419,14 @@ fn apply_actions_batch(
         pb.cmp(&pa)
     });
     for item in inserts {
-        try_apply_one_action(&mut tmp, item)?;
+        apply_insert(&mut tmp, item)?;
     }
 
     // Updates last, against the list after add/insert. Array order does not
     // matter except when two updates set `in_progress` (later one wins).
     for item in arr {
         if action_kind(item) == Some("update") {
-            try_apply_one_action(&mut tmp, item)?;
+            apply_update(&mut tmp, item, visible_len, &add_landings)?;
         }
     }
     Ok(tmp)
@@ -357,93 +455,106 @@ fn insert_position(v: &serde_json::Value) -> Option<usize> {
         })
 }
 
+fn action_status(v: &serde_json::Value) -> Option<TodoStatus> {
+    v.get("status")
+        .and_then(|s| s.as_str())
+        .and_then(TodoStatus::parse)
+}
+
+fn apply_add(
+    list: &mut Vec<TodoItem>,
+    v: &serde_json::Value,
+    auto_clear: bool,
+) -> Result<usize, String> {
+    let content = v
+        .get("content")
+        .and_then(|c| c.as_str())
+        .map(normalize_todo_content)
+        .filter(|c| !c.is_empty())
+        .ok_or_else(|| "todowrite: `add` needs non-empty `content`.".to_string())?;
+    if auto_clear {
+        maybe_auto_clear_finished(list);
+    }
+    Ok(upsert_todo(list, content, action_status(v), None))
+}
+
+fn apply_insert(list: &mut Vec<TodoItem>, v: &serde_json::Value) -> Result<usize, String> {
+    let content = v
+        .get("content")
+        .and_then(|c| c.as_str())
+        .map(normalize_todo_content)
+        .filter(|c| !c.is_empty())
+        .ok_or_else(|| "todowrite: `insert` needs non-empty `content`.".to_string())?;
+    Ok(upsert_todo(
+        list,
+        content,
+        action_status(v),
+        insert_position(v),
+    ))
+}
+
+fn apply_update(
+    list: &mut Vec<TodoItem>,
+    v: &serde_json::Value,
+    visible_len: usize,
+    add_landings: &[usize],
+) -> Result<(), String> {
+    let id = json_id(v).ok_or_else(|| "todowrite: `update` needs a valid `id`.".to_string())?;
+    let Some(resolved) = resolve_update_id(id, visible_len, add_landings, list.len()) else {
+        return Err(unknown_task_id(id, list));
+    };
+    let idx = resolved - 1;
+    let status = action_status(v);
+    let new_content = v
+        .get("content")
+        .and_then(|c| c.as_str())
+        .map(normalize_todo_content)
+        .filter(|c| !c.is_empty());
+    if status.is_none() && new_content.is_none() {
+        return Err(
+            "todowrite: `update` needs a `status` of pending|in_progress|completed.".into(),
+        );
+    }
+    if let Some(content) = new_content {
+        if let Some(other) = find_todo_index(list, &content) {
+            if other != idx {
+                // Title must stay unique: fold this row into the existing title.
+                if let Some(st) = status {
+                    list[other].status = st;
+                    if st == TodoStatus::InProgress {
+                        ensure_single_in_progress(list, other);
+                    }
+                }
+                list.remove(idx);
+                return Ok(());
+            }
+        }
+        list[idx].content = content;
+    }
+    if let Some(st) = status {
+        list[idx].status = st;
+        if st == TodoStatus::InProgress {
+            ensure_single_in_progress(list, idx);
+        }
+    }
+    Ok(())
+}
+
 /// Apply a single action object. `id` is the 1-based position **at this step**
 /// (left-to-right in a batch). Returns Err on schema / unknown-id so a batch
 /// can roll back.
 fn try_apply_one_action(list: &mut Vec<TodoItem>, v: &serde_json::Value) -> Result<(), String> {
     match v.get("action").and_then(|a| a.as_str()) {
-        Some("add") => {
-            if let Some(content) = v.get("content").and_then(|c| c.as_str()) {
-                let content = content.trim();
-                if !content.is_empty() {
-                    maybe_auto_clear_finished(list);
-                    list.push(TodoItem {
-                        content: content.to_string(),
-                        status: TodoStatus::Pending,
-                    });
-                    return Ok(());
-                }
-            }
-            Err("todowrite: `add` needs non-empty `content`.".into())
-        }
-        Some("insert") => {
-            if let Some(content) = v.get("content").and_then(|c| c.as_str()) {
-                let content = content.trim();
-                if !content.is_empty() {
-                    let status = v
-                        .get("status")
-                        .and_then(|s| s.as_str())
-                        .and_then(TodoStatus::parse)
-                        .unwrap_or(TodoStatus::Pending);
-                    if status == TodoStatus::InProgress {
-                        for it in list.iter_mut() {
-                            if it.status == TodoStatus::InProgress {
-                                it.status = TodoStatus::Pending;
-                            }
-                        }
-                    }
-                    let pos = insert_position(v);
-                    let idx = match pos {
-                        Some(p) if p <= 1 => 0,
-                        Some(p) if p - 1 <= list.len() => p - 1,
-                        _ => list.len(),
-                    };
-                    list.insert(
-                        idx,
-                        TodoItem {
-                            content: content.to_string(),
-                            status,
-                        },
-                    );
-                    return Ok(());
-                }
-            }
-            Err("todowrite: `insert` needs non-empty `content`.".into())
-        }
-        Some("update" | "delete" | "remove") => {
-            let (Some(id), status) = (
-                json_id(v),
-                v.get("status")
-                    .and_then(|x| x.as_str())
-                    .and_then(TodoStatus::parse),
-            ) else {
-                return Err("todowrite: `update`/`delete` needs a valid `id`.".into());
-            };
+        Some("add") => apply_add(list, v, true).map(|_| ()),
+        Some("insert") => apply_insert(list, v).map(|_| ()),
+        Some("update") => apply_update(list, v, list.len(), &[]),
+        Some("delete") | Some("remove") => {
+            let id = json_id(v)
+                .ok_or_else(|| "todowrite: `update`/`delete` needs a valid `id`.".to_string())?;
             if id == 0 || (id as usize) > list.len() {
-                return Err(format!("todowrite: unknown task id {id}."));
+                return Err(unknown_task_id(id, list));
             }
-            let idx = (id - 1) as usize;
-            match v.get("action").and_then(|a| a.as_str()) {
-                Some("delete") | Some("remove") => {
-                    list.remove(idx);
-                }
-                _ => {
-                    if status.is_none() {
-                        return Err(
-                            "todowrite: `update` needs a `status` of pending|in_progress|completed."
-                                .into(),
-                        );
-                    }
-                    if status == Some(TodoStatus::InProgress) {
-                        for it in list.iter_mut() {
-                            if it.status == TodoStatus::InProgress {
-                                it.status = TodoStatus::Pending;
-                            }
-                        }
-                    }
-                    list[idx].status = status.unwrap_or(TodoStatus::Pending);
-                }
-            }
+            list.remove((id as usize) - 1);
             Ok(())
         }
         Some("clear") => {
@@ -573,13 +684,18 @@ Prefer ONE `actions` array per turn for every REAL change of the SAME kind you a
 Do NOT call this tool unless the list must change. Never re-mark an item already in that status \
 (no-op — wasted turn). A successful result reprints the numbered list — use THOSE ids next; \
 a failed result reprints the unchanged list — fix ids from it, do not retry blindly.\n\
+Titles (`content`) are unique: adding an existing title updates that row instead of duplicating it.\n\
+When EVERY item is completed, the next `add` starts a NEW plan at id 1 (closed plan is cleared).\n\
+In the same `add`+`update` batch you may address a new item as either its post-add id (1…) \
+or as if it appended after the list you last saw (old_len+1…).\n\
 Legal mixes only:\n\
-- `add` + `update` (add appends; existing ids do not shift). First plan: add… + update #1 in_progress.\n\
+- `add` + `update` (add appends; existing ids do not shift unless the plan was already all-completed). First plan: add… + update #1 in_progress. `add` may set `status` directly.\n\
 - `clear` + `add` + `update` (`clear` ALWAYS runs first, then add, then update). Use this to replace a plan in ONE call.\n\
-- `insert` + `update` (internally inserts first, then updates — `id` is AFTER inserts).\n\
+- `insert` + `update` (internally inserts/re-ranks first, then updates — `id` is AFTER inserts). Insert of an existing title MOVES it.\n\
 - several `update` (any order; `id` is the current list).\n\
 - several `delete` (any order; `id` is the current list). Do NOT mix delete with anything else.\n\
 - `insert` stays with inserts/updates only. Do NOT mix insert with add/clear/delete.\n\
+Internal apply order is always: clear → delete → add → insert → update. Do not depend on JSON order for mixed kinds.\n\
 `id`/`position` are 1-based. update/delete order in the JSON does not matter.\n\
 The MOMENT you START a task set it `in_progress`; the MOMENT it is verified done set it `completed`.\n\
 Keep EXACTLY ONE task `in_progress` after the batch (enforced).";
@@ -607,7 +723,7 @@ impl Tool for TodoTool {
                         "type": "object",
                         "properties": {
                             "action": { "type": "string", "enum": ["add", "insert", "update", "delete", "remove", "clear"] },
-                            "id": { "type": "integer", "description": "1-based. update/delete-only: current list. insert+update: AFTER inserts. add+update: existing ids stay; new items are old_len+1…" },
+                            "id": { "type": "integer", "description": "1-based. update/delete: current list. insert+update: AFTER inserts. add+update: either post-add ids or old_len+k for the k-th add (works after a closed plan auto-clears)." },
                             "position": { "type": "integer", "description": "For insert: 1-based slot on the list before this batch's inserts (after any adds)." },
                             "status": { "type": "string", "enum": ["pending", "in_progress", "completed"] },
                             "content": { "type": "string", "description": "For add/insert: task text." }
@@ -805,9 +921,19 @@ mod tests {
     }
 
     #[test]
-    fn parse_rejects_two_in_progress() {
-        let e = parse_todos(r#"{"todos":[{"content":"a","status":"in_progress"},{"content":"b","status":"in_progress"}]}"#).unwrap_err();
-        assert!(e.to_ascii_lowercase().contains("in_progress"), "{e}");
+    fn parse_coalesces_two_in_progress_to_the_last_one() {
+        let todos = parse_todos(r#"{"todos":[{"content":"a","status":"in_progress"},{"content":"b","status":"in_progress"}]}"#).unwrap();
+        assert_eq!(todos.len(), 2);
+        assert_eq!(todos[0].status, TodoStatus::Pending);
+        assert_eq!(todos[1].status, TodoStatus::InProgress);
+    }
+
+    #[test]
+    fn parse_collapses_duplicate_titles() {
+        let todos = parse_todos(r#"{"todos":[{"content":"导出Excel","status":"pending"},{"content":"  导出Excel  ","status":"in_progress"}]}"#).unwrap();
+        assert_eq!(todos.len(), 1);
+        assert_eq!(todos[0].content, "导出Excel");
+        assert_eq!(todos[0].status, TodoStatus::InProgress);
     }
 
     #[test]
@@ -918,20 +1044,24 @@ mod tests {
 
     #[test]
     fn derive_skips_invalid_and_returns_last_valid() {
-        // The LAST todowrite has two in_progress items (invalid); the earlier one
-        // is valid. derive_current_todos must return the earlier valid list, not [].
+        // The LAST todowrite has empty content (invalid); the earlier one is valid.
         let msgs = vec![
-            Message::assistant("", vec![ToolCall {
-                id: "1".into(),
-                name: "todowrite".into(),
-                arguments: r#"{"todos":[{"content":"keep","status":"pending"}]}"#.into(),
-            }]),
-            Message::assistant("", vec![ToolCall {
-                id: "2".into(),
-                name: "todowrite".into(),
-                // Invalid: two in_progress items.
-                arguments: r#"{"todos":[{"content":"a","status":"in_progress"},{"content":"b","status":"in_progress"}]}"#.into(),
-            }]),
+            Message::assistant(
+                "",
+                vec![ToolCall {
+                    id: "1".into(),
+                    name: "todowrite".into(),
+                    arguments: r#"{"todos":[{"content":"keep","status":"pending"}]}"#.into(),
+                }],
+            ),
+            Message::assistant(
+                "",
+                vec![ToolCall {
+                    id: "2".into(),
+                    name: "todowrite".into(),
+                    arguments: r#"{"todos":[{"content":"  ","status":"pending"}]}"#.into(),
+                }],
+            ),
         ];
         let todos = derive_current_todos(&msgs);
         assert_eq!(
@@ -1447,6 +1577,64 @@ mod tests {
         assert_eq!(list[0].content, "next-1");
         assert_eq!(list[0].status, TodoStatus::InProgress);
         assert_eq!(list[1].content, "next-2");
+    }
+
+    #[test]
+    fn add_update_on_finished_list_accepts_append_style_ids() {
+        // The live failure: list is `[x] 1. 查询…`, model adds a follow-up as
+        // id 2 and updates id 2. Auto-clear restarts at 1; append-style ids
+        // must still land on the new row.
+        let mut list = vec![TodoItem {
+            content: "查询沉睡资源客户列表".into(),
+            status: TodoStatus::Completed,
+        }];
+        apply_todo_action(
+            &mut list,
+            r#"{"actions":[{"action":"add","content":"导出Excel","id":2},{"action":"update","id":2,"status":"in_progress"}]}"#,
+        );
+        assert_eq!(list.len(), 1);
+        assert_eq!(list[0].content, "导出Excel");
+        assert_eq!(list[0].status, TodoStatus::InProgress);
+    }
+
+    #[test]
+    fn add_duplicate_title_upserts_instead_of_duplicating() {
+        let mut list = vec![TodoItem {
+            content: "导出Excel".into(),
+            status: TodoStatus::Pending,
+        }];
+        apply_todo_action(
+            &mut list,
+            r#"{"actions":[{"action":"add","content":"导出Excel","status":"in_progress"}]}"#,
+        );
+        assert_eq!(list.len(), 1);
+        assert_eq!(list[0].status, TodoStatus::InProgress);
+    }
+
+    #[test]
+    fn insert_duplicate_title_re_ranks() {
+        let mut list = vec![
+            TodoItem {
+                content: "a".into(),
+                status: TodoStatus::Pending,
+            },
+            TodoItem {
+                content: "b".into(),
+                status: TodoStatus::Pending,
+            },
+            TodoItem {
+                content: "c".into(),
+                status: TodoStatus::Pending,
+            },
+        ];
+        apply_todo_action(
+            &mut list,
+            r#"{"action":"insert","position":1,"content":"c"}"#,
+        );
+        assert_eq!(
+            list.iter().map(|t| t.content.as_str()).collect::<Vec<_>>(),
+            vec!["c", "a", "b"]
+        );
     }
 
     #[test]

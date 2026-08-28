@@ -78,7 +78,10 @@ pub(super) fn dispatch_rewind(state: &UiState, ctx: &LoopCtx, renderer: &mut dyn
         .runtime
         .refresh_rewind_catalog(ctx.foreground_runtime_id, ctx.runtime_event_tx.clone())
     {
-        renderer.render(UiLine::Error(format!("{}: {error}", t(Msg::CmdRewindUnavailable))));
+        renderer.render(UiLine::Error(format!(
+            "{}: {error}",
+            t(Msg::CmdRewindUnavailable)
+        )));
         renderer.flush();
     }
 }
@@ -232,7 +235,9 @@ pub(crate) fn park_foreground_to_background(
             old_replay_events,
         )
         .map_err(|error| match error {
-            bg_runtime::BgError::SlotLimit { max } => t(Msg::BgSlotLimitReached { max }).into_owned(),
+            bg_runtime::BgError::SlotLimit { max } => {
+                t(Msg::BgSlotLimitReached { max }).into_owned()
+            }
             other => format!("{other:?}"),
         })?;
     ctx.runtime = endpoint.native;
@@ -806,7 +811,14 @@ fn command_output_should_mirror(
 ///
 /// 已绑定时经 live hub 投递到同一个 Coding Runtime，否则直接投递本地 runtime。
 pub(crate) fn submit_agent_turn(ctx: &LoopCtx, state: &mut UiState, text: String) {
-    if ctx.config.default_model.as_deref().unwrap_or("").trim().is_empty() {
+    if ctx
+        .config
+        .default_model
+        .as_deref()
+        .unwrap_or("")
+        .trim()
+        .is_empty()
+    {
         let msg = "未配置模型：请先使用 /model 或 /provider 添加提供商和模型后再开始对话。";
         state.deferred_background_notices.push(msg.to_string());
         return;
@@ -3405,7 +3417,8 @@ fn execute_slash_command_impl(
                             "  ○ Reasoning effort: default (API auto)\n".to_string(),
                             false,
                         );
-                    } else if levels.iter().any(|l| l.eq_ignore_ascii_case(&sub)) || !sub.is_empty() {
+                    } else if levels.iter().any(|l| l.eq_ignore_ascii_case(&sub)) || !sub.is_empty()
+                    {
                         let mut desired = ctx.config.clone();
                         desired.update_selection_reasoning(&provider_name, |r| {
                             *r.reasoning_effort = Some(sub.to_string())
@@ -5408,7 +5421,9 @@ mod schedule_list_text_tests {
             title: title.to_string(),
             prompt: "do something".to_string(),
             cwd: "/tmp".to_string(),
-            schedule: Schedule::Daily { time: "09:00".to_string() },
+            schedule: Schedule::Daily {
+                time: "09:00".to_string(),
+            },
             permission_mode: "plan".to_string(),
             notify: "important".to_string(),
             enabled,
@@ -5440,10 +5455,16 @@ mod schedule_list_text_tests {
         let now = 1785657600_i64; // 2026-07-31 08:00 UTC
         let out = build_schedule_list_text(&tasks, now);
         assert!(out.contains("task-1"), "should contain first task id");
-        assert!(out.contains("Daily brief"), "should contain first task title");
+        assert!(
+            out.contains("Daily brief"),
+            "should contain first task title"
+        );
         assert!(out.contains("on"), "enabled task should show 'on'");
         assert!(out.contains("task-2"), "should contain second task id");
-        assert!(out.contains("Weekly report"), "should contain second task title");
+        assert!(
+            out.contains("Weekly report"),
+            "should contain second task title"
+        );
         assert!(out.contains("off"), "disabled task should show 'off'");
         // Order: task-1 line comes before task-2 line
         let pos1 = out.find("task-1").unwrap();
@@ -5666,9 +5687,7 @@ where
     let catalog_dirs = catalog_dirs
         .into_iter()
         .map(|path| atomcode_capabilities::pathnorm::strip_verbatim_path(&path))
-        .filter(|path| {
-            catalog_seen.insert(atomcode_capabilities::pathnorm::path_case_key(path))
-        })
+        .filter(|path| catalog_seen.insert(atomcode_capabilities::pathnorm::path_case_key(path)))
         .filter(|path| is_dir(path))
         .collect::<Vec<_>>();
     let current_key = atomcode_capabilities::pathnorm::path_case_key(&current);
@@ -7652,16 +7671,12 @@ mod tests {
 
     #[test]
     fn review_prompt_uses_explicit_tool_scopes() {
-        assert!(review_prompt("").contains(
-            r#"{"scope":{"kind":"working_tree"}}"#
-        ));
-        assert!(review_prompt("staged").contains(
-            r#"{"scope":{"kind":"staged"}}"#
-        ));
+        assert!(review_prompt("").contains(r#"{"scope":{"kind":"working_tree"}}"#));
+        assert!(review_prompt("staged").contains(r#"{"scope":{"kind":"staged"}}"#));
         let range = review_prompt("release/v5.0.5");
-        assert!(range.contains(
-            r#"{"scope":{"kind":"range","base":"release/v5.0.5","head":"HEAD"}}"#
-        ));
+        assert!(
+            range.contains(r#"{"scope":{"kind":"range","base":"release/v5.0.5","head":"HEAD"}}"#)
+        );
         assert!(!range.contains(r#"{"base":"#));
     }
 

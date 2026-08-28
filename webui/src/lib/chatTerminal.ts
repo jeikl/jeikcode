@@ -255,27 +255,50 @@ export type TokenCacheState = {
   lastPrompt: number;
   /** True once the provider has reported `cached > 0` (telemetry is trusted). */
   providerReportsCache: boolean;
+  /** Sum of per-step prompts in the current user turn (industrial loop denominator). */
+  turnPromptSum: number;
+  /** Sum of per-step cache hits in the current user turn (industrial loop numerator). */
+  turnCachedSum: number;
 };
 
 export function createTokenCacheState(): TokenCacheState {
-  return { lastPrompt: 0, providerReportsCache: false };
+  return { lastPrompt: 0, providerReportsCache: false, turnPromptSum: 0, turnCachedSum: 0 };
 }
 
 export function resetTokenCacheState(baselinePrompt = 0): TokenCacheState {
-  return { lastPrompt: Math.max(0, baselinePrompt), providerReportsCache: false };
+  return {
+    lastPrompt: Math.max(0, baselinePrompt),
+    providerReportsCache: false,
+    turnPromptSum: 0,
+    turnCachedSum: 0,
+  };
 }
 
+/** Keep prefix baseline across a new user turn; zero the loop accumulators. */
+export function startTokenTurn(state: TokenCacheState): TokenCacheState {
+  return { ...state, turnPromptSum: 0, turnCachedSum: 0 };
+}
+
+/** Provider KV-cache block size. A partial trailing block does not count as a hit. */
+export const CACHE_BLOCK_TOKENS = 64;
+
 /**
- * Prefix-cache estimate when upstream omits cached telemetry.
- *
- * Model: each request reuses the longest matching prefix from the prior request.
- * So on warm paths, `cached ≈ min(current_prompt, previous_prompt)`.
- * A sharp prompt drop (compaction / rewrite) invalidates the cache key.
+ * Industrial prefix-cache estimate for one LLM step:
+ *   cached_n ≈ prompt_{n-1}  (previous request is the reusable prefix)
+ *   hit_n    = cached_n / prompt_n
+ * A ≥10% prompt drop invalidates the key (compaction / rewrite).
+ * Hits are floored to `CACHE_BLOCK_TOKENS` so a near-equal prompt cannot
+ * paint a fake 100% from min(current, previous).
  */
 export function estimatePrefixCached(currentPrompt: number, previousPrompt: number): number {
   if (currentPrompt <= 0 || previousPrompt <= 0) return 0;
   if (currentPrompt < previousPrompt * 0.9) return 0;
-  return Math.min(currentPrompt, previousPrompt);
+  const raw = Math.min(currentPrompt, previousPrompt);
+  const aligned = Math.floor(raw / CACHE_BLOCK_TOKENS) * CACHE_BLOCK_TOKENS;
+  if (aligned <= 0) return 0;
+  // Estimated hits must stay strictly below the current prompt so the footer
+  // cannot show 100% unless the provider reported a full-prefix hit.
+  return aligned >= currentPrompt ? Math.max(0, aligned - CACHE_BLOCK_TOKENS) : aligned;
 }
 
 /** Cached tokens cannot exceed the prompt they were read from. */
@@ -286,12 +309,17 @@ export function clampCachedToPrompt(cached: number, prompt: number): number {
 
 /** Resolve cache telemetry for the footer pill. Provider `cached > 0` wins;
  * once a provider has reported cache hits we also trust explicit zeros;
- * otherwise fall back to prefix estimation against the prior usage prompt. */
+ * otherwise fall back to prefix estimation against the prior usage prompt.
+ * `prompt === 0` usage events are ignored so they cannot wipe `lastPrompt`
+ * (that made the first round of a new turn show no cache). */
 export function resolveTokenCache(
   event: { prompt: number; cached?: number },
   state: TokenCacheState,
 ): { cached: number; cached_estimated: boolean; nextState: TokenCacheState } {
   const prompt = Math.max(0, event.prompt);
+  if (prompt <= 0) {
+    return { cached: 0, cached_estimated: false, nextState: state };
+  }
   const reported = event.cached != null ? Math.max(0, event.cached) : null;
   let providerReportsCache = state.providerReportsCache;
   if (reported != null && reported > 0) providerReportsCache = true;
@@ -301,17 +329,9 @@ export function resolveTokenCache(
 
   if (reported != null && reported > 0) {
     cached = clampCachedToPrompt(reported, prompt);
-  } else if (reported === 0 && providerReportsCache) {
-    // Provider may report cached=0 on the first usage event of a new turn
-    // before prefix cache warms up. Prefer prefix estimation when plausible.
-    const estimated = estimatePrefixCached(prompt, state.lastPrompt);
-    if (estimated > 0) {
-      cached = estimated;
-      cached_estimated = true;
-    } else {
-      cached = 0;
-    }
   } else {
+    // Missing or explicit 0: first-round providers often omit cache telemetry.
+    // Estimate from the previous request prefix (industrial step n ≈ prompt_{n-1}).
     const estimated = estimatePrefixCached(prompt, state.lastPrompt);
     if (estimated > 0) {
       cached = estimated;
@@ -322,7 +342,12 @@ export function resolveTokenCache(
   return {
     cached,
     cached_estimated,
-    nextState: { lastPrompt: prompt, providerReportsCache },
+    nextState: {
+      lastPrompt: prompt,
+      providerReportsCache,
+      turnPromptSum: state.turnPromptSum + prompt,
+      turnCachedSum: state.turnCachedSum + cached,
+    },
   };
 }
 
@@ -358,17 +383,25 @@ export function estimateCacheFromHistoryPrompt(
     cacheState: {
       lastPrompt: currentPrompt,
       providerReportsCache: false,
+      turnPromptSum: currentPrompt,
+      turnCachedSum: cached,
     },
   };
 }
 
-/** Provider-style cache hit rate: cached_input / total_prompt_tokens.
- * Kernel `prompt` already includes cached tokens for Anthropic/OpenAI adapters. */
-export function formatCacheHitRate(cached: number, prompt: number): string | null {
+/** Hit rate = cached / prompt (industrial single-step, or loop if sums are passed).
+ * 100% is reserved for a real full-prefix provider hit — never from rounding
+ * or from min(current, previous) estimates. */
+export function formatCacheHitRate(
+  cached: number,
+  prompt: number,
+  estimated = false,
+): string | null {
   if (cached <= 0 || prompt <= 0) return null;
-  if (cached >= prompt) return '100%';
   const ratio = (cached / prompt) * 100;
-  if (ratio >= 99.95) return '99.9%';
+  if (cached >= prompt) return estimated ? '99%' : '100%';
+  if (estimated && ratio >= 99) return '99%';
+  if (ratio >= 99.5) return '99%';
   if (ratio >= 10) return `${Math.round(ratio)}%`;
   return `${ratio.toFixed(1)}%`;
 }

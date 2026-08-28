@@ -20890,10 +20890,15 @@ fn handle_agent_event(
             // per-turn tallies instead. Falls back to the event value if no
             // per-round usage arrived (turn_prompt 0).
             let (total_tokens, cached_pct) = if state.turn_prompt_tokens > 0 {
+                let cached = if state.turn_cached_tokens > 0 {
+                    state.turn_cached_tokens
+                } else {
+                    state.turn_cached_display
+                };
                 crate::state::turn_token_summary(
                     state.turn_prompt_tokens,
                     state.turn_completion_tokens,
-                    state.turn_cached_tokens,
+                    cached,
                 )
             } else {
                 (total_tokens, None)
@@ -21217,15 +21222,32 @@ fn handle_agent_event(
             ctx_window,
         } => {
             state.on_token_usage(used_tokens, ctx_window);
-            state.prompt_tokens += u.prompt as usize;
-            state.completion_tokens += u.completion as usize;
-            state.cached_tokens += u.cached as usize;
-            state.total_tokens += u.completion as usize;
-            // Per-turn tallies for the footer's billable count + cache annotation
-            // (reset in on_turn_complete / on_turn_cancelled).
-            state.turn_prompt_tokens += u.prompt as usize;
-            state.turn_completion_tokens += u.completion as usize;
-            state.turn_cached_tokens += u.cached as usize;
+            let prompt = u.prompt as usize;
+            let reported_cached = u.cached as usize;
+            if prompt == 0 {
+                // Split usage events must not wipe the prefix baseline or the
+                // first round of a turn would show no cache.
+                state.completion_tokens += u.completion as usize;
+                state.turn_completion_tokens += u.completion as usize;
+                state.total_tokens += u.completion as usize;
+            } else {
+                let estimated =
+                    crate::state::estimate_prefix_cached(prompt, state.last_request_prompt);
+                let display_cached = if reported_cached > 0 {
+                    reported_cached.min(prompt)
+                } else {
+                    estimated
+                };
+                state.last_request_prompt = prompt;
+                state.prompt_tokens += prompt;
+                state.completion_tokens += u.completion as usize;
+                state.cached_tokens += reported_cached;
+                state.total_tokens += u.completion as usize;
+                state.turn_prompt_tokens += prompt;
+                state.turn_completion_tokens += u.completion as usize;
+                state.turn_cached_tokens += reported_cached;
+                state.turn_cached_display += display_cached;
+            }
         }
         AgentEvent::WorkingDirChanged(new_dir) => {
             // Fires when a tool (change_dir / bash cd) or

@@ -138,8 +138,9 @@ pub struct CodingAgentConfig {
     /// identical repetition. Defaults to 3/4 and is configurable through
     /// `ATOMCODE_TOOL_LOOP_WARNING_THRESHOLD` / `ATOMCODE_TOOL_LOOP_STOP_THRESHOLD`;
     /// a stop threshold of `0` disables the policy. The kernel's always-on echo
-    /// fuse (identical substantial thinking/text + same tool pattern) still warns
-    /// on the first replay and stops on the second, independent of this policy.
+    /// fuse (identical thinking or, if none, visible text, plus same tool/args/
+    /// result/status) reminds on the first two replays and stops on the third,
+    /// independent of this policy. Silent tool-only rounds do not use the echo fuse.
     pub tool_loop_policy: Option<ToolLoopPolicy>,
     /// Goal-mode round cap (0 = unbounded). Override via `ATOMCODE_GOAL_MAX_ROUNDS`.
     pub goal_max_rounds: u32,

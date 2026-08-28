@@ -37,9 +37,9 @@ pub const DEFAULT_MAX_TOOL_RESULT_BYTES: usize = 256 * 1024;
 /// state, then stops after the fourth. Products may choose higher thresholds for
 /// intentional polling/repetition, or leave the policy disabled. The kernel default
 /// is OFF — a runtime opts in explicitly through [`AgentBuilder::tool_loop_policy`].
-/// Identical substantial reasoning/text plus the same tool pattern is handled by
-/// the always-on echo fuse (warn on the first replay, stop on the second) and
-/// does not wait for these thresholds.
+/// A non-empty thinking or visible-text replay plus the same tool pattern, result
+/// content, and success/failure is handled by the always-on echo fuse (remind on
+/// the first two replays, stop on the third) and does not wait for these thresholds.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ToolLoopPolicy {
     warning_threshold: u32,
@@ -192,18 +192,21 @@ const REPEAT_LOOP_NUDGE: &str =
      request-user-input tool when available. If the task is done, reply with a short summary \
      and no tool calls. If you are blocked, explain what you need.";
 
-/// Fast path for the "stuck tape" failure: the model re-emits the same substantial
-/// reasoning/visible text AND the same tool pattern. That is stronger evidence than
-/// tool identity alone (a legitimate retry or poll), so this fuse warns on the first
-/// replay and stops on the second. Narratives shorter than [`ECHO_MIN_CHARS`] are
-/// ignored; the exact/coarse guards still cover those.
-const ECHO_MIN_CHARS: usize = 32;
+/// Fast path for a replayed narrative plus the same tool outcome.
+///
+/// Thinking models fingerprint the reasoning channel; models that never emit
+/// thinking fall back to visible text. Empty/empty is NOT a match — tool-only
+/// silent rounds stay with the exact/coarse guards so polling is not killed.
+/// Result success/failure AND model-visible content are part of the identity so
+/// a changed observation (health checks, `date`) is progress.
+///
+/// Round 1 is evidence. Rounds 2 and 3 remind. Round 4 stops. Two ignored
+/// reminders is enough to call it stuck without dying on the first retry.
 const ECHO_NUDGE_AT: u32 = 2;
-const ECHO_STOP_AT: u32 = 3;
-const ECHO_LOOP_NUDGE: &str =
-    "You just repeated the SAME reasoning (or visible text) and the SAME tool call as the \
-     previous round. That is a loop, not progress. Do not restate the problem. Take a \
-     different action now, or reply in plain text explaining what is blocking you.";
+const ECHO_STOP_AT: u32 = 4;
+const ECHO_LOOP_NUDGE: &str = "你死循环了，请你重新思考你的动作。";
+const ECHO_LOOP_NUDGE_FINAL: &str =
+    "你死循环了，请你重新思考你的动作。若再重复相同工具和参数，本回合将停止。";
 
 /// Order-independent signature of the model-emitted calls in one round. Call ids
 /// are deliberately excluded because providers commonly mint a new id for every
@@ -228,30 +231,39 @@ fn normalize_echo_narrative(s: &str) -> String {
     s.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
-/// Fingerprint a round as an echo only when the model produced a substantial
-/// narrative (reasoning and/or visible text) together with at least one tool call.
-/// `None` means "not enough text to call this an echo" — callers fall through to
-/// the exact/coarse tool-signature guards.
+/// Prefer reasoning when the model emits it; otherwise the visible text. Either
+/// channel is enough. Both empty → `None` (not an echo candidate).
+fn effective_echo_narrative(reasoning: &str, text: &str) -> Option<String> {
+    let reasoning = normalize_echo_narrative(reasoning);
+    if !reasoning.is_empty() {
+        return Some(reasoning);
+    }
+    let text = normalize_echo_narrative(text);
+    if !text.is_empty() {
+        return Some(text);
+    }
+    None
+}
+
+/// Fingerprint a round as an echo when the model produced any thinking or visible
+/// text together with at least one tool call. Result status/content is appended
+/// after execution via [`bind_echo_status`].
 fn round_echo_signature(reasoning: &str, text: &str, calls: &[ToolCall]) -> Option<String> {
     if calls.is_empty() {
         return None;
     }
-    let reasoning = normalize_echo_narrative(reasoning);
-    let text = normalize_echo_narrative(text);
-    let mut narrative = String::new();
-    if !reasoning.is_empty() {
-        narrative.push_str(&reasoning);
-    }
-    if !text.is_empty() {
-        if !narrative.is_empty() {
-            narrative.push('\u{2}');
-        }
-        narrative.push_str(&text);
-    }
-    if narrative.chars().count() < ECHO_MIN_CHARS {
+    let narrative = effective_echo_narrative(reasoning, text)?;
+    Some(format!("{narrative}\u{3}{}", round_tool_signature(calls)))
+}
+
+/// Bind post-execution success/failure + model-visible content onto the pre-tool
+/// echo signature. No applied results → not an echo (cancel/skip).
+fn bind_echo_status(echo_sig: Option<String>, status: &str) -> Option<String> {
+    let sig = echo_sig?;
+    if status.is_empty() {
         return None;
     }
-    Some(format!("{narrative}\u{3}{}", round_tool_signature(calls)))
+    Some(format!("{sig}\u{4}{status}"))
 }
 
 /// Maximum number of `parallel_safe` (read-only) tools that run CONCURRENTLY in
@@ -3500,6 +3512,7 @@ impl RunningAgent {
                         )
                     }));
             let mut loop_calls = Vec::with_capacity(plans.len());
+            let mut echo_status = String::new();
             let mut policy_denied = false;
             for (plan, result_slot) in plans.iter().zip(results.iter_mut()) {
                 let Some(ExecutedCallResult {
@@ -3584,6 +3597,12 @@ impl RunningAgent {
                 self.rt.emit(AgentEvent::ToolResult {
                     result: result.clone(),
                 });
+                if !echo_status.is_empty() {
+                    echo_status.push('\u{6}');
+                }
+                echo_status.push(if result.is_error { '1' } else { '0' });
+                echo_status.push('\u{5}');
+                echo_status.push_str(&result.content);
                 convo.push(Message::tool_result(
                     &result.call_id,
                     &result.content,
@@ -3684,7 +3703,8 @@ impl RunningAgent {
                 continue;
             }
 
-            if let Some(sig) = echo_sig.as_deref() {
+            let echo_key = bind_echo_status(echo_sig, &echo_status);
+            if let Some(sig) = echo_key.as_deref() {
                 if last_echo_sig.as_deref() == Some(sig) {
                     echo_rounds = echo_rounds.saturating_add(1);
                 } else {
@@ -3700,8 +3720,8 @@ impl RunningAgent {
             if echo_rounds >= ECHO_STOP_AT {
                 self.rt.emit(AgentEvent::Error {
                     message: format!(
-                        "stopped: the model replayed the same reasoning and tool-call pattern for \
-                         {echo_rounds} consecutive rounds"
+                        "stopped: the model replayed the same reasoning/text and tool-call \
+                         pattern for {echo_rounds} consecutive rounds"
                     ),
                     http_status: None,
                     code: None,
@@ -3710,13 +3730,17 @@ impl RunningAgent {
                     .await;
                 return;
             }
-            if echo_rounds >= ECHO_NUDGE_AT && !echo_nudged {
+            if echo_rounds >= ECHO_NUDGE_AT {
                 echo_nudged = true;
-                self.rt.emit(AgentEvent::Warning(
-                    "possible echo loop: the same reasoning and tool call repeated; asking the model to change course"
-                        .into(),
-                ));
-                convo.push(Message::synthetic_user(ECHO_LOOP_NUDGE.to_string()));
+                let last_reminder = echo_rounds + 1 >= ECHO_STOP_AT;
+                let nudge = if last_reminder {
+                    ECHO_LOOP_NUDGE_FINAL
+                } else {
+                    ECHO_LOOP_NUDGE
+                };
+                self.rt
+                    .emit(AgentEvent::Warning(format!("possible echo loop: {nudge}")));
+                convo.push(Message::synthetic_user(nudge.to_string()));
             }
             let echo_streak_active = echo_rounds > 1;
 

@@ -154,6 +154,11 @@ pub const BUNDLED_ASSETS: &[BundledFileEntry] = &[
         content: include_str!("../../atomcode-capabilities/assets/teaches/07_project_constraints_and_rules.md"),
         description: "项目约束与业务知识包指南 (teaches/07_project_constraints_and_rules.md)",
     },
+    BundledFileEntry {
+        relative_path: "teaches/08_updates_and_releases.md",
+        content: include_str!("../../atomcode-capabilities/assets/teaches/08_updates_and_releases.md"),
+        description: "升级与发版指南 (teaches/08_updates_and_releases.md)",
+    },
 ];
 
 /// 官方已废弃/重命名的历史遗留文件列表（需在升级时提示清理或移除）

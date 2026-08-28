@@ -379,6 +379,9 @@ mod tests {
         assert!(DOC_MCP_SKILLS.contains("jeikcode_config_reload"));
         assert!(DOC_MCP_SKILLS.contains("/mcp reload"));
         assert!(DOC_MCP_SKILLS.contains("刷新按钮"));
+        assert!(DOC_MCP_SKILLS.contains("jeikcode mcp add"));
+        assert!(DOC_MCP_SKILLS.contains("/skills"));
         assert!(DOC_OVERVIEW.contains("jeikcode_config_reload"));
+        assert!(DOC_OVERVIEW.contains("jeikcode mcp add"));
     }
 }

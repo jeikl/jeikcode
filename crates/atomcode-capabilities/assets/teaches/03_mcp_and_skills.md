@@ -9,7 +9,40 @@ JeikCode 支持连接任何遵循标准 MCP 协议的外部工具服务。
 2. **用户全局级**：`~/.atomcode/mcp.json`（全局共享，所有项目均可访问）。
 3. 优先级：工作区同名 MCP 服务覆盖全局 MCP 服务。
 
-### 1.2 `mcp.json` 标准配置格式
+### 1.2 CLI 添加 MCP（`jeikcode mcp`，最快；仅 stdio）
+
+二进制名 `jeikcode` 与 `atomcode` 等价。**同名会整段覆盖**该键（只写 `command`/`args`，原有 `env` 等字段不保留）。HTTP 型 server 请手写 JSON。
+
+```bash
+# 写进项目根 .mcp.json（默认当前目录）
+jeikcode mcp add playwright npx @playwright/mcp@latest
+
+# 写进用户级 ~/.atomcode/mcp.json
+jeikcode mcp add playwright npx -y @playwright/mcp@latest --global
+
+# 指定项目目录
+jeikcode mcp add playwright npx @playwright/mcp@latest -C /path/to/repo
+
+# GitHub 远程 MCP（只写配置，不登录）
+jeikcode mcp add-github-oauth github --global
+jeikcode mcp login github
+jeikcode mcp logout github
+```
+
+写完后调用 `jeikcode_config_reload`，或 WebUI/TUI `/mcp reload`，或点侧栏 MCP 刷新按钮。**不要要求用户重启。**
+
+| CLI | 作用 |
+| :--- | :--- |
+| `jeikcode mcp add <name> <command> [args…]` | 写入 stdio MCP（默认项目 `.mcp.json`） |
+| `jeikcode mcp add … --global` | 写入 `~/.atomcode/mcp.json` |
+| `jeikcode mcp add … -C <dir>` | 指定项目目录 |
+| `jeikcode mcp add-github-oauth [name] [--global]` | 写入 GitHub HTTP+OAuth MCP |
+| `jeikcode mcp login <name>` | OAuth 登录（弹浏览器） |
+| `jeikcode mcp logout <name>` | 清除已存凭证 |
+
+文件含 `//` 注释时 CLI 拒绝改写（避免抹掉注释），请手改 JSON。
+
+### 1.3 `mcp.json` 标准配置格式
 
 ```json
 {
@@ -34,7 +67,24 @@ JeikCode 支持连接任何遵循标准 MCP 协议的外部工具服务。
 }
 ```
 
-### 1.3 核心交互与生命周期
+HTTP 型只能手写（或 `add-github-oauth`）。项目根 `.mcp.json` 或用户级 `~/.atomcode/mcp.json`，顶层键 `mcpServers`（兼容旧键 `servers`）。同名时项目级覆盖用户级。
+
+### 1.4 斜杠命令（TUI / WebUI）与刷新
+
+| 命令 | TUI | WebUI | 作用 |
+| :--- | :--- | :--- | :--- |
+| `/mcp` | ✅ | ✅ | 列出 server 及状态（含 failed / blocked） |
+| `/mcp reload` | ✅ | ✅ | 重读两份配置并后台重连 |
+| `/mcp trust` | ✅ | ✅ | 信任当前项目（项目级 `.mcp.json` 才能连） |
+| `/mcp untrust` | ✅ | — | 撤销信任 |
+| `/mcp tools <server>` | ✅ | — | 列出该 server 远端工具 |
+| `/mcp login/logout <server>` | ✅ | CLI `jeikcode mcp login/logout` | OAuth |
+| 侧栏 MCP 刷新按钮 | — | ✅ | 等价 `/mcp reload` |
+| 工具 `jeikcode_config_reload` | ✅ | ✅ | Agent 写完配置后调用；当前回合结束后生效 |
+
+**项目级 `.mcp.json` 在未信任项目里不会连**，状态 `blocked: untrusted project`。用户级 `~/.atomcode/mcp.json` 不受此限。
+
+### 1.5 核心交互与生命周期
 - **后台连接、首轮就绪保护**：MCP 服务仍在后台异步连接；交互式长驻运行时可先展示界面，但 daemon 的短生命周期 `/chat` 请求会等待 MCP 工具目录完成首次发布。若连接超时或失败，本次消息会明确失败且不会在缺少 MCP 工具的情况下静默发送给模型。
 - **项目级共享实例**：daemon 的非同步 `/chat` 路径按工作目录缓存 MCP Registry，同一项目的短生命周期聊天复用同一组连接与工具目录，不会为每条消息重复启动 MCP 进程；不同项目各自隔离。缓存最多保留 5 个项目，按最近使用时间淘汰，并主动取消被淘汰实例的连接任务。WebUI 的同步 `/live` 路径使用自身的长驻 CodingRuntime，在该运行时生命周期内持续复用其 MCP Registry。
 - **单次工具发现**：同一连接的 `tools/list` 结果会缓存，并对并发首次发现进行合并；状态面板与聊天挂载共享该快照，不会反复请求每个 MCP 服务。
@@ -85,10 +135,15 @@ description: 专精于某业务模块的排查、测试与重构规范。当用�
 - `references/`：放详细技术参考、API 文档、架构说明，由 Agent 按需使用 `read_file` 查阅。
 - `scripts/`：放辅助脚本或模板。
 
+### 2.4 生效与浏览
+- WebUI / TUI 输入 `/skills` 浏览已加载技能；侧栏「技能」菜单可插入 `/<skill-name>`。
+- 新建或修改 `SKILL.md` 后调用 `jeikcode_config_reload`（或 `/reload`），下一轮用户消息即可挂载。提示词 `init.yaml`/`rules.yaml` 仍按 mtime 自动热重载，技能目录不会。
+
 ---
 
 ## 3. Plugins 插件生态
 
 - 插件主目录：`~/.atomcode/plugins/`。
 - **自动初始化**：首次启动自动同步官方插件市场并创建 `.plugin_bootstrap_v2` 标记。
-- **命令管理**：在 TUI 中使用 `/plugin` 即可交互式浏览、安装或卸载第三方插件与技能集。
+- **命令管理**：TUI `/plugin` 交互式浏览、安装或卸载；CLI `jeikcode plugin`（若已暴露）与市场命名空间 `<namespace>:<skill-name>` 一致。
+- 安装/更新插件后同样调用 `jeikcode_config_reload`，不要让用户重启。

@@ -136,17 +136,21 @@ MCP 总开关：`CodingRuntimeConfig.mcp` 默认 `true`；`atomcode-clix` 提供
 
 ## 5. `/mcp` 与命令行
 
-**TUI 斜杠命令**（`atomcode-tuix/src/event_loop/commands.rs::parse_mcp_subcommand`）：
+**TUI / WebUI 斜杠命令**（TUI：`atomcode-tuix`；WebUI：`webui/src/lib/slashCommands.ts`）：
 
-| 命令 | 作用 |
-|---|---|
-| `/mcp` | 列出所有 server 及状态（含 `failed` / `blocked: untrusted project`） |
-| `/mcp reload` | 重新加载两份配置并后台重连 |
-| `/mcp tools <server>` | 列出该 server 的远端工具（等待上限 = 该 server `timeout_ms + 5s`，默认 35s） |
-| `/mcp login <server>` / `/mcp logout <server>` | OAuth 登录 / 清除凭证 |
-| `/mcp trust` / `/mcp untrust` | 信任 / 取消信任当前项目 |
+| 命令 | TUI | WebUI | 作用 |
+|---|---|---|---|
+| `/mcp` | ✅ | ✅ | 列出所有 server 及状态（含 `failed` / `blocked: untrusted project`） |
+| `/mcp reload` | ✅ | ✅ | 重新加载两份配置并后台重连 |
+| `/mcp tools <server>` | ✅ | — | 列出该 server 的远端工具（等待上限 = 该 server `timeout_ms + 5s`，默认 35s） |
+| `/mcp login <server>` / `/mcp logout <server>` | ✅ | CLI | OAuth 登录 / 清除凭证 |
+| `/mcp trust` / `/mcp untrust` | ✅ | `/mcp trust` | 信任 / 取消信任当前项目 |
+| 侧栏 MCP 刷新按钮 | — | ✅ | 等价 `/mcp reload` |
+| 工具 `jeikcode_config_reload` | ✅ | ✅ | Agent 写完配置后重挂；当前回合结束后生效 |
 
-**CLI 子命令**：`atomcode mcp add`、`add-github-oauth`、`login`、`logout`。
+**CLI 子命令**：`jeikcode mcp add`、`add-github-oauth`、`login`、`logout`（二进制名 `atomcode` 等价）。
+
+写完配置后调用 `/mcp reload`、WebUI 刷新按钮或 `jeikcode_config_reload`，**不用重启**。
 
 **daemon HTTP 端点**：`GET /mcp/status`、`POST /mcp/reload`、`POST /live/mcp/trust`。
 

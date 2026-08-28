@@ -33,6 +33,7 @@ export interface SlashHandlers {
   notice(text: string): void;
   submitPrompt?(text: string): void | Promise<void>;
   execServerCommand(command: string, arg: string): void | Promise<void>;
+  mcpCommand(arg: string): void | Promise<void>;
   t(key: string, params?: Record<string, string | number>): string;
 }
 
@@ -65,6 +66,12 @@ export const FRONTEND_COMMANDS: SlashCommandDef[] = [
   },
   { name: 'resume', descKey: 'cmd.resume.desc', run: (_a, h) => h.openSessionSidebar() },
   { name: 'reload', descKey: 'cmd.reload.desc', run: (_a, h) => h.reloadConfig() },
+  {
+    name: 'mcp',
+    descKey: 'cmd.mcp.desc',
+    argHint: '[reload|trust]',
+    run: (a, h) => h.mcpCommand(a),
+  },
   { name: 'skills', descKey: 'cmd.skills.desc', run: (_a, h) => h.openSlashSkillsMenu() },
   { name: 'help', descKey: 'cmd.help.desc', run: (_a, h) => h.notice(buildHelpText(h.t)) },
   {
@@ -152,6 +159,40 @@ export interface SlashMenuItem {
   name: string;
   description: string;
   kind: 'command' | 'skill';
+}
+
+export interface McpStatusLine {
+  name: string;
+  status: string;
+  tool_count?: number;
+  error?: string;
+}
+
+/** Format `/mcp` command output to match TUI `/mcp` (server + status + tool count). */
+export function formatMcpStatusText(
+  servers: McpStatusLine[],
+  blocked: string[] | undefined,
+  t: (key: string, params?: Record<string, string | number>) => string,
+): string {
+  const lines: string[] = [t('cmd.mcp.header')];
+  if (blocked && blocked.length > 0) {
+    lines.push(t('mcp.blockedUntrusted', { n: blocked.length }));
+  }
+  if (servers.length === 0 && !(blocked && blocked.length)) {
+    lines.push(t('sidebar.mcpEmpty'));
+    return lines.join('\n');
+  }
+  for (const srv of servers) {
+    const status =
+      srv.status === 'connected' ? t('sidebar.mcpConnected') :
+      srv.status === 'connecting' ? t('sidebar.mcpConnecting') :
+      srv.status === 'error' ? t('sidebar.mcpError') :
+      t('sidebar.mcpDisconnected');
+    const tools = srv.tool_count != null ? `  ${t('sidebar.mcpTools', { n: srv.tool_count })}` : '';
+    const err = srv.error ? `  ${srv.error}` : '';
+    lines.push(`    ${srv.name}  ${status}${tools}${err}`);
+  }
+  return lines.join('\n');
 }
 
 export function buildSlashMenuItems(

@@ -533,11 +533,58 @@ impl LiveViewHub {
     }
 
     pub async fn set_mode(&self, mode: atomcode_coding::RuntimeMode) -> Result<(), HubError> {
-        self.bound_handle()?
-            .1
+        let (binding, handle) = self.bound_handle()?;
+        handle
             .set_mode(mode)
             .await
-            .map_err(|error| HubError::RuntimeRejected(error.to_string()))
+            .map_err(|error| HubError::RuntimeRejected(error.to_string()))?;
+        if mode.is_auto() {
+            self.resolve_pending_approvals_after_auto(&binding, &handle)
+                .await;
+        }
+        Ok(())
+    }
+
+    /// After Auto takes effect, dismiss already-published approval prompts so
+    /// WebUI/TUI don't keep a permission card for a request the runtime just
+    /// auto-answered (or is about to).
+    async fn resolve_pending_approvals_after_auto(
+        &self,
+        expected: &LiveBinding,
+        handle: &CodingRuntimeHandle,
+    ) {
+        let ids: Vec<atomcode_kernel::event::RequestId> = {
+            let state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+            state
+                .pending_requests
+                .iter()
+                .filter(|(_, kind)| {
+                    kind.as_str() == atomcode_capabilities::tools::APPROVAL_KIND
+                })
+                .map(|(id, _)| *id)
+                .collect()
+        };
+        if ids.is_empty() {
+            return;
+        }
+        let value = serde_json::to_value(atomcode_capabilities::tools::ApprovalResponse::allow())
+            .unwrap_or(serde_json::Value::Null);
+        for id in ids {
+            match handle.respond(id, value.clone()).await {
+                Ok(()) | Err(atomcode_coding::RuntimeError::StaleRequest { .. }) => {}
+                Err(_) => continue,
+            }
+            let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+            let Some(current) = state.binding.as_ref() else {
+                continue;
+            };
+            if current.identity.id != expected.id {
+                continue;
+            }
+            if state.pending_requests.contains_key(&id) {
+                let _ = self.resolve_request_locked(&mut state, id);
+            }
+        }
     }
 
     /// Whether the bound runtime is mid-turn, parked awaiting approval, or already
@@ -799,6 +846,26 @@ impl LiveViewHub {
         state.last_runtime_sequence = Some(envelope.sequence);
 
         let event = envelope.event;
+        let apply_agent_config_reload = matches!(
+            &event,
+            CodingRuntimeEvent::TurnFinished(TurnCompletion::Completed { .. })
+        ) && atomcode_capabilities::config_reload::take_pending_live_reload();
+        let reload_handle = apply_agent_config_reload
+            .then(|| {
+                state
+                    .binding
+                    .as_ref()
+                    .and_then(|bound| bound.control.handle())
+            })
+            .flatten();
+        let reload_working_dir = apply_agent_config_reload
+            .then(|| {
+                state
+                    .binding
+                    .as_ref()
+                    .map(|bound| bound.identity.working_dir.clone())
+            })
+            .flatten();
         let mapped_steer = match &event {
             CodingRuntimeEvent::Agent(AgentEvent::Steered { count, inputs }) => Some((
                 *count,
@@ -891,6 +958,26 @@ impl LiveViewHub {
                 },
                 replay,
             );
+        }
+        drop(state);
+        if let (Some(handle), Some(working_dir)) = (reload_handle, reload_working_dir) {
+            tokio::spawn(async move {
+                // The turn just finished; the actor may still be snapshotting.
+                // Retry Busy so the agent-requested remount lands for the next user turn.
+                let plugin_dirs = crate::gather_plugin_skill_dirs_for(&working_dir);
+                for _ in 0..20 {
+                    match handle
+                        .reload_capabilities_with_plugin_skills(Some(plugin_dirs.clone()))
+                        .await
+                    {
+                        Ok(_) => break,
+                        Err(atomcode_coding::RuntimeError::Busy) => {
+                            tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+                        }
+                        Err(_) => break,
+                    }
+                }
+            });
         }
         Ok(())
     }

@@ -48,6 +48,7 @@ pub mod encoding;
 pub mod glob;
 pub mod grep;
 pub mod jeikcode_config_guide;
+pub mod jeikcode_config_reload;
 pub mod list;
 /// Model-facing memory tool (remember / forget / list). Opt-in `memory` feature.
 #[cfg(feature = "memory")]
@@ -100,6 +101,7 @@ pub use edit::EditFileTool;
 pub use glob::GlobTool;
 pub use grep::GrepTool;
 pub use jeikcode_config_guide::JeikcodeConfigGuideTool;
+pub use jeikcode_config_reload::JeikcodeConfigReloadTool;
 pub use list::ListDirTool;
 pub use open_file::{OpenFileTool, OpenFileWorkspaceGate};
 pub use output_artifact::{
@@ -147,6 +149,7 @@ pub fn coding_tool_names() -> &'static [&'static str] {
             "ast_grep",
             "todowrite",
             "jeikcode_config_guide",
+            "jeikcode_config_reload",
             "fetch_output",
             "memory",
             "request_user_input",
@@ -167,6 +170,7 @@ pub fn coding_tool_names() -> &'static [&'static str] {
             "ast_grep",
             "todowrite",
             "jeikcode_config_guide",
+            "jeikcode_config_reload",
             "fetch_output",
             "request_user_input",
         ];
@@ -197,6 +201,7 @@ pub fn register_coding_tools_with_vision(reg: &mut ToolRegistry, vision: bool) {
     reg.register(Arc::new(SearchReplaceTool));
     reg.register(Arc::new(AstGrepTool));
     reg.register(Arc::new(JeikcodeConfigGuideTool::new()));
+    reg.register(Arc::new(JeikcodeConfigReloadTool::new()));
     // Gate on ATOMCODE_TODO env var (0/false/off → skip; anything else or absent → register).
     // Mirrors atomcode_core::config::todo_enabled_from_env but inlined here because
     // atomcode-capabilities must NOT depend on atomcode-core (layering constraint).
@@ -685,6 +690,7 @@ mod tests {
         "ast_grep",
         "todowrite",
         "jeikcode_config_guide",
+        "jeikcode_config_reload",
     ];
 
     #[test]

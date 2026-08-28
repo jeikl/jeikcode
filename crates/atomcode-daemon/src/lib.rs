@@ -6033,6 +6033,14 @@ fn merge_configured_mcp_statuses(
 }
 
 async fn mcp_status(State(state): State<AppState>) -> Json<McpStatusResponse> {
+    // Agent `jeikcode_config_reload` dirties the daemon MCP cache; rebuild it
+    // here so the WebUI sidebar reflects newly written mcp.json. Live-runtime
+    // remount happens at TurnFinished (reload_capabilities is Busy mid-turn).
+    if atomcode_capabilities::config_reload::take_pending_mcp_cache_reload() {
+        let working_dir = state.project.read().await.working_dir.clone();
+        let new_registry = Arc::new(McpRegistry::from_config_background(&working_dir));
+        replace_project_mcp_registry(&state, &working_dir, new_registry).await;
+    }
     // Prefer the per-project `/chat` registry when it exists; otherwise report
     // the daemon registry. Live runtime capability changes use the awaitable
     // CodingRuntime boundary and are reported on the live event stream.
@@ -6221,16 +6229,22 @@ pub(crate) async fn replace_project_mcp_registry(
     }
 }
 
-async fn mcp_reload(State(state): State<AppState>) -> Json<serde_json::Value> {
+/// Rebuild the per-project MCP registry from disk and remount live capabilities.
+/// Shared by `POST /mcp/reload` and `POST /config/reload`.
+pub(crate) async fn reload_mcp_and_live_runtime(state: &AppState) -> bool {
     let project = state.project.read().await;
     let project_dir = project.working_dir.clone();
     drop(project);
     let new_registry = Arc::new(McpRegistry::from_config_background(&project_dir));
-    replace_project_mcp_registry(&state, &project_dir, new_registry).await;
-    let runtime_reloaded = match crate::native_live::binding() {
+    replace_project_mcp_registry(state, &project_dir, new_registry).await;
+    match crate::native_live::binding() {
         Ok(_) => crate::native_live::reload_capabilities().await.is_ok(),
         Err(_) => true,
-    };
+    }
+}
+
+async fn mcp_reload(State(state): State<AppState>) -> Json<serde_json::Value> {
+    let runtime_reloaded = reload_mcp_and_live_runtime(&state).await;
     Json(serde_json::json!({
         "ok": runtime_reloaded,
         "status": "reloading",
@@ -7142,6 +7156,11 @@ pub async fn run_server(opts: ServerOpts) -> anyhow::Result<()> {
                 "serve: --yolo enabled (auto-approve tools; request_user_input tool hidden; no modal stalls)"
             );
         }
+    } else if !quiet && webui_tokens.is_some() {
+        // Headless `atomcode --host` / `serve`: default Auto so remote WebUI
+        // isn't stuck on Build (approval cards on every tool). TUI in-process
+        // `/webui` keeps quiet=true and stays on Build.
+        live_api::live_set_approval_mode(crate::approval_mode::ApprovalMode::Auto);
     }
 
     // Step 1: Load config (R1.1, R1.5) — tolerate errors, fallback to default.

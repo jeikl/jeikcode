@@ -66,18 +66,21 @@ function fmtContextWindow(v: number): string {
 function SettingsModal({
   title,
   wide,
+  large,
   hideFooter,
   onClose,
   children,
 }: {
   title: string;
   wide?: boolean;
+  large?: boolean;
   // 弹窗自带底部操作（如「添加模型」的 关闭/添加）时隐藏这里的页脚关闭，避免重复。
   hideFooter?: boolean;
   onClose: () => void;
   children: ComponentChildren;
 }) {
   const { t } = useSettings();
+  const sizeClass = large ? ' modal-card-lg' : wide ? '' : ' modal-card-sm';
   return (
     <div
       class="modal-overlay"
@@ -85,7 +88,7 @@ function SettingsModal({
         if (e.target === e.currentTarget) onClose();
       }}
     >
-      <div class={'modal-card' + (wide ? '' : ' modal-card-sm')}>
+      <div class={'modal-card' + sizeClass}>
         <div class="modal-header">
           <span>⚙</span>
           <h3>{title}</h3>
@@ -496,6 +499,7 @@ function ProviderFormDialog({
   return (
     <SettingsModal
       title={isEdit ? t('settings.editModel') : t('settings.addModel')}
+      large
       hideFooter
       onClose={onClose}
     >

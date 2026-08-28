@@ -56,6 +56,7 @@ function fakeHandlers(): { h: SlashHandlers; calls: string[] } {
     openSlashSkillsMenu: () => { calls.push('openSlashSkillsMenu'); },
     notice: (t) => { calls.push(`notice:${t}`); },
     execServerCommand: (cmd, arg) => { calls.push(`exec:${cmd}:${arg}`); },
+    mcpCommand: (a) => { calls.push(`mcp:${a}`); },
     t: (k) => k,
   };
   return { h, calls };
@@ -142,6 +143,7 @@ test('/undo /remember /forget /memory dispatch to execServerCommand', async () =
     changeDir: () => {}, openSessionSidebar: () => {}, reloadConfig: () => {},
     openSlashSkillsMenu: () => {}, notice: (t) => { calls.push(`notice:${t}`); },
     execServerCommand: (cmd, arg) => { calls.push(`exec:${cmd}:${arg}`); },
+    mcpCommand: () => {},
     t: (k) => k,
   };
   const map = buildCommandMap(FRONTEND_COMMANDS);
@@ -157,7 +159,8 @@ test('/context and /compact dispatch to execServerCommand', async () => {
   const h: SlashHandlers = {
     setMode: () => {}, openModelPicker: () => {}, setProvider: () => {}, changeDir: () => {},
     openSessionSidebar: () => {}, reloadConfig: () => {}, openSlashSkillsMenu: () => {},
-    notice: () => {}, execServerCommand: (cmd, arg) => { calls.push(`exec:${cmd}:${arg}`); }, t: (k) => k,
+    notice: () => {}, execServerCommand: (cmd, arg) => { calls.push(`exec:${cmd}:${arg}`); },
+    mcpCommand: () => {}, t: (k) => k,
   };
   const map = buildCommandMap(FRONTEND_COMMANDS);
   await dispatchSlashCommand('/context', map, h);
@@ -170,7 +173,8 @@ test('display commands dispatch to execServerCommand', async () => {
   const h: SlashHandlers = {
     setMode: () => {}, openModelPicker: () => {}, setProvider: () => {}, changeDir: () => {},
     openSessionSidebar: () => {}, reloadConfig: () => {}, openSlashSkillsMenu: () => {},
-    notice: () => {}, execServerCommand: (cmd, arg) => { calls.push(`${cmd}:${arg}`); }, t: (k) => k,
+    notice: () => {}, execServerCommand: (cmd, arg) => { calls.push(`${cmd}:${arg}`); },
+    mcpCommand: () => {}, t: (k) => k,
   };
   const map = buildCommandMap(FRONTEND_COMMANDS);
   for (const c of ['whoami','status','config','diff','cost','todo']) await dispatchSlashCommand(`/${c}`, map, h);
@@ -184,6 +188,7 @@ test('/remember and /forget without arg emit a notice', async () => {
     changeDir: () => {}, openSessionSidebar: () => {}, reloadConfig: () => {},
     openSlashSkillsMenu: () => {}, notice: (t) => { calls.push(t); },
     execServerCommand: (cmd, arg) => { calls.push(`exec:${cmd}:${arg}`); },
+    mcpCommand: () => {},
     t: (k) => k,
   };
   const map = buildCommandMap(FRONTEND_COMMANDS);
@@ -199,7 +204,7 @@ test('/review dispatches an explicit code_review scope through chat', async () =
     changeDir: () => {}, openSessionSidebar: () => {}, reloadConfig: () => {},
     openSlashSkillsMenu: () => {}, notice: () => {},
     submitPrompt: (text) => { prompts.push(text); },
-    execServerCommand: () => {}, t: (k) => k,
+    execServerCommand: () => {}, mcpCommand: () => {}, t: (k) => k,
   };
   const map = buildCommandMap(FRONTEND_COMMANDS);
   await dispatchSlashCommand('/review staged', map, h);
@@ -214,9 +219,39 @@ test('/review range JSON-escapes the ref without duplicating it into prose', asy
     changeDir: () => {}, openSessionSidebar: () => {}, reloadConfig: () => {},
     openSlashSkillsMenu: () => {}, notice: () => {},
     submitPrompt: (text) => { prompts.push(text); },
-    execServerCommand: () => {}, t: (k) => k,
+    execServerCommand: () => {}, mcpCommand: () => {}, t: (k) => k,
   };
   await dispatchSlashCommand('/review odd"ref', buildCommandMap(FRONTEND_COMMANDS), h);
   assert.match(prompts[0], /"base":"odd\\"ref"/);
   assert.doesNotMatch(prompts[0], /odd"ref\.\.HEAD/);
 });
+
+test('/mcp dispatches to mcpCommand with subcommand arg', async () => {
+  const { h, calls } = fakeHandlers();
+  const map = buildCommandMap(FRONTEND_COMMANDS);
+  await dispatchSlashCommand('/mcp', map, h);
+  await dispatchSlashCommand('/mcp reload', map, h);
+  await dispatchSlashCommand('/mcp trust', map, h);
+  assert.deepEqual(calls, ['mcp:', 'mcp:reload', 'mcp:trust']);
+});
+
+import { formatMcpStatusText } from './slashCommands.ts';
+
+test('formatMcpStatusText lists servers and blocked count', () => {
+  const t = (k: string, p?: Record<string, string | number>) =>
+    p ? `${k}:${JSON.stringify(p)}` : k;
+  const text = formatMcpStatusText(
+    [
+      { name: 'brave', status: 'connected', tool_count: 2 },
+      { name: 'broken', status: 'error', error: 'timeout' },
+    ],
+    ['local-fs'],
+    t,
+  );
+  assert.match(text, /cmd\.mcp\.header/);
+  assert.match(text, /brave/);
+  assert.match(text, /sidebar\.mcpConnected/);
+  assert.match(text, /timeout/);
+  assert.match(text, /mcp\.blockedUntrusted/);
+});
+

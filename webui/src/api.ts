@@ -695,6 +695,16 @@ export async function getMcpStatus(): Promise<McpStatusInfo> {
   return resp.json();
 }
 
+/** Re-read mcp.json and remount MCP servers (POST /mcp/reload). */
+export async function postMcpReload(): Promise<{ ok: boolean; status?: string; runtime_reloaded?: boolean }> {
+  const resp = await apiFetch('/mcp/reload', {
+    method: 'POST',
+    headers: authHeaders(),
+  });
+  if (!resp.ok) throw new Error(`mcp reload failed: ${resp.status}`);
+  return resp.json();
+}
+
 /** Trust the current project for MCP servers, then rebuild the MCP registry. */
 export async function postLiveMcpTrust(): Promise<{ ok: boolean; error?: string }> {
   const resp = await apiFetch('/live/mcp/trust', {

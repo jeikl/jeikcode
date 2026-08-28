@@ -27,3 +27,19 @@
 - **想了解 `~/.atomcode` 某个未知目录/文件的作用**：优先查阅 `topic: "directories"`。
 - **想了解项目级约束规范与业务/数据库知识包**：优先查阅 `topic: "project"`。
 - **想了解自升级源、版本检查、/upgrade 命令或编译发版流程**：优先查阅 `topic: "updates"`。
+
+---
+
+## 3. 写完配置后如何让运行时生效
+
+修改 `config.toml`、`mcp.json` 或 skills 后，**不要要求用户重启 JeikCode**。按界面调用对应重载：
+
+| 入口 | 作用 |
+| :--- | :--- |
+| 工具 `jeikcode_config_reload` | Agent 写完配置后调用；当前回合结束后重载，新 MCP 工具在下一轮用户消息可用 |
+| WebUI / TUI `/reload` | 从磁盘重载 `config.toml`，并重挂 MCP / skills |
+| WebUI / TUI `/mcp` | 列出 MCP 服务器状态 |
+| WebUI / TUI `/mcp reload` | 重新读取 `mcp.json` 并后台重连 |
+| WebUI 侧栏 MCP 菜单的刷新按钮 | 与 `/mcp reload` 相同，点按即可，无需重启 |
+
+提示词 `prompts/init.yaml`、`prompts/rules.yaml` 仍按 mtime **自动热重载**，不必走上述命令。

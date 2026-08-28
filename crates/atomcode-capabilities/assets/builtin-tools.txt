@@ -53,6 +53,8 @@ fetch_output          # 按 artifact_id 分片取回被折叠的输出
 ## 五、交互 / 其他
 request_user_input    # 向用户提问
 report_finding        # 报告发现项
+jeikcode_config_guide # 查阅 JeikCode 配置指南 (teaches/)
+jeikcode_config_reload# 写完 config.toml / mcp.json / skills 后重载运行时
 
 ## 六、AtomGit(feature: atomgit, 按需注册)
 atomgit_issue         # 操作 AtomGit issue

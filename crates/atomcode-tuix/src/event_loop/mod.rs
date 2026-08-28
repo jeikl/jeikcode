@@ -8465,6 +8465,9 @@ pub async fn run_loop(mut ctx: LoopCtx, renderer: &mut dyn Renderer) -> Result<E
                 if config_changed {
                     crate::sync_history_replay_config(renderer, &ctx.config, &ctx.caps);
                 }
+                if idle_boundary {
+                    poll_agent_requested_config_reload(&mut ctx, renderer);
+                }
                 let auth_changed = poll_external_auth(&mut ctx);
                 let clipboard_hint_changed = idle_boundary
                     && clipboard_image_hint_changed(
@@ -8791,6 +8794,9 @@ pub async fn run_loop(mut ctx: LoopCtx, renderer: &mut dyn Renderer) -> Result<E
                 let config_changed = idle_boundary && poll_external_config(&mut ctx);
                 if config_changed {
                     crate::sync_history_replay_config(renderer, &ctx.config, &ctx.caps);
+                }
+                if idle_boundary {
+                    poll_agent_requested_config_reload(&mut ctx, renderer);
                 }
                 let auth_changed = poll_external_auth(&mut ctx);
                 let clipboard_hint_changed = idle_boundary
@@ -13353,6 +13359,20 @@ fn redraw_after_slash(
 /// whether) to surface the warnings — the TUI gates them behind verbose
 /// mode (Ctrl+O) and always shows a `N loaded / M skipped` summary on
 /// /plugin install. Non-summary callers can ignore both values.
+/// Apply a `jeikcode_config_reload` request the agent queued during the last
+/// turn. Must run at an idle boundary — remounting MCP/skills while a turn is
+/// live is Busy and the tool catalog is a cache prefix anyway.
+fn poll_agent_requested_config_reload(ctx: &mut LoopCtx, renderer: &mut dyn crate::render::Renderer) {
+    if !atomcode_capabilities::config_reload::take_pending_live_reload() {
+        return;
+    }
+    if let Err(error) = request_capability_reload(ctx) {
+        atomcode_capabilities::config_reload::request_config_reload();
+        renderer.render(crate::render::UiLine::Error(error));
+        renderer.flush();
+    }
+}
+
 pub(crate) fn request_capability_reload(ctx: &mut LoopCtx) -> Result<(), String> {
     if ctx.pending_session_transition.is_some()
         || ctx.pending_session_resume.is_some()

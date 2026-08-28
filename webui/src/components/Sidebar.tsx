@@ -4,7 +4,7 @@
 
 import { useEffect, useRef, useState } from 'preact/hooks';
 import { createPortal } from 'preact/compat';
-import { listSessions, listProjectSessions, searchSessions, getSkills, getMcpStatus, postLiveMcpTrust, getSession, getProjects, getActiveChatSessions, SkillInfo, McpStatusInfo, SessionMetaWithProject, ProjectInfo } from '../api';
+import { listSessions, listProjectSessions, searchSessions, getSkills, getMcpStatus, postMcpReload, postLiveMcpTrust, getSession, getProjects, getActiveChatSessions, SkillInfo, McpStatusInfo, SessionMetaWithProject, ProjectInfo } from '../api';
 import { useT, useSettings, SettingsSection, Theme } from '../settings';
 import { MsgKey, Lang } from '../i18n';
 import { RenameDialog, DeleteDialog } from './SessionDialogs';
@@ -206,6 +206,15 @@ function DownloadIcon() {
   );
 }
 
+function RefreshIcon() {
+  return (
+    <svg width="14" height="14" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+      <path d="M13.2 8A5.2 5.2 0 1 1 11.4 3.7" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" />
+      <path d="M11.2 1.8v2.6h2.6" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round" />
+    </svg>
+  );
+}
+
 /** MCP / plug glyph (plug-connector for MCP servers). */
 function McpIcon() {
   return (
@@ -342,6 +351,7 @@ export function Sidebar({
   // MCP menu: server list fetched lazily; the count badge shows once loaded.
   const [mcpStatus, setMcpStatus] = useState<McpStatusInfo | null>(null);
   const [mcpLoading, setMcpLoading] = useState(false);
+  const [mcpReloading, setMcpReloading] = useState(false);
   // Bounds the connecting-state poll loop (see the poll effect below).
   const mcpPollAttemptsRef = useRef(0);
   const [mcpMenuOpen, setMcpMenuOpen] = useState(false);
@@ -686,6 +696,25 @@ export function Sidebar({
       })
       .finally(() => setMcpLoading(false));
   }
+
+  async function reloadMcpServers(e?: MouseEvent) {
+    e?.preventDefault();
+    e?.stopPropagation();
+    if (mcpReloading) return;
+    setMcpReloading(true);
+    setMcpLoading(true);
+    try {
+      await postMcpReload();
+      mcpPollAttemptsRef.current = 0;
+      const status = await getMcpStatus();
+      setMcpStatus(status);
+    } catch {
+      setMcpStatus((cur) => cur ?? { servers: [] });
+    } finally {
+      setMcpLoading(false);
+      setMcpReloading(false);
+    }
+  }
   useEffect(() => {
     refreshMcpStatus();
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -958,11 +987,25 @@ export function Sidebar({
               minWidth: `${Math.max(mcpMenuPos.width, 220)}px`,
             }}
           >
-            {mcpLoading && <div class="group-by-menu-title">{t('sidebar.mcpLoading')}</div>}
+            <div class="mcp-menu-header">
+              <span class="group-by-menu-title">{t('sidebar.mcp')}</span>
+              <button
+                type="button"
+                class={'mcp-refresh-btn' + (mcpReloading ? ' spinning' : '')}
+                disabled={mcpReloading}
+                title={mcpReloading ? t('sidebar.mcpReloading') : t('sidebar.mcpRefresh')}
+                aria-label={mcpReloading ? t('sidebar.mcpReloading') : t('sidebar.mcpRefresh')}
+                onClick={(ev) => void reloadMcpServers(ev as unknown as MouseEvent)}
+                onMouseDown={(ev) => { ev.preventDefault(); ev.stopPropagation(); }}
+              >
+                <RefreshIcon />
+              </button>
+            </div>
+            {mcpLoading && !mcpStatus && <div class="group-by-menu-title">{t('sidebar.mcpLoading')}</div>}
             {!mcpLoading && (mcpStatus?.servers?.length ?? 0) === 0 && !(mcpStatus?.blocked?.length) && (
               <div class="group-by-menu-title">{t('sidebar.mcpEmpty')}</div>
             )}
-            {!mcpLoading && (mcpStatus?.blocked?.length ?? 0) > 0 && (
+            {(mcpStatus?.blocked?.length ?? 0) > 0 && (
               <div class="mcp-blocked-notice">
                 <span>{t('mcp.blockedUntrusted').replace('{n}', String(mcpStatus!.blocked!.length))}</span>
                 {trustError && <span class="mcp-blocked-error">{trustError}</span>}
@@ -971,8 +1014,7 @@ export function Sidebar({
                 </button>
               </div>
             )}
-            {!mcpLoading &&
-              (mcpStatus?.servers ?? []).map((srv) => {
+            {(mcpStatus?.servers ?? []).map((srv) => {
                 const statusLabel =
                   srv.status === 'connected' ? t('sidebar.mcpConnected') :
                   srv.status === 'connecting' ? t('sidebar.mcpConnecting') :

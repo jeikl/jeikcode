@@ -663,19 +663,33 @@ pub(crate) async fn run_chat_turn_v2(
                 // The WebUI card is what prompts the human to POST /chat/permission,
                 // which resolves `rx` below — emitting it after the await would
                 // deadlock every interactive Build turn (busy cursor, no card).
-                if perm_rx.is_some() {
-                    let _ = runtime_event_tx.send(CodingRuntimeEvent::Request(request.clone()));
-                }
+                // Re-read live mode so a mid-turn switch to Auto skips the card
+                // and unparks a waiter within the poll interval.
+                let current_mode = live_current_approval_mode();
                 let decision = match &mut perm_rx {
-                    None => fallback_approval_decision(approval_mode),
-                    Some(rx) => tokio::select! {
-                        _ = cancel.cancelled(), if !cancelled => {
-                            cancelled = true;
-                            let _ = handle.cancel().await;
-                            PermissionDecision::Deny
+                    None => fallback_approval_decision(current_mode),
+                    Some(_) if current_mode == ApprovalMode::Auto => PermissionDecision::AllowOnce,
+                    Some(rx) => {
+                        let _ = runtime_event_tx
+                            .send(CodingRuntimeEvent::Request(request.clone()));
+                        loop {
+                            tokio::select! {
+                                _ = cancel.cancelled(), if !cancelled => {
+                                    cancelled = true;
+                                    let _ = handle.cancel().await;
+                                    break PermissionDecision::Deny;
+                                }
+                                decision = rx.recv() => {
+                                    break decision.unwrap_or(PermissionDecision::Deny);
+                                }
+                                _ = tokio::time::sleep(std::time::Duration::from_millis(100)) => {
+                                    if live_current_approval_mode() == ApprovalMode::Auto {
+                                        break PermissionDecision::AllowOnce;
+                                    }
+                                }
+                            }
                         }
-                        decision = rx.recv() => decision.unwrap_or(PermissionDecision::Deny),
-                    },
+                    }
                 };
                 let response = match decision {
                     PermissionDecision::AllowOnce => ApprovalResponse::allow(),

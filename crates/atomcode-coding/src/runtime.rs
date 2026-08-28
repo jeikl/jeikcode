@@ -3,7 +3,7 @@
 //! The runtime owns the replaceable kernel [`AgentHandle`] so native controls and
 //! events never need to traverse a legacy driver adapter.
 
-use std::collections::{BTreeSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::error::Error;
 use std::fmt;
 use std::io;
@@ -2504,7 +2504,7 @@ fn spawn_runtime_owner_with_optional_agent(
         let mut next_turn_id = 0u64;
         let mut conversation_revision = 0u64;
         let mut active_turn = None;
-        let mut pending_requests = BTreeSet::new();
+        let mut pending_requests = BTreeMap::new();
         let mut snapshot_waiters: Vec<RuntimeSnapshotWaiter> = Vec::new();
         let mut snapshot_in_flight = false;
         let mut terminal_reason = None;
@@ -3276,7 +3276,7 @@ fn spawn_runtime_owner_with_optional_agent(
                     }) => {
                         if !native_protocol || request_generation != generation || !agent_available {
                             let _ = done.send(Err(RuntimeError::Unavailable));
-                        } else if !pending_requests.remove(&id) {
+                        } else if pending_requests.remove(&id).is_none() {
                             let _ = done.send(Err(RuntimeError::StaleRequest { id }));
                         } else if !send_agent_command(&agent, AgentCommand::Respond { id, value }) {
                             agent_available = false;
@@ -3618,7 +3618,7 @@ fn spawn_runtime_owner_with_optional_agent(
                                 runtime.loop_active.store(false, Ordering::Release);
                             }
                             pending_wakeup = None;
-                            for id in pending_requests.iter().copied() {
+                            for id in pending_requests.keys().copied() {
                                 let _ = send_agent_command(&agent, AgentCommand::Respond {
                                     id,
                                     value: serde_json::Value::Null,
@@ -3684,7 +3684,7 @@ fn spawn_runtime_owner_with_optional_agent(
                             cancel_pending = false;
                             let _ = done.send(Ok(()));
                         } else {
-                            for id in pending_requests.iter().copied() {
+                            for id in pending_requests.keys().copied() {
                                 let _ = send_agent_command(&agent, AgentCommand::Respond {
                                     id,
                                     value: serde_json::Value::Null,
@@ -3743,6 +3743,37 @@ fn spawn_runtime_owner_with_optional_agent(
                             matches!(mode, RuntimeMode::AcceptEdits),
                             Ordering::Release,
                         );
+                        // Switching to Auto mid-turn must release already-parked
+                        // tool approvals immediately; waiting until the next user
+                        // message leaves the current turn stuck on a permission
+                        // card. request_user_input stays parked.
+                        if matches!(mode, RuntimeMode::Auto) && agent_available {
+                            let approval_ids: Vec<RequestId> = pending_requests
+                                .iter()
+                                .filter(|(_, kind)| kind.as_str() == APPROVAL_KIND)
+                                .map(|(id, _)| *id)
+                                .collect();
+                            if !approval_ids.is_empty() {
+                                let value = serde_json::to_value(ApprovalResponse::allow())
+                                    .unwrap_or(serde_json::Value::Null);
+                                for id in approval_ids {
+                                    pending_requests.remove(&id);
+                                    let _ = send_agent_command(
+                                        &agent,
+                                        AgentCommand::Respond {
+                                            id,
+                                            value: value.clone(),
+                                        },
+                                    );
+                                }
+                                if pending_requests.is_empty() && active_turn.is_some() {
+                                    controls.state.store(
+                                        runtime_phase_state(generation, RuntimePhase::InTurn),
+                                        Ordering::Release,
+                                    );
+                                }
+                            }
+                        }
                         let _ = runtime_event_tx.send(CodingRuntimeEvent::ModeChanged { mode });
                         let _ = done.send(Ok(()));
                     }
@@ -5347,7 +5378,7 @@ fn spawn_runtime_owner_with_optional_agent(
                                     // teardown will fail it closed; never claim success for a
                                     // response that did not reach the kernel.
                                 }
-                                pending_requests.insert(id);
+                                pending_requests.insert(id, kind.clone());
                                 controls.state.store(
                                     runtime_phase_state(
                                         generation,
@@ -6092,11 +6123,11 @@ fn reject_runtime_control(
 
 fn fail_close_pending_requests(
     agent: &Option<AgentHandle>,
-    pending_requests: &mut BTreeSet<RequestId>,
+    pending_requests: &mut BTreeMap<RequestId, String>,
     cancel_turn: bool,
 ) {
     if let Some(agent) = agent.as_ref() {
-        for id in pending_requests.iter().copied() {
+        for id in pending_requests.keys().copied() {
             let _ = agent.commands.send(AgentCommand::Respond {
                 id,
                 value: serde_json::Value::Null,
@@ -11869,6 +11900,75 @@ mod tests {
             kernel_commands.recv().await,
             Some(AgentCommand::Respond { id: 43, .. })
         ));
+        handle.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn switching_to_auto_allows_a_parked_approval_immediately() {
+        let (agent, mut kernel_commands, kernel_events) = fake_agent();
+        let (handle, controls) = coding_runtime_control_channel();
+        let (runtime_tx, mut runtime_events) = mpsc::unbounded_channel();
+        let (wakeup_tx, wakeup_rx) = mpsc::unbounded_channel();
+        let start = native_start(false);
+        let parts = prepare_with_plugin_hook_source(
+            &start.agent,
+            start.prepare.clone(),
+            start.plugin_hooks.as_ref(),
+        )
+        .await
+        .unwrap();
+        let resources = RuntimeResources {
+            config: start.agent,
+            prepare: start.prepare,
+            provider_factory: start.provider_factory,
+            plugin_hooks: start.plugin_hooks,
+            parts,
+            wakeup_tx,
+            loop_active: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            image_preprocessor: None,
+        };
+        let _adapter = spawn_runtime_owner_with_protocol(
+            agent,
+            controls,
+            runtime_tx,
+            true,
+            true,
+            None,
+            Some(resources),
+            Some(wakeup_rx),
+        );
+
+        handle.submit(UserInput::from("build turn")).await.unwrap();
+        assert!(matches!(
+            kernel_commands.recv().await,
+            Some(AgentCommand::SendMessage { .. })
+        ));
+        kernel_events
+            .send(AgentEvent::Request {
+                id: 7,
+                kind: APPROVAL_KIND.into(),
+                payload: serde_json::json!({"tool": "bash"}),
+            })
+            .unwrap();
+        assert!(matches!(
+            runtime_events.recv().await,
+            Some(CodingRuntimeEvent::Request(RuntimeRequest { id: 7, .. }))
+        ));
+        assert_eq!(handle.status().phase, RuntimePhase::WaitingApproval);
+
+        handle.set_mode(RuntimeMode::Auto).await.unwrap();
+        assert!(matches!(
+            runtime_events.recv().await,
+            Some(CodingRuntimeEvent::ModeChanged {
+                mode: RuntimeMode::Auto
+            })
+        ));
+        let expected = serde_json::to_value(ApprovalResponse::allow()).unwrap();
+        assert!(matches!(
+            kernel_commands.recv().await,
+            Some(AgentCommand::Respond { id: 7, value }) if value == expected
+        ));
+        assert_eq!(handle.status().phase, RuntimePhase::InTurn);
         handle.shutdown().await.unwrap();
     }
 

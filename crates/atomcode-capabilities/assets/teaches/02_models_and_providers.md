@@ -12,6 +12,7 @@
 2. **增量保留与合并**：
    修改 `config.toml` 时，应增量追加或更新指定项，严禁覆盖或清除用户已配置好的其他模型与 API Key。
 3. **编码规范**：必须以 **UTF-8（无 BOM）** 格式保存。
+4. **写完即重载**：Agent 改完 `config.toml` 后调用 `jeikcode_config_reload`；用户可在 WebUI / TUI 执行 `/reload`。不必重启进程。新模型出现在下一轮对话的选择器中。
 
 ---
 

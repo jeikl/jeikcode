@@ -53,6 +53,6 @@ JeikCode 统一将全局运行时数据与用户级配置保存在 `~/.atomcode/
 1. **绝对机密保护**：
    `auth.toml` 包含用户私有 Token，打包与构建脚本必须显式忽略，严禁打包进公开发布物。
 2. **免维护热更新**：
-   修改 `prompts/init.yaml`、`prompts/rules.yaml`、`thesaurus/*.txt`、`mcp.json` 后无需重新编译安装，即刻热生效。
+   修改 `prompts/init.yaml`、`prompts/rules.yaml`、`thesaurus/*.txt` 后按 mtime 即刻热生效。修改 `config.toml`、`mcp.json`、skills 后调用 `jeikcode_config_reload`（或 WebUI/TUI `/reload`、`/mcp reload`、侧栏 MCP 刷新按钮），无需重新编译或重启。
 3. **安全清理清单**：
    需要释放磁盘空间时，可安全删除：`cache/`、`image-cache/`、`logs/`、`rewind/`，不会破坏任何配置和技能定义。

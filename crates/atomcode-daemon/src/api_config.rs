@@ -1,9 +1,10 @@
 use atomcode_config::config::provider::ProviderConfig;
 use atomcode_config::config::Config;
 use atomcode_config::ConfigStore;
+use axum::extract::State;
 use axum::{response::IntoResponse, Json};
 
-use crate::{json_error, ConfigResponse, ProviderInfo};
+use crate::{json_error, AppState, ConfigResponse, ProviderInfo};
 
 /// Load config from disk.
 pub(crate) fn load_config() -> Result<Config, String> {
@@ -138,14 +139,16 @@ pub(crate) async fn get_config() -> impl IntoResponse {
     Json(config_response(&config)).into_response()
 }
 
-/// POST /config/reload - Reloads config from disk and returns it.
-pub(crate) async fn reload_config() -> impl IntoResponse {
+/// POST /config/reload - Reloads config.toml from disk, remounts MCP/skills on
+/// the live runtime, and returns the sanitized config view.
+pub(crate) async fn reload_config(State(state): State<AppState>) -> impl IntoResponse {
     let config = match load_config() {
         Ok(c) => c,
         Err(e) => {
             return json_error(axum::http::StatusCode::INTERNAL_SERVER_ERROR, e).into_response()
         }
     };
+    let _ = crate::reload_mcp_and_live_runtime(&state).await;
     Json(config_response(&config)).into_response()
 }
 

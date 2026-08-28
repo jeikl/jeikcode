@@ -372,4 +372,13 @@ mod tests {
         assert!(res.content.contains("ATOMCODE_UPDATE_DOWNLOAD_BASE"));
         assert!(res.content.contains("/upgrade"));
     }
+
+    #[test]
+    fn embedded_mcp_guide_documents_reload_tool_and_webui() {
+        // Host `~/.atomcode/teaches/` can override execute(); pin the shipped asset.
+        assert!(DOC_MCP_SKILLS.contains("jeikcode_config_reload"));
+        assert!(DOC_MCP_SKILLS.contains("/mcp reload"));
+        assert!(DOC_MCP_SKILLS.contains("刷新按钮"));
+        assert!(DOC_OVERVIEW.contains("jeikcode_config_reload"));
+    }
 }

@@ -27,15 +27,17 @@
 
 import { VNode } from 'preact';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'preact/hooks';
-import { streamChat, stopChat, getActiveChatSessions, getChatPending, watchChatSession, SSEEvent, getSession, SessionMetaWithProject, getModels, ModelInfo, ImageData, streamLive, postLiveMessage, postLiveStop, postLivePermission, postLiveProvider, postLiveMode, getApprovalMode, ApprovalMode, LiveWireEvent, SessionMessage, SessionTokenUsage, getSkills, SkillInfo, listDir, changeDir, postConfigReload, postCommand, postLiveCompact, postLiveUserInput, postChatUserInput, setDefaultProvider, type CommandResult, UserInputRequestEvent } from '../api';
+import { streamChat, stopChat, getActiveChatSessions, getChatPending, watchChatSession, SSEEvent, getSession, SessionMetaWithProject, getModels, ModelInfo, ImageData, streamLive, postLiveMessage, postLiveStop, postLivePermission, postLiveProvider, postLiveMode, getApprovalMode, ApprovalMode, LiveWireEvent, SessionMessage, SessionTokenUsage, getSkills, SkillInfo, listDir, changeDir, postConfigReload, postMcpReload, getMcpStatus, postLiveMcpTrust, postCommand, postLiveCompact, postLiveUserInput, postChatUserInput, setDefaultProvider, type CommandResult, UserInputRequestEvent } from '../api';
 import {
   parseSlashCommand,
   buildCommandMap,
   dispatchSlashCommand,
   buildSlashMenuItems,
+  formatMcpStatusText,
   FRONTEND_COMMANDS,
   type SlashHandlers,
 } from '../lib/slashCommands';
+import { buildTurnNavItems } from '../lib/turnNav';
 import { resolvePendingAfterDecision } from '../lib/pendingPermission';
 import { beginModeSwitch, completeModeSwitch, failModeSwitch, initModeState } from '../lib/modeSwitch';
 import { randomUUID } from '../lib/randomId';
@@ -987,9 +989,9 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
     ?? modelCatalog[0];
   const contextLimit = activeModelMeta?.context_window;
   // 审批模式（build / accept_edits / bypass / plan）。进程级 runtime 状态，
-  // 由 /live snapshot + 'mode' 事件同步，切换调 postLiveMode（下一轮生效）。
-  // confirmedMode 是 daemon 已确认值。
-  const [modeState, setModeState] = useState(() => initModeState('build' as ApprovalMode));
+  // 由 /live snapshot + 'mode' 事件同步，切换调 postLiveMode（当前回合立即生效）。
+  // confirmedMode 是 daemon 已确认值。Host/--host 默认 Auto。
+  const [modeState, setModeState] = useState(() => initModeState('bypass' as ApprovalMode));
   const [showFilePicker, setShowFilePicker] = useState(false);
   const [pendingImages, setPendingImages] = useState<ImageData[]>([]);
   const [attachError, setAttachError] = useState<string | null>(null);
@@ -1734,6 +1736,21 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
     else bottomRef.current?.scrollIntoView({ behavior: 'auto' });
   }, [messages, tokens]);
 
+  // Tool rows expand after paint (output / CLI body). That grows the timeline
+  // without a new `messages` identity, so the effect above would miss it.
+  // Follow those layout growths while the user is still pinned to the bottom.
+  useEffect(() => {
+    const el = scrollRef.current;
+    if (!el || typeof ResizeObserver === 'undefined') return;
+    const inner = el.querySelector('.timeline-inner') ?? el;
+    const ro = new ResizeObserver(() => {
+      if (!atBottomRef.current) return;
+      el.scrollTop = el.scrollHeight;
+    });
+    ro.observe(inner);
+    return () => ro.disconnect();
+  }, [sessionId]);
+
   // 消息变化且当前无精确 tokens（如切会话、加载历史）时，根据消息或内存快照恢复 tokens。
   useEffect(() => {
     const sid = activeIdRef.current;
@@ -2190,8 +2207,13 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
       return;
     }
     // 审批模式切换是进程级（另一 tab / 未来 TUI）→ 始终同步 pill。
+    // Auto 立即放行已弹出的审批卡，不必等下一轮。
     if (e.type === 'mode') {
       setModeState(initModeState(e.mode));
+      if (e.mode === 'bypass') {
+        setLivePending(null);
+        onPermissionResolved?.(null);
+      }
       return;
     }
     // 工作目录切换是进程级（另一端 /cd），与查看哪个会话无关 → 不门控，始终上报
@@ -2435,6 +2457,31 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
   }
 
   const slashCommandMap = useMemo(() => buildCommandMap(FRONTEND_COMMANDS), []);
+  const turnNavItems = useMemo(
+    () => buildTurnNavItems(messages.map((m) => ({ role: m.role, text: messageText(m) }))),
+    [messages],
+  );
+  const [activeTurnId, setActiveTurnId] = useState<string | null>(null);
+  useEffect(() => {
+    const root = scrollRef.current;
+    if (!root || turnNavItems.length === 0) return;
+    const nodes = turnNavItems
+      .map((item) => document.getElementById(item.id))
+      .filter((el): el is HTMLElement => !!el);
+    if (nodes.length === 0) return;
+    const observer = new IntersectionObserver(
+      (entries) => {
+        const visible = entries
+          .filter((e) => e.isIntersecting)
+          .sort((a, b) => a.boundingClientRect.top - b.boundingClientRect.top);
+        const id = visible[0]?.target.id;
+        if (id) setActiveTurnId(id);
+      },
+      { root, rootMargin: '-12% 0px -70% 0px', threshold: [0, 0.15, 0.4] },
+    );
+    for (const node of nodes) observer.observe(node);
+    return () => observer.disconnect();
+  }, [turnNavItems, sessionId]);
 
   // Reload one session's transcript from disk into the view, guarded against a
   // session switch racing the async fetch. Mirrors the session-load effect's activeIdRef guard.
@@ -2469,6 +2516,10 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
       .then((confirmed) => {
         setModeState((cur) => completeModeSwitch(cur, confirmed));
         onConfirmed?.(confirmed);
+        if (confirmed === 'bypass') {
+          setLivePending(null);
+          onPermissionResolved?.(null);
+        }
         // Backend may reject (runtime busy) and echo the previous mode — surface that.
         if (confirmed !== m) {
           pushCommandNotice(
@@ -2538,10 +2589,37 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
       },
       // openSessionSidebar: 侧栏开关状态在 App，Chat 无此 prop。
       openSessionSidebar: () => { onOpenSidebar?.(); },
-      // reloadConfig: POST /config/reload。
+      // reloadConfig: POST /config/reload（服务端同时重挂 MCP / skills）。
       reloadConfig: async () => {
         await postConfigReload();
         pushCommandNotice(t('cmd.reload.done'));
+      },
+      mcpCommand: async (arg) => {
+        const sub = arg.trim().toLowerCase();
+        const tt = t as (k: string, p?: Record<string, string | number>) => string;
+        try {
+          if (sub === 'reload' || sub === 'refresh') {
+            await postMcpReload();
+            const status = await getMcpStatus();
+            pushCommandNotice(`${t('cmd.mcp.reload.done')}\n${formatMcpStatusText(status.servers, status.blocked, tt)}`);
+            return;
+          }
+          if (sub === 'trust') {
+            const result = await postLiveMcpTrust();
+            if (result.ok) {
+              try { await postMcpReload(); } catch { /* older daemon */ }
+              const status = await getMcpStatus();
+              pushCommandNotice(`${t('cmd.mcp.trust.ok')}\n${formatMcpStatusText(status.servers, status.blocked, tt)}`);
+            } else {
+              pushCommandNotice(t('cmd.mcp.trust.failed', { error: result.error ?? 'trust failed' }));
+            }
+            return;
+          }
+          const status = await getMcpStatus();
+          pushCommandNotice(formatMcpStatusText(status.servers, status.blocked, tt));
+        } catch (e) {
+          pushCommandNotice(t('cmd.mcp.reload.failed', { error: e instanceof Error ? e.message : String(e) }));
+        }
       },
       openSlashSkillsMenu: () => {
         // Open a pure SKILLS browser (not the full '/' command list — that's what
@@ -4309,7 +4387,30 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
   return (
     <>
       {/* Message timeline */}
-      <div class="messages-container" ref={scrollRef} onScroll={recomputeAtBottom}>
+      <div class={'messages-container' + (turnNavItems.length > 0 ? ' has-turn-nav' : '')} ref={scrollRef} onScroll={recomputeAtBottom}>
+        {turnNavItems.length > 0 && (
+          <nav class="turn-nav" aria-label={t('turnNav.title')}>
+            <div class="turn-nav-inner">
+              <div class="turn-nav-title">{t('turnNav.title')}</div>
+              {turnNavItems.map((item) => (
+                <button
+                  key={item.id}
+                  type="button"
+                  class={'turn-nav-item' + (item.id === activeTurnId ? ' active' : '')}
+                  title={item.label}
+                  onClick={() => {
+                    const el = document.getElementById(item.id);
+                    if (!el) return;
+                    setActiveTurnId(item.id);
+                    el.scrollIntoView({ behavior: 'smooth', block: 'start' });
+                  }}
+                >
+                  {item.label}
+                </button>
+              ))}
+            </div>
+          </nav>
+        )}
         <div class="timeline-inner">
         {messages.length === 0 && !historyHint && !restoring && loading && (
           <div class="messages-empty">
@@ -4408,6 +4509,7 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
                 <UserMessageView
                   key={origIdx}
                   msg={msg}
+                  anchorId={`turn-nav-${origIdx}`}
                   searchRef={setMatchRef}
                   timeLabel={timeLabel}
                   timeFull={timeFull}
@@ -4983,6 +5085,7 @@ function highlightText(text: string, search: string) {
 
 function UserMessageView({
   msg,
+  anchorId,
   searchRef,
   timeLabel,
   timeFull,
@@ -4990,6 +5093,7 @@ function UserMessageView({
   isActiveSearchMatch,
 }: {
   msg: Message;
+  anchorId?: string;
   searchRef?: (el: HTMLElement | null) => void;
   timeLabel?: string;
   timeFull?: string;
@@ -5046,7 +5150,7 @@ function UserMessageView({
 
   if (skillTitle && !expanded) {
     return (
-      <div class={wrapperClass} ref={searchRef}>
+      <div class={wrapperClass} id={anchorId} data-turn-nav={anchorId || undefined} ref={searchRef}>
         {images}
         <button
           class="skill-badge"
@@ -5063,7 +5167,7 @@ function UserMessageView({
   }
 
   return (
-    <div class={wrapperClass} ref={searchRef}>
+    <div class={wrapperClass} id={anchorId} data-turn-nav={anchorId || undefined} ref={searchRef}>
       <div class={'user-message-bubble' + (skillTitle ? ' is-markdown' : '')}>
         {images}
         {skillTitle && (
@@ -5117,12 +5221,16 @@ function ToolStatusIcon({ cls }: { cls: string }) {
 
 function ToolRowView({ tool }: { tool: ToolRow }) {
   const t = useT();
-  const [expanded, setExpanded] = useState(false);
   const userCollapsedRef = useRef(false);
   const outputRef = useRef<HTMLPreElement>(null);
   const hasSubtasks = !!(tool.subtasks && tool.subtasks.length > 0);
   const category = toolCategory(tool.name);
   const glyph = toolGlyph(tool.name);
+  // Open on first paint when output/CLI body is already present so follow-scroll
+  // sees the real height instead of expanding after the messages effect ran.
+  const [expanded, setExpanded] = useState(
+    () => category === 'terminal' || category === 'edit' || !!tool.output,
+  );
 
   // Shell/edit tools open like a CLI while running (and stay open after)
   // unless the user collapsed them. Other tools open once output arrives.

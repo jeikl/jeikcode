@@ -385,6 +385,8 @@ function estimateSessionTokens(messages: Message[]): { tokens: TokenUsage; cache
 type SessionTokenSnapshot = {
   tokens: TokenUsage;
   cacheState: TokenCacheState;
+  /** True when the snapshot came from provider telemetry or persisted server usage. */
+  authoritative: boolean;
 };
 
 /** Max attached images per message and per-image byte cap (raw file size). */
@@ -764,6 +766,7 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
   const tokenUsageCacheRef = useRef<Map<string, SessionTokenSnapshot>>(new Map());
   /** Blocks token snapshots from bleeding across a session switch render. */
   const tokenSaveGenerationRef = useRef(0);
+  const tokensAuthoritativeRef = useRef(false);
   const lastUserTokensRef = useRef(0);
   const [showTokenDetails, setShowTokenDetails] = useState(false);
   const tokenPopoverRef = useRef<HTMLDivElement>(null);
@@ -780,6 +783,7 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
       tokenCacheRef.current,
     );
     tokenCacheRef.current = resolved.nextState;
+    tokensAuthoritativeRef.current = true;
     setTokens({
       prompt: usage.prompt,
       completion: usage.completion,
@@ -794,6 +798,7 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
     prev: TokenUsage | null,
     next: { prompt: number; completion: number; total: number; reasoning?: number },
   ): TokenUsage => {
+    tokensAuthoritativeRef.current = false;
     const local = estimateLocalCached(tokenCacheRef.current, next.prompt, prev);
     return {
       prompt: next.prompt,
@@ -807,11 +812,32 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
 
   const resetTokenTelemetry = () => {
     tokenCacheRef.current = createTokenCacheState();
+    tokensAuthoritativeRef.current = false;
     setTokens(null);
   };
 
-  const applyTokenUsage = (usage: TokenUsage, cacheState?: TokenCacheState) => {
+  const sessionTokensRunning = (sid: string) =>
+    busyRef.current
+    || localTurnSessionsRef.current.has(sid)
+    || backgroundRunningSessionsRef.current.has(sid)
+    || liveSessionIdRef.current === sid;
+
+  const saveTokenSnapshot = (sid: string, authoritative = tokensAuthoritativeRef.current) => {
+    if (!tokensRef.current) return;
+    tokenUsageCacheRef.current.set(sid, {
+      tokens: { ...tokensRef.current },
+      cacheState: { ...tokenCacheRef.current },
+      authoritative,
+    });
+  };
+
+  const applyTokenUsage = (
+    usage: TokenUsage,
+    cacheState?: TokenCacheState,
+    authoritative = tokensAuthoritativeRef.current,
+  ) => {
     if (cacheState) tokenCacheRef.current = { ...cacheState };
+    tokensAuthoritativeRef.current = authoritative;
     setTokens({ ...usage });
   };
 
@@ -827,7 +853,7 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
       cached: usage.cached,
       cached_estimated: Boolean(usage.cached_estimated),
       reasoning: 0,
-    }, cacheState);
+    }, cacheState, true);
   };
 
   const applySessionTokens = (
@@ -839,36 +865,29 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
       resetTokenTelemetry();
       return;
     }
+    const mem = tokenUsageCacheRef.current.get(sid);
+    const running = sessionTokensRunning(sid);
+
     if (serverUsage && (serverUsage.prompt > 0 || serverUsage.total > 0)) {
-      const mem = tokenUsageCacheRef.current.get(sid);
-      const midTurn = busyRef.current
-        && (localTurnSessionsRef.current.has(sid) || liveSessionIdRef.current === sid);
-      if (midTurn && mem && (mem.tokens.total ?? 0) > serverUsage.total) {
-        applyTokenUsage(mem.tokens, mem.cacheState);
+      // Persisted turn stats are the idle baseline. During an active turn only
+      // prefer in-memory telemetry when it is authoritative and ahead of disk.
+      if (running && mem?.authoritative && (mem.tokens.total ?? 0) > serverUsage.total) {
+        applyTokenUsage(mem.tokens, mem.cacheState, true);
         return;
       }
       applyServerTokenUsage(serverUsage);
+      saveTokenSnapshot(sid, true);
       return;
     }
-    const snap = tokenUsageCacheRef.current.get(sid);
-    if (snap) {
-      if (!busyRef.current && messages.length > 0) {
-        const est = estimateSessionTokens(messages);
-        const snapTotal = snap.tokens.total ?? 0;
-        const estTotal = est.tokens.total ?? 0;
-        // Local streaming deltas can inflate the mem snapshot; prefer a message
-        // estimate while idle until authoritative server usage arrives.
-        if (snapTotal > estTotal * 1.25) {
-          applyTokenUsage(est.tokens, est.cacheState);
-          return;
-        }
-      }
-      applyTokenUsage(snap.tokens, snap.cacheState);
+
+    if (mem && (running || mem.authoritative)) {
+      applyTokenUsage(mem.tokens, mem.cacheState, mem.authoritative);
       return;
     }
+
     if (messages.length > 0) {
       const est = estimateSessionTokens(messages);
-      applyTokenUsage(est.tokens, est.cacheState);
+      applyTokenUsage(est.tokens, est.cacheState, false);
       return;
     }
     resetTokenTelemetry();
@@ -908,6 +927,7 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
   const NEW_SESSION_PROVIDER_KEY = '__new__';
   const providerCacheRef = useRef(new Map<string, string>());
   const localTurnSessionsRef = useRef(new Set<string>());
+  const backgroundRunningSessionsRef = useRef(new Set<string>());
   const defaultProviderName = useCallback(
     () => modelCatalog.find((m) => m.is_default)?.provider
       ?? modelCatalog[0]?.provider
@@ -1260,6 +1280,7 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
     // 观察结束回空闲:recovery 状态机复位,否则 allowSend/allowQueueDrain 会一直
     // 停在 detached_active(false),输入框被锁住。
     transitionChatRecovery({ type: 'authoritative_terminal' });
+    backgroundRunningSessionsRef.current.delete(loadId);
     setHistoryHint(null);
     setBusyAndClock(false);
     busyRef.current = false;
@@ -1441,10 +1462,7 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
       sessionGenerationRef.current += 1;
       const switchGeneration = sessionGenerationRef.current;
       if (prevId && tokensRef.current) {
-        tokenUsageCacheRef.current.set(prevId, {
-          tokens: { ...tokensRef.current },
-          cacheState: { ...tokenCacheRef.current },
-        });
+        saveTokenSnapshot(prevId, tokensAuthoritativeRef.current);
       }
       tokenSaveGenerationRef.current = switchGeneration;
       resetTokenTelemetry();
@@ -1603,6 +1621,7 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
             active: active && !isLiveSession && !isLocalTurn,
           });
           if (active && !isLiveSession) {
+            backgroundRunningSessionsRef.current.add(loadId);
             requestIdRef.current = loadId;
             if (!syncRef.current) setBusyAndClock(false);
             setQueued([]);
@@ -1706,10 +1725,12 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
     const sid = activeIdRef.current;
     if (!sid || !tokens || sessionId !== sid) return;
     if (sessionGenerationRef.current !== tokenSaveGenerationRef.current) return;
-    tokenUsageCacheRef.current.set(sid, {
-      tokens: { ...tokens },
-      cacheState: { ...tokenCacheRef.current },
-    });
+    const prev = tokenUsageCacheRef.current.get(sid);
+    if (!tokensAuthoritativeRef.current && !sessionTokensRunning(sid)) {
+      // Idle non-authoritative deltas must not replace a persisted authoritative snapshot.
+      if (prev?.authoritative) return;
+    }
+    saveTokenSnapshot(sid, tokensAuthoritativeRef.current);
   }, [tokens, sessionId]);
 
   // Abort the live (/live) stream + cancel any pending reconnect timer if the
@@ -2202,7 +2223,12 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
     // 从侧栏打开了另一个历史会话，实时事件不应串进该页面（串进去刷新还会消失）。
     // `state` 仍要上报侧栏转圈：切走后 live 任务还在跑。
     if (e.type === 'state') {
-      onLiveRunningChange?.(liveSessionIdRef.current, e.running);
+      const sid = liveSessionIdRef.current;
+      if (sid) {
+        if (e.running) backgroundRunningSessionsRef.current.add(sid);
+        else backgroundRunningSessionsRef.current.delete(sid);
+      }
+      onLiveRunningChange?.(sid, e.running);
     }
     if (
       liveSessionIdRef.current &&
@@ -2873,14 +2899,8 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
         });
         // 工具已执行完 → 其审批必已解决，清掉 /chat 残留的同 call_id 审批卡片。
         onPermissionResolved?.(event.id);
-        const toolDelta = estimateTextTokens(event.output);
-        if (toolDelta > 0) {
-          setTokens((prev) => mergeLocalTokens(prev, {
-            prompt: (prev?.prompt ?? 0) + toolDelta,
-            completion: prev?.completion ?? 0,
-            total: (prev?.total ?? 0) + toolDelta,
-          }));
-        }
+        // Tool output is folded into the next provider usage event. Do not bump
+        // prompt locally — that inflates the footer and poisons session snapshots.
         break;
       }
 
@@ -2890,6 +2910,7 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
           tokenCacheRef.current,
         );
         tokenCacheRef.current = resolved.nextState;
+        tokensAuthoritativeRef.current = true;
         setTokens((prev) => ({
           prompt: event.prompt,
           completion: event.completion,
@@ -2960,6 +2981,10 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
         }
         transitionChatRecovery({ type: 'authoritative_terminal' });
         localTurnSessionsRef.current.delete(event.session_id);
+        backgroundRunningSessionsRef.current.delete(event.session_id);
+        if (activeIdRef.current === event.session_id) {
+          saveTokenSnapshot(event.session_id, tokensAuthoritativeRef.current);
+        }
         setBusyAndClock(false);
         onPermissionResolved?.(null); // 回合结束：兜底清掉任何残留审批卡片
         setUserInputReq(null);
@@ -2968,7 +2993,10 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
 
       case 'stopped':
         transitionChatRecovery({ type: 'authoritative_terminal' });
-        if (activeIdRef.current) localTurnSessionsRef.current.delete(activeIdRef.current);
+        if (activeIdRef.current) {
+          backgroundRunningSessionsRef.current.delete(activeIdRef.current);
+          localTurnSessionsRef.current.delete(activeIdRef.current);
+        }
         setBusyAndClock(false);
         setQueued([]); // 用户中止：丢弃排队消息（对齐 VSCode 插件）
         onPermissionResolved?.(null);
@@ -2978,7 +3006,10 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
       case 'error':
         appendToLastAssistant('\n\n' + t('chat.error', { msg: event.message }));
         transitionChatRecovery({ type: 'authoritative_terminal' });
-        if (activeIdRef.current) localTurnSessionsRef.current.delete(activeIdRef.current);
+        if (activeIdRef.current) {
+          backgroundRunningSessionsRef.current.delete(activeIdRef.current);
+          localTurnSessionsRef.current.delete(activeIdRef.current);
+        }
         setBusyAndClock(false);
         setQueued([]); // 出错：丢弃排队消息
         onPermissionResolved?.(null);

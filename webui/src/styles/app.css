@@ -257,50 +257,126 @@ body {
   position: relative;
 }
 
-/* Centered responsive message column (matches the input width; see --app-content-max-width). */
+/* Message column. Without the outline, keep the centered max-width column.
+   With the outline, `.chat-stage.has-turn-nav` lets this fill the remaining
+   width so the left gutter is not left empty. */
 .timeline-inner {
   width: 100%;
   max-width: var(--app-content-max-width);
   margin: 0 auto;
   display: flex;
   flex-direction: column;
-  grid-column: 2;
 }
 
-/* Session outline: sits in the right gutter, does not shrink the answer column. */
-.messages-container.has-turn-nav {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) minmax(0, var(--app-content-max-width)) minmax(168px, 200px);
-  align-items: start;
-  column-gap: 0;
-}
-.turn-nav {
-  grid-column: 3;
-  grid-row: 1;
-  justify-self: stretch;
-  position: sticky;
-  top: 8px;
-  z-index: 3;
-  width: 100%;
-  max-height: calc(100dvh - 180px);
-  overflow: hidden;
-  padding: 4px 4px 4px 12px;
-  box-sizing: border-box;
-}
-.turn-nav-inner {
+/* Chat stage: messages + composer share one column so the input, thinking
+   block, and answer stream keep the same left edge. */
+.chat-stage {
   display: flex;
   flex-direction: column;
-  gap: 2px;
-  max-height: calc(100dvh - 180px);
-  overflow-y: auto;
-  padding: 4px 2px 8px 0;
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+  position: relative;
+}
+
+/* Outline present: content fills from the left; the rail sits in the right gutter. */
+.chat-stage.has-turn-nav {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(200px, 240px);
+  grid-template-rows: minmax(0, 1fr) auto auto;
+  grid-template-areas:
+    "messages nav"
+    "warning  nav"
+    "input    nav";
+  column-gap: 8px;
+  align-items: stretch;
+}
+.chat-stage.has-turn-nav .messages-container {
+  grid-area: messages;
+  min-height: 0;
+}
+.chat-stage.has-turn-nav .turn-nav {
+  grid-area: nav;
+}
+.chat-stage.has-turn-nav .persistence-warning {
+  grid-area: warning;
+  width: 100%;
+  max-width: none;
+  margin: 0 0 8px;
+}
+.chat-stage.has-turn-nav .input-container {
+  grid-area: input;
+}
+.chat-stage.has-turn-nav .timeline-inner,
+.chat-stage.has-turn-nav .input-wrap {
+  max-width: none;
+  margin: 0;
+  width: 100%;
+}
+.chat-stage.has-turn-nav .msg-search-float {
+  right: calc(240px + 18px);
+}
+
+.turn-nav {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  height: 100%;
+  overflow: hidden;
+  z-index: 3;
+  width: 100%;
+  padding: 8px 10px 12px 4px;
+  box-sizing: border-box;
+}
+.turn-nav-header {
+  flex-shrink: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 0 4px 8px;
 }
 .turn-nav-title {
   font-size: 12px;
   font-weight: 600;
   color: var(--app-secondary-foreground);
-  padding: 4px 8px 8px;
   letter-spacing: 0;
+  padding: 4px 4px 0;
+}
+.turn-nav-search {
+  width: 100%;
+  height: 28px;
+  padding: 0 8px;
+  box-sizing: border-box;
+  background: var(--app-input-background);
+  border: 1px solid var(--app-input-border);
+  border-radius: var(--corner-radius-small);
+  color: var(--app-input-foreground);
+  font-family: inherit;
+  font-size: 12px;
+  outline: none;
+}
+.turn-nav-search:focus {
+  border-color: var(--app-input-active-border, var(--app-brand));
+}
+.turn-nav-search::placeholder {
+  color: var(--app-input-placeholder-foreground);
+}
+.turn-nav-list {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  overflow-x: hidden;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 0 2px 8px 0;
+}
+.turn-nav-empty {
+  padding: 8px 8px;
+  font-size: 12px;
+  color: var(--app-secondary-foreground);
+  opacity: 0.75;
 }
 .turn-nav-item {
   display: block;
@@ -320,6 +396,7 @@ body {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+  flex-shrink: 0;
 }
 .turn-nav-item:hover {
   background: var(--app-list-hover-background);
@@ -3695,12 +3772,16 @@ body {
   .messages-container {
     padding: 12px 12px 6px;
   }
-  .messages-container.has-turn-nav {
+  .chat-stage.has-turn-nav {
     display: flex;
     flex-direction: column;
   }
   .turn-nav { display: none; }
-  .timeline-inner { grid-column: auto; }
+  .chat-stage.has-turn-nav .timeline-inner,
+  .chat-stage.has-turn-nav .input-wrap {
+    max-width: var(--app-content-max-width);
+    margin: 0 auto;
+  }
   .input-container {
     padding: 6px 8px max(8px, env(safe-area-inset-bottom));
   }

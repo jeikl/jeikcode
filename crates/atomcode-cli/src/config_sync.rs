@@ -227,6 +227,27 @@ pub fn merge_user_config_preserving_models(existing: &str, new_template: &str) -
     toml::to_string_pretty(&new_val).unwrap_or_else(|_| existing.to_string())
 }
 
+/// MCP / skills 多为用户自定义接线与技能包，upgrade 交互勾选默认不覆盖。
+/// `teaches/` 文档与 `prompts/root_docs_*` 说明文件不在此列。
+pub fn is_user_custom_mcp_or_skill(relative_path: &str) -> bool {
+    let p = relative_path.replace('\\', "/");
+    if p.starts_with("teaches/") {
+        return false;
+    }
+    if p == "mcp.json" || p.ends_with("/mcp.json") || p == ".mcp.json" {
+        return true;
+    }
+    p == "skills" || p.starts_with("skills/") || p.contains("/skills/")
+}
+
+/// 交互式 upgrade 的默认勾选：MCP / skills 配置默认不选，废弃清理项仍默认勾选。
+pub fn default_selected_for(relative_path: &str, kind: DiffKind) -> bool {
+    match kind {
+        DiffKind::Obsolete => true,
+        DiffKind::New | DiffKind::Modified => !is_user_custom_mcp_or_skill(relative_path),
+    }
+}
+
 /// 扫描 ~/.atomcode 目录下所有涉及的内置非模型配置变更项（新增、更新修改、废弃清理）
 pub fn scan_atomcode_config_diffs(atomcode_home: &Path) -> Vec<ConfigDiffItem> {
     let mut diffs = Vec::new();
@@ -243,7 +264,7 @@ pub fn scan_atomcode_config_diffs(atomcode_home: &Path) -> Vec<ConfigDiffItem> {
                 target_path: target,
                 new_content: bundled_content.to_string(),
                 kind: DiffKind::New,
-                selected: true, // 默认全选
+                selected: default_selected_for(entry.relative_path, DiffKind::New),
             });
             continue;
         }
@@ -259,7 +280,7 @@ pub fn scan_atomcode_config_diffs(atomcode_home: &Path) -> Vec<ConfigDiffItem> {
                     target_path: target,
                     new_content: merged,
                     kind: DiffKind::Modified,
-                    selected: true, // 默认全选
+                    selected: default_selected_for(entry.relative_path, DiffKind::Modified),
                 });
             }
         } else {
@@ -271,7 +292,7 @@ pub fn scan_atomcode_config_diffs(atomcode_home: &Path) -> Vec<ConfigDiffItem> {
                     target_path: target,
                     new_content: bundled_content.to_string(),
                     kind: DiffKind::Modified,
-                    selected: true, // 默认全选
+                    selected: default_selected_for(entry.relative_path, DiffKind::Modified),
                 });
             }
         }
@@ -287,7 +308,7 @@ pub fn scan_atomcode_config_diffs(atomcode_home: &Path) -> Vec<ConfigDiffItem> {
                 target_path: stale_path,
                 new_content: String::new(),
                 kind: DiffKind::Obsolete,
-                selected: true, // 默认全选清理
+                selected: default_selected_for(stale_rel, DiffKind::Obsolete),
             });
         }
     }
@@ -316,6 +337,7 @@ pub fn prompt_interactive_config_sync(mut items: Vec<ConfigDiffItem>) -> Result<
     }
 
     println!("\n🔍 检测到默认配置（已自动保护用户模型、默认选择模型与档位等自定义项）发生更改：");
+    println!("   MCP / skills 相关项默认不勾选（多为用户自定义接线），可用空格勾选后覆盖。");
     println!("   覆盖文件或目录项如下（使用 ↑/↓ 导航，[空格] 选择/取消，[a] 全选，[Enter] 确认更新，[ESC] 跳过）：\n");
 
     let mut cursor = 0;
@@ -488,4 +510,41 @@ pub fn apply_all_bundled_assets(atomcode_home: &Path, force: bool) -> Result<usi
     }
 
     Ok(applied_count)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn mcp_and_skills_paths_are_user_custom() {
+        assert!(is_user_custom_mcp_or_skill("mcp.json"));
+        assert!(is_user_custom_mcp_or_skill("skills/foo/SKILL.md"));
+        assert!(is_user_custom_mcp_or_skill("skills"));
+        assert!(!is_user_custom_mcp_or_skill("teaches/03_mcp_and_skills.md"));
+        assert!(!is_user_custom_mcp_or_skill("prompts/init.yaml"));
+        assert!(!is_user_custom_mcp_or_skill("prompts/root_docs_内置技能.yaml"));
+        assert!(!is_user_custom_mcp_or_skill("config.toml"));
+    }
+
+    #[test]
+    fn upgrade_defaults_uncheck_mcp_but_keep_prompts() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path();
+        fs::create_dir_all(home.join("prompts")).unwrap();
+        fs::write(home.join("mcp.json"), "{ \"mcpServers\": { \"custom\": {} } }\n").unwrap();
+        fs::write(home.join("prompts/init.yaml"), "user-custom-init\n").unwrap();
+
+        let diffs = scan_atomcode_config_diffs(home);
+        let mcp = diffs
+            .iter()
+            .find(|d| d.relative_path == "mcp.json")
+            .expect("mcp.json should appear as a diff");
+        assert!(!mcp.selected, "mcp.json must default-uncheck on upgrade");
+        let init = diffs
+            .iter()
+            .find(|d| d.relative_path == "prompts/init.yaml")
+            .expect("init.yaml should appear as a diff");
+        assert!(init.selected, "prompts stay selected by default");
+    }
 }

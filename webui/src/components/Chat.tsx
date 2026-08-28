@@ -37,7 +37,7 @@ import {
   FRONTEND_COMMANDS,
   type SlashHandlers,
 } from '../lib/slashCommands';
-import { buildTurnNavItems } from '../lib/turnNav';
+import { buildTurnNavItems, filterTurnNavItems, resolveActiveTurnId } from '../lib/turnNav';
 import { resolvePendingAfterDecision } from '../lib/pendingPermission';
 import { beginModeSwitch, completeModeSwitch, failModeSwitch, initModeState } from '../lib/modeSwitch';
 import { randomUUID } from '../lib/randomId';
@@ -2461,27 +2461,60 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
     () => buildTurnNavItems(messages.map((m) => ({ role: m.role, text: messageText(m) }))),
     [messages],
   );
-  const [activeTurnId, setActiveTurnId] = useState<string | null>(null);
-  useEffect(() => {
+  const [turnNavQuery, setTurnNavQuery] = useState('');
+  const filteredTurnNavItems = useMemo(
+    () => filterTurnNavItems(turnNavItems, turnNavQuery),
+    [turnNavItems, turnNavQuery],
+  );
+  const [activeTurnId, setActiveTurnIdState] = useState<string | null>(null);
+  const activeTurnIdRef = useRef<string | null>(null);
+  const turnNavItemsRef = useRef(turnNavItems);
+  turnNavItemsRef.current = turnNavItems;
+  const turnNavPinUntilRef = useRef(0);
+  function setActiveTurnId(id: string | null) {
+    activeTurnIdRef.current = id;
+    setActiveTurnIdState(id);
+  }
+  function syncTurnNavFromScroll() {
+    if (Date.now() < turnNavPinUntilRef.current) return;
     const root = scrollRef.current;
-    if (!root || turnNavItems.length === 0) return;
-    const nodes = turnNavItems
-      .map((item) => document.getElementById(item.id))
-      .filter((el): el is HTMLElement => !!el);
-    if (nodes.length === 0) return;
-    const observer = new IntersectionObserver(
-      (entries) => {
-        const visible = entries
-          .filter((e) => e.isIntersecting)
-          .sort((a, b) => a.boundingClientRect.top - b.boundingClientRect.top);
-        const id = visible[0]?.target.id;
-        if (id) setActiveTurnId(id);
+    const items = turnNavItemsRef.current;
+    if (!root || items.length === 0) return;
+    const rootRect = root.getBoundingClientRect();
+    const next = resolveActiveTurnId(
+      items,
+      (id) => {
+        const el = document.getElementById(id);
+        if (!el) return undefined;
+        return el.getBoundingClientRect().top - rootRect.top + root.scrollTop;
       },
-      { root, rootMargin: '-12% 0px -70% 0px', threshold: [0, 0.15, 0.4] },
+      { scrollTop: root.scrollTop, clientHeight: root.clientHeight, scrollHeight: root.scrollHeight },
     );
-    for (const node of nodes) observer.observe(node);
-    return () => observer.disconnect();
-  }, [turnNavItems, sessionId]);
+    if (next && next !== activeTurnIdRef.current) setActiveTurnId(next);
+  }
+  function jumpToTurn(id: string) {
+    const el = document.getElementById(id);
+    if (!el) return;
+    setActiveTurnId(id);
+    turnNavPinUntilRef.current = Date.now() + 1200;
+    el.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    const root = scrollRef.current;
+    if (!root) return;
+    const onEnd = () => {
+      turnNavPinUntilRef.current = 0;
+      root.removeEventListener('scrollend', onEnd);
+    };
+    root.addEventListener('scrollend', onEnd, { once: true });
+  }
+  useEffect(() => {
+    setTurnNavQuery('');
+    setActiveTurnId(null);
+    turnNavPinUntilRef.current = 0;
+  }, [sessionId]);
+  useEffect(() => {
+    const id = requestAnimationFrame(() => syncTurnNavFromScroll());
+    return () => cancelAnimationFrame(id);
+  }, [turnNavItems]);
 
   // Reload one session's transcript from disk into the view, guarded against a
   // session switch racing the async fetch. Mirrors the session-load effect's activeIdRef guard.
@@ -4386,31 +4419,9 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
 
   return (
     <>
+      <div class={'chat-stage' + (turnNavItems.length > 0 ? ' has-turn-nav' : '')}>
       {/* Message timeline */}
-      <div class={'messages-container' + (turnNavItems.length > 0 ? ' has-turn-nav' : '')} ref={scrollRef} onScroll={recomputeAtBottom}>
-        {turnNavItems.length > 0 && (
-          <nav class="turn-nav" aria-label={t('turnNav.title')}>
-            <div class="turn-nav-inner">
-              <div class="turn-nav-title">{t('turnNav.title')}</div>
-              {turnNavItems.map((item) => (
-                <button
-                  key={item.id}
-                  type="button"
-                  class={'turn-nav-item' + (item.id === activeTurnId ? ' active' : '')}
-                  title={item.label}
-                  onClick={() => {
-                    const el = document.getElementById(item.id);
-                    if (!el) return;
-                    setActiveTurnId(item.id);
-                    el.scrollIntoView({ behavior: 'smooth', block: 'start' });
-                  }}
-                >
-                  {item.label}
-                </button>
-              ))}
-            </div>
-          </nav>
-        )}
+      <div class="messages-container" ref={scrollRef} onScroll={() => { recomputeAtBottom(); syncTurnNavFromScroll(); }}>
         <div class="timeline-inner">
         {messages.length === 0 && !historyHint && !restoring && loading && (
           <div class="messages-empty">
@@ -4610,6 +4621,39 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
         </div>
       </div>
 
+      {turnNavItems.length > 0 && (
+        <nav class="turn-nav" aria-label={t('turnNav.title')}>
+          <div class="turn-nav-header">
+            <div class="turn-nav-title">{t('turnNav.title')}</div>
+            <input
+              class="turn-nav-search"
+              type="text"
+              value={turnNavQuery}
+              placeholder={t('turnNav.searchPlaceholder')}
+              aria-label={t('turnNav.searchPlaceholder')}
+              onInput={(e) => setTurnNavQuery((e.target as HTMLInputElement).value)}
+            />
+          </div>
+          <div class="turn-nav-list">
+            {filteredTurnNavItems.length === 0 ? (
+              <div class="turn-nav-empty">{t('turnNav.noMatch')}</div>
+            ) : (
+              filteredTurnNavItems.map((item) => (
+                <button
+                  key={item.id}
+                  type="button"
+                  class={'turn-nav-item' + (item.id === activeTurnId ? ' active' : '')}
+                  title={item.text}
+                  onClick={() => jumpToTurn(item.id)}
+                >
+                  {item.label}
+                </button>
+              ))
+            )}
+          </div>
+        </nav>
+      )}
+
       {/* 浮动搜索框:默认隐藏,Cmd/Ctrl+F 呼出,Esc/× 关闭。仿浏览器 Find-in-page 样式:
           长条胶囊、无图标、右侧依次 ↑ ↓ ×。position:absolute 钉在容器右上角,不占布局空间。
           Enter/↓ 下一条,Shift+Enter/↑ 上一条;零匹配时计数显示提示,导航按钮隐藏。 */}
@@ -4723,6 +4767,7 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
           {inputBox}
           {inputSubbar}
         </div>
+      </div>
       </div>
       {filePickerModal}
       {livePermissionCard}

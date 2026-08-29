@@ -4,7 +4,7 @@
 import { useEffect, useRef, useState } from 'preact/hooks';
 import { Chat } from './components/Chat';
 import { Sidebar } from './components/Sidebar';
-import { ThemeDialog, LanguageDialog, ModelConfigDialog, RemoteAccessDialog } from './components/SettingsDialogs';
+import { ThemeDialog, LanguageDialog, ModelConfigDialog } from './components/SettingsDialogs';
 import { RenameDialog, DeleteDialog } from './components/SessionDialogs';
 import { CwdPicker } from './components/CwdPicker';
 import { PermissionCard } from './components/PermissionCard';
@@ -361,7 +361,6 @@ export function App() {
         onSessionRenamed={handleSessionRenamed}
         onSessionDeleted={handleSessionDeleted}
         onPickSkill={(name) => setSkillInsert({ name, seq: Date.now() })}
-        onOpenRemote={() => setSettingsSection('remote')}
         onOpenCwd={() => setShowCwd(true)}
         onSwitchProject={handlePickCwd}
         extraRunningIds={liveRunningId ? [liveRunningId] : []}
@@ -502,9 +501,6 @@ export function App() {
       )}
       {settingsSection === 'model' && (
         <ModelConfigDialog onClose={() => setSettingsSection(null)} />
-      )}
-      {settingsSection === 'remote' && (
-        <RemoteAccessDialog onClose={() => setSettingsSection(null)} />
       )}
       {pending && <PermissionCard req={pending} onDone={() => setPending((cur: any) => resolvePendingAfterDecision(cur, pending.call_id))} />}
       {headerDialog === 'rename' && activeSession && (

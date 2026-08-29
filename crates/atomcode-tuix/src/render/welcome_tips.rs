@@ -1,6 +1,5 @@
-//! Curated, usage-informed pool of "getting started" tips for the welcome banner.
-//! `/login` is always pinned first; 3 more are chosen at random from `POOL`.
-//! The pool is a hand-edited const, refreshed per release from the usage dashboard.
+//! Curated pool of "getting started" tips for the welcome banner.
+//! `/provider` is always pinned first; 3 more are chosen at random from `POOL`.
 
 use crate::i18n::Msg;
 use rand::seq::SliceRandom;
@@ -14,17 +13,13 @@ pub struct Tip {
 
 /// Always shown first.
 pub const PINNED: Tip = Tip {
-    cmd: "/login",
-    desc: Msg::WelcomeTipLogin,
+    cmd: "/provider",
+    desc: Msg::WelcomeTipProvider,
 };
 
-/// Random pool (15). Filtered to onboarding-relevant commands; excludes
-/// exit/clear/destructive and pure-utility commands. Edit + recompile to refresh.
+/// Random pool. Filtered to onboarding-relevant commands; excludes
+/// exit/clear/destructive and pure-utility commands.
 pub const POOL: &[Tip] = &[
-    Tip {
-        cmd: "/provider",
-        desc: Msg::WelcomeTipProvider,
-    },
     Tip {
         cmd: "/model",
         desc: Msg::WelcomeTipModel,
@@ -77,10 +72,6 @@ pub const POOL: &[Tip] = &[
         cmd: "/language",
         desc: Msg::WelcomeTipLanguage,
     },
-    Tip {
-        cmd: "/usage",
-        desc: Msg::WelcomeTipUsage,
-    },
 ];
 
 /// How many random tips to show below the pinned one.
@@ -121,10 +112,10 @@ mod tests {
     }
 
     #[test]
-    fn pinned_is_first_and_login() {
+    fn pinned_is_first_and_provider() {
         let t = choose_tips(&mut fixed(1));
         assert_eq!(t[0], PINNED);
-        assert_eq!(t[0].cmd, "/login");
+        assert_eq!(t[0].cmd, "/provider");
     }
 
     #[test]
@@ -137,7 +128,7 @@ mod tests {
         let t = choose_tips(&mut fixed(7));
         let rest = &t[1..];
         for w in rest {
-            assert_ne!(w.cmd, "/login");
+            assert_ne!(w.cmd, "/provider");
         }
         for i in 0..rest.len() {
             for j in (i + 1)..rest.len() {
@@ -161,6 +152,8 @@ mod tests {
             "/status",
             "/cd",
             "/logout",
+            "/login",
+            "/usage",
             "/delete_session",
             "/undo",
             "/stop",

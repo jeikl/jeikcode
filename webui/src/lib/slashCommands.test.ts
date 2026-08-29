@@ -177,8 +177,8 @@ test('display commands dispatch to execServerCommand', async () => {
     mcpCommand: () => {}, t: (k) => k,
   };
   const map = buildCommandMap(FRONTEND_COMMANDS);
-  for (const c of ['whoami','status','config','diff','cost','todo']) await dispatchSlashCommand(`/${c}`, map, h);
-  assert.deepEqual(calls, ['whoami:','status:','config:','diff:','cost:','todo:']);
+  for (const c of ['status','config','diff','cost','todo']) await dispatchSlashCommand(`/${c}`, map, h);
+  assert.deepEqual(calls, ['status:','config:','diff:','cost:','todo:']);
 });
 
 test('/remember and /forget without arg emit a notice', async () => {

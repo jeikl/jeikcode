@@ -8,7 +8,6 @@ import { listSessions, listProjectSessions, searchSessions, getSkills, getMcpSta
 import { useT, useSettings, SettingsSection, Theme } from '../settings';
 import { MsgKey, Lang } from '../i18n';
 import { RenameDialog, DeleteDialog } from './SessionDialogs';
-import { useAuth } from './LoginButton';
 import { mergeOptimisticSession } from '../lib/sessionList';
 import { sessionMessagesToMarkdownLines } from '../lib/historyMessages';
 import { collapseHomePath as collapseHomePathShared, displayPath } from '../lib/displayPath';
@@ -44,8 +43,6 @@ interface SidebarProps {
   onSessionDeleted?: (id: string) => void;
   /** Pick a skill from the sidebar Skills menu → insert `/name ` into the chat input. */
   onPickSkill?: (name: string) => void;
-  /** Open the remote-access dialog (moved from the old top header). */
-  onOpenRemote?: () => void;
   /** Open the working-directory picker (to switch to / start a project in any dir). */
   onOpenCwd?: () => void;
   /** Switch INTO another project (by its working dir): change cwd + land on a new
@@ -137,16 +134,6 @@ function FolderIcon() {
   return (
     <svg width="15" height="15" viewBox="0 0 16 16" fill="none" aria-hidden="true">
       <path d="M1.75 4c0-.55.45-1 1-1h3l1.5 1.5h5c.55 0 1 .45 1 1V12c0 .55-.45 1-1 1h-10c-.55 0-1-.45-1-1V4z" stroke="currentColor" stroke-width="1.2" stroke-linejoin="round" />
-    </svg>
-  );
-}
-
-/** Smartphone glyph for the remote-access button. */
-function SmartphoneIcon() {
-  return (
-    <svg width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden="true">
-      <rect x="4.5" y="1.5" width="7" height="13" rx="1.5" stroke="currentColor" stroke-width="1.2" />
-      <line x1="7" y1="12.3" x2="9" y2="12.3" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" />
     </svg>
   );
 }
@@ -271,16 +258,6 @@ function LangGlyph() {
   );
 }
 
-/** Account glyph (head + shoulders). */
-function AccountGlyph() {
-  return (
-    <svg width="15" height="15" viewBox="0 0 16 16" fill="none" aria-hidden="true">
-      <circle cx="8" cy="5.5" r="2.5" stroke="currentColor" stroke-width="1.2" />
-      <path d="M3.5 13.5a4.5 4.5 0 0 1 9 0" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" />
-    </svg>
-  );
-}
-
 /** Model glyph (chip). */
 function ModelGlyph() {
   return (
@@ -307,18 +284,12 @@ export function Sidebar({
   onSessionRenamed,
   onSessionDeleted,
   onPickSkill,
-  onOpenRemote,
   onOpenCwd,
   onSwitchProject,
   extraRunningIds,
 }: SidebarProps) {
   const t = useT();
   const { theme, setTheme, lang, setLang } = useSettings();
-  const auth = useAuth();
-  // Bottom-bar login button's idle label: distinct copy when credentials are
-  // present-but-dead vs signed-out. Shared by the tooltip and the visible text
-  // (they only diverge while a login is in flight).
-  const loginIdleLabel = auth.expired ? auth.labels.expired : auth.labels.signIn;
   const [sessions, setSessions] = useState<SessionMetaWithProject[]>([]);
   const [loading, setLoading] = useState(true);
   // 活跃（正在运行 turn）的会话 id，来自 GET /chat/active；配合 5s 轮询，
@@ -924,18 +895,6 @@ export function Sidebar({
           <ModelGlyph />
           <span>{t('settings.menuModel')}</span>
         </button>
-        {/* 远程访问入口已移到侧栏底部栏（见下方 sidebar-bottom 的 Remote Btn）。 */}
-
-        {/* 退出登录：放在组最下面，仅登录后显示（头像/登录入口在侧栏底部栏）。 */}
-        {auth.loggedIn && (
-          <>
-            <div class="settings-menu-divider" />
-            <button class="item-menu-row" onClick={auth.doLogout}>
-              <AccountGlyph />
-              <span>{auth.labels.signOut}</span>
-            </button>
-          </>
-        )}
       </div>,
           document.body,
         )
@@ -1187,16 +1146,6 @@ export function Sidebar({
           </button>
         </nav>
         <div class="sidebar-rail-bottom">
-          {onOpenRemote && (
-            <button
-              class="rail-btn"
-              onClick={onOpenRemote}
-              title={t('settings.menuRemote')}
-              aria-label={t('settings.menuRemote')}
-            >
-              <SmartphoneIcon />
-            </button>
-          )}
           <button
             class="rail-btn rail-btn-settings"
             onClick={(e) => toggleSettingsMenu(e as unknown as MouseEvent)}
@@ -1354,50 +1303,7 @@ export function Sidebar({
       </div>
 
       <div class="sidebar-bottom">
-        {auth.loggedIn && !auth.expired ? (
-          <div
-            class="sidebar-account"
-            title={auth.user?.name || auth.user?.username || 'account'}
-          >
-            <span class="login-avatar">
-              {auth.user?.avatar_url ? (
-                <img
-                  class="login-avatar-img"
-                  src={auth.user.avatar_url}
-                  alt=""
-                  referrerpolicy="no-referrer"
-                  onError={(e) => {
-                    (e.currentTarget as HTMLImageElement).style.display = 'none';
-                  }}
-                />
-              ) : (
-                (auth.user?.name || auth.user?.username || 'A').slice(0, 1).toUpperCase()
-              )}
-            </span>
-            <span class="login-name">{auth.user?.name || auth.user?.username || 'account'}</span>
-          </div>
-        ) : (
-          <button
-            class={auth.expired ? 'sidebar-account-btn sidebar-account-btn--expired' : 'sidebar-account-btn'}
-            onClick={auth.startLogin}
-            disabled={auth.busy}
-            title={auth.busy ? auth.labels.hint : loginIdleLabel}
-          >
-            <AccountGlyph />
-            <span class="login-name">{auth.busy ? auth.labels.signingIn : loginIdleLabel}</span>
-          </button>
-        )}
         <span class="sidebar-bottom-spacer" />
-        {onOpenRemote && (
-          <button
-            class="sidebar-icon-btn"
-            onClick={onOpenRemote}
-            title={t('settings.menuRemote')}
-            aria-label={t('settings.menuRemote')}
-          >
-            <SmartphoneIcon />
-          </button>
-        )}
         <button
           class="sidebar-icon-btn sidebar-settings-btn"
           onClick={(e) => toggleSettingsMenu(e as unknown as MouseEvent)}

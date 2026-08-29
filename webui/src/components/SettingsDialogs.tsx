@@ -12,16 +12,11 @@ import {
   setDefaultProvider,
   deleteProvider,
   fetchUpstreamModels,
-  getTunnelStatus,
-  TunnelStatus,
 } from '../api';
 import { useSettings, Theme } from '../settings';
 import { Lang } from '../i18n';
 import { ConfirmDialog } from './ConfirmDialog';
 import { Select } from './Select';
-
-// AtomGit 托管 provider 的 LLM 网关地址；其上下文窗口由平台固定，前端禁止修改。
-const ATOMGIT_BASE_URL = 'https://llm-api.atomgit.com/v1';
 
 // 上下文窗口预设（数值与配置一致，显示时按 /1000 换算为「k tokens」）。
 const CONTEXT_WINDOW_PRESETS = [32000, 64000, 128000, 256000, 512000, 1000000];
@@ -222,17 +217,14 @@ export function ModelConfigDialog({ onClose }: { onClose: () => void }) {
                       <span class="provider-default-badge">{t('settings.default')}</span>
                     )}
                     <span class="provider-type">{p.type}</span>
-                    {/* AtomGit 托管 provider 由平台固定，禁止编辑（仅保留删除）。 */}
-                    {p.base_url !== ATOMGIT_BASE_URL && (
-                      <button
-                        class="provider-edit-btn"
-                        type="button"
-                        onClick={() => setEditTarget(p)}
-                        title={t('settings.edit')}
-                      >
-                        {t('settings.edit')}
-                      </button>
-                    )}
+                    <button
+                      class="provider-edit-btn"
+                      type="button"
+                      onClick={() => setEditTarget(p)}
+                      title={t('settings.edit')}
+                    >
+                      {t('settings.edit')}
+                    </button>
                     <button
                       class="provider-delete-btn"
                       type="button"
@@ -259,14 +251,12 @@ export function ModelConfigDialog({ onClose }: { onClose: () => void }) {
                         <span>{(p.context_window / 1000).toFixed(0)}k tokens</span>
                       </div>
                     )}
-                    {p.base_url !== ATOMGIT_BASE_URL && (
-                      <div>
-                        <span class="pk">{t('settings.apiKey')}: </span>
-                        <span class={p.has_api_key ? 'ok' : 'nok'}>
-                          {p.has_api_key ? t('settings.configured') : t('settings.notConfigured')}
-                        </span>
-                      </div>
-                    )}
+                    <div>
+                      <span class="pk">{t('settings.apiKey')}: </span>
+                      <span class={p.has_api_key ? 'ok' : 'nok'}>
+                        {p.has_api_key ? t('settings.configured') : t('settings.notConfigured')}
+                      </span>
+                    </div>
                     <div>
                       <span class="pk">{t('settings.supportsVision')}: </span>
                       <span>{p.supports_vision ? t('settings.yes') : t('settings.no')}</span>
@@ -373,7 +363,6 @@ function ProviderFormDialog({
   const [highlight, setHighlight] = useState(0);
   const modelWrapRef = useRef<HTMLDivElement | null>(null);
 
-  const isAtomGit = editing?.base_url === ATOMGIT_BASE_URL;
   const cwOptions = CONTEXT_WINDOW_PRESETS.includes(contextWindow)
     ? CONTEXT_WINDOW_PRESETS
     : [contextWindow, ...CONTEXT_WINDOW_PRESETS];
@@ -470,7 +459,7 @@ function ProviderFormDialog({
           model: model.trim(),
           base_url: baseUrl.trim(),
           ...(apiKey.trim() ? { api_key: apiKey.trim() } : {}),
-          ...(isAtomGit ? {} : { context_window: contextWindow }),
+          context_window: contextWindow,
           ...advanced,
         });
         if (setDefault && !editing?.is_default) {
@@ -601,16 +590,12 @@ function ProviderFormDialog({
           <label class="add-model-label">{t('settings.contextWindow')}</label>
           <Select
             value={String(contextWindow)}
-            disabled={isAtomGit}
             options={cwOptions.map((v) => ({
               value: String(v),
               label: `${fmtContextWindow(v)} tokens`,
             }))}
             onChange={(v) => setContextWindow(Number(v))}
           />
-          {isAtomGit && (
-            <span class="field-hint">{t('settings.contextWindowLocked')}</span>
-          )}
         </div>
 
         <div class="add-model-field">
@@ -714,114 +699,5 @@ function Row({ label, value, mono }: { label: string; value: string; mono?: bool
       <span class="config-key">{label}</span>
       <span class={'config-val' + (mono ? ' mono' : '')}>{value}</span>
     </div>
-  );
-}
-
-/** 远程访问（蒲公英 / Oray PGY）：检测状态，给出可扫码的私网 URL。 */
-export function RemoteAccessDialog({ onClose }: { onClose: () => void }) {
-  const { t, lang } = useSettings();
-  const [status, setStatus] = useState<TunnelStatus | null>(null);
-  const [loading, setLoading] = useState(true);
-  const [copied, setCopied] = useState(false);
-
-  const reload = () => {
-    setLoading(true);
-    getTunnelStatus()
-      .then(setStatus)
-      .catch(() => setStatus(null))
-      .finally(() => setLoading(false));
-  };
-  useEffect(() => { reload(); }, []);
-
-  const pgy = status?.pgy;
-  // 服务端未给 remote_url（绑回环）时，展示一个「示意」地址。注意：token 现在只存在
-  // 于 HttpOnly Cookie 中，前端 JS 读不到（防插件拦截，CWE-598），所以这里无法拼出
-  // 可直接登录的链接——要可分享的真实链接需把 webui 绑到局域网，由服务端下发
-  // remote_url（带 token）。回环示意地址因此不带 token。
-  const fallbackUrl =
-    pgy?.ipv4 && status
-      ? `http://${pgy.ipv4}:${status.port}/?sync=1`
-      : null;
-
-  function copy() {
-    const url = status?.remote_url ?? fallbackUrl;
-    if (!url) return;
-    navigator.clipboard?.writeText(url).then(() => {
-      setCopied(true);
-      setTimeout(() => setCopied(false), 1500);
-    });
-  }
-
-  return (
-    <SettingsModal title={t('remote.title')} onClose={onClose}>
-      <div class="field-group remote-access">
-        <p class="field-hint">{t('remote.intro')}</p>
-
-        {loading && <div class="modal-loading">{t('remote.loading')}</div>}
-
-        {!loading && status && (
-          <>
-            {/* 1) 未装 / 未连蒲公英 */}
-            {(!pgy?.installed || !pgy?.ipv4) && (
-              <div class="remote-state">
-                <p>{pgy?.installed ? t('remote.notConnected') : t('remote.notInstalled')}</p>
-                <a
-                  class="btn btn-primary"
-                  href="https://pgy.oray.com"
-                  target="_blank"
-                  rel="noreferrer"
-                >
-                  {t('remote.installLink')}
-                </a>
-              </div>
-            )}
-
-            {/* 2) 已装+有 IP，但 server 仅绑回环 → 提示改绑 */}
-            {pgy?.installed && pgy?.ipv4 && !status.remote_url && (
-              <div class="remote-state">
-                <p>{t('remote.notReachable', { ip: pgy.ipv4 })}</p>
-                {fallbackUrl && <code class="remote-url">{fallbackUrl}</code>}
-              </div>
-            )}
-
-            {/* 3) 就绪：二维码 + URL */}
-            {status.remote_url && (
-              <div class="remote-state remote-ready">
-                <p>{t('remote.ready')}</p>
-                {status.qr_svg && (
-                  <div
-                    class="remote-qr"
-                    // eslint-disable-next-line react/no-danger
-                    dangerouslySetInnerHTML={{ __html: status.qr_svg }}
-                  />
-                )}
-                <code class="remote-url">{status.remote_url}</code>
-                <div class="remote-actions">
-                  <button class="btn" onClick={copy}>
-                    {copied ? t('remote.copied') : t('remote.copy')}
-                  </button>
-                </div>
-                <p class="field-hint remote-warn">⚠️ {t('remote.warnToken')}</p>
-              </div>
-            )}
-          </>
-        )}
-
-        <div class="remote-actions">
-          <button class="btn" onClick={reload} disabled={loading}>
-            {t('remote.refresh')}
-          </button>
-          {/* 使用引导：跳官网对应语言的说明页，新标签打开。 */}
-          <a
-            class="btn"
-            href={`https://atomcode.atomgit.com/docs/${lang}/webui-remote-access.html`}
-            target="_blank"
-            rel="noreferrer"
-          >
-            {t('remote.guide')}
-          </a>
-        </div>
-      </div>
-    </SettingsModal>
   );
 }

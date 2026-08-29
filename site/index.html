@@ -651,17 +651,13 @@
     <a href="#editor-plugins" data-section="editor-plugins" data-i18n="nav.plugins">IDE插件</a>
     <a href="#install" data-section="install" data-i18n="nav.install">安装</a>
     <a href="/docs/index.html" target="_blank" rel="noopener" data-i18n="nav.docs">文档</a>
-    <a href="https://atomcode-plugin.atomgit.com" target="_blank" rel="noopener" data-i18n="nav.marketplace">Skills</a>
-    <a class="nav-cp" href="https://ai.atomgit.com/serverless-api" target="_blank" rel="noopener">
-      <span data-i18n="nav.codingplan">Coding Plan</span>
-    </a>
   </nav>
   <div class="hdr-right">
     <button class="icon-btn" id="themeBtn" aria-label="主题">
       <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/></svg>
     </button>
     <button class="icon-btn" id="langBtn" aria-label="语言">中</button>
-    <a class="btn-pill" href="https://atomgit.com/atomgit_atomcode/atomcode" target="_blank" rel="noopener" data-i18n="btn.repo">开源仓库</a>
+    <a class="btn-pill" href="https://github.com/jeikl/jeikcode" target="_blank" rel="noopener" data-i18n="btn.repo">开源仓库</a>
     <a class="btn-pill primary" href="#install" data-i18n="btn.start">立即开始</a>
     <button class="icon-btn mb-toggle" id="mbToggle" aria-label="菜单" aria-expanded="false">☰</button>
   </div>
@@ -673,11 +669,7 @@
   <a href="#editor-plugins" data-i18n="nav.plugins">IDE插件</a>
   <a href="#install" data-i18n="nav.install">安装</a>
   <a href="/docs/index.html" target="_blank" rel="noopener" data-i18n="nav.docs">文档</a>
-  <a href="https://atomcode-plugin.atomgit.com" target="_blank" rel="noopener" data-i18n="nav.marketplace">Skills</a>
-  <a class="cp" href="https://ai.atomgit.com/serverless-api" target="_blank" rel="noopener">
-    <span data-i18n="nav.codingplan">Coding Plan</span>
-  </a>
-  <a href="https://atomgit.com/atomgit_atomcode/atomcode" target="_blank" rel="noopener" data-i18n="btn.repo">开源仓库</a>
+  <a href="https://github.com/jeikl/jeikcode" target="_blank" rel="noopener" data-i18n="btn.repo">开源仓库</a>
   <a class="cta" href="#install" data-i18n="btn.start.arrow">立即开始 →</a>
 </nav>
 
@@ -822,13 +814,13 @@
     </article>
 
     <article class="feat">
-      <div class="icon">⎇</div>
-      <h3 data-i18n="feat.atomgit.t">AtomGit 原生集成</h3>
-      <p data-i18n="feat.atomgit.d">AtomGit OAuth 一键登录、内置工具管理 Issue / PR / 仓库、企业微信扫码登录 —— 与开源生态无缝对接。</p>
+      <div class="icon">◇</div>
+      <h3 data-i18n="feat.selfhost.t">自托管 WebUI</h3>
+      <p data-i18n="feat.selfhost.d">/webui 启动浏览器界面，会话、模型配置与 TUI 实时同步，数据留在本机。</p>
       <div class="demo">
         <div class="gitcmd">
-          <div class="l1">› 为 auth callback 404 创建一个 AtomGit Issue</div>
-          <div class="l2">✓ atomgit.com/.../atomcode/issues/124</div>
+          <div class="l1">› /webui --host 0.0.0.0</div>
+          <div class="l2">✓ http://192.168.1.10:PORT</div>
         </div>
       </div>
     </article>
@@ -917,9 +909,9 @@
         </article>
 
         <article class="plugin-feat">
-          <div class="icon">★</div>
-          <h3 data-i18n="plug.atomgit.t">AtomGit 集成</h3>
-          <p data-i18n="plug.atomgit.d">OAuth 一键登录，CodingPlan 免费额度，/login /codingplan 命令</p>
+          <div class="icon">⚡</div>
+          <h3 data-i18n="plug.mcp.t">MCP 扩展</h3>
+          <p data-i18n="plug.mcp.d">连接 MCP 服务器扩展工具能力，支持项目级配置与热重载</p>
         </article>
 
       </div>
@@ -1093,7 +1085,7 @@
             <div class="ch">›</div>
             <div class="n">02</div>
             <div class="t" data-i18n="step2.t">配置 API Key</div>
-            <div class="d" data-i18n="step2.d">OpenAI / Claude / CodingPlan 任一即可</div>
+            <div class="d" data-i18n="step2.d">OpenAI / Claude / Ollama 等任一 API 即可</div>
           </div>
           <div class="step">
             <div class="n">03</div>
@@ -1112,7 +1104,7 @@
               <ul class="intro-list">
                 <li data-i18n="wiz.s1.b1">多步骤 agent loop · 内置代码图工具</li>
                 <li data-i18n="wiz.s1.b2">兼容所有 OpenAI 风格 API</li>
-                <li data-i18n="wiz.s1.b3">通过 CodingPlan 获取免费额度</li>
+                <li data-i18n="wiz.s1.b3">/provider 手动配置模型与 API Key</li>
               </ul>
               <div class="intro-hint" data-i18n="wiz.s1.hint">按 Enter 继续 · Ctrl+C 可随时退出</div>
             </div>
@@ -1127,8 +1119,7 @@
             <div class="wiz-step" data-step="3">
               <div class="tt" data-i18n="wiz.s3.tt">第 3/3 步 · 配置</div>
               <div class="qq" data-i18n="wiz.s3.qq">想怎么开始？</div>
-              <div class="opt sel"><span data-i18n="wiz.s3.o1">配置 CodingPlan</span> <small data-i18n="wiz.s3.o1.hint">免费额度 · 推荐</small></div>
-              <div class="opt"><span data-i18n="wiz.s3.o2">手动配置</span> <small data-i18n="wiz.s3.o2.hint">使用 API key</small></div>
+              <div class="opt sel"><span data-i18n="wiz.s3.o2">手动配置</span> <small data-i18n="wiz.s3.o2.hint">使用 API key</small></div>
               <div class="opt"><span data-i18n="wiz.s3.o3">暂时跳过</span> <small data-i18n="wiz.s3.o3.hint">稍后再说</small></div>
             </div>
             <div class="wiz-nav-hint" data-i18n="wiz.nav">1-3 选择 · Enter 确认 · ← 返回 · Esc 跳过</div>
@@ -1148,7 +1139,7 @@
 <!-- footer -->
 <footer class="ftr">
   <div class="ftr-row" data-i18n-html="ftr.links">
-    <a href="#top">官网</a> · <a href="/docs/index.html" target="_blank" rel="noopener">文档</a> · <a href="https://ai.atomgit.com/serverless-api" target="_blank" rel="noopener">CodingPlan</a> · <a href="https://atomgit.com/atomgit_atomcode/atomcode" target="_blank" rel="noopener">开源仓库</a> · <a href="https://atomgit.com/atomgit_atomcode/atomcode/issues" target="_blank" rel="noopener">Issue</a>
+    <a href="#top">官网</a> · <a href="/docs/index.html" target="_blank" rel="noopener">文档</a> · <a href="https://github.com/jeikl/jeikcode" target="_blank" rel="noopener">开源仓库</a> · <a href="https://github.com/jeikl/jeikcode/issues" target="_blank" rel="noopener">Issue</a>
   </div>
   <div data-i18n="ftr.copy">© 2026 AtomCode · MIT 许可证</div>
   <div class="ftr-tag" data-i18n="ftr.rust">⚙ 用 Rust 构建</div>
@@ -1230,9 +1221,9 @@ const T={
   'feat.images.d':{zh:'Ctrl+V 粘贴截图、Finder 拖拽、iTerm2 路径自动识别 —— 主模型不支持图片时，自动 VL 预处理 OCR 给主模型。',
                    en:'Ctrl+V paste, Finder drag, iTerm2 path auto-detect — when the main model lacks vision, falls back to VL preprocessor (OCR + describe).'},
   'feat.images.demo':{zh:'📎 <b>Ctrl + V</b> 粘贴截图  ·  或拖入图片',en:'📎 <b>Ctrl + V</b> paste screenshot · or drop an image'},
-  'feat.atomgit.t':{zh:'AtomGit 原生集成',en:'AtomGit Native Integration'},
-  'feat.atomgit.d':{zh:'AtomGit OAuth 一键登录、内置工具管理 Issue / PR / 仓库、企业微信扫码登录 —— 与开源生态无缝对接。',
-                    en:'AtomGit OAuth login, built-in Issue / PR / repository tools, and WeCom QR login — seamless with the open-source ecosystem.'},
+  'feat.selfhost.t':{zh:'自托管 WebUI',en:'Self-Hosted WebUI'},
+  'feat.selfhost.d':{zh:'/webui 启动浏览器界面，会话、模型配置与 TUI 实时同步，数据留在本机。',
+                    en:'/webui opens a browser UI with live sync to the TUI — sessions, models, and data stay on your machine.'},
   'feat.eco.t':{zh:'Skills + Plugin 生态',en:'Skills + Plugin Ecosystem'},
   'feat.eco.d':{zh:'Skills 写你自己的斜杠命令；/plugin install <git-repo> 一键拿别人的命令、hook、skill —— 与 Claude Code 生态兼容。',
                 en:'Write your own slash commands as Skills; /plugin install <git-repo> grabs packs of commands, hooks, skills — Claude Code ecosystem compatible.'},
@@ -1254,8 +1245,8 @@ const T={
   'plug.model.d':{zh:'Claude / OpenAI / DeepSeek / GLM / Qwen / Ollama，支持 thinking 参数配置',en:'Claude / OpenAI / DeepSeek / GLM / Qwen / Ollama, with thinking parameter support'},
   'plug.session.t':{zh:'会话管理',en:'Session Management'},
   'plug.session.d':{zh:'按时间分组的历史会话，支持搜索、重命名、删除、恢复',en:'Time-grouped session history with search, rename, delete, and restore'},
-  'plug.atomgit.t':{zh:'AtomGit 集成',en:'AtomGit Integration'},
-  'plug.atomgit.d':{zh:'OAuth 一键登录，CodingPlan 免费额度，/login /codingplan 命令',en:'OAuth one-click login, CodingPlan free tier, /login /codingplan commands'},
+  'plug.mcp.t':{zh:'MCP 扩展',en:'MCP Extensions'},
+  'plug.mcp.d':{zh:'连接 MCP 服务器扩展工具能力，支持项目级配置与热重载',en:'Connect MCP servers to extend tools, with per-project config and hot reload'},
   'plug.install.head':{zh:'安装 AtomCode for VS Code',en:'Install AtomCode for VS Code'},
   'plug.install.mkt':{zh:'# 从 Marketplace 安装（推荐）',en:'# Install from Marketplace (recommended)'},
   'plug.install.cmd':{zh:'# 或通过命令行安装',en:'# Or install via command line'},
@@ -1290,7 +1281,7 @@ const T={
   'step1.t':{zh:'运行命令',en:'Run command'},
   'step1.d':{zh:'脚本自动下载到 /usr/local/bin 或 ~/.local/bin',en:'Script installs to /usr/local/bin or ~/.local/bin'},
   'step2.t':{zh:'配置 provider',en:'Configure provider'},
-  'step2.d':{zh:'Claude / OpenAI / DeepSeek / GLM / Qwen / Ollama 任一 · 或 /login 走 AtomGit OAuth',en:'Pick any provider · Claude / OpenAI / DeepSeek / GLM / Qwen / Ollama · or /login via AtomGit OAuth'},
+  'step2.d':{zh:'OpenAI / Claude / Ollama 等任一 API 即可',en:'Any OpenAI-compatible API — Claude, OpenAI, Ollama, etc.'},
   'step3.t':{zh:'cd 进项目跑 atomcode',en:'cd into project, run atomcode'},
   'step3.d':{zh:'第一次会进 3 步启动向导 · 配置存 ~/.atomcode/config.toml',en:'First run launches a 3-step wizard · config at ~/.atomcode/config.toml'},
   'wiz.head':{zh:'atomcode · 首次运行 — 3 步启动向导',en:'atomcode · First run — 3-step wizard'},
@@ -1298,7 +1289,7 @@ const T={
   'wiz.s1.qq':{zh:`版本 ${VERSION}  ·  在终端里运行的 AI 编程代理`,en:`Version ${VERSION}  ·  AI coding agent in your terminal`},
   'wiz.s1.b1':{zh:'多步骤 agent loop · 内置代码图工具',en:'Multi-step agent loop · built-in code-graph tools'},
   'wiz.s1.b2':{zh:'兼容所有 OpenAI 风格 API',en:'Connects to any OpenAI-compatible API'},
-  'wiz.s1.b3':{zh:'通过 CodingPlan 获取免费额度',en:'Free tokens via CodingPlan'},
+  'wiz.s1.b3':{zh:'/provider 手动配置模型与 API Key',en:'Configure models via /provider with your own API keys'},
   'wiz.s1.hint':{zh:'按 Enter 继续 · Ctrl+C 可随时退出',en:'Press Enter to continue · Ctrl+C exits at any point'},
   'wiz.s2.tt':{zh:'第 2/3 步 · 语言',en:'Step 2/3 · Language'},
   'wiz.s2.qq':{zh:'Choose your language / 选择语言',en:'Choose your language / 选择语言'},
@@ -1308,8 +1299,6 @@ const T={
   'wiz.s2.o3':{zh:'English',en:'English'},
   'wiz.s3.tt':{zh:'第 3/3 步 · 配置',en:'Step 3/3 · Setup'},
   'wiz.s3.qq':{zh:'想怎么开始？',en:'How would you like to set up?'},
-  'wiz.s3.o1':{zh:'配置 CodingPlan',en:'Set up CodingPlan'},
-  'wiz.s3.o1.hint':{zh:'免费额度 · 推荐',en:'Free tokens · recommended'},
   'wiz.s3.o2':{zh:'手动配置',en:'Configure manually'},
   'wiz.s3.o2.hint':{zh:'使用 API key',en:'API key'},
   'wiz.s3.o3':{zh:'暂时跳过',en:'Skip for now'},
@@ -1318,8 +1307,8 @@ const T={
   'wiz.prev':{zh:'← 上一步',en:'← Back'},
   'wiz.next':{zh:'下一步 →',en:'Next →'},
   'wiz.done':{zh:'✓ 完成',en:'✓ Done'},
-  'ftr.links':{zh:'<a href="#top">官网</a> · <a href="/docs/index.html" target="_blank" rel="noopener">文档</a> · <a href="https://ai.atomgit.com/serverless-api" target="_blank" rel="noopener">CodingPlan</a> · <a href="https://atomgit.com/atomgit_atomcode/atomcode" target="_blank" rel="noopener">开源仓库</a> · <a href="https://atomgit.com/atomgit_atomcode/atomcode/issues" target="_blank" rel="noopener">Issue</a>',
-                en:'<a href="#top">Website</a> · <a href="/docs/index.html" target="_blank" rel="noopener">Docs</a> · <a href="https://ai.atomgit.com/serverless-api" target="_blank" rel="noopener">CodingPlan</a> · <a href="https://atomgit.com/atomgit_atomcode/atomcode" target="_blank" rel="noopener">Repository</a> · <a href="https://atomgit.com/atomgit_atomcode/atomcode/issues" target="_blank" rel="noopener">Issues</a>'},
+  'ftr.links':{zh:'<a href="#top">官网</a> · <a href="/docs/index.html" target="_blank" rel="noopener">文档</a> · <a href="https://github.com/jeikl/jeikcode" target="_blank" rel="noopener">开源仓库</a> · <a href="https://github.com/jeikl/jeikcode/issues" target="_blank" rel="noopener">Issue</a>',
+                en:'<a href="#top">Website</a> · <a href="/docs/index.html" target="_blank" rel="noopener">Docs</a> · <a href="https://github.com/jeikl/jeikcode" target="_blank" rel="noopener">Repository</a> · <a href="https://github.com/jeikl/jeikcode/issues" target="_blank" rel="noopener">Issues</a>'},
   'ftr.copy':{zh:'© 2026 AtomCode · MIT 许可证',en:'© 2026 AtomCode · MIT License'},
   'ftr.rust':{zh:'⚙ 用 Rust 构建',en:'⚙ Built with Rust'},
   'toast.install.copied':{zh:'✓ 安装命令已复制 · 粘贴到终端运行',en:'✓ Install command copied · paste into your terminal'},
@@ -1357,24 +1346,13 @@ function applyI18n(){
 }
 
 /* ========== data ========== */
-const RELEASE_BASE='https://atomgit.com/atomgit_atomcode/atomcode/releases/download/'+VERSION;
-// Install scripts are served version-free from the repo (raw host); the scripts
-// auto-detect the latest release themselves, so no version is pinned in the URL.
-const SCRIPT_BASE='https://raw.atomgit.com/atomgit_atomcode/atomcode/raw/main/scripts';
-const INVITE_PARAM=(()=>{
-  const q=new URLSearchParams(window.location.search).get('invite');
-  if(q)return q;
-  const m=window.location.pathname.match(/^\/invite\/([A-Za-z0-9]{8})$/);
-  return m?m[1]:'';
-})();
-const INVITE_CODE=/^[A-Za-z0-9]{8}$/.test(INVITE_PARAM)?INVITE_PARAM:'';
+const RELEASE_BASE='https://github.com/jeikl/jeikcode/releases/download/'+VERSION;
+const SCRIPT_BASE='https://raw.githubusercontent.com/jeikl/jeikcode/local-dev/scripts';
 function unixInstallCmd(){
-  return `curl -fsSL ${SCRIPT_BASE}/install.sh | sh${INVITE_CODE?` -s -- --invite=${INVITE_CODE}`:''}`;
+  return `curl -fsSL ${SCRIPT_BASE}/install.sh | sh`;
 }
 function winInstallCmd(){
-  return INVITE_CODE
-    ? `$env:ATOMCODE_INVITE='${INVITE_CODE}'; irm ${SCRIPT_BASE}/install.ps1 | iex`
-    : `irm ${SCRIPT_BASE}/install.ps1 | iex`;
+  return `irm ${SCRIPT_BASE}/install.ps1 | iex`;
 }
 const OS_CMDS={
   mac:unixInstallCmd(),
@@ -1388,10 +1366,10 @@ function osHint(os){return t('os.'+os);}
 const METHOD_CMDS={
   oneclick:{zh:`# macOS / Linux / HarmonyOS PC\n${unixInstallCmd()}\n\n# Windows · PowerShell\n${winInstallCmd()}`,
             en:`# macOS / Linux / HarmonyOS PC\n${unixInstallCmd()}\n\n# Windows · PowerShell\n${winInstallCmd()}`},
-  source:{zh:`# 需要 Rust 1.88+\ngit clone https://atomgit.com/atomgit_atomcode/atomcode.git\ncd atomcode\ncargo build --release\ncp target/release/atomcode ~/.local/bin/\natomcode --version  # 验证安装`,
-          en:`# Requires Rust 1.88+\ngit clone https://atomgit.com/atomgit_atomcode/atomcode.git\ncd atomcode\ncargo build --release\ncp target/release/atomcode ~/.local/bin/\natomcode --version  # verify install`},
-  binary:{zh:`# 从 Releases 页面下载\nhttps://atomgit.com/atomgit_atomcode/atomcode/releases/latest\n\n# 或直接 curl 取对应平台\ncurl -L -o atomcode \\\n  ${RELEASE_BASE}/atomcode-${VERSION}-darwin-arm64\nchmod +x atomcode && mv atomcode /usr/local/bin/`,
-          en:`# Download from Releases page\nhttps://atomgit.com/atomgit_atomcode/atomcode/releases/latest\n\n# Or curl for your platform\ncurl -L -o atomcode \\\n  ${RELEASE_BASE}/atomcode-${VERSION}-darwin-arm64\nchmod +x atomcode && mv atomcode /usr/local/bin/`},
+  source:{zh:`# 需要 Rust 1.88+\ngit clone https://github.com/jeikl/jeikcode.git\ncd jeikcode\ncargo build --release\ncp target/release/jeikcode ~/.local/bin/\njeikcode --version  # 验证安装`,
+          en:`# Requires Rust 1.88+\ngit clone https://github.com/jeikl/jeikcode.git\ncd jeikcode\ncargo build --release\ncp target/release/jeikcode ~/.local/bin/\njeikcode --version  # verify install`},
+  binary:{zh:`# 从 Releases 页面下载\nhttps://github.com/jeikl/jeikcode/releases/latest\n\n# 或直接 curl 取对应平台\ncurl -L -o jeikcode \\\n  ${RELEASE_BASE}/jeikcode-${VERSION}-linux-x64\nchmod +x jeikcode && mv jeikcode /usr/local/bin/`,
+          en:`# Download from Releases page\nhttps://github.com/jeikl/jeikcode/releases/latest\n\n# Or curl for your platform\ncurl -L -o jeikcode \\\n  ${RELEASE_BASE}/jeikcode-${VERSION}-linux-x64\nchmod +x jeikcode && mv jeikcode /usr/local/bin/`},
 };
 function methodHint(m){return t('method.'+m);}
 const DOWNLOADS=[
@@ -1470,7 +1448,7 @@ const FEAT=[
   {cat:'integration',catL:{zh:'集成',en:'Integration'}, f:{zh:'AtomGit 原生集成',en:'AtomGit native integration'}, a:{zh:'✓ OAuth + 内置 AtomGit 工具',en:'✓ OAuth + built-in AtomGit tools'}, c:{zh:'✗ 不支持',en:'✗ Not supported'}, win:'a'},
   {cat:'tools',     catL:{zh:'工具',en:'Tools'},   f:{zh:'MCP 支持',en:'MCP support'},      a:{zh:'✓ 已支持',en:'✓ Supported'},     c:{zh:'✓ 已支持',en:'✓ Supported'},  win:'='},
   {cat:'tools',     catL:{zh:'工具',en:'Tools'},   f:{zh:'视觉 / 截图',en:'Vision / screenshot'}, a:{zh:'✓ 已支持',en:'✓ Supported'},  c:{zh:'✓ 已支持',en:'✓ Supported'},  win:'='},
-  {cat:'price',     catL:{zh:'价格',en:'Price'},   f:{zh:'费用',en:'Pricing'},              a:{zh:'CodingPlan 限免 · 自带 API',en:'CodingPlan free tier · BYO API'}, c:{zh:'订阅 + API',en:'Subscription + API'}, win:'a'},
+  {cat:'price',     catL:{zh:'价格',en:'Price'},   f:{zh:'费用',en:'Pricing'},              a:{zh:'自带 API · 本地运行',en:'BYO API · runs locally'}, c:{zh:'订阅 + API',en:'Subscription + API'}, win:'a'},
 ];
 
 /* ========== robust clipboard copy ========== */

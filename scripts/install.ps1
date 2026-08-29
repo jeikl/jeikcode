@@ -11,7 +11,7 @@ $ErrorActionPreference = "Stop"
 
 $ManifestBase = if ($env:ATOMCODE_MANIFEST_URL) { $env:ATOMCODE_MANIFEST_URL.TrimEnd('/') } else { "https://raw.githubusercontent.com/jeikl/jeikcode/local-dev" }
 $RepoBase     = if ($env:ATOMCODE_DOWNLOAD_BASE) { $env:ATOMCODE_DOWNLOAD_BASE.TrimEnd('/') } else { "https://github.com/jeikl/jeikcode/releases/download" }
-$DefaultVersion = "6.0.44"
+$DefaultVersion = "6.0.45"
 
 # --- detect platform ---
 $os = "windows"

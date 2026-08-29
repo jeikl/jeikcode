@@ -16,7 +16,7 @@ set -eu
 
 MANIFEST_BASE="${ATOMCODE_MANIFEST_URL:-https://raw.githubusercontent.com/jeikl/jeikcode/local-dev}"
 REPO_BASE="${ATOMCODE_DOWNLOAD_BASE:-https://github.com/jeikl/jeikcode/releases/download}"
-DEFAULT_VERSION="6.0.44"
+DEFAULT_VERSION="6.0.45"
 
 # --- detect platform ---
 uname_s=$(uname -s)

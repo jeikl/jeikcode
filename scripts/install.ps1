@@ -1,189 +1,104 @@
-# AtomCode installer for Windows — PowerShell
+# JeikCode installer for Windows — PowerShell
 #
-#   irm https://raw.atomgit.com/atomgit_atomcode/atomcode/raw/main/scripts/install.ps1 | iex
+#   irm https://raw.githubusercontent.com/jeikl/jeikcode/local-dev/scripts/install.ps1 | iex
 #
 # Env overrides:
-#   $env:ATOMCODE_VERSION   release tag to install (default: latest release,
-#                             auto-detected from the AtomGit API)
-#   $env:ATOMCODE_PREFIX    install dir (default: %LOCALAPPDATA%\AtomCode)
-# IMPORTANT: when changing install paths, registry edits, or filenames here,
-# also update scripts/uninstall.ps1 AND
-# crates/atomcode-core/src/uninstall/paths.rs. The CI parity test guards
-# the manifest, but binary path / PATH edit are not checked.
-
-param(
-  [string]$Invite = ""
-)
+#   $env:ATOMCODE_VERSION    release tag (default: latest from fork latest.json)
+#   $env:ATOMCODE_PREFIX     install dir (default: $HOME\.local\bin)
+#   $env:ATOMCODE_MANIFEST_URL / $env:ATOMCODE_DOWNLOAD_BASE  override update channel (optional)
 
 $ErrorActionPreference = "Stop"
 
-# --- referral invite argument fallback ---
-if (-not $Invite) {
-  $Invite = $env:ATOMCODE_INVITE
-}
+$ManifestBase = if ($env:ATOMCODE_MANIFEST_URL) { $env:ATOMCODE_MANIFEST_URL.TrimEnd('/') } else { "https://raw.githubusercontent.com/jeikl/jeikcode/local-dev" }
+$RepoBase     = if ($env:ATOMCODE_DOWNLOAD_BASE) { $env:ATOMCODE_DOWNLOAD_BASE.TrimEnd('/') } else { "https://github.com/jeikl/jeikcode/releases/download" }
+$DefaultVersion = "6.0.44"
 
-# Fallback version used only when $env:ATOMCODE_VERSION is unset and the API lookup fails.
-$DefaultVersion = "v5.0.2"
-$RepoBase = "https://atomgit.com/atomgit_atomcode/atomcode/releases/download"
-$RepoLatestApi = "https://api.atomgit.com/api/v5/repos/atomgit_atomcode/atomcode/releases/latest"
-
-# --- detect arch ---
-# Prefer PROCESSOR_ARCHITEW6432 (set only when a 32-bit process runs on a 64-bit
-# OS — it holds the real OS arch). Fall back to PROCESSOR_ARCHITECTURE.
-# Avoids RuntimeInformation::OSArchitecture which is empty on older PS 5.1/.NET.
+# --- detect platform ---
+$os = "windows"
 $RealArch = if ($env:PROCESSOR_ARCHITEW6432) {
     $env:PROCESSOR_ARCHITEW6432
 } else {
     $env:PROCESSOR_ARCHITECTURE
 }
-
 switch ($RealArch) {
-    "AMD64" { $ArchTag = "x64" }
-    "ARM64" { $ArchTag = "arm64" }
+    "AMD64" { $arch = "x64" }
+    "ARM64" { $arch = "arm64" }
     default {
         Write-Host "Unsupported architecture: $RealArch (supported: AMD64, ARM64)" -ForegroundColor Red
         exit 1
     }
 }
+$ext = ".exe"
+
+# --- install dir ---
+$Prefix = if ($env:ATOMCODE_PREFIX) { $env:ATOMCODE_PREFIX } else { Join-Path $HOME ".local\bin" }
+New-Item -ItemType Directory -Force -Path $Prefix | Out-Null
 
 # --- resolve version ---
-# Honor $env:ATOMCODE_VERSION if set; otherwise auto-detect the latest release
-# tag from the API, falling back to $DefaultVersion if the lookup yields nothing.
 if ($env:ATOMCODE_VERSION) {
     $Version = $env:ATOMCODE_VERSION
 } else {
-    Write-Host "==> Detecting latest version"
+    Write-Host "==> Detecting latest version ($ManifestBase/latest.json)"
     try {
-        [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
-        $ProgressPreference = 'SilentlyContinue'
-        $Latest = Invoke-RestMethod -Uri $RepoLatestApi -UseBasicParsing -TimeoutSec 10
-        $Version = $Latest.tag_name
+        $manifest = Invoke-RestMethod -Uri "$ManifestBase/latest.json" -TimeoutSec 10
+        $Version = $manifest.version
     } catch {
-        $Version = $null
+        $Version = $DefaultVersion
     }
-    if (-not $Version) { $Version = $DefaultVersion }
 }
-
-$BinName = "atomcode-$Version-windows-$ArchTag.exe"
-$Url = "$RepoBase/$Version/$BinName"
-
-# --- pick install dir ---
-$Prefix = if ($env:ATOMCODE_PREFIX) {
-    $env:ATOMCODE_PREFIX
-} else {
-    Join-Path $env:LOCALAPPDATA "AtomCode"
-}
-
-if (-not (Test-Path $Prefix)) {
-    New-Item -ItemType Directory -Path $Prefix -Force | Out-Null
-}
-
-# --- referral invite code handling ---
-if ($Invite) {
-  if ($Invite -match '^[A-Za-z0-9]{8}$') {
-    $AtomcodeDir = if ($env:ATOMCODE_HOME) {
-      $env:ATOMCODE_HOME
-    } else {
-      Join-Path $env:USERPROFILE ".atomcode"
-    }
-
-    New-Item -ItemType Directory -Force -Path $AtomcodeDir | Out-Null
-
-    $InstallUuid = [guid]::NewGuid().ToString()
-
-    $pendingInvite = @"
-invite_code=$Invite
-install_uuid=$InstallUuid
-attempted_at=$([DateTimeOffset]::UtcNow.ToUnixTimeSeconds())
-"@
-
-    Set-Content -Path (Join-Path $AtomcodeDir "pending_invite") -Value $pendingInvite
-  } else {
-    Write-Warning "Invalid invite code format, skipping referral"
-  }
-}
-# --- end referral handling ---
 
 # --- download ---
-$Dest = Join-Path $Prefix "atomcode.exe"
-$TmpFile = Join-Path $env:TEMP "atomcode-download.exe"
+$BinName = "jeikcode-${Version}-${os}-${arch}${ext}"
+$Url = "$RepoBase/$Version/$BinName"
+$Dest = Join-Path $env:TEMP $BinName
 
 Write-Host "==> Downloading $BinName"
 Write-Host "    from $Url"
-
 try {
-    [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
-    $ProgressPreference = 'SilentlyContinue'
-    Invoke-WebRequest -Uri $Url -OutFile $TmpFile -UseBasicParsing
+    Invoke-WebRequest -Uri $Url -OutFile $Dest -UseBasicParsing
 } catch {
-    Write-Host "Error: download failed." -ForegroundColor Red
-    Write-Host "       $_" -ForegroundColor Red
-    Write-Host "       URL: $Url" -ForegroundColor Red
-    exit 1
+    $AltName = "atomcode-${Version}-${os}-${arch}${ext}"
+    $AltUrl = "$RepoBase/$Version/$AltName"
+    Write-Host "==> Retrying with $AltName"
+    Write-Host "    from $AltUrl"
+    Invoke-WebRequest -Uri $AltUrl -OutFile $Dest -UseBasicParsing
 }
 
-# Sanity check: must not be an HTML page
-$Header = [System.IO.File]::ReadAllBytes($TmpFile)[0..3]
-if ([char]$Header[0] -eq '<') {
-    Write-Host "Error: download looks like an HTML page, not a binary." -ForegroundColor Red
-    Write-Host "       The release may not exist, or the URL is wrong." -ForegroundColor Red
-    Write-Host "       URL: $Url" -ForegroundColor Red
-    Remove-Item $TmpFile -Force -ErrorAction SilentlyContinue
+# Sanity check: not an HTML 404 page
+$head = [System.IO.File]::ReadAllBytes($Dest)[0..3]
+$isHtml = ($head -contains 0x3C)  # '<'
+if ($isHtml) {
+    Write-Error "Download looks like an HTML page, not a binary. URL: $Url"
     exit 1
 }
 
 # --- install ---
-# Move-Item -Force is unreliable on Windows PowerShell 5.1 when the destination
-# already exists (see: fails with "当文件已存在时，无法创建该文件"). Do an explicit
-# Remove-Item first, and surface a clear message if the old binary is locked
-# (atomcode.exe still running in another terminal).
-Write-Host "==> Installing to $Dest"
-if (Test-Path $Dest) {
-    try {
-        Remove-Item $Dest -Force -ErrorAction Stop
-    } catch {
-        Write-Host "Error: cannot replace existing $Dest" -ForegroundColor Red
-        Write-Host "       It may be in use. Close any running atomcode.exe and re-run this installer." -ForegroundColor Red
-        Write-Host "       $_" -ForegroundColor Red
-        Remove-Item $TmpFile -Force -ErrorAction SilentlyContinue
-        exit 1
-    }
-}
-Move-Item -Path $TmpFile -Destination $Dest
-
-# --- add to PATH ---
-$UserPath = [Environment]::GetEnvironmentVariable("Path", "User")
-# Compare COMPLETE, normalized PATH entries — never a substring of the raw string.
-# A raw `-like "*$Prefix*"` false-positives when another entry merely CONTAINS the
-# prefix (e.g. "...\AtomCodeBackup" for prefix "...\AtomCode"), silently skipping the
-# real add so atomcode isn't on PATH in a new terminal. Split on ';', trim trailing
-# '\' + whitespace, match case-insensitively (Windows paths are case-insensitive).
-# Also avoids `-like` treating the prefix as a wildcard pattern (e.g. a literal '[').
-$PrefixNorm = $Prefix.TrimEnd('\').Trim()
-$InPath = $false
-if ($UserPath) {
-    foreach ($entry in ($UserPath -split ';')) {
-        if ($entry.TrimEnd('\').Trim() -ieq $PrefixNorm) { $InPath = $true; break }
-    }
-}
-if (-not $InPath) {
-    $NewPath = if ($UserPath) { "$Prefix;$UserPath" } else { $Prefix }
-    [Environment]::SetEnvironmentVariable("Path", $NewPath, "User")
-    # Also update current session so user can use it immediately
-    $env:Path = "$Prefix;$env:Path"
-    Write-Host ""
-    Write-Host "Added $Prefix to user PATH." -ForegroundColor Green
-    Write-Host "New terminal windows will pick it up automatically."
-}
-
-# --- done ---
-Write-Host ""
-Write-Host "Installed: $Dest" -ForegroundColor Green
+$Target = Join-Path $Prefix "jeikcode$ext"
+Write-Host "==> Installing to $Target"
 try {
-    & $Dest --version
+    Move-Item -Force $Dest $Target -ErrorAction Stop
 } catch {
-    # ignore
+    Write-Host "Error: could not write $Target." -ForegroundColor Red
+    Write-Host "       If jeikcode is already running, close it and re-run this installer." -ForegroundColor Red
+    exit 1
+}
+
+$Alias = Join-Path $Prefix "atomcode$ext"
+Copy-Item -Force $Target $Alias
+Write-Host ""
+Write-Host "Installed: $Target"
+Write-Host "Alias:     $Alias"
+& $Target --version 2>$null
+
+# --- PATH ---
+$currentPath = [Environment]::GetEnvironmentVariable("Path", "User")
+if ($currentPath -notlike "*$Prefix*") {
+    [Environment]::SetEnvironmentVariable("Path", "$Prefix;$currentPath", "User")
+    Write-Host "Added $Prefix to user PATH (new shells will pick it up)."
+} else {
+    Write-Host "$Prefix already on user PATH."
 }
 
 Write-Host ""
-Write-Host "Run 'atomcode' to get started." -ForegroundColor Cyan
+Write-Host "==> JeikCode uses the local-dev update channel. To enable auto-update, add to ~/.atomcode/config.toml:"
+Write-Host "    auto_update = true"

@@ -11,7 +11,7 @@ JeikCode 采用集中式端点解析机制（位于 `crates/atomcode-config/src/
 | 配置项 | 默认地址 (Default URL) | 环境变量覆盖 (Env Override) | 用途说明 |
 | :--- | :--- | :--- | :--- |
 | **版本清单 (Manifest)** | `https://raw.githubusercontent.com/jeikl/jeikcode/local-dev/latest.json` | `ATOMCODE_UPDATE_MANIFEST_URL` | 包含最新版本号、发布时间、全平台 SHA256 校验和与文件大小 |
-| **下载基址 (Download Base)** | `https://github.com/jeikl/jeikcode/releases/download` | `ATOMCODE_UPDATE_DOWNLOAD_BASE` | 发版二进制下载基址，拼接规则为 `{base}/{version}/jeikcode-{version}-{target}(.exe)` |
+| **下载基址 (Download Base)** | `https://github.com/jeikl/jeikcode/releases/download` | `ATOMCODE_UPDATE_DOWNLOAD_BASE` | 发版二进制下载基址，拼接规则为 `{base}/{version}/{asset_name}` |
 | **官方代码仓 (Repository)** | `https://github.com/jeikl/jeikcode` | - | 官方源码、Issue 与 Release 追踪主页 |
 
 ---
@@ -19,7 +19,7 @@ JeikCode 采用集中式端点解析机制（位于 `crates/atomcode-config/src/
 ## 2. 客户端自升级机制 (`/upgrade`)
 
 ### 2.1 触发方式
-- **交互式命令**：在 TUI 终端中输入 `/upgrade`，或运行 `jeikcode upgrade` / `atomcode upgrade`（后者仅为兼容入口，下载的仍是 `jeikcode-<version>-<target>` 发版资产）；
+- **交互式命令**：在 TUI 终端中输入 `/upgrade` 或运行 `atomcode upgrade`（如有）；
 - **版本检查**：客户端启动时在后台静默轮询 `latest.json`，发现新版本时在状态栏或终端顶部提示。
 
 ### 2.2 `latest.json` 结构规范

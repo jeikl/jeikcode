@@ -8037,6 +8037,54 @@ pub(crate) fn handle_loop_decision(
     }
 }
 
+/// Phases where the user must answer a blocking prompt (tool approval,
+/// `request_user_input`, round-cap checkpoint). In these phases the biased
+/// `select!` must service `input_rx` before the 5ms deferred-render tick and
+/// the `/loop` deadline arm — otherwise a perpetually-ready timer branch can
+/// starve keystrokes (Linux SSH reports: arrow keys / Ctrl+C dead, one core at
+/// 100%).
+fn interactive_input_priority(phase: UiPhase) -> bool {
+    matches!(
+        phase,
+        UiPhase::Approval | UiPhase::UserInput | UiPhase::RoundCap
+    )
+}
+
+/// Paint the idle footer immediately after opening an interactive prompt.
+/// Delegates to `redraw_idle_plain`, which flushes deferred paint in
+/// interactive phases.
+fn redraw_interactive_footer(
+    buf: &Buffer,
+    state: &UiState,
+    ctx: &LoopCtx,
+    renderer: &mut dyn Renderer,
+) {
+    redraw_idle_plain(buf, state, ctx, renderer);
+}
+
+/// OS-level interrupt (SIGINT on Unix) while a blocking prompt is up. Routes
+/// through the same key handlers as a literal Ctrl+C so approval/user-input
+/// prompts stay responsive when the keyboard path is wedged.
+fn handle_interactive_interrupt(
+    app: &mut App,
+    ctx: &mut LoopCtx,
+    renderer: &mut dyn Renderer,
+) -> Result<()> {
+    use crossterm::event::KeyModifiers;
+    match app.state.phase {
+        UiPhase::Approval => {
+            handle_approval_key(app, ctx, renderer, KeyCode::Char('c'), KeyModifiers::CONTROL)
+        }
+        UiPhase::UserInput => {
+            handle_user_input_key(app, ctx, renderer, KeyCode::Char('c'), KeyModifiers::CONTROL)
+        }
+        UiPhase::RoundCap => {
+            handle_round_cap_key(app, ctx, renderer, KeyCode::Char('c'), KeyModifiers::CONTROL)
+        }
+        _ => Ok(()),
+    }
+}
+
 pub async fn run_loop(mut ctx: LoopCtx, renderer: &mut dyn Renderer) -> Result<ExitReason> {
     let mut app = App::new(&ctx.caps);
     apply_startup_bypass(
@@ -8394,6 +8442,10 @@ pub async fn run_loop(mut ctx: LoopCtx, renderer: &mut dyn Renderer) -> Result<E
     #[cfg(unix)]
     let mut sigcont =
         tokio::signal::unix::signal(tokio::signal::unix::SignalKind::from_raw(libc::SIGCONT))?;
+    // Linux SSH / raw-mode fallback: when the biased select! starves the
+    // keyboard path during an approval prompt, SIGINT still reaches us.
+    #[cfg(unix)]
+    let mut sigint = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt())?;
 
     // Windows-only OS-level Ctrl+C fallback. The keyboard path
     // (crossterm KeyEvent → handle_input → 2-press confirm) is the
@@ -8431,6 +8483,7 @@ pub async fn run_loop(mut ctx: LoopCtx, renderer: &mut dyn Renderer) -> Result<E
         // future parks on `pending()` and its `if` guard keeps it inert.
         let loop_next_fire: Option<std::time::Instant> =
             ctx.loop_ctrl.as_ref().and_then(|c| c.next_fire_at);
+        let input_priority = interactive_input_priority(app.state.phase);
 
         #[cfg(unix)]
         tokio::select! {
@@ -8441,13 +8494,33 @@ pub async fn run_loop(mut ctx: LoopCtx, renderer: &mut dyn Renderer) -> Result<E
             // chosen ~50% of the time its tick is ready, dropping the
             // effective frame rate to ~5 fps and looking like "frozen
             // then jumps".
+            //
+            // Exception: during Approval / UserInput / RoundCap the keyboard
+            // route wins over deferred-render and /loop timer arms so a
+            // perpetually-ready branch cannot trap the user behind a prompt.
             biased;
+
+            // ── Terminal input ──
+            // First in the biased order so interactive prompts (approval /
+            // user-input / round-cap) cannot be starved by the 5ms render tick
+            // or a perpetually-ready /loop deadline arm.
+            maybe = ctx.input_rx.recv() => {
+                let Some(ev) = maybe else { break };
+                handle_input(&mut app, &mut ctx, renderer, ev)?;
+            }
+
+            // ── OS SIGINT while a blocking prompt is up ──
+            _ = sigint.recv(), if input_priority => {
+                handle_interactive_interrupt(&mut app, &mut ctx, renderer)?;
+            }
 
             // ── Deferred-render trailing edge ──
             // Drains any InputPrompt / StreamingBox payload the
             // renderer parked during its 20ms throttle window. No-op
-            // when nothing is pending.
-            _ = deferred_render_tick.tick() => {
+            // when nothing is pending. Suppressed during interactive
+            // prompts — those call `redraw_interactive_footer` which
+            // flushes immediately on open / navigation.
+            _ = deferred_render_tick.tick(), if !input_priority => {
                 renderer.flush_deferred();
             }
 
@@ -8506,7 +8579,7 @@ pub async fn run_loop(mut ctx: LoopCtx, renderer: &mut dyn Renderer) -> Result<E
                     Some(t) => tokio::time::sleep_until(t.into()).await,
                     None => std::future::pending::<()>().await,
                 }
-            }, if loop_next_fire.is_some() => {
+            }, if loop_next_fire.is_some() && !input_priority => {
                 if let Some(c) = ctx.loop_ctrl.as_mut() {
                     c.due = true;
                     // Re-arm next_fire_at: if the payload turn runs longer than
@@ -8516,12 +8589,6 @@ pub async fn run_loop(mut ctx: LoopCtx, renderer: &mut dyn Renderer) -> Result<E
                     // drives the single catch-up fire on the next idle edge.
                     c.next_fire_at = Some(std::time::Instant::now() + c.interval);
                 }
-            }
-
-            // ── Terminal input ──
-            maybe = ctx.input_rx.recv() => {
-                let Some(ev) = maybe else { break };
-                handle_input(&mut app, &mut ctx, renderer, ev)?;
             }
 
             // ── Version-check wake ──
@@ -8781,6 +8848,13 @@ pub async fn run_loop(mut ctx: LoopCtx, renderer: &mut dyn Renderer) -> Result<E
         tokio::select! {
             biased;
 
+            // ── Terminal input ──
+            // First in the biased order — see the unix arm for rationale.
+            maybe = ctx.input_rx.recv() => {
+                let Some(ev) = maybe else { break };
+                handle_input(&mut app, &mut ctx, renderer, ev)?;
+            }
+
             _ = config_poll_tick.tick() => {
                 let idle_boundary = matches!(app.state.phase, UiPhase::Idle)
                     && app.active_modal.is_none();
@@ -8822,7 +8896,9 @@ pub async fn run_loop(mut ctx: LoopCtx, renderer: &mut dyn Renderer) -> Result<E
             // 2-press confirm because if we got here, the user has no
             // working keyboard route to confirm with anyway.
             Some(()) = win_ctrl_c.recv() => {
-                if matches!(app.state.phase, UiPhase::Streaming) {
+                if input_priority {
+                    handle_interactive_interrupt(&mut app, &mut ctx, renderer)?;
+                } else if matches!(app.state.phase, UiPhase::Streaming) {
                     // In Streaming phase, Ctrl+C should cancel the
                     // running turn (matching keyboard-path behaviour)
                     // rather than shut down the whole application.
@@ -8843,7 +8919,7 @@ pub async fn run_loop(mut ctx: LoopCtx, renderer: &mut dyn Renderer) -> Result<E
             // Drains any InputPrompt / StreamingBox payload the
             // renderer parked during its 20ms throttle window. No-op
             // when nothing is pending.
-            _ = deferred_render_tick.tick() => {
+            _ = deferred_render_tick.tick(), if !input_priority => {
                 renderer.flush_deferred();
             }
 
@@ -8866,7 +8942,7 @@ pub async fn run_loop(mut ctx: LoopCtx, renderer: &mut dyn Renderer) -> Result<E
                     Some(t) => tokio::time::sleep_until(t.into()).await,
                     None => std::future::pending::<()>().await,
                 }
-            }, if loop_next_fire.is_some() => {
+            }, if loop_next_fire.is_some() && !input_priority => {
                 if let Some(c) = ctx.loop_ctrl.as_mut() {
                     c.due = true;
                     // Re-arm next_fire_at: if the payload turn runs longer than
@@ -8876,12 +8952,6 @@ pub async fn run_loop(mut ctx: LoopCtx, renderer: &mut dyn Renderer) -> Result<E
                     // drives the single catch-up fire on the next idle edge.
                     c.next_fire_at = Some(std::time::Instant::now() + c.interval);
                 }
-            }
-
-            // ── Terminal input ──
-            maybe = ctx.input_rx.recv() => {
-                let Some(ev) = maybe else { break };
-                handle_input(&mut app, &mut ctx, renderer, ev)?;
             }
 
             // ── Version-check wake ──
@@ -12549,7 +12619,7 @@ fn handle_idle_key(
                     // on_turn_complete() — it would show "◓ …" which is
                     // misleading. The next agent event (ApprovalNeeded /
                     // TurnComplete) will update the footer naturally.
-                    redraw_idle_plain(&app.buf, &app.state, ctx, renderer);
+                    redraw_interactive_footer(&app.buf, &app.state, ctx, renderer);
                 }
                 // Slash commands don't consume pastes (they take a
                 // single short arg, not a pasted body), but the submit
@@ -13086,10 +13156,12 @@ fn redraw_idle_plain(buf: &Buffer, state: &UiState, ctx: &LoopCtx, renderer: &mu
         status,
         attachments,
     });
-    // No explicit flush — see `redraw_with_menu` for the rationale
-    // (InputPrompt is footer-only, the 5ms `flush_deferred` tick owns
-    // the actual paint, and `out.flush()` on every keystroke is a
-    // measurable per-keypress syscall on Windows OpenConsole / xterm.js).
+    // Interactive prompts suppress the 5ms deferred-render tick in `run_loop`,
+    // so paint immediately here. Idle/Streaming keep the tick to avoid a
+    // per-keypress syscall on Windows OpenConsole / xterm.js.
+    if interactive_input_priority(state.phase) {
+        renderer.flush_deferred();
+    }
 }
 
 /// True iff startup should auto-open the OnboardingWizard:
@@ -15688,14 +15760,14 @@ fn handle_approval_key(
             if let Some(p) = app.state.approval_panel.as_mut() {
                 p.move_up();
             }
-            redraw_idle_plain(&app.buf, &mut app.state, ctx, renderer);
+            redraw_interactive_footer(&app.buf, &mut app.state, ctx, renderer);
             return Ok(());
         }
         KeyCode::Down | KeyCode::Char('j') | KeyCode::Char('J') => {
             if let Some(p) = app.state.approval_panel.as_mut() {
                 p.move_down();
             }
-            redraw_idle_plain(&app.buf, &mut app.state, ctx, renderer);
+            redraw_interactive_footer(&app.buf, &mut app.state, ctx, renderer);
             return Ok(());
         }
         _ => {}
@@ -16983,6 +17055,32 @@ fn retract_stale_approval(state: &mut UiState) -> bool {
 }
 
 #[cfg(test)]
+mod interactive_input_priority_tests {
+    use super::interactive_input_priority;
+    use crate::state::UiPhase;
+
+    #[test]
+    fn blocking_prompt_phases_prioritize_keyboard() {
+        for phase in [
+            UiPhase::Approval,
+            UiPhase::UserInput,
+            UiPhase::RoundCap,
+        ] {
+            assert!(
+                interactive_input_priority(phase),
+                "{phase:?} should prioritize input"
+            );
+        }
+        for phase in [UiPhase::Idle, UiPhase::Streaming, UiPhase::Suspended] {
+            assert!(
+                !interactive_input_priority(phase),
+                "{phase:?} should not prioritize input"
+            );
+        }
+    }
+}
+
+#[cfg(test)]
 mod approval_retract_tests {
     use super::retract_stale_approval;
     use crate::state::{UiPhase, UiState};
@@ -18231,13 +18329,13 @@ fn handle_runtime_event(
                                 state.user_input_batch =
                                     Some(crate::state::UserInputBatch::new(request.id, &requests));
                                 state.phase = UiPhase::UserInput;
-                                redraw_idle_plain(buf, state, ctx, renderer);
+                                redraw_interactive_footer(buf, state, ctx, renderer);
                             }
                             TuiUserInputPresentation::Single(input) => {
                                 state.user_input_panel =
                                     Some(crate::state::UserInputPanel::new(request.id, &input));
                                 state.phase = UiPhase::UserInput;
-                                redraw_idle_plain(buf, state, ctx, renderer);
+                                redraw_interactive_footer(buf, state, ctx, renderer);
                             }
                             TuiUserInputPresentation::Invalid => {
                                 deliver_user_input(ctx, request.id, UserInputResponse::declined());
@@ -18267,7 +18365,7 @@ fn handle_runtime_event(
                         state.round_cap_panel =
                             Some(crate::state::RoundCapPanel::new(request.id, cap, base));
                         state.phase = UiPhase::RoundCap;
-                        redraw_idle_plain(buf, state, ctx, renderer);
+                        redraw_interactive_footer(buf, state, ctx, renderer);
                         return;
                     }
                     if request.kind != APPROVAL_KIND {
@@ -20853,7 +20951,7 @@ fn handle_agent_event(
             // draw_spinner_now because the spinner label may be
             // stale/misleading in the approval phase (mirrors the
             // /bg resume path).
-            redraw_idle_plain(buf, state, ctx, renderer);
+            redraw_interactive_footer(buf, state, ctx, renderer);
         }
         AgentEvent::PhaseChange(AgentPhase::Thinking) => {
             state.footer_persistence_warning = None;

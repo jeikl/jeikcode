@@ -47,6 +47,14 @@ if [ "$CURRENT" != "$VERSION" ]; then
 fi
 echo "  -> Cargo.toml version = \"${VERSION}\""
 
+# 沙箱 / CI 若注入了 CARGO_TARGET_DIR，增量产物可能仍带着旧的
+# env!("CARGO_PKG_VERSION")。发版一律用仓库内 target/，并先清相关包。
+unset CARGO_TARGET_DIR || true
+export CARGO_TARGET_DIR="${ROOT}/target"
+echo "  -> CARGO_TARGET_DIR=${CARGO_TARGET_DIR}"
+echo "  -> 清理旧 release 产物，避免版本号烙印残留..."
+cargo clean -p atomcode -p atomcode-tuix -p atomcode-config -p atomcode-updater 2>/dev/null || true
+
 # --- 2. 编译 webui ---
 echo ""
 echo "[2/5] 编译 webui 静态资源..."
@@ -107,6 +115,35 @@ for entry in "${BUILD_TARGETS[@]}"; do
         echo "    !! 跳过 ${TARGET} (缺 target 或链接失败: rustup target add ${TARGET})"
     fi
 done
+
+# 硬校验：二进制里必须烙入本次 VERSION（否则 TUI 右上角会显示旧号）
+echo ""
+echo "校验二进制内嵌版本号 ${VERSION} ..."
+verify_stamp() {
+    local f="$1"
+    if ! command -v strings >/dev/null 2>&1; then
+        # Windows Git Bash 可能没有 strings，用 grep -a
+        if grep -a -F -q "${VERSION}" "$f"; then
+            return 0
+        fi
+        return 1
+    fi
+    strings "$f" | grep -F -q "${VERSION}"
+}
+STAMP_OK=1
+for f in dist/jeikcode-${VERSION}-*; do
+    [ -f "$f" ] || continue
+    if verify_stamp "$f"; then
+        echo "  OK  $(basename "$f")"
+    else
+        echo "  FAIL $(basename "$f") — 未找到字符串 ${VERSION}"
+        STAMP_OK=0
+    fi
+done
+if [ "$STAMP_OK" -ne 1 ]; then
+    echo "错误: 发版二进制版本烙印不正确。请 cargo clean 后重试，并确认未使用陈旧 CARGO_TARGET_DIR。"
+    exit 1
+fi
 
 # --- 4. 生成 latest.json ---
 echo ""

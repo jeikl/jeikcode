@@ -428,6 +428,12 @@ impl Modal for SessionPicker {
         Ok(ModalAction::Continue)
     }
 
+    fn captures_all_keys(&self) -> bool {
+        // `/sessions` is allowed mid-turn; keys must go to the picker, not
+        // type-ahead, and Esc must dismiss the list instead of cancelling.
+        true
+    }
+
     fn draw(&self, _buf: &Buffer, state: &UiState, ctx: &LoopCtx, renderer: &mut dyn Renderer) {
         // Project name = basename of the working dir (falls back to the full
         // path string, then to a placeholder, so the title never renders blank).

@@ -253,7 +253,7 @@ impl Tool for BashTool {
             }
         }
 
-        let mut child = match cmd.spawn() {
+        let child = match cmd.spawn() {
             Ok(c) => c,
             Err(e) => return err(format!("bash: failed to spawn shell: {e}")),
         };
@@ -268,12 +268,15 @@ impl Tool for BashTool {
         // intentionally left running is in the job too, so it's reaped on
         // return — consistent with this tool having no background path.)
         //
-        // Unix: the setsid pre_exec made the shell its own pgroup leader
-        // (pgid == pid), so `killpg(pid)` reaches the grandchildren that
-        // `kill_on_drop` (direct child only) would otherwise orphan — the same
-        // leak, and the same fix, as Windows.
+        // Unix: wrap in `PgroupChild` so Drop always `killpg`s. Critical when the
+        // kernel cancel path *drops* this future (outer select) without running
+        // our cancel arm — otherwise grandchildren survive after setsid detach.
         #[cfg(windows)]
         let job_guard = crate::process_utils::assign_child_to_kill_on_close_job(&child);
+        #[cfg(windows)]
+        let mut child = child;
+        #[cfg(not(target_os = "windows"))]
+        let mut child = PgroupChild::new(child);
         // PID captured before we take the pipes and `wait`. On Unix it is the
         // pgid (setsid leader); on Windows it's the `taskkill /T` fallback
         // root for when the Job Object couldn't be set up.
@@ -310,12 +313,17 @@ impl Tool for BashTool {
                 read_pipe_and_stream(&mut stderr, progress_err, live_err),
             );
             let status = child.wait().await;
+            #[cfg(not(target_os = "windows"))]
+            {
+                // wait() reaped the leader — skip Drop's killpg (PID-reuse window).
+                child.terminated = true;
+            }
             (stdout_buf, stderr_buf, status)
         };
 
         tokio::select! {
             biased;
-            // Cooperative cancel: returning drops `run` → kill_on_drop SIGKILLs the child.
+            // Cooperative cancel: returning drops `run` → PgroupChild/Job reaps the tree.
             _ = ctx.cancel.cancelled() => {
                 kill_tree();
                 // The command itself is already shown in the `● Bash(…)`
@@ -329,7 +337,7 @@ impl Tool for BashTool {
                     format_captured_output(&stdout_buf, &stderr_buf, status)
                 }
                 Ok((_, _, Err(e))) => err(format!("bash: error running command: {e}")),
-                // Timed out: the timeout future drops `run` → kill_on_drop SIGKILLs the child.
+                // Timed out: the timeout future drops `run` → kill_on_drop / PgroupChild.
                 // Don't echo the command (see the cancel arm); point at the actionable
                 // knob — a larger `timeout` — the way the core bash tool does.
                 Err(_) => {

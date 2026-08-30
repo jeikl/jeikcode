@@ -850,6 +850,8 @@ pub async fn run(
         pending_session_resume: None,
         pending_session_resume_preparation: None,
         pending_session_picker: None,
+        session_catalog_loading: false,
+        local_shell_cancel: None,
         pending_rewind_catalog: None,
         pending_session_transition: None,
         pending_external_session_projection: None,

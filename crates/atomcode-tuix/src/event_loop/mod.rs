@@ -3794,6 +3794,12 @@ pub struct LoopCtx {
         std::path::PathBuf,
         Result<Vec<crate::session::SessionMeta>, String>,
     )>,
+    /// True from `/sessions` spawn until the picker (or empty/error) is installed.
+    /// Blocks streaming-footer redraw so the catalog overlay is not clobbered.
+    pub(crate) session_catalog_loading: bool,
+    /// Cancel token for an in-flight `!cmd` local shell. Wired so Idle Ctrl+C
+    /// can stop the child (phase stays Idle, so streaming Cancel alone is not enough).
+    pub(crate) local_shell_cancel: Option<tokio_util::sync::CancellationToken>,
     /// Runtime-owned Rewind points loaded after the double-Esc gesture. The
     /// main loop installs the modal because this event handler does not own
     /// `App::active_modal`.
@@ -8085,6 +8091,63 @@ fn handle_interactive_interrupt(
     }
 }
 
+/// Cancel an in-flight `!cmd` local shell if one is running. Returns true when
+/// a cancel was signalled (caller should not also treat this as quit).
+fn cancel_local_shell_if_running(ctx: &mut LoopCtx) -> bool {
+    if let Some(token) = ctx.local_shell_cancel.take() {
+        token.cancel();
+        crate::tuix_trace!("KEY", "local shell Ctrl+C/SIGINT -> cancel");
+        true
+    } else {
+        false
+    }
+}
+
+/// Cancel the bound Coding Runtime and any local `!cmd` shell.
+fn cancel_active_turn(ctx: &mut LoopCtx) -> bool {
+    let _ = cancel_local_shell_if_running(ctx);
+    if ctx.live_binding.is_some() {
+        atomcode_daemon::native_live::cancel().is_ok()
+    } else {
+        ctx.runtime
+            .dispatch(atomcode_coding::DriverCommand::Cancel)
+            .is_ok()
+    }
+}
+
+/// True when a mid-turn overlay (`/sessions` loading/picker) owns the footer —
+/// streaming spinner must not redraw over it.
+fn suppress_streaming_footer(app: &App, ctx: &LoopCtx) -> bool {
+    ctx.session_catalog_loading
+        || ctx.pending_session_picker.is_some()
+        || app
+            .active_modal
+            .as_ref()
+            .is_some_and(|m| m.captures_all_keys())
+}
+
+/// Redraw streaming chrome, or keep a capturing overlay on top.
+fn refresh_streaming_or_modal(
+    app: &mut App,
+    ctx: &LoopCtx,
+    renderer: &mut dyn Renderer,
+) {
+    if suppress_streaming_footer(app, ctx) {
+        if let Some(modal) = app.active_modal.as_ref() {
+            modal.draw(&app.buf, &app.state, ctx, renderer);
+        }
+        return;
+    }
+    draw_spinner_now(
+        &mut app.state,
+        &app.buf,
+        ctx,
+        renderer,
+        app.message_queue.len(),
+        app.menu.selected,
+    );
+}
+
 pub async fn run_loop(mut ctx: LoopCtx, renderer: &mut dyn Renderer) -> Result<ExitReason> {
     let mut app = App::new(&ctx.caps);
     apply_startup_bypass(
@@ -8509,9 +8572,26 @@ pub async fn run_loop(mut ctx: LoopCtx, renderer: &mut dyn Renderer) -> Result<E
                 handle_input(&mut app, &mut ctx, renderer, ev)?;
             }
 
-            // ── OS SIGINT while a blocking prompt is up ──
-            _ = sigint.recv(), if input_priority => {
-                handle_interactive_interrupt(&mut app, &mut ctx, renderer)?;
+            // ── OS SIGINT: interactive prompts, streaming cancel, or `!cmd` ──
+            // Keyboard path can starve under heavy tool output (Linux SSH);
+            // SIGINT is the documented fallback. Also stop a local `!cmd`
+            // whose phase stays Idle (so Streaming Cancel never runs).
+            _ = sigint.recv(), if input_priority
+                || matches!(app.state.phase, UiPhase::Streaming)
+                || ctx.local_shell_cancel.is_some() => {
+                if cancel_local_shell_if_running(&mut ctx) && !matches!(app.state.phase, UiPhase::Streaming) {
+                    // Idle `!cmd` only — do not also cancel a turn / quit.
+                } else if input_priority {
+                    handle_interactive_interrupt(&mut app, &mut ctx, renderer)?;
+                } else if matches!(app.state.phase, UiPhase::Streaming) {
+                    crate::tuix_trace!("KEY", "unix SIGINT -> Cancel (streaming)");
+                    let send_ok = cancel_active_turn(&mut ctx);
+                    if send_ok {
+                        app.interrupt_drain_pending = true;
+                    }
+                    clear_capturing_modal_on_cancel(&mut app);
+                    restore_cancelled_message_to_buf(&mut app, renderer, &ctx);
+                }
             }
 
             // ── Deferred-render trailing edge ──
@@ -8562,7 +8642,7 @@ pub async fn run_loop(mut ctx: LoopCtx, renderer: &mut dyn Renderer) -> Result<E
             // prompt) is up — the spinner repaints the same footer/input
             // region the modal draws, and would clobber the masked line.
             Some(()) = spin_rx.recv(), if matches!(app.state.phase, UiPhase::Streaming)
-                && app.active_modal.as_ref().map_or(true, |m| !m.captures_all_keys()) => {
+                && !suppress_streaming_footer(&app, &ctx) => {
                 draw_spinner_now(&mut app.state, &app.buf, &ctx, renderer, app.message_queue.len(), app.menu.selected);
             }
 
@@ -8713,7 +8793,7 @@ pub async fn run_loop(mut ctx: LoopCtx, renderer: &mut dyn Renderer) -> Result<E
                     }
                     if matches!(app.state.phase, UiPhase::Streaming)
                     {
-                        draw_spinner_now(&mut app.state, &app.buf, &ctx, renderer, app.message_queue.len(), app.menu.selected);
+                        refresh_streaming_or_modal(&mut app, &ctx, renderer);
                     }
                     if matches!(app.state.phase, UiPhase::Idle) {
                         // The end of a turn is the first safe provider reload
@@ -8896,14 +8976,18 @@ pub async fn run_loop(mut ctx: LoopCtx, renderer: &mut dyn Renderer) -> Result<E
             // 2-press confirm because if we got here, the user has no
             // working keyboard route to confirm with anyway.
             Some(()) = win_ctrl_c.recv() => {
-                if input_priority {
+                if cancel_local_shell_if_running(&mut ctx)
+                    && !matches!(app.state.phase, UiPhase::Streaming)
+                {
+                    crate::tuix_trace!("KEY", "windows ctrl_c signal -> cancel local shell");
+                } else if input_priority {
                     handle_interactive_interrupt(&mut app, &mut ctx, renderer)?;
                 } else if matches!(app.state.phase, UiPhase::Streaming) {
                     // In Streaming phase, Ctrl+C should cancel the
                     // running turn (matching keyboard-path behaviour)
                     // rather than shut down the whole application.
                     crate::tuix_trace!("KEY", "windows ctrl_c signal -> Cancel (streaming)");
-                    let send_ok = cancel_active_turn(&ctx);
+                    let send_ok = cancel_active_turn(&mut ctx);
                     if send_ok {
                         app.interrupt_drain_pending = true;
                     }
@@ -8928,7 +9012,7 @@ pub async fn run_loop(mut ctx: LoopCtx, renderer: &mut dyn Renderer) -> Result<E
             // prompt) is up — the spinner repaints the same footer/input
             // region the modal draws, and would clobber the masked line.
             Some(()) = spin_rx.recv(), if matches!(app.state.phase, UiPhase::Streaming)
-                && app.active_modal.as_ref().map_or(true, |m| !m.captures_all_keys()) => {
+                && !suppress_streaming_footer(&app, &ctx) => {
                 draw_spinner_now(&mut app.state, &app.buf, &ctx, renderer, app.message_queue.len(), app.menu.selected);
             }
 
@@ -9074,7 +9158,7 @@ pub async fn run_loop(mut ctx: LoopCtx, renderer: &mut dyn Renderer) -> Result<E
                     }
                     if matches!(app.state.phase, UiPhase::Streaming)
                     {
-                        draw_spinner_now(&mut app.state, &app.buf, &ctx, renderer, app.message_queue.len(), app.menu.selected);
+                        refresh_streaming_or_modal(&mut app, &ctx, renderer);
                     }
                     if matches!(app.state.phase, UiPhase::Idle) {
                         let config_redraw = poll_shared_state(&mut ctx, renderer);
@@ -11848,6 +11932,11 @@ fn handle_idle_key(
     code: KeyCode,
     modifiers: crossterm::event::KeyModifiers,
 ) -> Result<()> {
+    // `!cmd` keeps UiPhase::Idle while the shell runs. Ctrl+C must stop the
+    // child instead of arming the double-press quit sequence.
+    if is_ctrl_letter(code, modifiers, 'c') && cancel_local_shell_if_running(ctx) {
+        return Ok(());
+    }
     // GOAL ESCAPE HATCH (Idle). A `/goal` continuation is driven SERVER-SIDE,
     // so the TUI can legitimately sit in Idle while the agent keeps looping
     // rounds. From Idle, Esc/Ctrl+C otherwise just clear the input / arm exit —
@@ -14740,19 +14829,29 @@ fn handle_streaming_key(
                 app.buf.cursor = 0;
                 app.menu.selected = 0;
                 if readonly {
-                    // Restore the streaming footer/spinner after executing the report.
-                    // Mid-turn read-only reports (`/usage`, `/cost`, `/status`, `/diff`)
-                    // are all carried in the footer snapshot itself, below the input
-                    // box — they must not enter conversation scrollback, where live
-                    // tool output would interleave with them.
-                    draw_spinner_now(
-                        &mut app.state,
-                        &app.buf,
-                        ctx,
-                        renderer,
-                        app.message_queue.len(),
-                        app.menu.selected,
-                    );
+                    // Mid-turn `/sessions` / `/clear` own the viewport; do not
+                    // immediately repaint StreamingBox over the loading line or picker.
+                    if matches!(cmd.as_str(), "sessions" | "clear")
+                        || suppress_streaming_footer(app, ctx)
+                    {
+                        if let Some(modal) = app.active_modal.as_ref() {
+                            modal.draw(&app.buf, &app.state, ctx, renderer);
+                        }
+                    } else {
+                        // Restore the streaming footer/spinner after executing the report.
+                        // Mid-turn read-only reports (`/usage`, `/cost`, `/status`, `/diff`)
+                        // are all carried in the footer snapshot itself, below the input
+                        // box — they must not enter conversation scrollback, where live
+                        // tool output would interleave with them.
+                        draw_spinner_now(
+                            &mut app.state,
+                            &app.buf,
+                            ctx,
+                            renderer,
+                            app.message_queue.len(),
+                            app.menu.selected,
+                        );
+                    }
                 }
                 return Ok(());
             }
@@ -14944,17 +15043,6 @@ fn dismiss_orphan_capturing_modal(app: &mut App, ctx: &LoopCtx, renderer: &mut d
     {
         app.active_modal = None;
         redraw_idle_plain(&app.buf, &app.state, ctx, renderer);
-    }
-}
-
-/// Cancel the bound Coding Runtime through the hub, or the standalone runtime directly.
-fn cancel_active_turn(ctx: &LoopCtx) -> bool {
-    if ctx.live_binding.is_some() {
-        atomcode_daemon::native_live::cancel().is_ok()
-    } else {
-        ctx.runtime
-            .dispatch(atomcode_coding::DriverCommand::Cancel)
-            .is_ok()
     }
 }
 
@@ -18232,6 +18320,9 @@ fn install_pending_session_picker(app: &mut App, ctx: &mut LoopCtx, renderer: &m
         .pending_session_picker
         .take()
         .expect("pending_session_picker checked Some above");
+    // Always clear the loading flag once we consume the pending result (even if
+    // we drop it for a stale dir) so streaming footer redraw is unblocked.
+    ctx.session_catalog_loading = false;
     // Re-validate here, not just at stash time: while deferred behind a modal the
     // working dir can change (async session/dir transition), and the picker must
     // not show the previous project's sessions.
@@ -19189,6 +19280,7 @@ fn handle_runtime_event(
             output,
             failed,
         }) => {
+            ctx.local_shell_cancel = None;
             if failed {
                 renderer.render(UiLine::Error(output));
             } else {
@@ -19703,19 +19795,21 @@ fn escape_runtime_context(value: &str) -> String {
         .replace('>', "&gt;")
 }
 
-fn run_local_shell_command(command: String, ctx: &LoopCtx) {
+fn run_local_shell_command(command: String, ctx: &mut LoopCtx) {
     use atomcode_kernel::tool::Tool;
 
     let working_dir = ctx.working_dir.clone();
     let runtime = ctx.runtime.clone();
     let runtime_id = ctx.foreground_runtime_id;
     let event_tx = ctx.runtime_event_tx.clone();
+    let cancel = tokio_util::sync::CancellationToken::new();
+    ctx.local_shell_cancel = Some(cancel.clone());
     tokio::spawn(async move {
         let tool = atomcode_capabilities::tools::BashTool;
         let args = serde_json::json!({ "command": command.clone() }).to_string();
         let tool_ctx = atomcode_kernel::tool::ToolContext {
             working_dir,
-            cancel: tokio_util::sync::CancellationToken::new(),
+            cancel,
             progress: atomcode_kernel::tool::ProgressSink::noop(),
             requester: None,
         };

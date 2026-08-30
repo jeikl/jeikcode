@@ -5510,7 +5510,8 @@ pub(super) fn run_remote_command(ctx: &LoopCtx, state: &UiState, cmd: &str) -> O
 }
 
 /// Open the session picker (`/sessions`): scan disk off-thread, install modal on load.
-fn spawn_session_catalog_picker(ctx: &LoopCtx, renderer: &mut dyn Renderer) {
+fn spawn_session_catalog_picker(ctx: &mut LoopCtx, renderer: &mut dyn Renderer) {
+    ctx.session_catalog_loading = true;
     renderer.render(UiLine::CommandOutput(
         t(Msg::CmdSessionListLoading).into_owned(),
     ));

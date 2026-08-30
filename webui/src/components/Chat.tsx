@@ -490,8 +490,10 @@ interface ChatProps {
   onLanding?: (landing: boolean) => void;
   /** 侧栏「技能」菜单选中的技能：变化时把 `/name ` 插入输入框。 */
   skillInsert?: { name: string; seq: number } | null;
-  /** 打开会话侧栏（/resume 命令）。 */
+  /** 打开会话侧栏（/sessions 命令）。 */
   onOpenSidebar?: () => void;
+  /** 开始新会话（/new 命令）。 */
+  onNewSession?: () => void;
 }
 
 function formatArgs(args: unknown): string {
@@ -668,7 +670,7 @@ function detectSkillContent(text: string): string | null {
   return title || null;
 }
 
-export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionResolved, activeSession, restoring, onLiveTurnDone, onLiveRunningChange, onOptimisticSession, onOpenCwd, onCwdChanged, onLanding, skillInsert, onSessionRenamed, onOpenSidebar }: ChatProps) {
+export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionResolved, activeSession, restoring, onLiveTurnDone, onLiveRunningChange, onOptimisticSession, onOpenCwd, onCwdChanged, onLanding, skillInsert, onSessionRenamed, onOpenSidebar, onNewSession }: ChatProps) {
   const t = useT();
   const [messages, setMessages] = useState<Message[]>([]);
   const [input, setInput] = useState('');
@@ -2622,6 +2624,8 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
       },
       // openSessionSidebar: 侧栏开关状态在 App，Chat 无此 prop。
       openSessionSidebar: () => { onOpenSidebar?.(); },
+      openNewSession: () => { onNewSession?.(); },
+      clearScreen: () => { pushCommandNotice(t('cmd.clear.desc')); },
       // reloadConfig: POST /config/reload（服务端同时重挂 MCP / skills）。
       reloadConfig: async () => {
         await postConfigReload();

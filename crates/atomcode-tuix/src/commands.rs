@@ -85,8 +85,9 @@ impl CommandRegistry {
 /// the canonical name on dispatch, and renders as `canonical (alias)` — one
 /// annotated row, not two. Add a pair here to give any command an alias.
 const COMMAND_ALIASES: &[(&str, &str)] = &[
-    // `/new` is a memorable alias for `/session` (start a fresh session).
-    ("new", "session"),
+    // List/switch saved sessions (OpenCode `/sessions`; `/resume` kept for muscle memory).
+    ("resume", "sessions"),
+    ("continue", "sessions"),
     // Keep `/exit` working while presenting one canonical quit command.
     ("exit", "quit"),
     // `/modelsadd`, `/model-add`, `/models-add` alias to `/modeladd`.
@@ -142,7 +143,7 @@ const BUILTIN_COMMANDS: &[Command] = &[
     Command { name: "sync",    desc: "Attach to live webui session (/sync off to detach)", needs_args: false, hidden: false },
     Command { name: "app", desc: "Expose this session to the mobile App via relay (QR pairing; /app stop to detach)", needs_args: true, hidden: false },
     Command { name: "setup",      desc: "First run: install recommender skill + run it. Extra text forwarded as a steering hint", needs_args: true, hidden: false },
-    Command { name: "resume",  desc: "Resume a previous session", needs_args: false, hidden: false },
+    Command { name: "sessions", desc: "List and switch between sessions", needs_args: false, hidden: false },
     Command { name: "rename",  desc: "Rename current session", needs_args: true, hidden: false },
     Command { name: "logout",  desc: "Sign out of AtomGit", needs_args: false, hidden: true },
     Command { name: "whoami",  desc: "Show current logged-in user", needs_args: false, hidden: true },
@@ -155,11 +156,11 @@ const BUILTIN_COMMANDS: &[Command] = &[
     Command { name: "reload",  desc: "Reload ~/.atomcode/config.toml from disk", needs_args: false, hidden: false },
     Command { name: "cd",      desc: "Change working directory and start a new session", needs_args: false, hidden: false },
     Command { name: "init",    desc: "Analyze the project and generate AGENTS.md", needs_args: false, hidden: false },
-    Command { name: "bg",      desc: "Background sessions: /bg, /bg list, /bg <N>, /bg drop <N>", needs_args: false, hidden: false },
+    Command { name: "bg",      desc: "Background sessions: /bg, /bg list, /bg <N>, /bg drop <N>", needs_args: false, hidden: true },
     Command { name: "background", desc: "Compatibility alias: start a one-shot task in a /bg slot", needs_args: true, hidden: false },
     Command { name: "diff",    desc: "Show git diff", needs_args: false, hidden: false },
-    Command { name: "clear",   desc: "Start a new conversation (clears context + screen)", needs_args: false, hidden: false },
-    Command { name: "session", desc: "Start a new session (clears conversation)", needs_args: false, hidden: false },
+    Command { name: "clear",   desc: "Clear the terminal screen (does not start a new session)", needs_args: false, hidden: false },
+    Command { name: "new",     desc: "Start a new session (clears conversation)", needs_args: false, hidden: false },
     Command { name: "usage",   desc: "Show CodingPlan usage (tabs: current / overview / models)", needs_args: false, hidden: true },
     // `/cost` reports THIS SESSION's token cost from local accounting × the model
     // price table — works for ANY model, including self-integrated ones the
@@ -236,7 +237,10 @@ pub fn cmd_desc_i18n(name: &str) -> Option<std::borrow::Cow<'static, str>> {
     let msg = match name {
         "webui" => Msg::CmdDescWebui,
         "setup" => Msg::CmdDescSetup,
-        "resume" => Msg::CmdDescResume,
+        "new" => Msg::CmdDescNew,
+        "sessions" => Msg::CmdDescSessions,
+        "resume" => Msg::CmdDescSessions,
+        "continue" => Msg::CmdDescSessions,
         "rename" => Msg::CmdDescRename,
         "login" => Msg::CmdDescLogin,
         "logout" => Msg::CmdDescLogout,
@@ -253,7 +257,6 @@ pub fn cmd_desc_i18n(name: &str) -> Option<std::borrow::Cow<'static, str>> {
         "background" => Msg::CmdDescBackground,
         "diff" => Msg::CmdDescDiff,
         "clear" => Msg::CmdDescClear,
-        "session" => Msg::CmdDescSession,
         "cost" => Msg::CmdDescCost,
         "usage" => Msg::CmdDescUsage,
         "context" => Msg::CmdDescContext,
@@ -433,63 +436,66 @@ mod tests {
 
     #[test]
     fn canonical_name_resolves_aliases_case_insensitively() {
-        assert_eq!(canonical_command_name("new"), "session");
-        assert_eq!(canonical_command_name("NEW"), "session");
+        assert_eq!(canonical_command_name("resume"), "sessions");
+        assert_eq!(canonical_command_name("continue"), "sessions");
+        assert_eq!(canonical_command_name("clear"), "clear");
+        assert_eq!(canonical_command_name("new"), "new");
         assert_eq!(canonical_command_name("exit"), "quit");
         assert_eq!(canonical_command_name("EXIT"), "quit");
         // Non-alias names pass through unchanged.
-        assert_eq!(canonical_command_name("session"), "session");
+        assert_eq!(canonical_command_name("sessions"), "sessions");
         assert_eq!(canonical_command_name("model"), "model");
         assert_eq!(canonical_command_name("nonexistent"), "nonexistent");
     }
 
     #[test]
     fn display_name_annotates_aliased_commands_only() {
-        assert_eq!(command_display_name("session"), "session (new)");
+        assert_eq!(command_display_name("sessions"), "sessions (resume, continue)");
         assert_eq!(command_display_name("quit"), "quit (exit)");
+        assert_eq!(command_display_name("new"), "new");
+        assert_eq!(command_display_name("clear"), "clear");
         // Commands without aliases render as their bare name.
         assert_eq!(command_display_name("model"), "model");
-        assert_eq!(command_display_name("resume"), "resume");
     }
 
     #[test]
     fn find_resolves_alias_to_canonical_command() {
         let reg = CommandRegistry::builtin();
-        let via_alias = reg.find("new").expect("/new must resolve to /session");
-        assert_eq!(via_alias.name, "session");
-        // The alias inherits the canonical command's args behavior.
-        assert_eq!(
-            via_alias.needs_args,
-            reg.find("session").unwrap().needs_args
-        );
+        let via_resume = reg.find("resume").expect("/resume must resolve to /sessions");
+        assert_eq!(via_resume.name, "sessions");
 
         let via_exit = reg.find("exit").expect("/exit must resolve to /quit");
         assert_eq!(via_exit.name, "quit");
+
+        assert_eq!(reg.find("clear").unwrap().name, "clear");
+        assert_eq!(reg.find("new").unwrap().name, "new");
     }
 
     #[test]
     fn matching_prefix_finds_command_by_alias_prefix_as_single_row() {
         let reg = CommandRegistry::builtin();
-        // Typing the alias prefix surfaces the canonical command...
         for prefix in ["n", "ne", "new"] {
             let hits = reg.matching_prefix(prefix);
-            let sessions: Vec<_> = hits.iter().filter(|c| c.name == "session").collect();
+            let news: Vec<_> = hits.iter().filter(|c| c.name == "new").collect();
             assert_eq!(
-                sessions.len(),
+                news.len(),
                 1,
-                "prefix {prefix:?} must surface `session` exactly once (no duplicate row)"
+                "prefix {prefix:?} must surface `new` exactly once (no duplicate row)"
             );
         }
-        // ...and typing the canonical prefix still works.
+        for prefix in ["cl", "cle", "clear"] {
+            let hits = reg.matching_prefix(prefix);
+            let clears: Vec<_> = hits.iter().filter(|c| c.name == "clear").collect();
+            assert_eq!(
+                clears.len(),
+                1,
+                "prefix {prefix:?} must surface `clear` exactly once"
+            );
+        }
         assert!(reg
             .matching_prefix("sess")
             .iter()
-            .any(|c| c.name == "session"));
-        // A prefix matching neither name nor alias yields nothing for session.
-        assert!(!reg
-            .matching_prefix("zzz")
-            .iter()
-            .any(|c| c.name == "session"));
+            .any(|c| c.name == "sessions"));
 
         for prefix in ["q", "quit", "e", "ex", "exit"] {
             let hits = reg.matching_prefix(prefix);

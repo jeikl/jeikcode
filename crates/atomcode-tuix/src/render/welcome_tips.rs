@@ -25,7 +25,7 @@ pub const POOL: &[Tip] = &[
         desc: Msg::WelcomeTipModel,
     },
     Tip {
-        cmd: "/resume",
+        cmd: "/sessions",
         desc: Msg::WelcomeTipResume,
     },
     Tip {
@@ -53,7 +53,7 @@ pub const POOL: &[Tip] = &[
         desc: Msg::WelcomeTipPlan,
     },
     Tip {
-        cmd: "/session",
+        cmd: "/new",
         desc: Msg::WelcomeTipSession,
     },
     Tip {

@@ -47,6 +47,7 @@ pub mod plan_mode;
 pub mod plugin_hooks;
 pub mod provider_factory;
 pub mod runtime;
+pub mod session_runtime_registry;
 pub mod session_title;
 pub mod telemetry;
 pub mod vision;
@@ -97,6 +98,9 @@ pub use runtime::{
     RuntimeRequest, RuntimeSessionInfo, RuntimeSnapshotError, RuntimeStartError, RuntimeStatus,
     RuntimeTurnStats, RuntimeUnavailable, SequencedRuntimeEvent, SessionChanged, SubmitReceipt,
     TurnCompletion, UndoResult, UserInput, VisionNotice,
+};
+pub use session_runtime_registry::{
+    OpenOutcome, RuntimeActivity, SessionKey, SessionRuntimeEntry, SessionRuntimeRegistry,
 };
 pub use telemetry::{TelemetryHook, ToolTelemetryMiddleware};
 pub use todo::TodoHook;

@@ -13324,6 +13324,17 @@ mod streaming_slash_tests {
     }
 
     #[test]
+    fn session_commands_run_mid_stream() {
+        for cmd in ["new", "sessions", "clear"] {
+            assert_eq!(
+                exec(&format!("/{cmd}")),
+                Some((cmd.to_string(), String::new())),
+                "cmd={cmd}"
+            );
+        }
+    }
+
+    #[test]
     fn bg_no_arg_runs_but_setting_a_goal_does_not() {
         assert_eq!(exec("/bg"), Some(("bg".to_string(), String::new())));
         // Backgrounding a NEW message and SETTING a new goal must NOT run mid-stream.
@@ -14226,6 +14237,13 @@ fn should_stage_interrupt(send_ok: bool, bare_esc: bool, has_pending: bool) -> b
 /// whitelisted — only the halt sub-commands.
 fn streaming_executable_slash(line: &str) -> Option<(String, String)> {
     let (cmd, arg) = parse_slash_line(line)?;
+    if matches!(
+        cmd.to_ascii_lowercase().as_str(),
+        "new" | "sessions" | "clear"
+    ) && arg.trim().is_empty()
+    {
+        return Some((cmd.to_ascii_lowercase(), String::new()));
+    }
     if cmd.eq_ignore_ascii_case("bg") && arg.trim().is_empty() {
         return Some(("bg".to_string(), String::new()));
     }
@@ -14697,7 +14715,7 @@ fn handle_streaming_key(
                 // type-ahead queue, in-flight tools, thinking/reasoning buffers). Framed
                 // as "read-only is the safe default" so a future allowlisted report can't
                 // silently corrupt a running turn by being forgotten in this list.
-                let readonly = !matches!(cmd.as_str(), "bg" | "quit" | "exit" | "goal" | "loop");
+                let readonly = !matches!(cmd.as_str(), "bg" | "quit" | "exit" | "goal" | "loop" | "new");
                 if matches!(cmd.as_str(), "quit" | "exit") {
                     cancel_active_turn(ctx);
                     clear_capturing_modal_on_cancel(app);
@@ -18148,6 +18166,57 @@ fn retry_pending_provider_projection(
 /// Install a `/resume` picker once its catalog has loaded off the UI thread.
 /// Runs in the main loop where `app.active_modal` is reachable (the event handler
 /// that received the result cannot touch it). No-op unless a result is pending.
+fn session_picker_running_map(
+    ctx: &LoopCtx,
+    state: &crate::state::UiState,
+) -> std::collections::HashMap<String, crate::event_loop::bg_runtime::RuntimeState> {
+    use crate::event_loop::bg_runtime::RuntimeState;
+    use crate::state::UiPhase;
+    let mut running: std::collections::HashMap<String, RuntimeState> = ctx
+        .bg_manager
+        .backgrounds()
+        .running_sessions()
+        .into_iter()
+        .collect();
+    if matches!(
+        state.phase,
+        UiPhase::Streaming | UiPhase::Approval | UiPhase::UserInput | UiPhase::RoundCap
+    ) {
+        running.insert(ctx.current_session.id.clone(), RuntimeState::Running);
+    }
+    running
+}
+
+fn merge_background_only_sessions(
+    sessions: &mut Vec<crate::session::SessionMeta>,
+    ctx: &LoopCtx,
+) {
+    let bucket = ctx
+        .current_session_project_bucket
+        .clone()
+        .unwrap_or_else(|| {
+            atomcode_capabilities::session::SessionManager::project_hash(&ctx.working_dir)
+        });
+    let known: std::collections::HashSet<String> =
+        sessions.iter().map(|session| session.id.clone()).collect();
+    for slot in ctx.bg_manager.backgrounds().iter() {
+        if slot.working_dir != ctx.working_dir || known.contains(&slot.session.id) {
+            continue;
+        }
+        let session = &slot.session;
+        sessions.push(crate::session::SessionMeta {
+            id: session.id.clone(),
+            name: session.name.clone(),
+            project_bucket: bucket.clone(),
+            working_dir: slot.working_dir.clone(),
+            created_at: session.created_at,
+            updated_at: session.updated_at,
+            message_count: session.messages.len(),
+            file_size: 0,
+        });
+    }
+}
+
 fn install_pending_session_picker(app: &mut App, ctx: &mut LoopCtx, renderer: &mut dyn Renderer) {
     if ctx.pending_session_picker.is_none() {
         return;
@@ -18177,8 +18246,12 @@ fn install_pending_session_picker(app: &mut App, ctx: &mut LoopCtx, renderer: &m
             renderer.flush();
         }
         Ok(sessions) => {
-            let picker: Box<dyn crate::modals::Modal> =
-                Box::new(crate::modals::SessionPicker::open(sessions));
+            let mut sessions = sessions;
+            merge_background_only_sessions(&mut sessions, ctx);
+            let running = session_picker_running_map(ctx, &app.state);
+            let picker: Box<dyn crate::modals::Modal> = Box::new(
+                crate::modals::SessionPicker::open_with_running(sessions, running),
+            );
             picker.draw(&app.buf, &app.state, ctx, renderer);
             app.active_modal = Some(picker);
         }
@@ -19371,6 +19444,7 @@ fn retry_pending_session_projections(
         });
         ctx.pending_session_resume = pending;
         result?;
+        commands::sync_session_runtime_registry(ctx, state);
     }
 
     if ctx

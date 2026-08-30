@@ -16,6 +16,7 @@
 use crate::session::{Session, SessionMeta, TurnStat};
 use anyhow::Result;
 use crossterm::event::{KeyCode, KeyModifiers};
+use std::collections::HashMap;
 
 use super::{Modal, ModalAction};
 use crate::event_loop::{
@@ -49,10 +50,19 @@ pub struct SessionPicker {
     pub confirm_delete: Option<usize>,
     /// Status message shown in the footer (overwrites previous status).
     pub delete_status: Option<String>,
+    /// Live runners keyed by session id (foreground + background slots).
+    pub running: HashMap<String, crate::event_loop::bg_runtime::RuntimeState>,
 }
 
 impl SessionPicker {
     pub fn open(sessions: Vec<SessionMeta>) -> Self {
+        Self::open_with_running(sessions, HashMap::new())
+    }
+
+    pub fn open_with_running(
+        sessions: Vec<SessionMeta>,
+        running: HashMap<String, crate::event_loop::bg_runtime::RuntimeState>,
+    ) -> Self {
         let filtered: Vec<usize> = (0..sessions.len()).collect();
         Self {
             sessions,
@@ -62,6 +72,7 @@ impl SessionPicker {
             search_focused: false,
             confirm_delete: None,
             delete_status: None,
+            running,
         }
     }
 
@@ -318,6 +329,22 @@ impl Modal for SessionPicker {
                     return Ok(ModalAction::Close);
                 }
 
+                if ctx.bg_manager.slot_for_session_id(&selected.id).is_some() {
+                    match crate::event_loop::commands::attach_background_session_by_id(
+                        ctx,
+                        state,
+                        renderer,
+                        &selected.id,
+                    ) {
+                        Ok(()) => return Ok(ModalAction::Close),
+                        Err(error) => {
+                            renderer.render(UiLine::Error(error));
+                            renderer.flush();
+                            return Ok(ModalAction::Close);
+                        }
+                    }
+                }
+
                 let pending = crate::event_loop::PendingSessionResumePreparation {
                     project_bucket: selected.project_bucket.clone(),
                     session_id: selected.id.clone(),
@@ -528,6 +555,10 @@ fn build_menu_payload(
         {
             metadata.push_str(" · ");
             metadata.push_str(&crate::i18n::t(crate::i18n::Msg::DirCurrent));
+        }
+        if let Some(state) = p.running.get(&s.id) {
+            metadata.push_str(" · ");
+            metadata.push_str(&state.localised());
         }
         items.push((s.name.clone(), metadata));
     }

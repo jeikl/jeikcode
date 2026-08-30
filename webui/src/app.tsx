@@ -9,7 +9,7 @@ import { RenameDialog, DeleteDialog } from './components/SessionDialogs';
 import { CwdPicker } from './components/CwdPicker';
 import { PermissionCard } from './components/PermissionCard';
 import { resolvePendingAfterDecision } from './lib/pendingPermission';
-import { getProject, getConfig, changeDir, resolveSession, createSession, getSession, SessionMetaWithProject } from './api';
+import { getProject, getConfig, changeDir, resolveSession, createSession, getSession, postLiveSwitchSession, SessionMetaWithProject } from './api';
 import { useT, SettingsSection } from './settings';
 import { sessionMessagesToMarkdownLines } from './lib/historyMessages';
 
@@ -48,7 +48,7 @@ export function App() {
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [sessionListVersion, setSessionListVersion] = useState(0);
-  const [liveRunningId, setLiveRunningId] = useState<string | null>(null);
+  const [liveRunningIds, setLiveRunningIds] = useState<Set<string>>(() => new Set());
   const [headerMenuOpen, setHeaderMenuOpen] = useState(false);
   // 表头会话菜单改用 fixed 定位，避免被祖先 overflow/层叠裁剪；记录锚点坐标。
   const [headerMenuPos, setHeaderMenuPos] = useState<{ top: number; left: number } | null>(null);
@@ -261,16 +261,42 @@ export function App() {
     openNewSession(cwd || undefined);
   }
 
-  function handleSelectSession(session: SessionMetaWithProject) {
+  function isSyncMode(): boolean {
+    try {
+      return new URLSearchParams(location.search).get('sync') === '1';
+    } catch {
+      return false;
+    }
+  }
+
+  function applySessionSelection(session: SessionMetaWithProject) {
     setOptimisticSession(null);
     setSessionId(session.id);
     setActiveSession(session);
     if (session.working_dir) {
       setCwd(session.working_dir);
     }
-    // Scope the sidebar to the picked session's physical project bucket.
     if (session.project_hash) setProjectHash(session.project_hash);
     setSidebarOpen(false);
+  }
+
+  function handleSelectSession(session: SessionMetaWithProject) {
+    // Sync/live: tell the native runtime to switch view binding + replay snapshot.
+    if (isSyncMode()) {
+      postLiveSwitchSession(session.id)
+        .then((r) => {
+          if (!r.ok) {
+            console.warn('[switchSession] live switch failed:', r.error);
+          }
+          applySessionSelection(session);
+        })
+        .catch((err) => {
+          console.warn('[switchSession]', err);
+          applySessionSelection(session);
+        });
+      return;
+    }
+    applySessionSelection(session);
   }
 
   // 切换工作目录：侧栏按新目录过滤会话，并在该目录下新建一个会话（落地、侧栏可见）。
@@ -363,7 +389,7 @@ export function App() {
         onPickSkill={(name) => setSkillInsert({ name, seq: Date.now() })}
         onOpenCwd={() => setShowCwd(true)}
         onSwitchProject={handlePickCwd}
-        extraRunningIds={liveRunningId ? [liveRunningId] : []}
+        extraRunningIds={Array.from(liveRunningIds)}
       />
       <div
         class={'sidebar-backdrop' + (sidebarOpen ? ' show' : '')}
@@ -399,7 +425,7 @@ export function App() {
               }}
             >
               <span class="session-title-text">{activeSession.name}</span>
-              {liveRunningId === activeSession.id && (
+              {liveRunningIds.has(activeSession.id) && (
                 <span
                   class="session-item-running session-header-running"
                   title={t('sidebar.running')}
@@ -472,7 +498,13 @@ export function App() {
             restoring={restoring}
             onLiveTurnDone={() => setSessionListVersion((v) => v + 1)}
             onLiveRunningChange={(id, running) => {
-              setLiveRunningId(running && id ? id : null);
+              if (!id) return;
+              setLiveRunningIds((prev) => {
+                const next = new Set(prev);
+                if (running) next.add(id);
+                else next.delete(id);
+                return next;
+              });
             }}
             onOptimisticSession={handleOptimisticSession}
             onOpenCwd={() => setShowCwd(true)}
@@ -481,6 +513,7 @@ export function App() {
             skillInsert={skillInsert}
             onSessionRenamed={(name) => setActiveSession((prev) => prev ? { ...prev, name } : prev)}
             onOpenSidebar={() => setSidebarOpen(true)}
+            onNewSession={handleNewSession}
           />
         </div>
       </div>

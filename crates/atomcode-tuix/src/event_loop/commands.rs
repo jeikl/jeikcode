@@ -17,7 +17,7 @@
 //   3. Any long handler factored to a private helper in this file
 //
 // Modals open by pushing `Some(Box::new(...))` into `active_modal` — the
-// handler arms for `/model`, `/resume`, `/provider` show the pattern.
+// handler arms for `/model`, `/sessions`, `/provider` show the pattern.
 
 use std::path::{Path, PathBuf};
 
@@ -250,6 +250,7 @@ pub(crate) fn park_foreground_to_background(
     state.active_todos = None;
     crate::event_loop::sync_todo_titles(state);
     state.approval_panel = None;
+    sync_session_runtime_registry(ctx, state);
     Ok(())
 }
 
@@ -280,6 +281,121 @@ fn schedule_resumed_runtime_replay(
     events: Vec<bg_runtime::RuntimeEventPayload>,
 ) {
     replay_queue.extend(events);
+}
+
+fn background_slot_running(state: bg_runtime::RuntimeState) -> bool {
+    matches!(state, bg_runtime::RuntimeState::Running)
+}
+
+/// Mirror TUI foreground/background slots into the L2 session registry.
+pub(crate) fn sync_session_runtime_registry(ctx: &LoopCtx, state: &UiState) {
+    let foreground_running = matches!(
+        state.phase,
+        crate::state::UiPhase::Streaming
+            | crate::state::UiPhase::Approval
+            | crate::state::UiPhase::UserInput
+            | crate::state::UiPhase::RoundCap
+    );
+    let foreground_id = ctx.current_session.id.clone();
+    let foreground_dir = ctx.working_dir.clone();
+    let backgrounds: Vec<(String, std::path::PathBuf, bool)> = ctx
+        .bg_manager
+        .backgrounds()
+        .iter()
+        .map(|slot| {
+            (
+                slot.session.id.clone(),
+                slot.working_dir.clone(),
+                background_slot_running(slot.state),
+            )
+        })
+        .collect();
+    tokio::spawn(async move {
+        atomcode_coding::session_runtime_registry::sync_from_tui_slots(
+            foreground_id,
+            foreground_dir,
+            foreground_running,
+            &backgrounds,
+        )
+        .await;
+    });
+}
+
+fn render_bg_resume_error(renderer: &mut dyn Renderer, error: bg_runtime::BgError) {
+    let message = match error {
+        bg_runtime::BgError::InvalidSlot { slot, len } => {
+            t(Msg::BgInvalidSlot {
+                slot,
+                available: len,
+            })
+            .into_owned()
+        }
+        bg_runtime::BgError::SlotLimit { max } => t(Msg::BgSlotLimitReached { max }).into_owned(),
+        bg_runtime::BgError::NoRuntimeClient { .. } => t(Msg::BgNoRuntimeClient).into_owned(),
+        bg_runtime::BgError::SessionProjectionUnavailable { error, .. } => {
+            format!("background session could not be loaded: {error}")
+        }
+        bg_runtime::BgError::SessionNotInBackground { session_id } => {
+            format!("session {session_id} is not running in the background")
+        }
+    };
+    renderer.render(UiLine::Error(message));
+    renderer.flush();
+}
+
+pub(crate) fn apply_resume_outcome(
+    ctx: &mut LoopCtx,
+    state: &mut UiState,
+    renderer: &mut dyn Renderer,
+    outcome: bg_runtime::ResumeOutcome,
+) {
+    stop_active_loop(state, ctx);
+    super::commit_working_dir_projection(ctx, outcome.resumed_working_dir.clone());
+    let endpoint = outcome.resumed_endpoint;
+    ctx.runtime = endpoint.native;
+    ctx.foreground_runtime_id = outcome.resumed_runtime_id;
+    ctx.current_session = outcome.resumed_session;
+    bind_telemetry_to_session(ctx, &ctx.current_session);
+    apply_resumed_runtime_state(state, outcome.resumed_state);
+    crate::modals::session_picker::replay_session(renderer, state, &ctx.current_session, true);
+    schedule_resumed_runtime_replay(&mut ctx.foreground_replay_events, outcome.replay_events);
+    let short_id = ctx.current_session.short_id().to_string();
+    renderer.render(UiLine::CommandOutput(
+        t(Msg::SessionSwitched { short_id: &short_id }).into_owned(),
+    ));
+    renderer.flush();
+    sync_session_runtime_registry(ctx, state);
+}
+
+/// Attach a live background runner by session id (`/sessions` picker path).
+pub(crate) fn attach_background_session_by_id(
+    ctx: &mut LoopCtx,
+    state: &mut UiState,
+    renderer: &mut dyn Renderer,
+    session_id: &str,
+) -> Result<(), String> {
+    if ctx.current_session.id == session_id {
+        crate::modals::session_picker::replay_session(renderer, state, &ctx.current_session, true);
+        return Ok(());
+    }
+    if let Err(error) = ensure_bg_foreground_switch_allowed(
+        super::provider_transition_pending(ctx),
+        ctx.pending_runtime_request_id.is_some(),
+    ) {
+        return Err(error.into());
+    }
+    sync_bg_foreground(ctx);
+    let outcome = ctx
+        .bg_manager
+        .resume_session_by_id(session_id, foreground_state_from_ui(state))
+        .map_err(|error| match error {
+            bg_runtime::BgError::SessionNotInBackground { session_id } => {
+                format!("session {session_id} is not running in the background")
+            }
+            other => format!("{other:?}"),
+        })?;
+    apply_resume_outcome(ctx, state, renderer, outcome);
+    Ok(())
 }
 
 fn foreground_turn_replay_events(state: &UiState) -> Vec<bg_runtime::RuntimeEventPayload> {
@@ -1804,18 +1920,16 @@ fn execute_slash_command_impl(
             renderer.flush();
         }
         "clear" => {
-            // `/clear` starts a fresh conversation (matches Claude Code and the
-            // common expectation): it was previously a SCREEN-ONLY wipe, so the
-            // engine kept the full history and the model still "remembered"
-            // everything after a clear. Delegate to the same reset `/session`
-            // uses — it sends ClearConversation to the engine AND wipes the
-            // screen + re-renders the welcome banner.
+            clear_terminal_screen(state, ctx, renderer);
+        }
+        "new" => {
             reset_to_new_session(ctx, state, renderer);
         }
-        "session" => {
-            // Start fresh in the current directory. Ports `/session` from the
-            // legacy TUI. Shared with the webui-driven project switch via
-            // `reset_to_new_session`.
+        "sessions" => {
+            spawn_session_catalog_picker(ctx, renderer);
+        }
+        // Legacy `/session` (start fresh) — redirect users to `/new`.
+        "session" if arg.trim().is_empty() => {
             reset_to_new_session(ctx, state, renderer);
         }
         "model" | "models" => {
@@ -1845,47 +1959,6 @@ fn execute_slash_command_impl(
                     }
                 }
             }
-        }
-        "resume" => {
-            // The catalog scan reads/parses every session file, which froze the UI
-            // when done inline (thousands of files across projects). Offload it to a
-            // blocking thread and install the picker via an event when it lands —
-            // mirroring the async session-resume path. `install_pending_session_picker`
-            // in the main loop consumes the result.
-            renderer.render(UiLine::CommandOutput(
-                t(Msg::CmdSessionListLoading).into_owned(),
-            ));
-            renderer.flush();
-            let working_dir = ctx.working_dir.clone();
-            let event_working_dir = working_dir.clone();
-            let event_tx = ctx.runtime_event_tx.clone();
-            let runtime_id = ctx.foreground_runtime_id;
-            tokio::spawn(async move {
-                let scanned = tokio::task::spawn_blocking(move || {
-                    atomcode_daemon::legacy_convert::catalog_for_project(&working_dir)
-                        .map(|all| {
-                            all.into_iter()
-                                .filter(|entry| entry.message_count > 0)
-                                .map(crate::session::SessionMeta::from)
-                                .collect::<Vec<_>>()
-                        })
-                        .map_err(|e| e.to_string())
-                })
-                .await;
-                let result = match scanned {
-                    Ok(inner) => inner,
-                    Err(join) => Err(join.to_string()),
-                };
-                let _ = event_tx.send(crate::event_loop::bg_runtime::RuntimeEvent {
-                    runtime_id,
-                    event: crate::event_loop::bg_runtime::RuntimeEventPayload::Driver(
-                        crate::event_loop::bg_runtime::DriverEvent::SessionCatalogLoaded {
-                            working_dir: event_working_dir,
-                            result,
-                        },
-                    ),
-                });
-            });
         }
         "rename" => {
             // Rename targets `ctx.current_session` (the in-flight conversation),
@@ -2629,13 +2702,10 @@ fn execute_slash_command_impl(
         }
         "bg" => {
             match bg_runtime::parse_bg_command(arg) {
-                bg_runtime::BgCommand::Help => {
-                    renderer.render(UiLine::CommandOutput(bg_runtime::render_bg_help()));
-                }
-                bg_runtime::BgCommand::List => {
-                    renderer.render(UiLine::CommandOutput(bg_runtime::render_bg_list(
-                        ctx.bg_manager.backgrounds(),
-                    )));
+                bg_runtime::BgCommand::Help | bg_runtime::BgCommand::List => {
+                    renderer.render(UiLine::CommandOutput(
+                        t(Msg::BgUseSessionsInstead).into_owned(),
+                    ));
                 }
                 bg_runtime::BgCommand::BackgroundCurrent => {
                     if let Err(error) = ensure_bg_foreground_switch_allowed(
@@ -2682,7 +2752,8 @@ fn execute_slash_command_impl(
                         Err(bg_runtime::BgError::InvalidSlot { .. }) => unreachable!(),
                         Err(
                             bg_runtime::BgError::NoRuntimeClient { .. }
-                            | bg_runtime::BgError::SessionProjectionUnavailable { .. },
+                            | bg_runtime::BgError::SessionProjectionUnavailable { .. }
+                            | bg_runtime::BgError::SessionNotInBackground { .. },
                         ) => unreachable!("background_current cannot return a resume error"),
                     };
                     ctx.runtime = endpoint.native;
@@ -2730,83 +2801,29 @@ fn execute_slash_command_impl(
                         return Ok(());
                     }
                     sync_bg_foreground(ctx);
-                    let outcome = match ctx
+                    let session_id = ctx
                         .bg_manager
-                        .resume_slot(slot, foreground_state_from_ui(state))
-                    {
-                        Ok(outcome) => outcome,
-                        Err(bg_runtime::BgError::InvalidSlot { slot, len }) => {
-                            renderer.render(UiLine::Error(
-                                t(Msg::BgInvalidSlot {
-                                    slot,
-                                    available: len,
-                                })
-                                .into_owned(),
-                            ));
-                            renderer.flush();
-                            return Ok(());
+                        .backgrounds()
+                        .iter()
+                        .nth(slot.saturating_sub(1))
+                        .map(|slot| slot.session.id.clone());
+                    if let Some(session_id) = session_id {
+                        match attach_background_session_by_id(ctx, state, renderer, &session_id) {
+                            Ok(()) => {}
+                            Err(error) => {
+                                renderer.render(UiLine::Error(error));
+                                renderer.flush();
+                            }
                         }
-                        Err(bg_runtime::BgError::SlotLimit { max }) => {
-                            renderer.render(UiLine::Error(
-                                t(Msg::BgSlotLimitReached { max }).into_owned(),
-                            ));
-                            renderer.flush();
-                            return Ok(());
-                        }
-                        Err(bg_runtime::BgError::NoRuntimeClient { .. }) => {
-                            renderer.render(UiLine::Error(t(Msg::BgNoRuntimeClient).into_owned()));
-                            renderer.flush();
-                            return Ok(());
-                        }
-                        Err(bg_runtime::BgError::SessionProjectionUnavailable {
-                            error, ..
-                        }) => {
-                            renderer.render(UiLine::Error(format!(
-                                "background session could not be loaded: {error}"
-                            )));
-                            renderer.flush();
-                            return Ok(());
-                        }
-                    };
-                    let endpoint = outcome.resumed_endpoint;
-
-                    // Switching sessions: stop any active /loop so its TUI-side interval
-                    // controller can't keep firing the old payload into the newly-resumed
-                    // session (and clear the stale footer). ClearLoop reaches the outgoing
-                    // agent before the swap below.
-                    stop_active_loop(state, ctx);
-                    super::commit_working_dir_projection(ctx, outcome.resumed_working_dir.clone());
-                    ctx.runtime = endpoint.native;
-                    ctx.foreground_runtime_id = outcome.resumed_runtime_id;
-                    ctx.current_session = outcome.resumed_session;
-                    bind_telemetry_to_session(ctx, &ctx.current_session);
-                    apply_resumed_runtime_state(state, outcome.resumed_state);
-                    crate::modals::session_picker::replay_session(
-                        renderer,
-                        state,
-                        &ctx.current_session,
-                        true,
-                    );
-                    schedule_resumed_runtime_replay(
-                        &mut ctx.foreground_replay_events,
-                        outcome.replay_events,
-                    );
-
-                    let short_id = ctx.current_session.short_id().to_string();
-                    let mut msg = t(Msg::BgResumed {
-                        slot,
-                        short_id: &short_id,
-                    })
-                    .into_owned();
-                    if let Some(previous_slot) = outcome.previous_foreground_slot {
-                        msg.push_str(
-                            &t(Msg::BgPreviousForegroundMoved {
-                                slot: previous_slot,
-                            })
-                            .into_owned(),
+                    } else {
+                        render_bg_resume_error(
+                            renderer,
+                            bg_runtime::BgError::InvalidSlot {
+                                slot,
+                                len: ctx.bg_manager.backgrounds().len(),
+                            },
                         );
                     }
-                    renderer.render(UiLine::CommandOutput(msg));
                 }
                 bg_runtime::BgCommand::Drop(slot) => {
                     let dropped = match ctx.bg_manager.drop_slot(slot) {
@@ -2825,7 +2842,8 @@ fn execute_slash_command_impl(
                         Err(bg_runtime::BgError::SlotLimit { .. }) => unreachable!(),
                         Err(
                             bg_runtime::BgError::NoRuntimeClient { .. }
-                            | bg_runtime::BgError::SessionProjectionUnavailable { .. },
+                            | bg_runtime::BgError::SessionProjectionUnavailable { .. }
+                            | bg_runtime::BgError::SessionNotInBackground { .. },
                         ) => unreachable!("drop_slot cannot return a resume error"),
                     };
                     if matches!(dropped.state, bg_runtime::RuntimeState::Running) {
@@ -2889,7 +2907,8 @@ fn execute_slash_command_impl(
                 Err(bg_runtime::BgError::InvalidSlot { .. }) => unreachable!(),
                 Err(
                     bg_runtime::BgError::NoRuntimeClient { .. }
-                    | bg_runtime::BgError::SessionProjectionUnavailable { .. },
+                    | bg_runtime::BgError::SessionProjectionUnavailable { .. }
+                    | bg_runtime::BgError::SessionNotInBackground { .. },
                 ) => unreachable!("push_background_runtime cannot return a resume error"),
             };
             let submit_result =
@@ -5490,6 +5509,83 @@ pub(super) fn run_remote_command(ctx: &LoopCtx, state: &UiState, cmd: &str) -> O
     }
 }
 
+/// Open the session picker (`/sessions`): scan disk off-thread, install modal on load.
+fn spawn_session_catalog_picker(ctx: &LoopCtx, renderer: &mut dyn Renderer) {
+    renderer.render(UiLine::CommandOutput(
+        t(Msg::CmdSessionListLoading).into_owned(),
+    ));
+    renderer.flush();
+    let working_dir = ctx.working_dir.clone();
+    let event_working_dir = working_dir.clone();
+    let event_tx = ctx.runtime_event_tx.clone();
+    let runtime_id = ctx.foreground_runtime_id;
+    tokio::spawn(async move {
+        let scanned = tokio::task::spawn_blocking(move || {
+            atomcode_daemon::legacy_convert::catalog_for_project(&working_dir)
+                .map(|all| {
+                    all.into_iter()
+                        .filter(|entry| entry.message_count > 0)
+                        .map(crate::session::SessionMeta::from)
+                        .collect::<Vec<_>>()
+                })
+                .map_err(|e| e.to_string())
+        })
+        .await;
+        let result = match scanned {
+            Ok(inner) => inner,
+            Err(join) => Err(join.to_string()),
+        };
+        let _ = event_tx.send(crate::event_loop::bg_runtime::RuntimeEvent {
+            runtime_id,
+            event: crate::event_loop::bg_runtime::RuntimeEventPayload::Driver(
+                crate::event_loop::bg_runtime::DriverEvent::SessionCatalogLoaded {
+                    working_dir: event_working_dir,
+                    result,
+                },
+            ),
+        });
+    });
+}
+
+/// Wipe the terminal viewport and re-render the welcome banner. Does not change
+/// the active session or interrupt a running turn.
+fn clear_terminal_screen(
+    state: &UiState,
+    ctx: &LoopCtx,
+    renderer: &mut dyn Renderer,
+) {
+    renderer.begin_sync();
+    renderer.clear_screen();
+    renderer.reset();
+    let dir_display = crate::platform::collapse_home(&ctx.working_dir.to_string_lossy());
+    renderer.render(UiLine::Welcome {
+        model: ctx.model_name.clone(),
+        working_dir: dir_display,
+    });
+    let _ = state; // session + phase unchanged; spinner redraw happens on next tick if streaming
+    renderer.flush();
+    renderer.end_sync();
+}
+
+/// Park the foreground runtime when a session transition must proceed while a
+/// turn is still live on the current runtime (OpenCode-style view switch).
+fn park_foreground_if_busy_turn(
+    ctx: &mut LoopCtx,
+    state: &mut UiState,
+) -> Result<(), String> {
+    if matches!(
+        state.phase,
+        crate::state::UiPhase::Streaming
+            | crate::state::UiPhase::Approval
+            | crate::state::UiPhase::UserInput
+            | crate::state::UiPhase::RoundCap
+    ) {
+        park_foreground_to_background(ctx, state)
+    } else {
+        Ok(())
+    }
+}
+
 /// Ask CodingRuntime to atomically replace the current session. The runtime
 /// terminal owns the UI/session projection commit; this function deliberately
 /// does not clear the current screen or bind a locally invented session.
@@ -5514,9 +5610,13 @@ pub(crate) fn reset_to_new_session(
         renderer.flush();
         return;
     }
-    // /clear and /session must also halt any active /loop (both self-paced
-    // runtime and fixed-interval TUI controller).
+    // /new must also halt any active /loop (both self-paced runtime and fixed-interval TUI controller).
     stop_active_loop(state, ctx);
+    if let Err(error) = park_foreground_if_busy_turn(ctx, state) {
+        renderer.render(UiLine::Error(error));
+        renderer.flush();
+        return;
+    }
     match ctx
         .runtime
         .fresh_session(ctx.foreground_runtime_id, ctx.runtime_event_tx.clone())

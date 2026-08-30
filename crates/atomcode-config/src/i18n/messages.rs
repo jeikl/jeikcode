@@ -1178,6 +1178,14 @@ pub enum Msg<'a> {
     // ── Command descriptions (for help_text dynamic lookup) ──
     CmdDescWebui,
     CmdDescSetup,
+    CmdDescNew,
+    CmdDescSessions,
+    /// OpenCode-style session switch confirmation (no slot numbers).
+    SessionSwitched {
+        short_id: &'a str,
+    },
+    /// Shown when user invokes hidden `/bg` — redirect to `/sessions`.
+    BgUseSessionsInstead,
     CmdDescResume,
     CmdDescRename,
     CmdDescLogin,

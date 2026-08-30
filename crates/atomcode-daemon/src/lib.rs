@@ -5818,13 +5818,68 @@ async fn stop_chat(
 
 /// GET /chat/active - Return list of session IDs currently generating
 async fn active_chat_sessions(State(state): State<AppState>) -> impl IntoResponse {
-    let mut ids = state.active_chats.active_session_ids().await;
+    use atomcode_coding::session_runtime_registry::{RuntimeActivity, SessionRuntimeRegistry};
+    use std::collections::HashSet;
+
+    let mut ids: HashSet<String> = state
+        .active_chats
+        .active_session_ids()
+        .await
+        .into_iter()
+        .collect();
     if let Some(live_id) = crate::native_live::live_running_session_id() {
-        if !ids.iter().any(|id| id == &live_id) {
-            ids.push(live_id);
+        ids.insert(live_id);
+    }
+    for entry in SessionRuntimeRegistry::global().list_all().await {
+        if matches!(
+            entry.activity,
+            RuntimeActivity::Running
+                | RuntimeActivity::WaitingApproval
+                | RuntimeActivity::WaitingUserInput
+                | RuntimeActivity::Starting
+        ) {
+            ids.insert(entry.session_id);
         }
     }
-    Json(ids)
+    Json(ids.into_iter().collect::<Vec<_>>())
+}
+
+#[derive(serde::Serialize)]
+struct RuntimeSessionRow {
+    session_id: String,
+    working_dir: String,
+    activity: String,
+}
+
+/// GET /runtime/sessions — live runners with activity (OpenCode-style registry view).
+async fn runtime_sessions() -> impl IntoResponse {
+    use atomcode_coding::session_runtime_registry::{RuntimeActivity, SessionRuntimeRegistry};
+
+    fn activity_label(activity: RuntimeActivity) -> &'static str {
+        match activity {
+            RuntimeActivity::Starting => "starting",
+            RuntimeActivity::Ready => "ready",
+            RuntimeActivity::Running => "running",
+            RuntimeActivity::WaitingApproval => "waiting_approval",
+            RuntimeActivity::WaitingUserInput => "waiting_user_input",
+            RuntimeActivity::Reconfiguring => "reconfiguring",
+            RuntimeActivity::Stopping => "stopping",
+            RuntimeActivity::Stopped => "stopped",
+            RuntimeActivity::Failed => "failed",
+        }
+    }
+
+    let rows: Vec<RuntimeSessionRow> = SessionRuntimeRegistry::global()
+        .list_all()
+        .await
+        .into_iter()
+        .map(|entry| RuntimeSessionRow {
+            session_id: entry.session_id,
+            working_dir: entry.working_dir.to_string_lossy().into_owned(),
+            activity: activity_label(entry.activity).to_string(),
+        })
+        .collect();
+    Json(rows)
 }
 
 #[derive(Debug, serde::Deserialize)]
@@ -7233,6 +7288,7 @@ pub async fn run_server(opts: ServerOpts) -> anyhow::Result<()> {
         )
         .route("/chat/stop", post(stop_chat))
         .route("/chat/active", get(active_chat_sessions))
+        .route("/runtime/sessions", get(runtime_sessions))
         // Restore unanswered approval / user-input cards after refresh or switch.
         .route("/chat/pending", get(chat_pending))
         // Reattach to a turn started by another client (OpenAI API / another tab).

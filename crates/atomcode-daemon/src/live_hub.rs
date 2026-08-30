@@ -614,6 +614,34 @@ impl LiveViewHub {
         )
     }
 
+    pub fn switch_view_only(
+        &self,
+        session_id: String,
+        working_dir: PathBuf,
+        snapshot: atomcode_kernel::message::SessionSnapshot,
+    ) -> Result<atomcode_coding::SessionChanged, HubError> {
+        let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+        let binding = state
+            .binding
+            .as_ref()
+            .ok_or(HubError::Unbound)?
+            .identity
+            .clone();
+        let changed = atomcode_coding::SessionChanged {
+            generation: atomcode_coding::RuntimeGeneration(binding.generation),
+            session_id: Some(session_id),
+            working_dir,
+        };
+        state.snapshot = Some(Arc::new(snapshot));
+        state.snapshot_error = None;
+        self.publish_view_locked(
+            &mut state,
+            LiveViewEvent::Runtime(CodingRuntimeEvent::SessionChanged(changed.clone())),
+            false,
+        );
+        Ok(changed)
+    }
+
     pub async fn reload_provider(
         &self,
         expected: &LiveBinding,

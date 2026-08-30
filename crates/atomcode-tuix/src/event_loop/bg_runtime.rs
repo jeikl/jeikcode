@@ -105,6 +105,7 @@ pub enum BgError {
     InvalidSlot { slot: usize, len: usize },
     NoRuntimeClient { slot: usize },
     SessionProjectionUnavailable { slot: usize, error: String },
+    SessionNotInBackground { session_id: String },
 }
 
 pub struct ForegroundRuntime {
@@ -310,6 +311,25 @@ impl BackgroundSlots {
             .iter()
             .position(|slot| slot.runtime_id == runtime_id)
             .map(|idx| idx + 1)
+    }
+
+    /// 1-based slot index for a parked session, if any.
+    pub fn slot_for_session_id(&self, session_id: &str) -> Option<usize> {
+        self.slots
+            .iter()
+            .position(|slot| slot.session.id == session_id)
+            .map(|idx| idx + 1)
+    }
+
+    pub fn iter(&self) -> impl Iterator<Item = &BackgroundSlot> {
+        self.slots.iter()
+    }
+
+    pub fn running_sessions(&self) -> Vec<(String, RuntimeState)> {
+        self.slots
+            .iter()
+            .map(|slot| (slot.session.id.clone(), slot.state))
+            .collect()
     }
 
     fn slot_mut_for_runtime_id(&mut self, runtime_id: RuntimeId) -> Option<&mut BackgroundSlot> {
@@ -566,12 +586,30 @@ impl BgRuntimeManager {
         })
     }
 
+    pub fn slot_for_session_id(&self, session_id: &str) -> Option<usize> {
+        self.backgrounds.slot_for_session_id(session_id)
+    }
+
     pub fn resume_slot(
         &mut self,
         slot: usize,
         current_state: RuntimeState,
     ) -> Result<ResumeOutcome, BgError> {
         self.resume_slot_with_loader(slot, current_state, load_background_session_projection)
+    }
+
+    pub fn resume_session_by_id(
+        &mut self,
+        session_id: &str,
+        current_state: RuntimeState,
+    ) -> Result<ResumeOutcome, BgError> {
+        let slot = self
+            .backgrounds
+            .slot_for_session_id(session_id)
+            .ok_or_else(|| BgError::SessionNotInBackground {
+                session_id: session_id.to_string(),
+            })?;
+        self.resume_slot(slot, current_state)
     }
 
     fn resume_slot_with_loader(

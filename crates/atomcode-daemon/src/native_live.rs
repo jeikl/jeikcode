@@ -259,6 +259,13 @@ pub async fn resume_session(
             })?,
     };
     let target_dir = PathBuf::from(&prepared.view.meta.working_dir);
+    if hub().turn_in_progress() {
+        return hub().switch_view_only(
+            session_id,
+            target_dir,
+            prepared.view.snapshot,
+        );
+    }
     hub()
         .resume_session_with_lease(session_id, target_dir, prepared.lease)
         .await

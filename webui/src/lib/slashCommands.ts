@@ -28,6 +28,8 @@ export interface SlashHandlers {
   setProvider(name: string): void | Promise<void>;
   changeDir(path: string): void | Promise<void>;
   openSessionSidebar(): void;
+  openNewSession(): void;
+  clearScreen?(): void;
   reloadConfig(): void | Promise<void>;
   openSlashSkillsMenu(): void;
   notice(text: string): void;
@@ -64,7 +66,22 @@ export const FRONTEND_COMMANDS: SlashCommandDef[] = [
       return h.changeDir(a);
     },
   },
-  { name: 'resume', descKey: 'cmd.resume.desc', run: (_a, h) => h.openSessionSidebar() },
+  {
+    name: 'new',
+    descKey: 'cmd.new.desc',
+    run: (_a, h) => h.openNewSession(),
+  },
+  {
+    name: 'clear',
+    descKey: 'cmd.clear.desc',
+    run: (_a, h) => h.clearScreen?.(),
+  },
+  {
+    name: 'sessions',
+    aliases: ['resume', 'continue'],
+    descKey: 'cmd.sessions.desc',
+    run: (_a, h) => h.openSessionSidebar(),
+  },
   { name: 'reload', descKey: 'cmd.reload.desc', run: (_a, h) => h.reloadConfig() },
   {
     name: 'mcp',

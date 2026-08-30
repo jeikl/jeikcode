@@ -140,6 +140,15 @@ pub fn is_session_draft(session_id: &str) -> bool {
         .contains_key(session_id)
 }
 
+/// Peek a draft's working directory without consuming the draft registration.
+pub fn session_draft_working_dir(session_id: &str) -> Option<PathBuf> {
+    session_drafts()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .get(session_id)
+        .cloned()
+}
+
 /// Spawn (or attach) a CodingRuntime into the L2 registry without claiming the
 /// LiveHub binding — used when the hub/TUI is already bound to another session.
 pub async fn ensure_registry_runner(
@@ -463,6 +472,16 @@ pub async fn resume_session(
             session_id: Some(binding.session_id),
             working_dir: binding.working_dir,
         });
+    }
+    // OpenCode-style draft from POST /sessions: no catalog row yet. Switch the
+    // live *view* to an empty transcript so --host/sync "新建会话" does not fail
+    // and rebound to the TUI's previous session.
+    if let Some(draft_dir) = session_draft_working_dir(&session_id) {
+        return hub().switch_view_only(
+            session_id,
+            draft_dir,
+            SessionSnapshot::new(Vec::new()),
+        );
     }
     let project_bucket =
         atomcode_capabilities::session::SessionManager::project_hash(&binding.working_dir);

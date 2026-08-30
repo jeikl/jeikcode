@@ -624,17 +624,23 @@ impl LiveViewHub {
         let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
         let binding = state
             .binding
-            .as_ref()
-            .ok_or(HubError::Unbound)?
-            .identity
-            .clone();
+            .as_mut()
+            .ok_or(HubError::Unbound)?;
+        binding.identity.session_id = session_id.clone();
+        binding.identity.working_dir = working_dir.clone();
+        let generation = binding.identity.generation;
         let changed = atomcode_coding::SessionChanged {
-            generation: atomcode_coding::RuntimeGeneration(binding.generation),
+            generation: atomcode_coding::RuntimeGeneration(generation),
             session_id: Some(session_id),
             working_dir,
         };
         state.snapshot = Some(Arc::new(snapshot));
         state.snapshot_error = None;
+        state.replay.clear();
+        state.pending_requests.clear();
+        state.pending_web_steers.clear();
+        state.turn_active = false;
+        state.last_runtime_sequence = None;
         self.publish_view_locked(
             &mut state,
             LiveViewEvent::Runtime(CodingRuntimeEvent::SessionChanged(changed.clone())),

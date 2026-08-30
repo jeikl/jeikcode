@@ -1634,8 +1634,14 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
             applySessionTokens(loadId, displayMessages, sessionResult.value.token_usage ?? undefined);
           }
         } else if (!isLiveSession) {
-          loadedForRef.current = null;
-          nextHint = t('chat.continueSession', { id: loadId.slice(0, 8) });
+          // Draft / brand-new empty sessions 404 on disk until first persist —
+          // that is not "continue a historical session".
+          const isEmptyNew =
+            activeSession?.id === loadId && (activeSession?.message_count ?? 0) === 0;
+          loadedForRef.current = isEmptyNew ? loadId : null;
+          if (!isEmptyNew) {
+            nextHint = t('chat.continueSession', { id: loadId.slice(0, 8) });
+          }
         }
 
         if (activeResult.status === 'fulfilled') {

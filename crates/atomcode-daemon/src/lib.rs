@@ -2788,6 +2788,24 @@ async fn get_sessions_by_working_dir(
 
 /// GET /projects/:hash/sessions/:id - Get session detail
 async fn get_session_detail(Path((hash, id)): Path<(String, String)>) -> impl IntoResponse {
+    // OpenCode draft: allocated via POST /sessions but not catalog-persisted yet.
+    // Return an empty detail so WebUI does not show a false "continue session" hint.
+    if crate::native_live::is_session_draft(&id) {
+        let working_dir = crate::native_live::session_draft_working_dir(&id)
+            .unwrap_or_else(|| PathBuf::from("."));
+        let detail = SessionDetail {
+            id: id.clone(),
+            name: format!("session-{id}"),
+            working_dir,
+            created_at: 0,
+            updated_at: 0,
+            message_count: 0,
+            messages: Vec::new(),
+            preferred_model: None,
+            token_usage: None,
+        };
+        return Json(detail).into_response();
+    }
     match crate::legacy_convert::load_catalog_session_view_in_project(&hash, &id) {
         Ok(Some(session)) => {
             let messages = match merge_catalog_session_messages_for_display(&session) {
@@ -5397,16 +5415,21 @@ async fn process_chat_request(
     let (session_id, initial_messages, is_new_session) =
         if let Some(ref session_id_str) = req.session_id {
             let project_bucket = NativeSessionManager::project_hash(&working_dir);
-            let session = crate::legacy_convert::load_catalog_session_view_in_project(
+            match crate::legacy_convert::load_catalog_session_view_in_project(
                 &project_bucket,
                 session_id_str,
-            )?
-            .ok_or_else(|| {
-                anyhow::anyhow!(
-                    "session {session_id_str:?} not found in project bucket {project_bucket}"
-                )
-            })?;
-            (session.meta.id, session.snapshot.messages, false)
+            )? {
+                Some(session) => (session.meta.id, session.snapshot.messages, false),
+                None if crate::native_live::is_session_draft(session_id_str) => {
+                    // Draft from POST /sessions: keep the client id, persist on first turn.
+                    (session_id_str.clone(), Vec::new(), true)
+                }
+                None => {
+                    return Err(anyhow::anyhow!(
+                        "session {session_id_str:?} not found in project bucket {project_bucket}"
+                    ));
+                }
+            }
         } else {
             (uuid::Uuid::new_v4().to_string(), Vec::new(), true)
         };

@@ -351,7 +351,9 @@ export function Sidebar({
   const [searchBusy, setSearchBusy] = useState(false);
   const searchInputRef = useRef<HTMLInputElement | null>(null);
   const [renameTarget, setRenameTarget] = useState<SessionMetaWithProject | null>(null);
-  const [deleteTarget, setDeleteTarget] = useState<SessionMetaWithProject | null>(null);
+  const [deleteTargets, setDeleteTargets] = useState<SessionMetaWithProject[] | null>(null);
+  const [selectMode, setSelectMode] = useState(false);
+  const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
   // Settings menu (3 entries → each opens its own dialog), fixed-anchored above the button.
   const [settingsMenuOpen, setSettingsMenuOpen] = useState(false);
   const [settingsSub, setSettingsSub] = useState<'theme' | 'language' | null>(null);
@@ -515,16 +517,42 @@ export function Sidebar({
     onSessionRenamed?.(id, name);
   }
 
-  function handleDeleted(id: string) {
-    // The DELETE response is authoritative for this row. Removing it locally
+  function handleDeleted(ids: string[]) {
+    // The DELETE response is authoritative for these rows. Removing them locally
     // avoids an O(N) catalog reload after every deletion, which made clearing a
     // large history progressively slow. Invalidate any older in-flight list
     // response so it cannot resurrect the deleted row; normal reload triggers
     // still reconcile the complete list later.
     loadEpochRef.current += 1;
     setLoading(false);
-    setSessions((current) => current.filter((session) => session.id !== id));
-    onSessionDeleted?.(id);
+    const removed = new Set(ids);
+    setSessions((current) => current.filter((session) => !removed.has(session.id)));
+    setSelectedIds((current) => {
+      const next = new Set(current);
+      for (const id of ids) next.delete(id);
+      return next;
+    });
+    const leftover = (deleteTargets ?? []).filter((session) => !removed.has(session.id));
+    setDeleteTargets(leftover.length > 0 ? leftover : null);
+    if (leftover.length === 0) {
+      setSelectMode(false);
+      setSelectedIds(new Set());
+    }
+    for (const id of ids) onSessionDeleted?.(id);
+  }
+
+  function exitSelectMode() {
+    setSelectMode(false);
+    setSelectedIds(new Set());
+  }
+
+  function toggleSelected(id: string) {
+    setSelectedIds((current) => {
+      const next = new Set(current);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
   }
 
   /** Export a session's conversation as a Markdown file and trigger a browser download. */
@@ -1065,6 +1093,7 @@ export function Sidebar({
   const renderItem = (s: SessionMetaWithProject) => {
     const active = s.id === activeSessionId;
     const running = activeSet.has(s.id);
+    const selected = selectedIds.has(s.id);
     const label = s.name || s.id.slice(0, 8);
     const dir = shortDir(s.working_dir);
     return (
@@ -1073,12 +1102,31 @@ export function Sidebar({
         ref={active ? activeSessionItemRef : undefined}
         class={
           'session-item' +
-          (active ? ' active' : '') +
+          (active && !selectMode ? ' active' : '') +
           (running ? ' running' : '') +
-          (menuFor === s.id ? ' menu-open' : '')
+          (menuFor === s.id ? ' menu-open' : '') +
+          (selectMode && selected ? ' selected' : '') +
+          (selectMode ? ' selecting' : '')
         }
       >
-        <button class="session-item-main" onClick={() => onSelect(s)} title={dir}>
+        {selectMode && (
+          <button
+            type="button"
+            class={'session-item-check' + (selected ? ' checked' : '')}
+            role="checkbox"
+            aria-checked={selected}
+            aria-label={label}
+            onClick={(e) => {
+              e.stopPropagation();
+              toggleSelected(s.id);
+            }}
+          />
+        )}
+        <button
+          class="session-item-main"
+          onClick={() => (selectMode ? toggleSelected(s.id) : onSelect(s))}
+          title={dir}
+        >
           <span class="session-item-name">{label}</span>
           <span class="session-item-meta">
             {formatTime(s.updated_at || s.created_at, t)}
@@ -1091,14 +1139,16 @@ export function Sidebar({
             aria-label={t('sidebar.running')}
           />
         )}
-        <button
-          class="session-item-kebab"
-          onClick={(e) => openItemMenu(e as unknown as MouseEvent, s.id)}
-          title={t('sidebar.itemMenu')}
-          aria-label={t('sidebar.itemMenu')}
-        >
-          <KebabIcon />
-        </button>
+        {!selectMode && (
+          <button
+            class="session-item-kebab"
+            onClick={(e) => openItemMenu(e as unknown as MouseEvent, s.id)}
+            title={t('sidebar.itemMenu')}
+            aria-label={t('sidebar.itemMenu')}
+          >
+            <KebabIcon />
+          </button>
+        )}
       </div>
     );
   };
@@ -1191,7 +1241,7 @@ export function Sidebar({
       </div>
 
       <div class="sidebar-actions">
-        <button class="sidebar-action" onClick={onNew}>
+        <button class="sidebar-action" onClick={() => { exitSelectMode(); onNew(); }}>
           <span class="sidebar-action-icon"><PlusIcon /></span>
           <span class="sidebar-action-label">{t('sidebar.newChat')}</span>
         </button>
@@ -1281,8 +1331,84 @@ export function Sidebar({
       )}
 
       <div class="session-group-header">
-        <span class="session-group-label">{t('sidebar.recent')}</span>
+        <span class="session-group-label">
+          {selectMode ? t('sidebar.selectedCount', { n: selectedIds.size }) : t('sidebar.recent')}
+        </span>
+        <span class="session-group-actions">
+          {selectMode ? (
+            <>
+              <button
+                type="button"
+                class="session-select-btn"
+                onClick={() => {
+                  const visible = filtered.map((s) => s.id);
+                  const allSelected = visible.length > 0 && visible.every((id) => selectedIds.has(id));
+                  setSelectedIds(allSelected ? new Set() : new Set(visible));
+                }}
+              >
+                {t('sidebar.selectAll')}
+              </button>
+              <button
+                type="button"
+                class="session-select-btn"
+                onClick={() => {
+                  const visible = filtered.map((s) => s.id);
+                  setSelectedIds((current) => {
+                    const next = new Set(current);
+                    for (const id of visible) {
+                      if (next.has(id)) next.delete(id);
+                      else next.add(id);
+                    }
+                    return next;
+                  });
+                }}
+              >
+                {t('sidebar.invertSelect')}
+              </button>
+              <button
+                type="button"
+                class="session-select-btn"
+                onClick={exitSelectMode}
+              >
+                {t('sidebar.selectDone')}
+              </button>
+            </>
+          ) : (
+            <button
+              type="button"
+              class="session-select-btn"
+              onClick={() => {
+                setMenuFor(null);
+                setSelectMode(true);
+              }}
+              disabled={filtered.length === 0}
+            >
+              {t('sidebar.select')}
+            </button>
+          )}
+        </span>
       </div>
+      {selectMode && (
+        <div class="session-select-delete-bar">
+          <button
+            type="button"
+            class="session-select-delete-btn"
+            disabled={selectedIds.size === 0}
+            onClick={() => {
+              const targets = filtered.filter((s) => selectedIds.has(s.id));
+              if (targets.length === 0) return;
+              setDeleteTargets(targets);
+            }}
+          >
+            <TrashIcon />
+            <span>
+              {selectedIds.size > 0
+                ? t('sidebar.deleteSelectedCount', { n: selectedIds.size })
+                : t('sidebar.deleteSelected')}
+            </span>
+          </button>
+        </div>
+      )}
 
       <div class="session-list-body" ref={sessionListBodyRef} aria-busy={loading}>
         {loading && dateGroups.length === 0 && (
@@ -1415,7 +1541,7 @@ export function Sidebar({
           <button
             class="item-menu-row danger"
             onClick={() => {
-              setDeleteTarget(menuSession);
+              setDeleteTargets([menuSession]);
               setMenuFor(null);
             }}
           >
@@ -1434,11 +1560,11 @@ export function Sidebar({
         />,
         document.body,
       )}
-      {deleteTarget && createPortal(
+      {deleteTargets && deleteTargets.length > 0 && createPortal(
         <DeleteDialog
-          session={deleteTarget}
-          onClose={() => setDeleteTarget(null)}
-          onDone={() => handleDeleted(deleteTarget.id)}
+          sessions={deleteTargets}
+          onClose={() => setDeleteTargets(null)}
+          onDone={handleDeleted}
         />,
         document.body,
       )}

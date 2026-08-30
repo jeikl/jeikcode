@@ -2029,8 +2029,71 @@ body {
 .session-group-header {
   display: flex;
   align-items: center;
+  justify-content: space-between;
   gap: 6px;
   padding: 10px 8px 4px;
+}
+.session-group-actions {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  flex-shrink: 0;
+}
+.session-select-btn {
+  border: none;
+  background: transparent;
+  color: var(--app-secondary-foreground);
+  cursor: pointer;
+  font-size: 12px;
+  font-family: inherit;
+  padding: 2px 6px;
+  border-radius: var(--corner-radius-small);
+  line-height: 1.4;
+}
+.session-select-btn:hover:not(:disabled) {
+  background: var(--app-ghost-button-hover-background);
+  color: var(--app-primary-foreground);
+}
+.session-select-btn:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+.session-select-btn.danger {
+  color: var(--app-error-foreground, #e07070);
+}
+.session-select-btn.danger:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--app-error-foreground, #e07070) 12%, transparent);
+}
+
+.session-select-delete-bar {
+  padding: 2px 8px 8px;
+  flex-shrink: 0;
+}
+.session-select-delete-btn {
+  width: 100%;
+  height: 34px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  border: none;
+  border-radius: var(--corner-radius-medium);
+  background: color-mix(in srgb, var(--app-error-foreground, #c45c5c) 18%, transparent);
+  color: var(--app-error-foreground, #e07070);
+  cursor: pointer;
+  font-size: 13px;
+  font-weight: 600;
+  font-family: inherit;
+}
+.session-select-delete-btn svg {
+  flex-shrink: 0;
+}
+.session-select-delete-btn:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--app-error-foreground, #c45c5c) 28%, transparent);
+}
+.session-select-delete-btn:disabled {
+  opacity: 0.4;
+  cursor: default;
 }
 
 /* Project selector — dropdown above the session list to browse other projects. */
@@ -2168,6 +2231,8 @@ body {
   font-size: 11px;
   font-weight: 600;
   color: var(--app-secondary-foreground);
+  min-width: 0;
+  flex: 1;
 }
 
 .group-by-control { position: relative; flex-shrink: 0; }
@@ -2251,6 +2316,36 @@ body {
   /* 用主色前景，保证亮/暗主题下都有对比；不强制白色（亮色主题会看不见）。 */
   background: var(--app-list-active-background);
   color: var(--app-primary-foreground);
+}
+.session-item.selected {
+  background: var(--app-list-active-background);
+}
+.session-item-check {
+  flex-shrink: 0;
+  width: 16px;
+  height: 16px;
+  margin-left: 8px;
+  border: 1.5px solid var(--app-secondary-foreground);
+  border-radius: 4px;
+  background: transparent;
+  padding: 0;
+  cursor: pointer;
+  position: relative;
+}
+.session-item-check.checked {
+  border-color: var(--app-brand);
+  background: var(--app-brand);
+}
+.session-item-check.checked::after {
+  content: '';
+  position: absolute;
+  left: 4px;
+  top: 1px;
+  width: 5px;
+  height: 8px;
+  border: solid #fff;
+  border-width: 0 1.6px 1.6px 0;
+  transform: rotate(45deg);
 }
 
 /* Main clickable area (title + time), laid out as a column. */

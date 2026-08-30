@@ -548,10 +548,10 @@ export function App() {
       )}
       {headerDialog === 'delete' && activeSession && (
         <DeleteDialog
-          session={activeSession}
+          sessions={[activeSession]}
           onClose={() => setHeaderDialog(null)}
-          onDone={() => {
-            handleSessionDeleted(activeSession.id);
+          onDone={(ids) => {
+            for (const id of ids) handleSessionDeleted(id);
             setSessionListVersion((v) => v + 1);
           }}
         />

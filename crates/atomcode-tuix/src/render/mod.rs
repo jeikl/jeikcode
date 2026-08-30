@@ -368,6 +368,28 @@ pub trait Renderer: Send {
     /// (see `crate::title::session_terminal_title`).
     fn set_title(&mut self, _title: String) {}
 
+    /// Deliver approval notification terminal I/O through the renderer owner.
+    /// `TaskRenderer` queues this on its worker so Linux PTY backpressure cannot
+    /// block the event loop exactly when it must begin receiving approval keys.
+    fn notify_approval(
+        &mut self,
+        config: atomcode_config::config::NotificationConfig,
+        tool_name: String,
+        detail: String,
+        working_dir: std::path::PathBuf,
+    ) {
+        atomcode_capabilities::notify::notify(
+            &config,
+            atomcode_capabilities::notify::NotificationEvent::ApprovalNeeded(
+                atomcode_capabilities::notify::ApprovalNotification {
+                    tool_name: &tool_name,
+                    detail: Some(&detail),
+                    working_dir: Some(&working_dir),
+                },
+            ),
+        );
+    }
+
     /// Hand the terminal off to a non-TUI child process (blocking OAuth
     /// flow, `/shell`, etc.): disable raw mode + bracketed paste, finish
     /// any pending writes. After this returns, the child is free to use

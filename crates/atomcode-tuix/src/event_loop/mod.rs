@@ -8063,6 +8063,22 @@ fn interactive_input_priority(phase: UiPhase) -> bool {
     )
 }
 
+/// Resolve the blocking prompt that actually owns the footer and keyboard.
+///
+/// `UiPhase` is presentation progress and can legitimately be changed by a
+/// later runtime event. The pending panel is the stronger source of truth.
+fn blocking_prompt_phase(state: &UiState) -> Option<UiPhase> {
+    if state.approval_panel.is_some() {
+        Some(UiPhase::Approval)
+    } else if state.user_input_batch.is_some() || state.user_input_panel.is_some() {
+        Some(UiPhase::UserInput)
+    } else if state.round_cap_panel.is_some() {
+        Some(UiPhase::RoundCap)
+    } else {
+        None
+    }
+}
+
 /// True when a blocking footer prompt is on screen — by phase **or** by
 /// panel. Later runtime events (compaction, thinking, session overlays) can
 /// set `phase = Streaming` while `approval_panel` is still `Some`; the card
@@ -8071,23 +8087,15 @@ fn interactive_input_priority(phase: UiPhase) -> bool {
 /// the PTY allows: one core at 100% and keystrokes never reach
 /// `handle_approval_key`. Treat the panel as the source of truth.
 fn blocking_prompt_active(state: &UiState) -> bool {
-    interactive_input_priority(state.phase)
-        || state.approval_panel.is_some()
-        || state.user_input_panel.is_some()
-        || state.user_input_batch.is_some()
-        || state.round_cap_panel.is_some()
+    blocking_prompt_phase(state).is_some() || interactive_input_priority(state.phase)
 }
 
 /// Re-assert Approval / UserInput / RoundCap whenever the matching panel is
 /// still populated, so a later `phase = Streaming` cannot strand the card
 /// on screen with streaming key routing and the 5ms tick.
 fn restore_blocking_prompt_phase(state: &mut UiState) {
-    if state.approval_panel.is_some() {
-        state.phase = UiPhase::Approval;
-    } else if state.user_input_batch.is_some() || state.user_input_panel.is_some() {
-        state.phase = UiPhase::UserInput;
-    } else if state.round_cap_panel.is_some() {
-        state.phase = UiPhase::RoundCap;
+    if let Some(phase) = blocking_prompt_phase(state) {
+        state.phase = phase;
     }
 }
 
@@ -8101,6 +8109,12 @@ fn redraw_interactive_footer(
     renderer: &mut dyn Renderer,
 ) {
     redraw_idle_plain(buf, state, ctx, renderer);
+    // `flush_deferred` is coalesced by TaskRenderer. If an older deferred
+    // flush is already queued, the redraw above may not enqueue another one;
+    // that older flush runs before this new InputPrompt and leaves the card
+    // unpainted after the 5ms tick is paused. A normal FIFO Flush after the
+    // prompt guarantees this blocking boundary reaches the terminal.
+    renderer.flush();
 }
 
 /// A capturing overlay owns keys only when it must (password mid-turn).
@@ -8157,16 +8171,28 @@ fn handle_interactive_interrupt(
     renderer: &mut dyn Renderer,
 ) -> Result<()> {
     use crossterm::event::KeyModifiers;
-    match app.state.phase {
-        UiPhase::Approval => {
-            handle_approval_key(app, ctx, renderer, KeyCode::Char('c'), KeyModifiers::CONTROL)
-        }
-        UiPhase::UserInput => {
-            handle_user_input_key(app, ctx, renderer, KeyCode::Char('c'), KeyModifiers::CONTROL)
-        }
-        UiPhase::RoundCap => {
-            handle_round_cap_key(app, ctx, renderer, KeyCode::Char('c'), KeyModifiers::CONTROL)
-        }
+    match blocking_prompt_phase(&app.state).unwrap_or(app.state.phase) {
+        UiPhase::Approval => handle_approval_key(
+            app,
+            ctx,
+            renderer,
+            KeyCode::Char('c'),
+            KeyModifiers::CONTROL,
+        ),
+        UiPhase::UserInput => handle_user_input_key(
+            app,
+            ctx,
+            renderer,
+            KeyCode::Char('c'),
+            KeyModifiers::CONTROL,
+        ),
+        UiPhase::RoundCap => handle_round_cap_key(
+            app,
+            ctx,
+            renderer,
+            KeyCode::Char('c'),
+            KeyModifiers::CONTROL,
+        ),
         _ => Ok(()),
     }
 }
@@ -11596,30 +11622,13 @@ fn handle_input(
                     return Ok(());
                 }
             }
-            if app.state.approval_panel.is_some() {
-                handle_approval_key(app, ctx, renderer, code, modifiers)?;
-            } else if app.state.user_input_panel.is_some() || app.state.user_input_batch.is_some()
-            {
-                handle_user_input_key(app, ctx, renderer, code, modifiers)?;
-            } else if app.state.round_cap_panel.is_some() {
-                handle_round_cap_key(app, ctx, renderer, code, modifiers)?;
-            } else {
-                match app.state.phase {
-                    UiPhase::Idle => handle_idle_key(app, ctx, renderer, code, modifiers)?,
-                    UiPhase::Streaming => {
-                        handle_streaming_key(app, ctx, renderer, code, modifiers)?
-                    }
-                    UiPhase::Approval => {
-                        handle_approval_key(app, ctx, renderer, code, modifiers)?
-                    }
-                    UiPhase::UserInput => {
-                        handle_user_input_key(app, ctx, renderer, code, modifiers)?
-                    }
-                    UiPhase::RoundCap => {
-                        handle_round_cap_key(app, ctx, renderer, code, modifiers)?
-                    }
-                    UiPhase::Suspended => {}
-                }
+            match blocking_prompt_phase(&app.state).unwrap_or(app.state.phase) {
+                UiPhase::Idle => handle_idle_key(app, ctx, renderer, code, modifiers)?,
+                UiPhase::Streaming => handle_streaming_key(app, ctx, renderer, code, modifiers)?,
+                UiPhase::Approval => handle_approval_key(app, ctx, renderer, code, modifiers)?,
+                UiPhase::UserInput => handle_user_input_key(app, ctx, renderer, code, modifiers)?,
+                UiPhase::RoundCap => handle_round_cap_key(app, ctx, renderer, code, modifiers)?,
+                UiPhase::Suspended => {}
             }
         }
         // Release key events: drop on the floor. Press / Repeat are handled
@@ -17288,7 +17297,7 @@ fn flush_pending_separator(state: &mut UiState, renderer: &mut dyn Renderer, as_
 /// the result. Returns false (no-op) when no approval is pending — the normal path, where
 /// the keypress already cleared it.
 fn retract_stale_approval(state: &mut UiState) -> bool {
-    if matches!(state.phase, UiPhase::Approval) {
+    if state.approval_panel.is_some() || matches!(state.phase, UiPhase::Approval) {
         // The footer approval panel clears via `on_approval_resolved` (which nulls
         // `state.approval_panel`); there is no body row to erase anymore.
         state.on_approval_resolved();
@@ -17325,7 +17334,7 @@ mod interactive_input_priority_tests {
 
     #[test]
     fn approval_panel_keeps_input_priority_even_if_phase_is_streaming() {
-        use super::{blocking_prompt_active, restore_blocking_prompt_phase};
+        use super::{blocking_prompt_active, blocking_prompt_phase, restore_blocking_prompt_phase};
         use crate::state::{ApprovalKind, ApprovalOption, ApprovalPanel, UiState};
 
         let mut state = UiState::new();
@@ -17344,6 +17353,11 @@ mod interactive_input_priority_tests {
         assert!(
             blocking_prompt_active(&state),
             "visible approval card must pause the 5ms tick even if phase drifted"
+        );
+        assert_eq!(
+            blocking_prompt_phase(&state),
+            Some(UiPhase::Approval),
+            "the visible panel must route keys independently of stale phase"
         );
         restore_blocking_prompt_phase(&mut state);
         assert!(
@@ -17392,6 +17406,28 @@ mod approval_retract_tests {
             !matches!(state.phase, UiPhase::Approval),
             "phase must leave Approval"
         );
+    }
+
+    #[test]
+    fn retracts_orphaned_panel_even_after_phase_drift() {
+        use crate::state::{ApprovalKind, ApprovalOption, ApprovalPanel};
+
+        let mut state = UiState::new();
+        state.phase = UiPhase::Streaming;
+        state.approval_panel = Some(ApprovalPanel {
+            tool: "Bash".into(),
+            detail: "rm /tmp/example".into(),
+            options: vec![ApprovalOption {
+                label: "deny".into(),
+                kind: ApprovalKind::Deny,
+                accel: 'n',
+            }],
+            selected: 0,
+            cache_key: String::new(),
+        });
+
+        assert!(retract_stale_approval(&mut state));
+        assert!(state.approval_panel.is_none());
     }
 
     #[test]
@@ -21367,17 +21403,6 @@ fn handle_agent_event(
                 selected: 0,
                 cache_key,
             });
-            renderer.flush();
-            atomcode_capabilities::notify::notify(
-                &ctx.config.notifications,
-                atomcode_capabilities::notify::NotificationEvent::ApprovalNeeded(
-                    atomcode_capabilities::notify::ApprovalNotification {
-                        tool_name: &display_tool_name(&tool_name),
-                        detail: Some(&format_tool_detail(&tool_name, &call.arguments)),
-                        working_dir: Some(&ctx.working_dir),
-                    },
-                ),
-            );
             // `display` is the already-PascalCased name (e.g. "Bash",
             // "ReadFile"); on_approval_needed stashes the current
             // "Running X" label so on_approval_resolved can restore it.
@@ -21393,6 +21418,15 @@ fn handle_agent_event(
             // stale/misleading in the approval phase (mirrors the
             // /bg resume path).
             redraw_interactive_footer(buf, state, ctx, renderer);
+            // Queue OSC/BEL notification I/O after the card paint on the render
+            // worker. A backpressured Linux PTY must not block the event loop
+            // before it can receive Y/N/Ctrl+C.
+            renderer.notify_approval(
+                ctx.config.notifications.clone(),
+                display_tool_name(&tool_name),
+                format_tool_detail(&tool_name, &call.arguments),
+                ctx.working_dir.clone(),
+            );
         }
         AgentEvent::PhaseChange(AgentPhase::Thinking) => {
             state.footer_persistence_warning = None;

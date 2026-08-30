@@ -87,6 +87,13 @@ enum RenderCmd {
     /// (the worker owns stdout; writing from the event-loop thread would
     /// risk interleaving mid-escape-sequence).
     SetTitle(String),
+    /// Approval notification terminal I/O, serialized with renderer output.
+    NotifyApproval {
+        config: atomcode_config::config::NotificationConfig,
+        tool_name: String,
+        detail: String,
+        working_dir: std::path::PathBuf,
+    },
     /// Lifecycle operation requiring an ACK — the worker performs the
     /// op then sends `()` back so the caller can proceed.
     Ack {
@@ -218,6 +225,21 @@ impl Renderer for TaskRenderer {
 
     fn set_title(&mut self, title: String) {
         let _ = self.cmd_tx.send(RenderCmd::SetTitle(title));
+    }
+
+    fn notify_approval(
+        &mut self,
+        config: atomcode_config::config::NotificationConfig,
+        tool_name: String,
+        detail: String,
+        working_dir: std::path::PathBuf,
+    ) {
+        let _ = self.cmd_tx.send(RenderCmd::NotifyApproval {
+            config,
+            tool_name,
+            detail,
+            working_dir,
+        });
     }
 
     fn suspend_for_external(&mut self) {
@@ -394,6 +416,14 @@ fn run_worker(
             RenderCmd::ScrollToNextUserMessage => {
                 inner.scroll_to_next_user_message();
             }
+            RenderCmd::NotifyApproval {
+                config,
+                tool_name,
+                detail,
+                working_dir,
+            } => {
+                inner.notify_approval(config, tool_name, detail, working_dir);
+            }
             RenderCmd::BeginSync => {
                 inner.begin_sync();
             }
@@ -522,6 +552,7 @@ mod tests {
         deferred: usize,
         begin_syncs: usize,
         end_syncs: usize,
+        approval_notifications: usize,
         history_replay_caps: Vec<Option<usize>>,
         resizes: Vec<(u16, u16)>,
         calls: Vec<&'static str>,
@@ -570,6 +601,17 @@ mod tests {
                 .unwrap()
                 .history_replay_caps
                 .push(max_rows);
+        }
+        fn notify_approval(
+            &mut self,
+            _config: atomcode_config::config::NotificationConfig,
+            _tool_name: String,
+            _detail: String,
+            _working_dir: std::path::PathBuf,
+        ) {
+            let mut counts = self.counts.lock().unwrap();
+            counts.approval_notifications += 1;
+            counts.calls.push("notify_approval");
         }
         fn on_resize(&mut self, cols: u16, rows: u16) {
             let mut counts = self.counts.lock().unwrap();
@@ -630,6 +672,22 @@ mod tests {
             counts.lock().unwrap().history_replay_caps,
             vec![Some(1234), None]
         );
+    }
+
+    #[test]
+    fn approval_notification_is_queued_on_worker() {
+        let (mut r, counts) = setup();
+        r.render(UiLine::User("approval card painted first".into()));
+        r.notify_approval(
+            atomcode_config::config::NotificationConfig::default(),
+            "Bash".into(),
+            "rm /tmp/example".into(),
+            std::path::PathBuf::from("/tmp"),
+        );
+        r.reset(); // FIFO fence for the fire-and-forget notification command.
+        let counts = counts.lock().unwrap();
+        assert_eq!(counts.approval_notifications, 1);
+        assert_eq!(counts.calls, vec!["notify_approval", "reset"]);
     }
 
     #[test]

@@ -1004,6 +1004,38 @@ impl McpRegistry {
         self.cancelled.send_replace(true);
     }
 
+    /// Cancel pending work and tear down every connected transport.
+    pub async fn shutdown(&self) {
+        self.cancel_pending_work();
+        let servers: Vec<Arc<dyn McpClient>> = {
+            let mut map = self.servers.write().await;
+            let clients: Vec<_> = map.values().cloned().collect();
+            map.clear();
+            clients
+        };
+        for server in servers {
+            server.shutdown().await;
+        }
+        {
+            let mut cache = self.tool_cache.write().await;
+            cache.clear();
+        }
+        {
+            let mut failed = self.failed_servers.write().await;
+            failed.clear();
+        }
+        if let Ok(mut overrides) = self.status_overrides.write() {
+            overrides.clear();
+        }
+        if let Ok(mut configured) = self.configured_servers.write() {
+            configured.clear();
+        }
+        if let Ok(mut instructions) = self.server_instructions.write() {
+            instructions.clear();
+        }
+        self.finish_initial_connections();
+    }
+
     /// Completes when the registry owner cancels its pending work.
     pub async fn wait_for_cancellation(&self) {
         let mut cancelled = self.cancelled.subscribe();

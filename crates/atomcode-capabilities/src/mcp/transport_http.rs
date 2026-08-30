@@ -516,6 +516,22 @@ impl McpClient for HttpClient {
             .map(|s| s.clone())
             .unwrap_or(ServerStatus::Disconnected)
     }
+
+    async fn shutdown(&self) {
+        let session = self.session_id.lock().await.clone();
+        let negotiated = self.negotiated_version.lock().await.clone();
+        if let Some(session_id) = session {
+            delete_http_session(
+                self.client.clone(),
+                self.url.clone(),
+                self.headers.clone(),
+                session_id,
+                negotiated,
+            )
+            .await;
+        }
+        *self.status.lock().await = ServerStatus::Disconnected;
+    }
 }
 
 /// Parse a single JSON-RPC response out of an SSE-framed body.

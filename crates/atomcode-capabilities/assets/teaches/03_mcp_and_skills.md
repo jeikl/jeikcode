@@ -86,16 +86,16 @@ HTTP 型只能手写（或 `add-github-oauth`）。项目根 `.mcp.json` 或用�
 
 ### 1.5 核心交互与生命周期
 - **后台连接、首轮就绪保护**：MCP 服务仍在后台异步连接；交互式长驻运行时可先展示界面，但 daemon 的短生命周期 `/chat` 请求会等待 MCP 工具目录完成首次发布。若连接超时或失败，本次消息会明确失败且不会在缺少 MCP 工具的情况下静默发送给模型。
-- **项目级共享实例**：daemon 的非同步 `/chat` 路径按工作目录缓存 MCP Registry，同一项目的短生命周期聊天复用同一组连接与工具目录，不会为每条消息重复启动 MCP 进程；不同项目各自隔离。缓存最多保留 5 个项目，按最近使用时间淘汰，并主动取消被淘汰实例的连接任务。WebUI 的同步 `/live` 路径使用自身的长驻 CodingRuntime，在该运行时生命周期内持续复用其 MCP Registry。
+- **项目级共享实例**：同一 driver 进程内，`ProjectMcpPool` 按工作目录缓存 MCP transport（最多 5 个项目，LRU 淘汰并 `shutdown` 旧 stdio 进程树）。TUI 前台/后台 slot、CLI、daemon `/chat` 对同一项目共享一组连接，不会为每个 runtime 重复 `npm exec` 启动 MCP；不同项目各自隔离。`/mcp reload` 先 `shutdown` 池中旧 registry，再对所有相关 runtime 重挂 catalog。
 - **单次工具发现**：同一连接的 `tools/list` 结果会缓存，并对并发首次发现进行合并；状态面板与聊天挂载共享该快照，不会反复请求每个 MCP 服务。
 - **工具与挂载查询纪律**：当用户询问当前会话“挂载了哪些 MCP 或技能”时，Agent 应优先从当前上下文中检索已挂载的真实工具/技能，若未挂载则如实相告并提供配置指引建议，避免不必要地调用配置指南工具去遍历配置文件。
 - **原子发布**：只有初始连接达到成功或明确失败的终态后才把权威工具快照发布给 Agent，避免冷启动时先把空工具集误标记为“已就绪”。
 - **热重载命令**：
-  - TUI / WebUI 输入 `/mcp` 列出服务器状态；`/mcp reload` 重新读取两份配置并后台重连。
+  - TUI / WebUI 输入 `/mcp` 列出服务器状态；`/mcp reload` 重新读取两份配置、重建共享池并后台重连，同时 remount 前台与同一项目下的后台 runtime。
   - WebUI 侧栏 **MCP** 菜单右上角有刷新按钮，改完 `mcp.json` 后点按即可，不必重启。
   - Agent 写完 `mcp.json` 后必须调用工具 `jeikcode_config_reload`（等价于 `/reload` + `/mcp reload`）。重载在**当前回合结束后**生效，新 MCP 工具在**下一轮用户消息**才挂到模型上。
 - **WebUI `/mcp` 子命令**：`/mcp`（状态）、`/mcp reload`（重连）、`/mcp trust`（信任当前项目，与侧栏「信任本项目」相同）。
-- **所有权规则**：daemon 拥有并负责取消共享 Registry；单个短生命周期会话退出只撤销自己的工具挂载，不会关闭其他会话仍在使用的 MCP 连接。
+- **所有权规则**：`ProjectMcpPool` 拥有 transport 生命周期；`CodingRuntime` 仍拥有 model-facing catalog（ADR-0002）。reload 时池先 teardown，再由各 runtime remount adapter；单个会话退出只撤销自己的挂载，不会误关其他会话仍在使用的连接（同项目共享）。
 
 ---
 

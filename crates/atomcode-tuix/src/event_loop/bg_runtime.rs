@@ -1,5 +1,7 @@
 use std::path::PathBuf;
 
+use tokio::sync::mpsc;
+
 use super::ui_event::UiEvent as AgentEvent;
 use crate::session::Session;
 use atomcode_coding::runtime::{CodingRuntimeEvent, CompactionCompletion};
@@ -436,6 +438,29 @@ impl BgRuntimeManager {
 
     pub fn backgrounds(&self) -> &BackgroundSlots {
         &self.backgrounds
+    }
+
+    /// Remount capabilities on every background runtime for `working_dir`.
+    pub fn reload_capabilities_for_working_dir(
+        &self,
+        working_dir: &std::path::Path,
+        plugin_skill_dirs: Vec<(PathBuf, String)>,
+        event_tx: mpsc::UnboundedSender<RuntimeEvent>,
+    ) {
+        let working_dir = atomcode_capabilities::pathnorm::strip_verbatim_path(working_dir);
+        for slot in &self.backgrounds.slots {
+            if slot.working_dir != working_dir {
+                continue;
+            }
+            let Some(endpoint) = slot.endpoint.as_ref() else {
+                continue;
+            };
+            let _ = endpoint.native.reload_capabilities(
+                plugin_skill_dirs.clone(),
+                slot.runtime_id,
+                event_tx.clone(),
+            );
+        }
     }
 
     pub fn has_capacity(&self) -> bool {

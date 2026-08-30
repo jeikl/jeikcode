@@ -964,7 +964,7 @@ async fn run_compat_turn(state: AppState, turn: CompatTurn, format: WireFormat) 
         .map(|(_, r)| r);
     let fan_tx = fanout_chat_events(client_tx, event_bus, replay);
     let active_chats = state.active_chats.clone();
-    let mcp_cache = state.mcp_cache.clone();
+    let mcp_pool = state.mcp_pool.clone();
     let telemetry = state.telemetry.clone();
     let pending_permissions = state.pending_permissions.clone();
     let pending_user_inputs = state.pending_user_inputs.clone();
@@ -1018,7 +1018,7 @@ async fn run_compat_turn(state: AppState, turn: CompatTurn, format: WireFormat) 
                 cancel_token,
                 operation_id,
                 active_chats,
-                mcp_cache,
+                mcp_pool,
                 telemetry,
                 pending_permissions,
                 pending_user_inputs,

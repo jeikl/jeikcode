@@ -4317,13 +4317,23 @@ fn spawn_runtime_owner_with_optional_agent(
                         // A same-directory ChangeDirectory resolves to no input: the current
                         // runtime remains authoritative, with no candidate session, generation
                         // advance, or reconfiguration events.
-                        let Some((input, prepared_lease)) = resolved else {
+                        let Some((mut input, prepared_lease)) = resolved else {
                             let unchanged = session_changed(generation, &runtime);
                             resources = Some(runtime);
                             let _ = done.send(Ok(unchanged));
                             continue;
                         };
                         let operation = input.operation;
+                        if withdraws_mcp {
+                            // Config, trust, and auth are mutable security inputs.
+                            // Remove the old scope before reading them so a failed
+                            // replacement cannot leave revoked MCP authority mounted.
+                            // Pool reload is owned by the driver (`/mcp reload`, daemon
+                            // `POST /mcp/reload`, TUI `request_capability_reload`) so
+                            // every runtime for one project shares a single shutdown/build
+                            // cutover instead of racing duplicate reload_full calls.
+                            runtime.parts.withdraw_mcp_tools().await;
+                        }
                         let reuses_current_session = runtime
                             .parts
                             .session
@@ -4347,12 +4357,6 @@ fn spawn_runtime_owner_with_optional_agent(
                         }
                         if let Some(task) = next_prompt_task.take() {
                             task.abort();
-                        }
-                        if withdraws_mcp {
-                            // Config, trust, and auth are mutable security inputs.
-                            // Remove the old scope before reading them so a failed
-                            // replacement cannot leave revoked MCP authority mounted.
-                            runtime.parts.withdraw_mcp_tools().await;
                         }
                         let previous_phase = runtime_status(
                             controls.state.load(Ordering::Acquire),

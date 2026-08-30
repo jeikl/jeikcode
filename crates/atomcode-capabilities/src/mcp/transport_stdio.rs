@@ -144,6 +144,17 @@ impl StdioClient {
             cmd.env(key, value);
         }
 
+        #[cfg(unix)]
+        unsafe {
+            cmd.pre_exec(|| {
+                extern "C" {
+                    fn setsid() -> i32;
+                }
+                setsid();
+                Ok(())
+            });
+        }
+
         crate::mcp::util::suppress_console_window(&mut cmd);
 
         let mut child = cmd.spawn().with_context(|| {
@@ -352,6 +363,30 @@ impl StdioClient {
         self.reader.lock().await.take();
         self.preread_line.lock().await.take();
         if let Some(mut child) = self.process.lock().await.take() {
+            #[cfg(unix)]
+            {
+                let pid = match child.id() {
+                    Some(pid) if pid > 0 => pid,
+                    _ => 0,
+                };
+                if pid > 0 {
+                    extern "C" {
+                        fn killpg(pgid: i32, sig: i32) -> i32;
+                    }
+                    const SIGTERM: i32 = 15;
+                    const SIGKILL: i32 = 9;
+                    unsafe {
+                        if killpg(pid as i32, SIGTERM) == 0 {
+                            let _ = tokio::time::timeout(
+                                std::time::Duration::from_millis(250),
+                                child.wait(),
+                            )
+                            .await;
+                        }
+                        killpg(pid as i32, SIGKILL);
+                    }
+                }
+            }
             let _ = child.start_kill();
             let _ = child.wait().await;
         }
@@ -565,6 +600,12 @@ impl McpClient for StdioClient {
             .try_lock()
             .map(|s| s.clone())
             .unwrap_or(ServerStatus::Disconnected)
+    }
+
+    async fn shutdown(&self) {
+        self.recovery_cancel.cancel();
+        self.clear_transport().await;
+        *self.status.lock().await = ServerStatus::Disconnected;
     }
 }
 

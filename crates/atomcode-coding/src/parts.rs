@@ -538,22 +538,16 @@ async fn prepare_with_plugin_hooks_reusing_lease(
     // the session candidate path. `mount()` publishes each connected server's tools
     // atomically for the next turn, then publishes once more when the initial pass
     // reaches its bounded terminal state.
-    let (mcp_registry, mcp_connect_rx, owns_mcp_registry) =
-        if let Some(shared) = opts.shared_mcp_registry.clone() {
-            (Some(shared), None, false)
-        } else if opts.mcp {
-            let (event_tx, event_rx) = tokio::sync::mpsc::unbounded_channel();
-            (
-                Some(Arc::new(McpRegistry::from_config_background_with_events(
-                    &cfg.working_dir,
-                    Some(event_tx),
-                ))),
-                Some(event_rx),
-                true,
-            )
-        } else {
-            (None, None, false)
-        };
+    let (mcp_registry, mcp_connect_rx, owns_mcp_registry) = if !opts.mcp {
+        (None, None, false)
+    } else if let Some(shared) = opts.shared_mcp_registry.clone() {
+        (Some(shared), None, false)
+    } else {
+        let registry = atomcode_capabilities::mcp::ProjectMcpPool::global()
+            .registry(&cfg.working_dir)
+            .await;
+        (Some(registry), None, false)
+    };
     let mcp_tool_names = Arc::new(std::sync::RwLock::new(Vec::new()));
 
     // Session binding: the id's single owner.

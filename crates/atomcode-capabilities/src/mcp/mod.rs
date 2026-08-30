@@ -23,6 +23,7 @@ use atomcode_kernel::tool::{Tool, ToolRegistry};
 pub mod client;
 pub mod config;
 pub mod oauth;
+pub mod pool;
 pub mod registry;
 pub mod tool;
 pub mod transport_http;
@@ -40,6 +41,9 @@ pub use config::{
 pub use oauth::{
     login_github_oauth, login_mcp_oauth, refresh_mcp_oauth_token, McpOAuthLoginOptions,
     McpOAuthToken, McpTokenStore,
+};
+pub use pool::{
+    CachedMcpRegistry, ProjectMcpHandle, ProjectMcpPool, MCP_CACHE_MAX,
 };
 pub use registry::{project_trust_key, McpConnectEvent, McpRegistry};
 pub use tool::{mcp_tool_full_name, sanitize_name_segment, McpToolAdapter};

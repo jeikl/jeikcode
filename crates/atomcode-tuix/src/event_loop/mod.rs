@@ -13453,9 +13453,18 @@ pub(crate) fn request_capability_reload(ctx: &mut LoopCtx) -> Result<(), String>
     {
         return Err(crate::i18n::t(crate::i18n::Msg::CmdSessionTransitionPending).into_owned());
     }
+    let plugin_skill_dirs =
+        atomcode_capabilities::plugin::loader::installed_plugin_skill_dirs(&ctx.working_dir);
+    tokio::task::block_in_place(|| {
+        tokio::runtime::Handle::current().block_on(async {
+            atomcode_capabilities::mcp::ProjectMcpPool::global()
+                .reload_full(&ctx.working_dir)
+                .await;
+        })
+    });
     ctx.runtime
         .reload_capabilities(
-            atomcode_capabilities::plugin::loader::installed_plugin_skill_dirs(&ctx.working_dir),
+            plugin_skill_dirs.clone(),
             ctx.foreground_runtime_id,
             ctx.runtime_event_tx.clone(),
         )
@@ -13465,6 +13474,11 @@ pub(crate) fn request_capability_reload(ctx: &mut LoopCtx) -> Result<(), String>
             })
             .into_owned()
         })?;
+    ctx.bg_manager.reload_capabilities_for_working_dir(
+        &ctx.working_dir,
+        plugin_skill_dirs,
+        ctx.runtime_event_tx.clone(),
+    );
     ctx.pending_capability_reload = true;
     Ok(())
 }

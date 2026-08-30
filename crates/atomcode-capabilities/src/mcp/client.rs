@@ -38,4 +38,7 @@ pub trait McpClient: Send + Sync {
 
     /// Get the current server status.
     fn status(&self) -> ServerStatus;
+
+    /// Tear down transport resources owned by this client.
+    async fn shutdown(&self);
 }

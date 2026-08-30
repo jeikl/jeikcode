@@ -8063,6 +8063,34 @@ fn interactive_input_priority(phase: UiPhase) -> bool {
     )
 }
 
+/// True when a blocking footer prompt is on screen — by phase **or** by
+/// panel. Later runtime events (compaction, thinking, session overlays) can
+/// set `phase = Streaming` while `approval_panel` is still `Some`; the card
+/// stays visible (`build_input_status` reads the panel) but the 5ms render
+/// tick and spinner resume. On Linux SSH that paints full frames as fast as
+/// the PTY allows: one core at 100% and keystrokes never reach
+/// `handle_approval_key`. Treat the panel as the source of truth.
+fn blocking_prompt_active(state: &UiState) -> bool {
+    interactive_input_priority(state.phase)
+        || state.approval_panel.is_some()
+        || state.user_input_panel.is_some()
+        || state.user_input_batch.is_some()
+        || state.round_cap_panel.is_some()
+}
+
+/// Re-assert Approval / UserInput / RoundCap whenever the matching panel is
+/// still populated, so a later `phase = Streaming` cannot strand the card
+/// on screen with streaming key routing and the 5ms tick.
+fn restore_blocking_prompt_phase(state: &mut UiState) {
+    if state.approval_panel.is_some() {
+        state.phase = UiPhase::Approval;
+    } else if state.user_input_batch.is_some() || state.user_input_panel.is_some() {
+        state.phase = UiPhase::UserInput;
+    } else if state.round_cap_panel.is_some() {
+        state.phase = UiPhase::RoundCap;
+    }
+}
+
 /// Paint the idle footer immediately after opening an interactive prompt.
 /// Delegates to `redraw_idle_plain`, which flushes deferred paint in
 /// interactive phases.
@@ -8093,7 +8121,11 @@ fn capturing_modal_owns_input(app: &App) -> bool {
         return false;
     };
     capturing_overlay_owns_keys(
-        app.state.phase,
+        if blocking_prompt_active(&app.state) {
+            UiPhase::Approval
+        } else {
+            app.state.phase
+        },
         modal.captures_all_keys(),
         modal.yield_to_interactive_prompt(),
     )
@@ -8103,7 +8135,7 @@ fn capturing_modal_owns_input(app: &App) -> bool {
 /// footer. Askpass stays. Also drop a pending catalog so the picker cannot pop
 /// back over the prompt when the scan finishes.
 fn yield_overlays_for_blocking_prompt(app: &mut App, ctx: &mut LoopCtx) {
-    if !interactive_input_priority(app.state.phase) {
+    if !blocking_prompt_active(&app.state) {
         return;
     }
     let drop_overlay = app.active_modal.as_ref().is_some_and(|m| {
@@ -8592,9 +8624,10 @@ pub async fn run_loop(mut ctx: LoopCtx, renderer: &mut dyn Renderer) -> Result<E
         // `next_fire_at`, so the snapshot stays in lock-step with the
         // controller. `None` when no interval loop is active → the arm's
         // future parks on `pending()` and its `if` guard keeps it inert.
+        restore_blocking_prompt_phase(&mut app.state);
         let loop_next_fire: Option<std::time::Instant> =
             ctx.loop_ctrl.as_ref().and_then(|c| c.next_fire_at);
-        let input_priority = interactive_input_priority(app.state.phase);
+        let input_priority = blocking_prompt_active(&app.state);
 
         #[cfg(unix)]
         tokio::select! {
@@ -8625,7 +8658,7 @@ pub async fn run_loop(mut ctx: LoopCtx, renderer: &mut dyn Renderer) -> Result<E
             // the approval-prompt fallback so a ready signal arm cannot steal
             // the loop from arrow keys. Streaming Ctrl+C stays on the keyboard
             // path (`handle_streaming_key`).
-            _ = sigint.recv(), if input_priority || ctx.local_shell_cancel.is_some() => {
+            Some(()) = sigint.recv(), if input_priority || ctx.local_shell_cancel.is_some() => {
                 if input_priority {
                     handle_interactive_interrupt(&mut app, &mut ctx, renderer)?;
                 } else {
@@ -8643,7 +8676,7 @@ pub async fn run_loop(mut ctx: LoopCtx, renderer: &mut dyn Renderer) -> Result<E
                 renderer.flush_deferred();
             }
 
-            _ = config_poll_tick.tick() => {
+            _ = config_poll_tick.tick(), if !input_priority => {
                 let idle_boundary = matches!(app.state.phase, UiPhase::Idle)
                     && app.active_modal.is_none();
                 if idle_boundary {
@@ -8681,6 +8714,7 @@ pub async fn run_loop(mut ctx: LoopCtx, renderer: &mut dyn Renderer) -> Result<E
             // prompt) is up — the spinner repaints the same footer/input
             // region the modal draws, and would clobber the masked line.
             Some(()) = spin_rx.recv(), if matches!(app.state.phase, UiPhase::Streaming)
+                && !input_priority
                 && !suppress_streaming_footer(&app, &ctx) => {
                 draw_spinner_now(&mut app.state, &app.buf, &ctx, renderer, app.message_queue.len(), app.menu.selected);
             }
@@ -8805,11 +8839,12 @@ pub async fn run_loop(mut ctx: LoopCtx, renderer: &mut dyn Renderer) -> Result<E
                     let pre_phase = app.state.phase;
                     apply_fixed_interval_loop_action(loop_action, &mut app.state, &mut ctx);
                     handle_runtime_event(runtime_event.event, &mut app.state, &mut app.think, renderer, &mut app.pending_tools, &mut ctx, &mut app.setup_pending, &mut app.reasoning_buffer, &mut app.buf);
+                    restore_blocking_prompt_phase(&mut app.state);
                     let overlay_before_yield = app.active_modal.is_some();
                     yield_overlays_for_blocking_prompt(&mut app, &mut ctx);
                     if overlay_before_yield
                         && app.active_modal.is_none()
-                        && interactive_input_priority(app.state.phase)
+                        && blocking_prompt_active(&app.state)
                     {
                         redraw_interactive_footer(&app.buf, &app.state, &ctx, renderer);
                     }
@@ -8934,7 +8969,7 @@ pub async fn run_loop(mut ctx: LoopCtx, renderer: &mut dyn Renderer) -> Result<E
             }
 
             // ── Suspend / Terminal signal ──
-            _ = sigtstp.recv() => {
+            Some(()) = sigtstp.recv() => {
                 // Do not raise SIGSTOP to suspend the process, which drops the CLI to shell [1]+ Stopped.
                 // Reclaim the TTY (a child may have stolen the foreground pgrp)
                 // and keep raw mode so the next keystroke stays in the TUI.
@@ -8952,7 +8987,7 @@ pub async fn run_loop(mut ctx: LoopCtx, renderer: &mut dyn Renderer) -> Result<E
             }
 
             // ── Resume ──
-            _ = sigcont.recv() => {
+            Some(()) = sigcont.recv() => {
                 crate::signal_restore::recover_tty();
                 renderer.reset();
                 app.state.on_resume();
@@ -8987,7 +9022,7 @@ pub async fn run_loop(mut ctx: LoopCtx, renderer: &mut dyn Renderer) -> Result<E
                 handle_input(&mut app, &mut ctx, renderer, ev)?;
             }
 
-            _ = config_poll_tick.tick() => {
+            _ = config_poll_tick.tick(), if !input_priority => {
                 let idle_boundary = matches!(app.state.phase, UiPhase::Idle)
                     && app.active_modal.is_none();
                 if idle_boundary {
@@ -9064,6 +9099,7 @@ pub async fn run_loop(mut ctx: LoopCtx, renderer: &mut dyn Renderer) -> Result<E
             // prompt) is up — the spinner repaints the same footer/input
             // region the modal draws, and would clobber the masked line.
             Some(()) = spin_rx.recv(), if matches!(app.state.phase, UiPhase::Streaming)
+                && !input_priority
                 && !suppress_streaming_footer(&app, &ctx) => {
                 draw_spinner_now(&mut app.state, &app.buf, &ctx, renderer, app.message_queue.len(), app.menu.selected);
             }
@@ -9183,11 +9219,12 @@ pub async fn run_loop(mut ctx: LoopCtx, renderer: &mut dyn Renderer) -> Result<E
                     let pre_phase = app.state.phase;
                     apply_fixed_interval_loop_action(loop_action, &mut app.state, &mut ctx);
                     handle_runtime_event(runtime_event.event, &mut app.state, &mut app.think, renderer, &mut app.pending_tools, &mut ctx, &mut app.setup_pending, &mut app.reasoning_buffer, &mut app.buf);
+                    restore_blocking_prompt_phase(&mut app.state);
                     let overlay_before_yield = app.active_modal.is_some();
                     yield_overlays_for_blocking_prompt(&mut app, &mut ctx);
                     if overlay_before_yield
                         && app.active_modal.is_none()
-                        && interactive_input_priority(app.state.phase)
+                        && blocking_prompt_active(&app.state)
                     {
                         redraw_interactive_footer(&app.buf, &app.state, &ctx, renderer);
                     }
@@ -9273,6 +9310,7 @@ pub async fn run_loop(mut ctx: LoopCtx, renderer: &mut dyn Renderer) -> Result<E
         }
 
         drain_foreground_replay_events(&mut app, &mut ctx, renderer);
+        restore_blocking_prompt_phase(&mut app.state);
         install_pending_session_picker(&mut app, &mut ctx, renderer);
         install_pending_rewind_modal(&mut app, &mut ctx, renderer);
 
@@ -11558,13 +11596,30 @@ fn handle_input(
                     return Ok(());
                 }
             }
-            match app.state.phase {
-                UiPhase::Idle => handle_idle_key(app, ctx, renderer, code, modifiers)?,
-                UiPhase::Streaming => handle_streaming_key(app, ctx, renderer, code, modifiers)?,
-                UiPhase::Approval => handle_approval_key(app, ctx, renderer, code, modifiers)?,
-                UiPhase::UserInput => handle_user_input_key(app, ctx, renderer, code, modifiers)?,
-                UiPhase::RoundCap => handle_round_cap_key(app, ctx, renderer, code, modifiers)?,
-                UiPhase::Suspended => {}
+            if app.state.approval_panel.is_some() {
+                handle_approval_key(app, ctx, renderer, code, modifiers)?;
+            } else if app.state.user_input_panel.is_some() || app.state.user_input_batch.is_some()
+            {
+                handle_user_input_key(app, ctx, renderer, code, modifiers)?;
+            } else if app.state.round_cap_panel.is_some() {
+                handle_round_cap_key(app, ctx, renderer, code, modifiers)?;
+            } else {
+                match app.state.phase {
+                    UiPhase::Idle => handle_idle_key(app, ctx, renderer, code, modifiers)?,
+                    UiPhase::Streaming => {
+                        handle_streaming_key(app, ctx, renderer, code, modifiers)?
+                    }
+                    UiPhase::Approval => {
+                        handle_approval_key(app, ctx, renderer, code, modifiers)?
+                    }
+                    UiPhase::UserInput => {
+                        handle_user_input_key(app, ctx, renderer, code, modifiers)?
+                    }
+                    UiPhase::RoundCap => {
+                        handle_round_cap_key(app, ctx, renderer, code, modifiers)?
+                    }
+                    UiPhase::Suspended => {}
+                }
             }
         }
         // Release key events: drop on the floor. Press / Repeat are handled
@@ -13317,7 +13372,7 @@ fn redraw_idle_plain(buf: &Buffer, state: &UiState, ctx: &LoopCtx, renderer: &mu
     // Interactive prompts suppress the 5ms deferred-render tick in `run_loop`,
     // so paint immediately here. Idle/Streaming keep the tick to avoid a
     // per-keypress syscall on Windows OpenConsole / xterm.js.
-    if interactive_input_priority(state.phase) {
+    if blocking_prompt_active(state) {
         renderer.flush_deferred();
     }
 }
@@ -17269,6 +17324,35 @@ mod interactive_input_priority_tests {
     }
 
     #[test]
+    fn approval_panel_keeps_input_priority_even_if_phase_is_streaming() {
+        use super::{blocking_prompt_active, restore_blocking_prompt_phase};
+        use crate::state::{ApprovalKind, ApprovalOption, ApprovalPanel, UiState};
+
+        let mut state = UiState::new();
+        state.phase = UiPhase::Streaming;
+        state.approval_panel = Some(ApprovalPanel {
+            tool: "Bash".into(),
+            detail: "rmdir /tmp/safety-test".into(),
+            options: vec![ApprovalOption {
+                label: "允许一次".into(),
+                kind: ApprovalKind::AllowOnce,
+                accel: 'y',
+            }],
+            selected: 0,
+            cache_key: String::new(),
+        });
+        assert!(
+            blocking_prompt_active(&state),
+            "visible approval card must pause the 5ms tick even if phase drifted"
+        );
+        restore_blocking_prompt_phase(&mut state);
+        assert!(
+            matches!(state.phase, UiPhase::Approval),
+            "restore must put keys back on handle_approval_key"
+        );
+    }
+
+    #[test]
     fn sessions_overlay_does_not_steal_approval_keys() {
         use super::capturing_overlay_owns_keys;
         assert!(
@@ -18401,7 +18485,7 @@ fn install_pending_session_picker(app: &mut App, ctx: &mut LoopCtx, renderer: &m
         return;
     }
     // Never cover a blocking prompt (tool approval / user-input / round-cap).
-    if interactive_input_priority(app.state.phase) {
+    if blocking_prompt_active(&app.state) {
         ctx.pending_session_picker = None;
         ctx.session_catalog_loading = false;
         return;
@@ -20120,9 +20204,14 @@ fn handle_coding_runtime_event(
         CodingRuntimeEvent::CompactionStarted { .. } => {
             state.compacting = true;
             if !matches!(state.phase, UiPhase::Streaming) {
-                state.compaction_forced_streaming = true;
-                state.phase = UiPhase::Streaming;
-                state.phase_started_at = Some(std::time::Instant::now());
+                // Don't steal keys from a blocking footer prompt. Auto-compact
+                // can fire while Bash approval is up; forcing Streaming would
+                // resume the 5ms tick + spinner over the still-visible card.
+                if !blocking_prompt_active(state) {
+                    state.compaction_forced_streaming = true;
+                    state.phase = UiPhase::Streaming;
+                    state.phase_started_at = Some(std::time::Instant::now());
+                }
             }
         }
         CodingRuntimeEvent::CompactionFinished { completion } => {
@@ -20189,13 +20278,15 @@ fn handle_coding_runtime_event(
 
             if state.compaction_forced_streaming {
                 state.compaction_forced_streaming = false;
-                state.phase = UiPhase::Idle;
-                state.spinner_label.clear();
-                // This Streaming→Idle path bypasses on_turn_complete/cancelled, so
-                // drop the interactive `/usage` panel here too — otherwise a panel
-                // armed during a forced-streaming compaction would bleed its tab
-                // keys into the next real streaming turn.
-                state.footer_usage = None;
+                if !blocking_prompt_active(state) {
+                    state.phase = UiPhase::Idle;
+                    state.spinner_label.clear();
+                    // This Streaming→Idle path bypasses on_turn_complete/cancelled, so
+                    // drop the interactive `/usage` panel here too — otherwise a panel
+                    // armed during a forced-streaming compaction would bleed its tab
+                    // keys into the next real streaming turn.
+                    state.footer_usage = None;
+                }
             }
         }
         CodingRuntimeEvent::ProviderUnavailable { reason, .. } => {
@@ -20318,6 +20409,46 @@ mod coding_runtime_event_tests {
         assert!(!state.compaction_forced_streaming);
         assert!(matches!(state.phase, UiPhase::Idle));
         assert!(!output.is_empty());
+    }
+
+    #[test]
+    fn compaction_during_approval_does_not_steal_keyboard() {
+        use crate::state::{ApprovalKind, ApprovalOption, ApprovalPanel};
+
+        let mut state = UiState::default();
+        state.phase = UiPhase::Approval;
+        state.approval_panel = Some(ApprovalPanel {
+            tool: "Bash".into(),
+            detail: "rmdir /tmp/x".into(),
+            options: vec![ApprovalOption {
+                label: "允许一次".into(),
+                kind: ApprovalKind::AllowOnce,
+                accel: 'y',
+            }],
+            selected: 0,
+            cache_key: String::new(),
+        });
+        let mut think = ThinkStripper::default();
+        let mut output = Vec::new();
+        {
+            let mut renderer = crate::render::plain::PlainRenderer::with_writer(&mut output);
+            handle_coding_runtime_event(
+                CodingRuntimeEvent::CompactionStarted {
+                    trigger: CompactTrigger::Auto { utilization: 0.8 },
+                },
+                &mut state,
+                &mut think,
+                &mut renderer,
+                true,
+            );
+            assert!(state.compacting);
+            assert!(
+                !state.compaction_forced_streaming,
+                "must not force Streaming over an approval card"
+            );
+            assert!(matches!(state.phase, UiPhase::Approval));
+            assert!(blocking_prompt_active(&state));
+        }
     }
 
     #[test]

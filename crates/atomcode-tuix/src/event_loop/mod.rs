@@ -18872,6 +18872,10 @@ fn handle_runtime_event(
                     );
                     return;
                 }
+                CodingRuntimeEvent::SessionTitleSeeded { name } => {
+                    seed_provisional_session_title(ctx, name);
+                    return;
+                }
                 CodingRuntimeEvent::NextPromptSuggested {
                     generation,
                     session_id,
@@ -22383,6 +22387,22 @@ fn apply_ai_session_name(ctx: &mut LoopCtx, name: String, renderer: &mut dyn Ren
         .set_foreground_session(ctx.current_session.clone(), ctx.working_dir.clone());
 }
 
+/// First-prompt provisional title (raw user input). Disk already has the name
+/// from publish; this only updates the in-memory TUI projection. Does not set
+/// `ai_named` / `user_renamed` so a later AI suggestion or `/rename` can win.
+fn seed_provisional_session_title(ctx: &mut LoopCtx, name: String) {
+    if ctx.current_session.user_renamed || ctx.current_session.ai_named {
+        return;
+    }
+    if name.trim().is_empty() {
+        return;
+    }
+    ctx.current_session.name = name;
+    ctx.current_session.touch();
+    ctx.bg_manager
+        .set_foreground_session(ctx.current_session.clone(), ctx.working_dir.clone());
+}
+
 /// Keep the transitional UI projection in sync. Durable persistence belongs to
 /// the native runtime hooks; this function must never write core JSON.
 fn persist_current_session(
@@ -22441,7 +22461,17 @@ pub(crate) fn apply_session_snapshot(
             .map(|m| m.text.as_str())
             .find(|t| !is_synthetic_user_text(t));
         if let Some(text) = first_real_user {
-            let name: String = text.lines().next().unwrap_or("").chars().take(40).collect();
+            let unwrapped = atomcode_capabilities::session::UserWrapHook::unwrap_input_for(
+                &session.working_dir,
+                text,
+            );
+            let name: String = unwrapped
+                .lines()
+                .next()
+                .unwrap_or("")
+                .chars()
+                .take(40)
+                .collect();
             if !name.is_empty() {
                 session.name = name;
             }

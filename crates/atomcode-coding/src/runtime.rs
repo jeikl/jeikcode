@@ -92,6 +92,12 @@ pub enum CodingRuntimeEvent {
     SessionNameSuggested {
         name: String,
     },
+    /// Provisional first-prompt title (raw user input). Does not set `ai_named`
+    /// or `user_renamed`; a later [`SessionNameSuggested`] may replace it, while
+    /// protocol-pinned `user` titles never emit this.
+    SessionTitleSeeded {
+        name: String,
+    },
     /// Ephemeral composer suggestion sampled after a naturally completed turn.
     /// It is not part of the conversation or session persistence. Drivers must
     /// discard it when the correlated generation/session/turn is no longer current.
@@ -3167,13 +3173,30 @@ fn spawn_runtime_owner_with_optional_agent(
                                     .update_from_user_text(&input.text);
                             }
                         }
-                        // First real user message commits a staged fresh session to disk.
+                        // First real user message commits a staged fresh session to
+                        // disk immediately (catalog-visible + provisional title from
+                        // raw input). Wrap happens later in the kernel hooks; the
+                        // title/seed never includes wrap boilerplate. Protocol
+                        // `user` titles stay pinned via user_renamed.
                         if let Some(runtime) = resources.as_mut() {
-                            if let Err(error) = runtime.parts.publish_staged_session() {
-                                let _ = done.send(Err(RuntimeError::ReconfigureFailed(
-                                    format!("failed to persist staged session: {error}"),
-                                )));
-                                continue;
+                            let seed_input = (!input.text.trim().is_empty())
+                                .then_some(input.text.as_str());
+                            match runtime
+                                .parts
+                                .publish_staged_session_with_first_input(seed_input)
+                            {
+                                Ok(Some(name)) => {
+                                    let _ = runtime_event_tx.send(
+                                        CodingRuntimeEvent::SessionTitleSeeded { name },
+                                    );
+                                }
+                                Ok(None) => {}
+                                Err(error) => {
+                                    let _ = done.send(Err(RuntimeError::ReconfigureFailed(
+                                        format!("failed to persist staged session: {error}"),
+                                    )));
+                                    continue;
+                                }
                             }
                         }
                         let receipt = if let Some(turn_id) = active_turn {
@@ -5595,8 +5618,25 @@ fn spawn_runtime_owner_with_optional_agent(
                                     let turn_id = active_turn.unwrap_or_default();
                                     let mut completion_reason = reason;
                                     if reason != StopReason::Cancelled && !ai_name_attempted {
+                                        let working_dir = resources
+                                            .as_ref()
+                                            .map(|runtime| runtime.config.working_dir.as_path())
+                                            .unwrap_or_else(|| std::path::Path::new(""));
+                                        // Skip AI naming when the protocol `user` title
+                                        // is pinned (user_renamed) — checked again when
+                                        // applying SessionNameSuggested.
+                                        let pinned = resources.as_ref().and_then(|runtime| {
+                                            runtime.parts.session.as_ref().and_then(|binding| {
+                                                binding.manager.read_meta(&binding.id).ok()
+                                            })
+                                        })
+                                        .is_some_and(|meta| meta.user_renamed);
+                                        if !pinned {
                                         if let Some(conversation) =
-                                            crate::session_title::first_exchange_text(&snapshot.messages)
+                                            crate::session_title::first_exchange_text_in(
+                                                &snapshot.messages,
+                                                working_dir,
+                                            )
                                         {
                                             let enabled = resources
                                                 .as_ref()
@@ -5642,6 +5682,7 @@ fn spawn_runtime_owner_with_optional_agent(
                                                     });
                                                 }
                                             }
+                                        }
                                         }
                                     }
                                     if let Some(state) = goal.as_mut().filter(|state| state.active) {

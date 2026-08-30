@@ -1,3 +1,4 @@
+use std::path::Path;
 use std::sync::Arc;
 
 use atomcode_kernel::message::{Message, Role};
@@ -7,6 +8,47 @@ use futures::StreamExt;
 
 const MAX_TITLE_CHARS: usize = 40;
 const TITLE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// First-line provisional title from the user's raw (unwrapped) input.
+/// Used at first Submit so the session is catalog-visible before the turn ends.
+pub fn provisional_title_from_user_input(raw: &str) -> Option<String> {
+    let text = strip_leading_image_markers(raw.trim());
+    let name: String = text
+        .lines()
+        .next()
+        .unwrap_or_default()
+        .chars()
+        .map(|character| {
+            if character.is_control() {
+                ' '
+            } else {
+                character
+            }
+        })
+        .take(MAX_TITLE_CHARS)
+        .collect();
+    let name = name.trim();
+    if name.is_empty() {
+        None
+    } else {
+        Some(name.to_string())
+    }
+}
+
+/// Remove only TUI-generated image attachment markers from the beginning of a
+/// prompt so titles stay human-readable.
+fn strip_leading_image_markers(mut text: &str) -> &str {
+    loop {
+        let trimmed = text.trim_start();
+        let Some(marker) = trimmed.strip_prefix("[Image #") else {
+            return trimmed;
+        };
+        let Some(close) = marker.find(']') else {
+            return trimmed;
+        };
+        text = marker[close + 1..].trim_start();
+    }
+}
 
 pub fn session_title_prompt(conversation: &str) -> String {
     format!(
@@ -46,6 +88,12 @@ pub fn sanitize_generated_title(raw: &str) -> Option<String> {
 }
 
 pub fn first_exchange_text(messages: &[Message]) -> Option<String> {
+    first_exchange_text_in(messages, Path::new(""))
+}
+
+/// Like [`first_exchange_text`], but unwraps `user-wrap.md` so AI titles never
+/// echo the wrap template boilerplate — only the user's real input.
+pub fn first_exchange_text_in(messages: &[Message], working_dir: &Path) -> Option<String> {
     let user = messages
         .iter()
         .filter(|message| {
@@ -53,9 +101,14 @@ pub fn first_exchange_text(messages: &[Message]) -> Option<String> {
                 && !message.synthetic
                 && !atomcode_capabilities::reminder::is_system_reminder(&message.text)
         })
-        .map(|message| message.text.as_str())
+        .map(|message| {
+            atomcode_capabilities::session::UserWrapHook::unwrap_input_for(
+                working_dir,
+                &message.text,
+            )
+        })
         .next()
-        .map(str::trim)
+        .map(|text| text.trim().to_string())
         .filter(|text| !text.is_empty())?;
     let assistant = messages
         .iter()
@@ -132,6 +185,32 @@ mod tests {
         assert_eq!(
             first_exchange_text(&messages).as_deref(),
             Some("User: 修复登录错误\nAssistant: 已修复")
+        );
+    }
+
+    #[test]
+    fn first_exchange_unwraps_user_wrap_for_title_prompt() {
+        let temp = tempfile::TempDir::new().unwrap();
+        std::fs::write(
+            temp.path().join("user-wrap.md"),
+            "用户提问：【{{input}}】\n请严格遵守规则。",
+        )
+        .unwrap();
+        let messages = vec![
+            Message::user("用户提问：【修复登录错误】\n请严格遵守规则。"),
+            Message::assistant("已修复", vec![]),
+        ];
+        assert_eq!(
+            first_exchange_text_in(&messages, temp.path()).as_deref(),
+            Some("User: 修复登录错误\nAssistant: 已修复")
+        );
+    }
+
+    #[test]
+    fn provisional_title_uses_first_line_only() {
+        assert_eq!(
+            provisional_title_from_user_input("[Image #1] 帮我看图\n第二行").as_deref(),
+            Some("帮我看图")
         );
     }
 

@@ -27,8 +27,9 @@ use atomcode_capabilities::memory::MemoryHook;
 
 use atomcode_capabilities::session::snapshot::SnapshotPersistenceStatus;
 use atomcode_capabilities::session::{
-    PresentationFile, RecallTool, SessionContextHook, SessionLease, SessionManager, SessionMeta,
-    SnapshotHook, StatusReminderHook, StorageOwner, TranscriptHook,
+    DisplayAnchor, PresentationEntry, PresentationFile, PresentationRole, RecallTool,
+    SessionContextHook, SessionLease, SessionManager, SessionMeta, SnapshotHook,
+    StatusReminderHook, StorageOwner, TranscriptHook,
 };
 use atomcode_capabilities::skills::{
     register_skill_tools, runtime_skill_dirs, SkillCatalogHook, SkillRegistry,
@@ -566,6 +567,9 @@ async fn prepare_with_plugin_hooks_reusing_lease(
             let now = atomcode_capabilities::session::now_ms();
             let mut meta = SessionMeta::new(&id, cfg.working_dir.to_string_lossy().as_ref(), now);
             meta.owner = StorageOwner::Native;
+            // OpenAI / Anthropic / compat `user` (or user_title): pin as
+            // user_renamed so first-prompt seed and AI naming never overwrite.
+            apply_pinned_session_display_name(&mut meta, cfg.session_display_name.as_deref());
             if !stage_fresh {
                 manager
                     .commit_native_import(
@@ -591,6 +595,7 @@ async fn prepare_with_plugin_hooks_reusing_lease(
             let now = atomcode_capabilities::session::now_ms();
             let mut meta = SessionMeta::new(id, cfg.working_dir.to_string_lossy().as_ref(), now);
             meta.owner = StorageOwner::Native;
+            apply_pinned_session_display_name(&mut meta, cfg.session_display_name.as_deref());
             // Drafts are always staged — never catalog-visible until first Submit.
             Some(SessionBinding {
                 id: id.clone(),
@@ -895,6 +900,15 @@ fn session_lease(
     }
 }
 
+/// Pin OpenAI / Anthropic / compat JSON `user` (or user_title) onto session meta.
+/// `user_renamed=true` blocks first-prompt seeding and AI title suggestions.
+fn apply_pinned_session_display_name(meta: &mut SessionMeta, display_name: Option<&str>) {
+    if let Some(title) = display_name.map(str::trim).filter(|title| !title.is_empty()) {
+        meta.name = title.to_string();
+        meta.user_renamed = true;
+    }
+}
+
 impl CodingParts {
     /// The host-owned CodingPlan quota source, if any. Used at `/goal` start to
     /// size the round budget from the live request quota.
@@ -934,23 +948,65 @@ impl CodingParts {
     /// session transition's persistence commit point; preparation and assembly
     /// deliberately leave the catalog untouched.
     pub(crate) fn publish_staged_session(&mut self) -> io::Result<()> {
+        self.publish_staged_session_with_first_input(None)
+            .map(|_| ())
+    }
+
+    /// Commit a staged fresh/draft session on first real user Submit.
+    ///
+    /// When `first_user_input` is non-empty and the title is not already pinned
+    /// (`user_renamed`, e.g. OpenAI/Anthropic JSON `user`), seeds a provisional
+    /// title from the raw user text (never wrap boilerplate) and sets
+    /// `message_count = 1` so the session appears in pickers mid-turn. AI
+    /// session naming may later replace that provisional title; pinned API
+    /// titles never change.
+    pub(crate) fn publish_staged_session_with_first_input(
+        &mut self,
+        first_user_input: Option<&str>,
+    ) -> io::Result<Option<String>> {
         let Some(binding) = self.session.as_mut() else {
-            return Ok(());
+            return Ok(None);
         };
         let Some(meta) = binding.staged_fresh.as_ref() else {
-            return Ok(());
+            return Ok(None);
         };
+        let mut meta = meta.clone();
+        let mut snapshot = SessionSnapshot::new(Vec::new());
+        let mut presentation = PresentationFile::default();
+        let mut seeded_title = None;
+
+        if let Some(raw) = first_user_input.map(str::trim).filter(|text| !text.is_empty()) {
+            // Persist the raw user turn so catalog/message_count > 0 immediately.
+            // turn_start inflight / turn_complete overwrite with the full
+            // (possibly wrap-expanded) conversation for the model.
+            snapshot = SessionSnapshot::new(vec![Message::user(raw)]);
+            presentation.entries.push(PresentationEntry {
+                anchor: DisplayAnchor::AtStart,
+                role: PresentationRole::User,
+                text: raw.to_string(),
+            });
+            meta.message_count = 1;
+            if !meta.user_renamed {
+                if let Some(title) =
+                    crate::session_title::provisional_title_from_user_input(raw)
+                {
+                    meta.name = title.clone();
+                    seeded_title = Some(title);
+                }
+            }
+        }
+
         binding
             .manager
             .commit_native_import(
                 &binding.lease,
-                Some(&SessionSnapshot::new(Vec::new())),
-                Some(&PresentationFile::default()),
-                meta,
+                Some(&snapshot),
+                Some(&presentation),
+                &meta,
             )
             .map_err(io::Error::from)?;
         binding.staged_fresh = None;
-        Ok(())
+        Ok(seeded_title)
     }
 
     pub(crate) fn has_staged_fresh_session(&self) -> bool {
@@ -2637,10 +2693,64 @@ mod tests {
 
         parts.publish_staged_session().unwrap();
         let binding = parts.session.as_ref().unwrap();
-        assert_eq!(
-            binding.manager.read_meta(&binding.id).unwrap().owner,
-            StorageOwner::Native
-        );
+        let meta = binding.manager.read_meta(&binding.id).unwrap();
+        assert_eq!(meta.owner, StorageOwner::Native);
+        assert_eq!(meta.message_count, 0);
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(atomcode_home)]
+    async fn first_submit_seeds_provisional_title_and_message_count() {
+        let home = tempfile::tempdir().unwrap();
+        let project = tempfile::tempdir().unwrap();
+        std::env::set_var("ATOMCODE_HOME", home.path());
+        let cfg = CodingAgentConfig::new("k", "http://localhost", "m", project.path());
+        let mut opts = io_free_opts();
+        opts.session = SessionMode::Fresh;
+
+        let mut parts = prepare_with_plugin_hooks_reusing_lease(&cfg, opts, Vec::new(), None, true)
+            .await
+            .unwrap();
+        let seeded = parts
+            .publish_staged_session_with_first_input(Some("修复登录错误\n第二行"))
+            .unwrap();
+        assert_eq!(seeded.as_deref(), Some("修复登录错误"));
+        let binding = parts.session.as_ref().unwrap();
+        let meta = binding.manager.read_meta(&binding.id).unwrap();
+        assert_eq!(meta.name, "修复登录错误");
+        assert!(!meta.user_renamed);
+        assert!(!meta.ai_named);
+        assert_eq!(meta.message_count, 1);
+        let snap = binding.manager.load_snapshot(&binding.id).unwrap();
+        assert_eq!(snap.messages.len(), 1);
+        assert_eq!(snap.messages[0].text, "修复登录错误\n第二行");
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(atomcode_home)]
+    async fn pinned_protocol_user_title_survives_first_submit_seed() {
+        let home = tempfile::tempdir().unwrap();
+        let project = tempfile::tempdir().unwrap();
+        std::env::set_var("ATOMCODE_HOME", home.path());
+        let mut cfg = CodingAgentConfig::new("k", "http://localhost", "m", project.path());
+        cfg.session_display_name = Some("alice_a".into());
+        let mut opts = io_free_opts();
+        opts.session = SessionMode::Draft {
+            id: "draft-alice".into(),
+        };
+
+        let mut parts = prepare_with_plugin_hooks_reusing_lease(&cfg, opts, Vec::new(), None, true)
+            .await
+            .unwrap();
+        let seeded = parts
+            .publish_staged_session_with_first_input(Some("should not become title"))
+            .unwrap();
+        assert_eq!(seeded, None);
+        let binding = parts.session.as_ref().unwrap();
+        let meta = binding.manager.read_meta(&binding.id).unwrap();
+        assert_eq!(meta.name, "alice_a");
+        assert!(meta.user_renamed);
+        assert_eq!(meta.message_count, 1);
     }
 
     #[tokio::test]

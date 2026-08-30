@@ -1490,6 +1490,13 @@ fn tool_result_summary(text: &str) -> String {
 
 impl MessageInfo {
     fn from_kernel(msg: &atomcode_kernel::message::Message) -> Self {
+        Self::from_kernel_in(msg, None)
+    }
+
+    fn from_kernel_in(
+        msg: &atomcode_kernel::message::Message,
+        working_dir: Option<&std::path::Path>,
+    ) -> Self {
         use atomcode_kernel::message::Role;
 
         let role = match msg.role {
@@ -1536,9 +1543,9 @@ impl MessageInfo {
                 .collect()
         });
         if msg.role == Role::User {
-            let cwd = std::env::current_dir().unwrap_or_default();
+            let cwd = working_dir.unwrap_or_else(|| std::path::Path::new("."));
             content =
-                atomcode_capabilities::session::UserWrapHook::unwrap_input_for(&cwd, &content);
+                atomcode_capabilities::session::UserWrapHook::unwrap_input_for(cwd, &content);
             let (display, had_vision_marker) = strip_vision_marker(&content);
             if had_vision_marker {
                 content = display;
@@ -2927,8 +2934,16 @@ fn merge_catalog_session_messages_for_display(
         presentation.entry(after_message).or_default().push(entry);
     }
     let timestamp = Some(u64::try_from(session.meta.updated_at.max(0)).unwrap_or(0));
+    let working_dir = std::path::Path::new(&session.meta.working_dir);
     let mut messages =
         Vec::with_capacity(runtime_messages.len() + session.presentation.entries.len());
+    let unwrap_presentation_text = |role: PresentationRole, text: &str| -> String {
+        if role == PresentationRole::User {
+            atomcode_capabilities::session::UserWrapHook::unwrap_input_for(working_dir, text)
+        } else {
+            text.to_string()
+        }
+    };
     let mut append_presentation = |position: usize, messages: &mut Vec<MessageInfo>| {
         for entry in presentation.remove(&position).unwrap_or_default() {
             if atomcode_capabilities::reminder::is_system_reminder(&entry.text) {
@@ -2940,7 +2955,7 @@ fn merge_catalog_session_messages_for_display(
                     PresentationRole::Assistant => "assistant",
                 }
                 .into(),
-                content: entry.text.clone(),
+                content: unwrap_presentation_text(entry.role, &entry.text),
                 reasoning: None,
                 synthetic: false,
                 internal_origin: None,
@@ -2955,7 +2970,7 @@ fn merge_catalog_session_messages_for_display(
     };
     append_presentation(0, &mut messages);
     for (index, message) in runtime_messages.into_iter().enumerate() {
-        let mut info = MessageInfo::from_kernel(message);
+        let mut info = MessageInfo::from_kernel_in(message, Some(working_dir));
         if info.created_at.is_none() {
             info.created_at = timestamp;
         }
@@ -2973,7 +2988,7 @@ fn merge_catalog_session_messages_for_display(
                     PresentationRole::Assistant => "assistant",
                 }
                 .into(),
-                content: entry.text.clone(),
+                content: unwrap_presentation_text(entry.role, &entry.text),
                 reasoning: None,
                 synthetic: false,
                 internal_origin: None,
@@ -4958,6 +4973,7 @@ impl ChatRuntimeProjector {
             | CodingRuntimeEvent::ProviderChanged { .. }
             | CodingRuntimeEvent::ProviderUnavailable { .. }
             | CodingRuntimeEvent::SessionNameSuggested { .. }
+            | CodingRuntimeEvent::SessionTitleSeeded { .. }
             | CodingRuntimeEvent::SessionChanged(_)
             | CodingRuntimeEvent::WorkingDirectoryChanged(_)
             | CodingRuntimeEvent::GoalChanged(_)

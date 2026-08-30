@@ -791,6 +791,9 @@ pub(crate) async fn run_chat_turn_v2(
                     )));
                 }
             }
+            CodingRuntimeEvent::SessionTitleSeeded { .. } => {
+                // Disk title was already seeded at publish; no further catalog write.
+            }
             CodingRuntimeEvent::RuntimeStopped(_) => {
                 send_chat_runtime_error(
                     &runtime_event_tx,
@@ -1205,6 +1208,12 @@ impl NativeLiveWireProjector {
                 provider, ..
             }) => LiveWireEvent::Provider { provider },
             crate::live_hub::LiveViewEvent::Runtime(Runtime::SessionNameSuggested { name }) => {
+                LiveWireEvent::SessionRenamed {
+                    session_id: self.session_id.clone(),
+                    name,
+                }
+            }
+            crate::live_hub::LiveViewEvent::Runtime(Runtime::SessionTitleSeeded { name }) => {
                 LiveWireEvent::SessionRenamed {
                     session_id: self.session_id.clone(),
                     name,

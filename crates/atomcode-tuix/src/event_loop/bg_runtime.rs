@@ -887,6 +887,29 @@ impl BgRuntimeManager {
         );
     }
 
+    /// Provisional first-prompt title: in-memory only (disk already written at
+    /// publish). Never sets `ai_named` / `user_renamed`.
+    fn apply_background_session_title_seed(&mut self, runtime_id: RuntimeId, name: String) {
+        let Some(background) = self.backgrounds.slot_mut_for_runtime_id(runtime_id) else {
+            return;
+        };
+        if background.pending_session_change.is_some() {
+            background.buffered_events.push(RuntimeEventPayload::Native(
+                CodingRuntimeEvent::SessionTitleSeeded { name },
+            ));
+            return;
+        }
+        if background.session.user_renamed || background.session.ai_named {
+            return;
+        }
+        if name.trim().is_empty() {
+            return;
+        }
+        background.session.name = name;
+        background.session.touch();
+        background.summary = session_summary(&background.session);
+    }
+
     pub fn drop_slot(&mut self, slot: usize) -> Result<BackgroundSlot, BgError> {
         self.backgrounds.drop_slot(slot)
     }
@@ -922,6 +945,10 @@ impl BgRuntimeManager {
             }
             RuntimeEventPayload::Native(CodingRuntimeEvent::SessionNameSuggested { name }) => {
                 self.apply_background_session_name(runtime_id, name);
+                false
+            }
+            RuntimeEventPayload::Native(CodingRuntimeEvent::SessionTitleSeeded { name }) => {
+                self.apply_background_session_title_seed(runtime_id, name);
                 false
             }
             RuntimeEventPayload::Native(event @ CodingRuntimeEvent::NextPromptSuggested { .. }) => {
@@ -1176,6 +1203,7 @@ fn retain_session_replay_events(events: &mut Vec<RuntimeEventPayload>) {
         matches!(
             event,
             RuntimeEventPayload::Native(CodingRuntimeEvent::SessionNameSuggested { .. })
+                | RuntimeEventPayload::Native(CodingRuntimeEvent::SessionTitleSeeded { .. })
         )
     });
 }

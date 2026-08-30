@@ -220,6 +220,10 @@ pub struct CodingAgentConfig {
     /// Optional client-supplied system text (OpenAI/Anthropic compat API).
     /// Appended after AGENTS.md / glossary / db packs in the SESSION CONTEXT block.
     pub extra_system_append: Option<String>,
+    /// Optional display name for a freshly created session (e.g. OpenAI `user` /
+    /// user_title). Pinned with `user_renamed=true` so first-prompt seeding and
+    /// AI session naming never overwrite it.
+    pub session_display_name: Option<String>,
     /// Full provider registry used to resolve task-tool fast/capable tiers.
     pub subagent_config: Option<Arc<atomcode_config::config::Config>>,
     /// Swap-aware, lazily-built FAST-tier provider for the `task` tool. `None` ⇒ the fast
@@ -467,6 +471,7 @@ impl CodingRuntimeConfig {
         config.skip_tls_verify = self.skip_tls_verify;
         config.supports_vision = self.supports_vision;
         config.extra_system_append = self.extra_system_append.clone();
+        config.session_display_name = self.session_display_name.clone();
         config.loop_max_rounds = self.loop_max_rounds;
         config.max_rounds = self.turn_max_rounds;
         // First-token liveness: propagate the config/env-resolved value down to
@@ -813,6 +818,7 @@ impl CodingAgentConfig {
             // Callers that load from config overwrite this via `accepts_images()`.
             supports_vision: false,
             extra_system_append: None,
+            session_display_name: None,
             subagent_config: None,
             subagent_fast_provider: None,
             subagent_capable_provider: None,

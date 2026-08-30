@@ -1528,6 +1528,52 @@ mod tests {
     }
 
     #[test]
+    fn background_approval_does_not_change_selected_session_and_replays_on_return() {
+        use atomcode_coding::RuntimeRequest;
+
+        let mut manager = BgRuntimeManager::new_for_test(session("visible session"));
+        manager
+            .push_test_background(
+                session("background approval session"),
+                RuntimeState::Running,
+            )
+            .unwrap();
+        let request = RuntimeRequest {
+            id: 77,
+            kind: atomcode_capabilities::tools::APPROVAL_KIND.into(),
+            payload: serde_json::json!({
+                "call_id": "call-77",
+                "tool": "bash",
+                "args": "{\"command\":\"pwd\"}"
+            }),
+            snapshot: None,
+        };
+
+        manager.apply_background_event(
+            RuntimeId::new(2),
+            RuntimeEventPayload::Native(CodingRuntimeEvent::Request(request)),
+        );
+
+        assert_eq!(manager.foreground_session().name, "visible session");
+        assert_eq!(manager.foreground.runtime_id, RuntimeId::new(1));
+        assert_eq!(
+            manager.backgrounds.slots[0]
+                .pending_request
+                .as_ref()
+                .map(|r| r.id),
+            Some(77)
+        );
+
+        let resumed = manager.resume_slot(1, RuntimeState::Idle).unwrap();
+        assert_eq!(resumed.resumed_session.name, "background approval session");
+        assert!(matches!(
+            resumed.replay_events.last(),
+            Some(RuntimeEventPayload::Native(CodingRuntimeEvent::Request(request)))
+                if request.id == 77
+        ));
+    }
+
+    #[test]
     fn sequenced_native_agent_output_is_retained_for_foreground_resume() {
         use atomcode_coding::SequencedRuntimeEvent;
 

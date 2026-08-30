@@ -233,6 +233,11 @@ fn bind_spawned_foreground(
     endpoint: super::RuntimeEndpoint,
     session: Session,
 ) {
+    // Replay payloads intentionally omit RuntimeId because they are consumed
+    // synchronously for the selected runner. Once the view changes, anything
+    // left in this queue belongs to the outgoing session and must never be
+    // projected into the new foreground UI (especially an approval request).
+    ctx.foreground_replay_events.clear();
     ctx.runtime = endpoint.native;
     ctx.foreground_runtime_id = runtime_id;
     ctx.current_session = session;
@@ -379,6 +384,10 @@ fn schedule_resumed_runtime_replay(
     replay_queue: &mut std::collections::VecDeque<bg_runtime::RuntimeEventPayload>,
     events: Vec<bg_runtime::RuntimeEventPayload>,
 ) {
+    // A replay queue is scoped to exactly one foreground runtime. Replacing it
+    // on every session switch prevents an undrained request from session A
+    // from opening a blocking card after session B becomes selected.
+    replay_queue.clear();
     replay_queue.extend(events);
 }
 
@@ -724,6 +733,40 @@ mod bg_live_guard_tests {
             Some(RuntimeEventPayload::Ui(
                 crate::event_loop::ui_event::UiEvent::TurnComplete { .. }
             ))
+        ));
+    }
+
+    #[test]
+    fn switching_foreground_discards_outgoing_session_replay_requests() {
+        let outgoing_request = atomcode_coding::RuntimeRequest {
+            id: 41,
+            kind: atomcode_capabilities::tools::APPROVAL_KIND.into(),
+            payload: serde_json::json!({}),
+            snapshot: None,
+        };
+        let resumed_request = atomcode_coding::RuntimeRequest {
+            id: 42,
+            kind: atomcode_capabilities::tools::APPROVAL_KIND.into(),
+            payload: serde_json::json!({}),
+            snapshot: None,
+        };
+        let mut replay_queue = std::collections::VecDeque::from([RuntimeEventPayload::Native(
+            atomcode_coding::CodingRuntimeEvent::Request(outgoing_request),
+        )]);
+
+        schedule_resumed_runtime_replay(
+            &mut replay_queue,
+            vec![RuntimeEventPayload::Native(
+                atomcode_coding::CodingRuntimeEvent::Request(resumed_request),
+            )],
+        );
+
+        assert_eq!(replay_queue.len(), 1);
+        assert!(matches!(
+            replay_queue.pop_front(),
+            Some(RuntimeEventPayload::Native(
+                atomcode_coding::CodingRuntimeEvent::Request(request)
+            )) if request.id == 42
         ));
     }
 }

@@ -264,6 +264,22 @@ impl LiveViewHub {
         self.join_for_provider(None)
     }
 
+    /// Replace the projected view snapshot without emitting `SessionChanged`.
+    /// Used when a view-only switch left an empty hub projection while a
+    /// registry runner (or catalog) already has the real transcript.
+    pub fn replace_view_snapshot_silent(
+        &self,
+        snapshot: SessionSnapshot,
+    ) -> Result<(), HubError> {
+        let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+        if state.binding.is_none() {
+            return Err(HubError::Unbound);
+        }
+        state.snapshot = Some(Arc::new(snapshot));
+        state.snapshot_error = None;
+        Ok(())
+    }
+
     pub fn join_for_provider(
         &self,
         expected_session_id: Option<&str>,

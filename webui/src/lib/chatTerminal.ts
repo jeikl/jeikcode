@@ -89,6 +89,29 @@ export function restoreLiveSnapshot<T>(messages: T[]): { messages: T[]; running:
   return { messages, running: false };
 }
 
+/** Empty hub projections (view-only “new session”) must not wipe a canvas that
+ * already has turns. A reconnect after the first Submit used to paint the
+ * landing page over the live transcript. */
+export function keepCanvasOnEmptyLiveSnapshot(
+  snapshotMessageCount: number,
+  canvasMessageCount: number,
+  viewingThisSession: boolean,
+): boolean {
+  return viewingThisSession && snapshotMessageCount === 0 && canvasMessageCount > 0;
+}
+
+/** New/draft sessions and not-yet-resolved ids should stay on the landing page
+ * instead of flashing the empty-chat chrome or a “continue session” hint. */
+export function stayOnNewSessionLanding(input: {
+  sessionId: string | null;
+  activeSession?: { id: string; message_count?: number; project_hash?: string } | null;
+}): boolean {
+  if (!input.sessionId) return true;
+  const active = input.activeSession;
+  if (!active || active.id !== input.sessionId || !active.project_hash) return true;
+  return (active.message_count ?? 0) === 0;
+}
+
 type CanvasPart = { kind: string; text?: string };
 type CanvasMessage = { role: string; parts: CanvasPart[] };
 

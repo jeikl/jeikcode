@@ -24,6 +24,8 @@ import {
   clampCachedToPrompt,
   isStackedTurnBillingUsage,
   userMessageAlreadyOnCanvas,
+  keepCanvasOnEmptyLiveSnapshot,
+  stayOnNewSessionLanding,
 } from './chatTerminal.ts';
 
 test('legacy done and stopped are natural completions that preserve queued messages', () => {
@@ -333,6 +335,35 @@ test('stacked turn billing is occupancy over the window with ~100% cache', () =>
   );
   assert.equal(
     isStackedTurnBillingUsage({ prompt: 1_724_257, cached: 1_721_920 }, null),
+    false,
+  );
+});
+
+test('empty live snapshot does not wipe an in-progress canvas', () => {
+  assert.equal(keepCanvasOnEmptyLiveSnapshot(0, 2, true), true);
+  assert.equal(keepCanvasOnEmptyLiveSnapshot(0, 0, true), false);
+  assert.equal(keepCanvasOnEmptyLiveSnapshot(3, 2, true), false);
+  assert.equal(keepCanvasOnEmptyLiveSnapshot(0, 2, false), false);
+});
+
+test('new/draft sessions stay on the landing page instead of continue-session chrome', () => {
+  assert.equal(stayOnNewSessionLanding({ sessionId: null }), true);
+  assert.equal(
+    stayOnNewSessionLanding({ sessionId: 'abc', activeSession: null }),
+    true,
+  );
+  assert.equal(
+    stayOnNewSessionLanding({
+      sessionId: 'abc',
+      activeSession: { id: 'abc', project_hash: 'h', message_count: 0 },
+    }),
+    true,
+  );
+  assert.equal(
+    stayOnNewSessionLanding({
+      sessionId: 'abc',
+      activeSession: { id: 'abc', project_hash: 'h', message_count: 4 },
+    }),
     false,
   );
 });

@@ -2788,26 +2788,9 @@ async fn get_sessions_by_working_dir(
 
 /// GET /projects/:hash/sessions/:id - Get session detail
 async fn get_session_detail(Path((hash, id)): Path<(String, String)>) -> impl IntoResponse {
-    // OpenCode draft: allocated via POST /sessions but not catalog-persisted yet.
-    // Return an empty detail so WebUI does not show a false "continue session" hint.
-    if crate::native_live::is_session_draft(&id) {
-        let working_dir = crate::native_live::session_draft_working_dir(&id)
-            .unwrap_or_else(|| PathBuf::from("."));
-        let detail = SessionDetail {
-            id: id.clone(),
-            name: format!("session-{id}"),
-            working_dir,
-            created_at: 0,
-            updated_at: 0,
-            message_count: 0,
-            messages: Vec::new(),
-            preferred_model: None,
-            token_usage: None,
-        };
-        return Json(detail).into_response();
-    }
     match crate::legacy_convert::load_catalog_session_view_in_project(&hash, &id) {
         Ok(Some(session)) => {
+            let _ = crate::native_live::take_session_draft(&id);
             let messages = match merge_catalog_session_messages_for_display(&session) {
                 Ok(messages) => messages,
                 Err(error) => {
@@ -2826,6 +2809,23 @@ async fn get_session_detail(Path((hash, id)): Path<(String, String)>) -> impl In
                 messages,
                 preferred_model: session.meta.preferred_model.clone(),
                 token_usage,
+            };
+            Json(detail).into_response()
+        }
+        Ok(None) if crate::native_live::is_session_draft(&id) => {
+            // OpenCode draft: allocated via POST /sessions but not catalog-persisted yet.
+            let working_dir = crate::native_live::session_draft_working_dir(&id)
+                .unwrap_or_else(|| PathBuf::from("."));
+            let detail = SessionDetail {
+                id: id.clone(),
+                name: format!("session-{id}"),
+                working_dir,
+                created_at: 0,
+                updated_at: 0,
+                message_count: 0,
+                messages: Vec::new(),
+                preferred_model: None,
+                token_usage: None,
             };
             Json(detail).into_response()
         }

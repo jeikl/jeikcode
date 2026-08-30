@@ -173,13 +173,15 @@ pub async fn ensure_registry_runner(
         crate::live_api::live_runtime_config(&config, &provider_name, &working_dir, telemetry);
 
     let session_mode = if let Ok(snapshot) = load_snapshot(&working_dir, &session_id) {
+        let _ = take_session_draft(&session_id);
         atomcode_coding::SessionMode::ExternalSnapshot {
             id: session_id.clone(),
             snapshot,
         }
     } else {
-        // Draft or brand-new id: staged until first Submit.
-        let _ = take_session_draft(&session_id);
+        // Keep the draft registration until catalog persist. Taking it here
+        // made `/live` fall back to the hub's empty view-only snapshot after
+        // the first Submit, wiping the WebUI canvas on reconnect.
         atomcode_coding::SessionMode::Draft {
             id: session_id.clone(),
         }
@@ -219,18 +221,48 @@ pub async fn ensure_registry_runner(
 }
 
 pub fn prefer_registry_live_stream(requested_session_id: &str) -> bool {
-    if is_session_draft(requested_session_id) {
+    let key = requested_session_id.to_string();
+    let reg = atomcode_coding::session_runtime_registry::SessionRuntimeRegistry::global();
+    match join() {
+        Ok(current) => prefer_registry_decision(
+            requested_session_id,
+            is_session_draft(requested_session_id),
+            Some(current.binding.session_id.as_str()),
+            current.snapshot.messages.is_empty(),
+            reg.handle(&key).is_some(),
+            reg.lookup(&key).is_some(),
+        ),
+        Err(_) => prefer_registry_decision(
+            requested_session_id,
+            is_session_draft(requested_session_id),
+            None,
+            true,
+            reg.handle(&key).is_some(),
+            reg.lookup(&key).is_some(),
+        ),
+    }
+}
+
+/// Route `/live?session_id=` to the registry when the hub identity was only
+/// view-switched onto this session (empty projection) while a registry runner
+/// owns the real transcript. Hub stream stays preferred for the bound
+/// execution session once it has a non-empty snapshot.
+pub(crate) fn prefer_registry_decision(
+    requested: &str,
+    is_draft: bool,
+    hub_session_id: Option<&str>,
+    hub_snapshot_empty: bool,
+    registry_has_runner: bool,
+    registry_has_entry: bool,
+) -> bool {
+    if is_draft {
         return true;
     }
-    if let Ok(current) = join() {
-        if current.binding.session_id != requested_session_id {
-            return true;
-        }
-        return false;
+    match hub_session_id {
+        Some(hub_sid) if hub_sid == requested => registry_has_runner && hub_snapshot_empty,
+        Some(_) => true,
+        None => registry_has_runner || registry_has_entry,
     }
-    atomcode_coding::session_runtime_registry::SessionRuntimeRegistry::global()
-        .lookup(&requested_session_id.to_string())
-        .is_some()
 }
 
 /// Snapshot for a registry-backed live view (memory first, then disk catalog).
@@ -467,6 +499,13 @@ pub async fn resume_session(
 ) -> Result<atomcode_coding::SessionChanged, HubError> {
     let binding = hub().binding()?;
     if binding.session_id == session_id {
+        // View-only switch onto a draft leaves an empty hub snapshot. Refresh
+        // from registry/catalog so a later hub join is not blank.
+        if let Ok(snap) = registry_session_snapshot(&binding.working_dir, &session_id) {
+            if !snap.messages.is_empty() {
+                let _ = hub().replace_view_snapshot_silent(snap);
+            }
+        }
         return Ok(atomcode_coding::SessionChanged {
             generation: atomcode_coding::RuntimeGeneration(binding.generation),
             session_id: Some(binding.session_id),
@@ -793,5 +832,65 @@ mod tests {
             bound.load(Ordering::Acquire),
             "the live hub should bind after MCP tools reach the catalog"
         );
+    }
+
+    #[test]
+    fn prefer_registry_for_drafts_even_when_hub_view_matches() {
+        assert!(super::prefer_registry_decision(
+            "draft-1",
+            true,
+            Some("draft-1"),
+            true,
+            false,
+            false,
+        ));
+    }
+
+    #[test]
+    fn prefer_hub_when_bound_execution_snapshot_is_non_empty() {
+        assert!(!super::prefer_registry_decision(
+            "sess-a",
+            false,
+            Some("sess-a"),
+            false,
+            true,
+            true,
+        ));
+    }
+
+    #[test]
+    fn prefer_registry_when_hub_view_matches_but_projection_is_empty() {
+        // switch_view_only onto a new session: hub identity == requested, snapshot
+        // empty, registry runner owns the transcript.
+        assert!(super::prefer_registry_decision(
+            "sess-b",
+            false,
+            Some("sess-b"),
+            true,
+            true,
+            true,
+        ));
+    }
+
+    #[test]
+    fn prefer_registry_when_hub_is_on_another_session() {
+        assert!(super::prefer_registry_decision(
+            "sess-b",
+            false,
+            Some("sess-a"),
+            false,
+            false,
+            true,
+        ));
+    }
+
+    #[test]
+    fn prefer_registry_when_hub_unbound_and_registry_has_entry() {
+        assert!(super::prefer_registry_decision(
+            "sess-b", false, None, true, false, true,
+        ));
+        assert!(!super::prefer_registry_decision(
+            "sess-b", false, None, true, false, false,
+        ));
     }
 }

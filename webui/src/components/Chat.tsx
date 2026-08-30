@@ -102,6 +102,8 @@ import {
   reduceLiveLifecycle,
   resolveUserInputRequest,
   restoreLiveSnapshot,
+  keepCanvasOnEmptyLiveSnapshot,
+  stayOnNewSessionLanding,
   resolveTokenCache,
   formatCacheHitRate,
   createTokenCacheState,
@@ -1544,9 +1546,13 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
       setHistoryHint(null);
       setPersistenceWarning(null);
       applySessionTokens(sessionId, cached && cached.length > 0 ? cached : []);
-      // 切到一个有 id 的会话 → 进入「加载中」，先抑制落地页（避免闪屏）；
-      // 无 id（新建）则不加载、直接落地。
-      setLoading(sessionId != null && !cached);
+      // 切到有内容的历史会话才进「加载中」抑制落地页。新建/draft（message_count=0）
+      // 以及元数据尚未对齐的 id 必须保持落地，否则会闪一下空聊天框再跳回落地页。
+      setLoading(
+        sessionId != null &&
+          !cached &&
+          !stayOnNewSessionLanding({ sessionId, activeSession }),
+      );
       // Sync mode only mirrors the currently viewed transcript. It does not
       // rebind the live runtime: the in-flight task keeps running in the
       // background, and switching back reconnects the live snapshot.
@@ -1563,17 +1569,20 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
     if (loadedForRef.current === sessionId) return;
 
     const projectHash = activeSession?.project_hash;
-    if (!projectHash || (activeSession && activeSession.id !== sessionId)) {
-      // 还没拿到对齐的 project_hash / activeSession：先给「继续会话」提示，等其到位再由本 effect 重跑加载。
-      setHistoryHint(t('chat.continueSession', { id: sessionId.slice(0, 8) }));
+    const hideLoadChrome = stayOnNewSessionLanding({ sessionId, activeSession });
+    if (hideLoadChrome) {
+      setHistoryHint(null);
       setLoading(false);
+    }
+    if (!projectHash || !activeSession || activeSession.id !== sessionId) {
+      // SSE 可能先把 id 推过来；等 activeSession 对齐后再加载，期间保持落地页。
       return;
     }
 
     // 标记已为该会话发起加载，避免并发/重复。
     loadedForRef.current = sessionId;
     const cached = messageCacheRef.current.get(sessionId);
-    if (!cached) {
+    if (!cached && !hideLoadChrome) {
       setLoading(true);
     }
     const loadId = sessionId;
@@ -1604,10 +1613,15 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
               restoreProviderForSession(loadId);
             }
           }
-          // Live reconnect already restores from the /live snapshot. Disk history
-          // can race that snapshot (stale, missing in-flight turns) and must not
-          // overlay the canvas — that was duplicating the last user bubble.
-          if (!isLiveSession) {
+          // Live reconnect restores from the /live snapshot. Disk history can
+          // race that snapshot (stale, missing in-flight turns) and must not
+          // overlay a canvas that already has turns. If the live projection is
+          // empty (view-only hub snapshot) the canvas is also empty — then disk
+          // is the recovery path after switching away and back.
+          const canvasEmpty =
+            messagesRef.current.length === 0 &&
+            !(currentCached && currentCached.length > 0);
+          if (!isLiveSession || canvasEmpty) {
             const loaded = sessionMessagesToDisplay(sessionResult.value.messages);
             let displayMessages: Message[] = currentCached && currentCached.length > 0 ? currentCached : loaded;
 
@@ -2167,7 +2181,7 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
       liveLifecycleRef.current = lifecycle.state;
       const restored = restoreLiveSnapshot(loaded);
       onLiveRunningChange?.(e.session_id || null, restored.running);
-      if (e.session_id) {
+      if (e.session_id && restored.messages.length > 0) {
         messageCacheRef.current.set(e.session_id, restored.messages);
       }
       const viewingOther =
@@ -2175,14 +2189,21 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
       if (viewingOther) {
         return;
       }
-      setMessages(restored.messages.length > 0 ? restored.messages : []);
-      setBusyAndClock(restored.running);
-      if (queueDisposition.discardQueued) {
-        setQueued([]);
-        pushCommandNotice(t('sync.reconnectTerminalUnknown'));
+      const keepCanvas = keepCanvasOnEmptyLiveSnapshot(
+        restored.messages.length,
+        messagesRef.current.length,
+        true,
+      );
+      if (!keepCanvas) {
+        setMessages(restored.messages.length > 0 ? restored.messages : []);
+        setBusyAndClock(restored.running);
+        if (queueDisposition.discardQueued) {
+          setQueued([]);
+          pushCommandNotice(t('sync.reconnectTerminalUnknown'));
+        }
+        setLivePending(null);
+        setUserInputReq(null);
       }
-      setLivePending(null);
-      setUserInputReq(null);
       setHistoryHint(null);
       if (e.provider && !providerPinnedRef.current) {
         setProvider(e.provider);
@@ -2263,7 +2284,9 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
         setPersistenceWarning(null);
         applySessionTokens(e.session_id, []);
       }
-      if (sync) {
+      // Already viewing this session: do not restart /live. Reconnect would
+      // snapshot the hub's empty view-only projection and wipe the transcript.
+      if (sync && !alreadyViewing) {
         stopLiveStream();
         startLiveStream();
       }

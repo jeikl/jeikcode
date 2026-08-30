@@ -80,18 +80,27 @@ BUILD_TARGETS=(
 for entry in "${BUILD_TARGETS[@]}"; do
     read -r TARGET PLATFORM <<< "$entry"
     echo "  编译 ${TARGET} ..."
-    if cargo build --release --target "$TARGET" --bin atomcode 2>&1; then
-        SRC="target/${TARGET}/release/atomcode"
-        [ -f "${SRC}.exe" ] && SRC="${SRC}.exe"
-        if [ -f "${SRC}.exe" ] || [ "${PLATFORM}" = "windows-x64" ]; then
+    if cargo build --release --target "$TARGET" --bin jeikcode 2>&1; then
+        SRC=""
+        for candidate in \
+            "target/${TARGET}/release/jeikcode.exe" \
+            "target/${TARGET}/release/jeikcode" \
+            "target/${TARGET}/release/atomcode.exe" \
+            "target/${TARGET}/release/atomcode"; do
+            if [ -f "$candidate" ]; then
+                SRC="$candidate"
+                break
+            fi
+        done
+        if [ -z "$SRC" ]; then
+            echo "    !! 编译成功但找不到二进制: target/${TARGET}/release/jeikcode[.exe]"
+            continue
+        fi
+        if [ "${PLATFORM}" = "windows-x64" ] || [[ "$SRC" == *.exe ]]; then
             cp "$SRC" "dist/jeikcode-${VERSION}-${PLATFORM}.exe"
-            # 同时也生成 atomcode- 兼容别名软/硬拷贝
-            cp "$SRC" "dist/atomcode-${VERSION}-${PLATFORM}.exe"
             echo "    -> dist/jeikcode-${VERSION}-${PLATFORM}.exe ($(du -h dist/jeikcode-${VERSION}-${PLATFORM}.exe 2>/dev/null | cut -f1 || ls -lh dist/jeikcode-${VERSION}-${PLATFORM}.exe | awk '{print \$5}'))"
         else
             cp "$SRC" "dist/jeikcode-${VERSION}-${PLATFORM}"
-            # 同时也生成 atomcode- 兼容别名
-            cp "$SRC" "dist/atomcode-${VERSION}-${PLATFORM}"
             echo "    -> dist/jeikcode-${VERSION}-${PLATFORM} ($(du -h dist/jeikcode-${VERSION}-${PLATFORM} 2>/dev/null | cut -f1 || ls -lh dist/jeikcode-${VERSION}-${PLATFORM} | awk '{print \$5}'))"
         fi
     else
@@ -168,7 +177,7 @@ echo ""
 echo "  # 3. 验证升级源"
 echo "  curl -s https://raw.githubusercontent.com/jeikl/jeikcode/local-dev/latest.json"
 echo ""
-echo "  # 4. 本机测试升级"
-echo "  atomcode upgrade"
+echo "  # 4. 本机测试升级（atomcode upgrade 同样下载 jeikcode-* 资产）"
+echo "  jeikcode upgrade"
 echo ""
 echo "=========================================="

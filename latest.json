@@ -1,14 +1,14 @@
 {
-  "version": "6.0.47",
+  "version": "6.0.48",
   "released_at": "2026-08-30",
   "binaries": {
     "linux-x64": {
-      "sha256": "bca7d400139a5b898fd6b46c828b806607d054bdffcb5a86d2c47479b4bedd42",
-      "size": 54338904
+      "sha256": "cb8c2ee4d1ce6d4be82d25e7df582b3f67e2e3037cc126e7606f570204ea568e",
+      "size": 54075208
     },
     "windows-x64": {
-      "sha256": "da90601e9b6ad54ad85541c0833b2a5a572ba5b22b9b4c7cf738584103929ede",
-      "size": 64143360
+      "sha256": "251d7e9f8dd59b3285c30523978eddf1cc578336f3c4bb3a1320bd970fc61fb5",
+      "size": 63841792
     }
   }
 }

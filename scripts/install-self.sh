@@ -73,13 +73,19 @@ fi
 # --- download ---
 TMP=$(mktemp -d)
 trap 'rm -rf "$TMP"' EXIT
-DEST="$TMP/atomcode${ext}"
-BIN_NAME="atomcode-${VERSION}-${os}-${arch}${ext}"
+DEST="$TMP/jeikcode${ext}"
+BIN_NAME="jeikcode-${VERSION}-${os}-${arch}${ext}"
 URL="${REPO_BASE}/${VERSION}/${BIN_NAME}"
 
 echo "==> Downloading $BIN_NAME"
 echo "    from $URL"
-$_down "$DEST" "$URL"
+if ! $_down "$DEST" "$URL"; then
+    ALT_NAME="atomcode-${VERSION}-${os}-${arch}${ext}"
+    ALT_URL="${REPO_BASE}/${VERSION}/${ALT_NAME}"
+    echo "==> Retrying with $ALT_NAME"
+    echo "    from $ALT_URL"
+    $_down "$DEST" "$ALT_URL"
+fi
 
 # Sanity check: must be a real binary, not an HTML 404 page
 if head -c 4 "$DEST" | grep -q "<" 2>/dev/null; then
@@ -91,12 +97,12 @@ fi
 chmod +x "$DEST"
 
 # --- install ---
-TARGET="$PREFIX/atomcode${ext}"
+TARGET="$PREFIX/jeikcode${ext}"
 if [ "$os" = "windows" ]; then
     echo "==> Installing to $TARGET"
     if ! mv "$DEST" "$TARGET"; then
         echo "Error: could not write $TARGET." >&2
-        echo "       If atomcode is already running, close it and re-run this installer." >&2
+        echo "       If jeikcode is already running, close it and re-run this installer." >&2
         exit 1
     fi
 elif [ -e "$TARGET" ] && [ ! -w "$TARGET" ]; then
@@ -110,7 +116,7 @@ else
     mv "$DEST" "$TARGET"
 fi
 
-ALIAS="$PREFIX/jeikcode${ext}"
+ALIAS="$PREFIX/atomcode${ext}"
 cp -f "$TARGET" "$ALIAS" 2>/dev/null || sudo cp -f "$TARGET" "$ALIAS" 2>/dev/null || true
 echo ""
 echo "Installed: $TARGET"

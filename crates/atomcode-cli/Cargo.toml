@@ -2,7 +2,7 @@
 name = "atomcode"
 version.workspace = true
 edition.workspace = true
-default-run = "atomcode"
+default-run = "jeikcode"
 
 [[bin]]
 name = "atomcode"

@@ -38,13 +38,21 @@ if ($env:ATOMCODE_VERSION) {
 }
 
 # --- download ---
-$BinName = "atomcode-${Version}-${os}-${arch}${ext}"
+$BinName = "jeikcode-${Version}-${os}-${arch}${ext}"
 $Url = "$RepoBase/$Version/$BinName"
 $Dest = Join-Path $env:TEMP $BinName
 
 Write-Host "==> Downloading $BinName"
 Write-Host "    from $Url"
-Invoke-WebRequest -Uri $Url -OutFile $Dest -UseBasicParsing
+try {
+    Invoke-WebRequest -Uri $Url -OutFile $Dest -UseBasicParsing
+} catch {
+    $AltName = "atomcode-${Version}-${os}-${arch}${ext}"
+    $AltUrl = "$RepoBase/$Version/$AltName"
+    Write-Host "==> Retrying with $AltName"
+    Write-Host "    from $AltUrl"
+    Invoke-WebRequest -Uri $AltUrl -OutFile $Dest -UseBasicParsing
+}
 
 # Sanity check: not an HTML 404 page
 $head = [System.IO.File]::ReadAllBytes($Dest)[0..3]
@@ -55,17 +63,17 @@ if ($isHtml) {
 }
 
 # --- install ---
-$Target = Join-Path $Prefix "atomcode$ext"
+$Target = Join-Path $Prefix "jeikcode$ext"
 Write-Host "==> Installing to $Target"
 try {
     Move-Item -Force $Dest $Target -ErrorAction Stop
 } catch {
     Write-Host "Error: could not write $Target." -ForegroundColor Red
-    Write-Host "       If atomcode is already running, close it and re-run this installer." -ForegroundColor Red
+    Write-Host "       If jeikcode is already running, close it and re-run this installer." -ForegroundColor Red
     exit 1
 }
 
-$Alias = Join-Path $Prefix "jeikcode$ext"
+$Alias = Join-Path $Prefix "atomcode$ext"
 Copy-Item -Force $Target $Alias
 Write-Host ""
 Write-Host "Installed: $Target"

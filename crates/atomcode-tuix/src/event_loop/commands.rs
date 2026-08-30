@@ -25,6 +25,7 @@ use super::{
     apply_persisted_config, bg_runtime, deactivate_runtime_provider_after_logout,
     provider_transition_pending, reload_persisted_config, request_context_stats_render,
     save_and_reload, save_language_and_reload, LoopCtx, PersistedConfigReload,
+    RuntimeUiAvailability,
 };
 use crate::custom_commands::ArgsRequirement;
 use crate::i18n::{t, Msg};
@@ -214,6 +215,40 @@ pub(crate) fn park_foreground_to_background(
         ctx.pending_runtime_request_id.is_some(),
     )
     .map_err(str::to_string)?;
+    let new_session = Session::default_session(ctx.working_dir.clone());
+    park_foreground_and_open_session(ctx, state, new_session)
+}
+
+/// OpenCode / WebUI `--host` model: switching the visible session must not
+/// wait on the current runtime's lock (turn, approval, or provider reload).
+/// Busy work stays on its own runner in a background slot.
+fn session_view_switch_must_detach(
+    availability: RuntimeUiAvailability,
+    ui_busy: bool,
+    provider_pending: bool,
+) -> bool {
+    ui_busy
+        || provider_pending
+        || !matches!(availability, RuntimeUiAvailability::Available)
+}
+
+fn ui_phase_is_busy(phase: crate::state::UiPhase) -> bool {
+    matches!(
+        phase,
+        crate::state::UiPhase::Streaming
+            | crate::state::UiPhase::Approval
+            | crate::state::UiPhase::UserInput
+            | crate::state::UiPhase::RoundCap
+    )
+}
+
+/// Park the current runner (no lock gates) and make `session` the foreground
+/// on a newly spawned runtime that boots from that session's snapshot.
+fn park_foreground_and_open_session(
+    ctx: &mut LoopCtx,
+    state: &mut crate::state::UiState,
+    session: Session,
+) -> Result<(), String> {
     sync_bg_foreground(ctx);
     if !ctx.bg_manager.has_capacity() {
         return Err(t(Msg::BgSlotLimitReached {
@@ -222,14 +257,14 @@ pub(crate) fn park_foreground_to_background(
         .into_owned());
     }
     let old_replay_events = foreground_turn_replay_events(state);
-    let new_session = Session::default_session(ctx.working_dir.clone());
-    let (runtime_id, endpoint, new_session) = spawn_runtime(ctx, new_session);
+    let working_dir = ctx.working_dir.clone();
+    let (runtime_id, endpoint, session) = spawn_runtime(ctx, session);
     let old_state = foreground_state_from_ui(state);
     ctx.bg_manager
         .background_current_with_replay(
             endpoint.clone(),
-            new_session.clone(),
-            ctx.working_dir.clone(),
+            session.clone(),
+            working_dir,
             runtime_id,
             old_state,
             old_replay_events,
@@ -242,7 +277,7 @@ pub(crate) fn park_foreground_to_background(
         })?;
     ctx.runtime = endpoint.native;
     ctx.foreground_runtime_id = runtime_id;
-    ctx.current_session = new_session;
+    ctx.current_session = session;
     ctx.live_binding = None;
     bind_telemetry_to_session(ctx, &ctx.current_session);
     state.on_turn_complete();
@@ -250,7 +285,58 @@ pub(crate) fn park_foreground_to_background(
     state.active_todos = None;
     crate::event_loop::sync_todo_titles(state);
     state.approval_panel = None;
+    ctx.pending_runtime_request_id = None;
     sync_session_runtime_registry(ctx, state);
+    Ok(())
+}
+
+/// Open a catalog session as the TUI view. If the current runtime is busy or
+/// reconfiguring, park it and spawn a dedicated runner — never `resume_session`
+/// on a locked handle (that produced `coding runtime is unavailable`).
+pub(crate) fn open_catalog_session_view(
+    ctx: &mut LoopCtx,
+    state: &mut crate::state::UiState,
+    renderer: &mut dyn Renderer,
+    session: Session,
+    lease: atomcode_capabilities::session::SessionLease,
+    working_dir: PathBuf,
+    project_bucket: String,
+) -> Result<(), String> {
+    let must_detach = session_view_switch_must_detach(
+        ctx.runtime.ui_availability(),
+        ui_phase_is_busy(state.phase),
+        super::provider_transition_pending(ctx),
+    );
+    if must_detach {
+        drop(lease);
+        park_foreground_and_open_session(ctx, state, session)?;
+        crate::modals::session_picker::replay_session(renderer, state, &ctx.current_session, true);
+        let short_id = ctx.current_session.short_id().to_string();
+        renderer.render(UiLine::CommandOutput(
+            t(Msg::SessionSwitched { short_id: &short_id }).into_owned(),
+        ));
+        renderer.flush();
+        return Ok(());
+    }
+    ctx.runtime
+        .resume_session(
+            session.id.clone(),
+            working_dir.clone(),
+            lease,
+            ctx.foreground_runtime_id,
+            ctx.runtime_event_tx.clone(),
+        )
+        .map_err(|error| error.to_string())?;
+    ctx.pending_session_resume = Some(super::PendingSessionResume {
+        project_bucket,
+        session,
+        working_dir,
+        committed: None,
+    });
+    renderer.render(UiLine::CommandOutput(
+        t(Msg::CmdSessionTransitionPending).into_owned(),
+    ));
+    renderer.flush();
     Ok(())
 }
 
@@ -378,12 +464,6 @@ pub(crate) fn attach_background_session_by_id(
         crate::modals::session_picker::replay_session(renderer, state, &ctx.current_session, true);
         return Ok(());
     }
-    if let Err(error) = ensure_bg_foreground_switch_allowed(
-        super::provider_transition_pending(ctx),
-        ctx.pending_runtime_request_id.is_some(),
-    ) {
-        return Err(error.into());
-    }
     sync_bg_foreground(ctx);
     let outcome = ctx
         .bg_manager
@@ -455,6 +535,36 @@ mod bg_live_guard_tests {
     #[test]
     fn live_binding_does_not_block_foreground_bg_switches() {
         assert!(ensure_bg_foreground_switch_allowed(false, false).is_ok());
+    }
+
+    #[test]
+    fn session_view_switch_detaches_instead_of_waiting_on_runtime_lock() {
+        use super::session_view_switch_must_detach;
+        use crate::event_loop::RuntimeUiAvailability;
+        assert!(
+            !session_view_switch_must_detach(RuntimeUiAvailability::Available, false, false),
+            "idle ready runtime can resume in place"
+        );
+        assert!(session_view_switch_must_detach(
+            RuntimeUiAvailability::Reconfiguring,
+            false,
+            false
+        ));
+        assert!(session_view_switch_must_detach(
+            RuntimeUiAvailability::Starting,
+            false,
+            false
+        ));
+        assert!(session_view_switch_must_detach(
+            RuntimeUiAvailability::Available,
+            true,
+            false
+        ));
+        assert!(session_view_switch_must_detach(
+            RuntimeUiAvailability::Available,
+            false,
+            true
+        ));
     }
 
     #[test]

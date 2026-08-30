@@ -161,6 +161,13 @@ pub trait Modal: Send {
         false
     }
 
+    /// Mid-turn overlays such as `/sessions` must not steal keys from a
+    /// blocking prompt (tool approval / user-input / round-cap). Password
+    /// prompts stay on top. Default: yield (`true`).
+    fn yield_to_interactive_prompt(&self) -> bool {
+        true
+    }
+
     /// Notify the modal that an async plugin job finished, so it can refresh
     /// any cached lists it is displaying. Default: ignore. Only the
     /// interactive `/plugin` manager overrides this. The event loop calls it

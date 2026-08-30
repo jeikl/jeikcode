@@ -1467,7 +1467,7 @@ pub struct DeferredRuntimeControl {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum RuntimeUiAvailability {
+pub(crate) enum RuntimeUiAvailability {
     Starting,
     Available,
     Reconfiguring,
@@ -2819,7 +2819,7 @@ impl RuntimeControl {
         }
     }
 
-    fn ui_availability(&self) -> RuntimeUiAvailability {
+    pub(crate) fn ui_availability(&self) -> RuntimeUiAvailability {
         match self {
             Self::Ready(ready) => runtime_ui_availability(ready.handle.status().phase),
             Self::Deferred(deferred) => deferred.ui_availability(),
@@ -8068,6 +8068,47 @@ fn redraw_interactive_footer(
     redraw_idle_plain(buf, state, ctx, renderer);
 }
 
+/// A capturing overlay owns keys only when it must (password mid-turn).
+/// `/sessions` yields once a blocking approval/user-input/round-cap prompt is up,
+/// otherwise arrow keys never reach `handle_approval_key`.
+fn capturing_overlay_owns_keys(phase: UiPhase, captures: bool, yields_to_prompt: bool) -> bool {
+    if !captures {
+        return false;
+    }
+    if interactive_input_priority(phase) && yields_to_prompt {
+        return false;
+    }
+    true
+}
+
+fn capturing_modal_owns_input(app: &App) -> bool {
+    let Some(modal) = app.active_modal.as_ref() else {
+        return false;
+    };
+    capturing_overlay_owns_keys(
+        app.state.phase,
+        modal.captures_all_keys(),
+        modal.yield_to_interactive_prompt(),
+    )
+}
+
+/// Drop `/sessions` (and similar) so a blocking prompt can own the keyboard and
+/// footer. Askpass stays. Also drop a pending catalog so the picker cannot pop
+/// back over the prompt when the scan finishes.
+fn yield_overlays_for_blocking_prompt(app: &mut App, ctx: &mut LoopCtx) {
+    if !interactive_input_priority(app.state.phase) {
+        return;
+    }
+    let drop_overlay = app.active_modal.as_ref().is_some_and(|m| {
+        m.captures_all_keys() && m.yield_to_interactive_prompt()
+    });
+    if drop_overlay {
+        app.active_modal = None;
+        ctx.session_catalog_loading = false;
+        ctx.pending_session_picker = None;
+    }
+}
+
 /// OS-level interrupt (SIGINT on Unix) while a blocking prompt is up. Routes
 /// through the same key handlers as a literal Ctrl+C so approval/user-input
 /// prompts stay responsive when the keyboard path is wedged.
@@ -8572,25 +8613,16 @@ pub async fn run_loop(mut ctx: LoopCtx, renderer: &mut dyn Renderer) -> Result<E
                 handle_input(&mut app, &mut ctx, renderer, ev)?;
             }
 
-            // ── OS SIGINT: interactive prompts, streaming cancel, or `!cmd` ──
-            // Keyboard path can starve under heavy tool output (Linux SSH);
-            // SIGINT is the documented fallback. Also stop a local `!cmd`
-            // whose phase stays Idle (so Streaming Cancel never runs).
-            _ = sigint.recv(), if input_priority
-                || matches!(app.state.phase, UiPhase::Streaming)
-                || ctx.local_shell_cancel.is_some() => {
-                if cancel_local_shell_if_running(&mut ctx) && !matches!(app.state.phase, UiPhase::Streaming) {
-                    // Idle `!cmd` only — do not also cancel a turn / quit.
-                } else if input_priority {
+            // ── OS SIGINT while a blocking prompt is up, or `!cmd` ──
+            // Keep this off during Streaming: 5c37b2f90 only used SIGINT as
+            // the approval-prompt fallback so a ready signal arm cannot steal
+            // the loop from arrow keys. Streaming Ctrl+C stays on the keyboard
+            // path (`handle_streaming_key`).
+            _ = sigint.recv(), if input_priority || ctx.local_shell_cancel.is_some() => {
+                if input_priority {
                     handle_interactive_interrupt(&mut app, &mut ctx, renderer)?;
-                } else if matches!(app.state.phase, UiPhase::Streaming) {
-                    crate::tuix_trace!("KEY", "unix SIGINT -> Cancel (streaming)");
-                    let send_ok = cancel_active_turn(&mut ctx);
-                    if send_ok {
-                        app.interrupt_drain_pending = true;
-                    }
-                    clear_capturing_modal_on_cancel(&mut app);
-                    restore_cancelled_message_to_buf(&mut app, renderer, &ctx);
+                } else {
+                    let _ = cancel_local_shell_if_running(&mut ctx);
                 }
             }
 
@@ -8766,6 +8798,14 @@ pub async fn run_loop(mut ctx: LoopCtx, renderer: &mut dyn Renderer) -> Result<E
                     let pre_phase = app.state.phase;
                     apply_fixed_interval_loop_action(loop_action, &mut app.state, &mut ctx);
                     handle_runtime_event(runtime_event.event, &mut app.state, &mut app.think, renderer, &mut app.pending_tools, &mut ctx, &mut app.setup_pending, &mut app.reasoning_buffer, &mut app.buf);
+                    let overlay_before_yield = app.active_modal.is_some();
+                    yield_overlays_for_blocking_prompt(&mut app, &mut ctx);
+                    if overlay_before_yield
+                        && app.active_modal.is_none()
+                        && interactive_input_priority(app.state.phase)
+                    {
+                        redraw_interactive_footer(&app.buf, &app.state, &ctx, renderer);
+                    }
                     hold_interrupt_wait_phase(&mut app.state, app.interrupt_drain_pending);
                     if interrupt_was_armed
                         && matches!(queue_action, TypeAheadQueueAction::Clear)
@@ -9131,6 +9171,14 @@ pub async fn run_loop(mut ctx: LoopCtx, renderer: &mut dyn Renderer) -> Result<E
                     let pre_phase = app.state.phase;
                     apply_fixed_interval_loop_action(loop_action, &mut app.state, &mut ctx);
                     handle_runtime_event(runtime_event.event, &mut app.state, &mut app.think, renderer, &mut app.pending_tools, &mut ctx, &mut app.setup_pending, &mut app.reasoning_buffer, &mut app.buf);
+                    let overlay_before_yield = app.active_modal.is_some();
+                    yield_overlays_for_blocking_prompt(&mut app, &mut ctx);
+                    if overlay_before_yield
+                        && app.active_modal.is_none()
+                        && interactive_input_priority(app.state.phase)
+                    {
+                        redraw_interactive_footer(&app.buf, &app.state, &ctx, renderer);
+                    }
                     hold_interrupt_wait_phase(&mut app.state, app.interrupt_drain_pending);
                     if interrupt_was_armed
                         && matches!(queue_action, TypeAheadQueueAction::Clear)
@@ -11070,6 +11118,8 @@ fn handle_input(
 ) -> Result<()> {
     use crate::modals::ModalAction;
 
+    yield_overlays_for_blocking_prompt(app, ctx);
+
     if matches!(app.state.phase, UiPhase::Idle)
         && app.active_modal.is_none()
         && poll_shared_state(ctx, renderer)
@@ -11168,6 +11218,7 @@ fn handle_input(
                 .active_modal
                 .as_ref()
                 .is_some_and(|m| m.captures_all_keys())
+                && capturing_modal_owns_input(app)
             {
                 let streaming = matches!(app.state.phase, UiPhase::Streaming);
                 if let Some(modal) = app.active_modal.as_mut() {
@@ -11328,6 +11379,7 @@ fn handle_input(
                 .active_modal
                 .as_ref()
                 .is_some_and(|m| m.captures_all_keys())
+                && capturing_modal_owns_input(app)
             {
                 // Ctrl+C is a global exit shortcut and must NOT be trappable by a
                 // capturing modal either — but only for the ones that open while
@@ -17198,6 +17250,28 @@ mod interactive_input_priority_tests {
             );
         }
     }
+
+    #[test]
+    fn sessions_overlay_does_not_steal_approval_keys() {
+        use super::capturing_overlay_owns_keys;
+        assert!(
+            capturing_overlay_owns_keys(UiPhase::Streaming, true, true),
+            "picker must keep keys while the turn is streaming"
+        );
+        assert!(
+            !capturing_overlay_owns_keys(UiPhase::Approval, true, true),
+            "picker must yield so approval arrows / y-n work"
+        );
+        assert!(
+            capturing_overlay_owns_keys(UiPhase::Approval, true, false),
+            "askpass must keep keys even if an approval prompt is also up"
+        );
+        assert!(!capturing_overlay_owns_keys(
+            UiPhase::Approval,
+            false,
+            true
+        ));
+    }
 }
 
 #[cfg(test)]
@@ -18309,6 +18383,12 @@ fn install_pending_session_picker(app: &mut App, ctx: &mut LoopCtx, renderer: &m
     if ctx.pending_session_picker.is_none() {
         return;
     }
+    // Never cover a blocking prompt (tool approval / user-input / round-cap).
+    if interactive_input_priority(app.state.phase) {
+        ctx.pending_session_picker = None;
+        ctx.session_catalog_loading = false;
+        return;
+    }
     // The user has another modal open (opened one while the scan ran, or an
     // askpass prompt appeared) — DEFER: leave the result stashed so it installs
     // once the modal closes, rather than dropping it and stranding the user on a
@@ -19345,40 +19425,21 @@ fn handle_runtime_event(
                     return;
                 }
             };
-            if matches!(
-                state.phase,
-                crate::state::UiPhase::Streaming
-                    | crate::state::UiPhase::Approval
-                    | crate::state::UiPhase::UserInput
-                    | crate::state::UiPhase::RoundCap
-            ) {
-                if let Err(error) = commands::park_foreground_to_background(ctx, state) {
-                    renderer.render(UiLine::Error(error));
-                    renderer.flush();
-                    return;
-                }
-            }
-            if let Err(error) = ctx.runtime.resume_session(
-                session.id.clone(),
-                expected.working_dir.clone(),
+            if let Err(error) = commands::open_catalog_session_view(
+                ctx,
+                state,
+                renderer,
+                session,
                 prepared.lease,
-                ctx.foreground_runtime_id,
-                ctx.runtime_event_tx.clone(),
+                expected.working_dir,
+                project_bucket,
             ) {
-                let message = error.to_string();
                 renderer.render(UiLine::Error(
-                    crate::i18n::t(crate::i18n::Msg::SessionLoadFailed { error: &message })
+                    crate::i18n::t(crate::i18n::Msg::SessionLoadFailed { error: &error })
                         .into_owned(),
                 ));
                 renderer.flush();
-                return;
             }
-            ctx.pending_session_resume = Some(PendingSessionResume {
-                project_bucket,
-                session,
-                working_dir: expected.working_dir,
-                committed: None,
-            });
         }
         bg_runtime::RuntimeEventPayload::Driver(
             bg_runtime::DriverEvent::SessionCatalogLoaded {

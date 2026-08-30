@@ -20,7 +20,7 @@ use std::collections::HashMap;
 
 use super::{Modal, ModalAction};
 use crate::event_loop::{
-    build_status, format_tool_detail, provider_transition_pending, summarise, Buffer, LoopCtx,
+    build_status, format_tool_detail, summarise, Buffer, LoopCtx,
 };
 use crate::render::{MenuPayload, Renderer, UiLine};
 use crate::state::UiState;
@@ -309,13 +309,6 @@ impl Modal for SessionPicker {
                 ) {
                     return Ok(ModalAction::Close);
                 }
-                if provider_transition_pending(ctx) {
-                    renderer.render(UiLine::Error(
-                        crate::i18n::t(crate::i18n::Msg::CmdProviderReloading).into_owned(),
-                    ));
-                    renderer.flush();
-                    return Ok(ModalAction::Continue);
-                }
                 if ctx.pending_session_resume.is_some()
                     || ctx.pending_session_resume_preparation.is_some()
                 {
@@ -397,6 +390,8 @@ impl Modal for SessionPicker {
                     self.draw(buf, state, ctx, renderer);
                     Ok(ModalAction::Continue)
                 } else {
+                    ctx.session_catalog_loading = false;
+                    ctx.pending_session_picker = None;
                     Ok(ModalAction::Close)
                 }
             }

@@ -117,6 +117,10 @@ impl Modal for PasswordModal {
         true
     }
 
+    fn yield_to_interactive_prompt(&self) -> bool {
+        false
+    }
+
     fn handle_key(
         &mut self,
         code: KeyCode,

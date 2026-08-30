@@ -25,7 +25,6 @@ use super::{
     apply_persisted_config, bg_runtime, deactivate_runtime_provider_after_logout,
     provider_transition_pending, reload_persisted_config, request_context_stats_render,
     save_and_reload, save_language_and_reload, LoopCtx, PersistedConfigReload,
-    RuntimeUiAvailability,
 };
 use crate::custom_commands::ArgsRequirement;
 use crate::i18n::{t, Msg};
@@ -203,35 +202,6 @@ fn sync_bg_foreground(ctx: &mut LoopCtx) {
     );
 }
 
-/// Park the current foreground runtime into a background slot and spawn a
-/// fresh idle runtime. The live hub stays bound to the parked runtime so
-/// WebUI can keep following that task.
-pub(crate) fn park_foreground_to_background(
-    ctx: &mut LoopCtx,
-    state: &mut crate::state::UiState,
-) -> Result<(), String> {
-    ensure_bg_foreground_switch_allowed(
-        super::provider_transition_pending(ctx),
-        ctx.pending_runtime_request_id.is_some(),
-    )
-    .map_err(str::to_string)?;
-    let new_session = Session::default_session(ctx.working_dir.clone());
-    park_foreground_and_open_session(ctx, state, new_session)
-}
-
-/// OpenCode / WebUI `--host` model: switching the visible session must not
-/// wait on the current runtime's lock (turn, approval, or provider reload).
-/// Busy work stays on its own runner in a background slot.
-fn session_view_switch_must_detach(
-    availability: RuntimeUiAvailability,
-    ui_busy: bool,
-    provider_pending: bool,
-) -> bool {
-    ui_busy
-        || provider_pending
-        || !matches!(availability, RuntimeUiAvailability::Available)
-}
-
 fn ui_phase_is_busy(phase: crate::state::UiPhase) -> bool {
     matches!(
         phase,
@@ -242,39 +212,27 @@ fn ui_phase_is_busy(phase: crate::state::UiPhase) -> bool {
     )
 }
 
-/// Park the current runner (no lock gates) and make `session` the foreground
-/// on a newly spawned runtime that boots from that session's snapshot.
-fn park_foreground_and_open_session(
+/// OpenCode: the visible session is a client route. Empty idle views are not
+/// execution; only a turn or an existing transcript is worth keeping as a runner.
+fn foreground_worth_parking(messages_empty: bool, phase: crate::state::UiPhase) -> bool {
+    !messages_empty || ui_phase_is_busy(phase)
+}
+
+fn clear_view_transition_flags(ctx: &mut LoopCtx) {
+    ctx.pending_session_transition = None;
+    ctx.pending_session_resume = None;
+    ctx.pending_session_resume_preparation = None;
+    ctx.pending_capability_reload = false;
+    ctx.pending_capability_projection = None;
+}
+
+fn bind_spawned_foreground(
     ctx: &mut LoopCtx,
     state: &mut crate::state::UiState,
+    runtime_id: bg_runtime::RuntimeId,
+    endpoint: super::RuntimeEndpoint,
     session: Session,
-) -> Result<(), String> {
-    sync_bg_foreground(ctx);
-    if !ctx.bg_manager.has_capacity() {
-        return Err(t(Msg::BgSlotLimitReached {
-            max: bg_runtime::MAX_BACKGROUND_SLOTS,
-        })
-        .into_owned());
-    }
-    let old_replay_events = foreground_turn_replay_events(state);
-    let working_dir = ctx.working_dir.clone();
-    let (runtime_id, endpoint, session) = spawn_runtime(ctx, session);
-    let old_state = foreground_state_from_ui(state);
-    ctx.bg_manager
-        .background_current_with_replay(
-            endpoint.clone(),
-            session.clone(),
-            working_dir,
-            runtime_id,
-            old_state,
-            old_replay_events,
-        )
-        .map_err(|error| match error {
-            bg_runtime::BgError::SlotLimit { max } => {
-                t(Msg::BgSlotLimitReached { max }).into_owned()
-            }
-            other => format!("{other:?}"),
-        })?;
+) {
     ctx.runtime = endpoint.native;
     ctx.foreground_runtime_id = runtime_id;
     ctx.current_session = session;
@@ -287,54 +245,106 @@ fn park_foreground_and_open_session(
     state.approval_panel = None;
     ctx.pending_runtime_request_id = None;
     sync_session_runtime_registry(ctx, state);
+}
+
+/// Adopt `session` as the TUI ViewBinding. Never `resume_session` /
+/// `fresh_session` on another session's handle (OpenCode: view ≠ execution).
+fn adopt_session_as_view(
+    ctx: &mut LoopCtx,
+    state: &mut crate::state::UiState,
+    session: Session,
+) -> Result<(), String> {
+    clear_view_transition_flags(ctx);
+    if ctx.current_session.id == session.id {
+        return Ok(());
+    }
+    sync_bg_foreground(ctx);
+    if ctx.bg_manager.slot_for_session_id(&session.id).is_some() {
+        let outcome = ctx
+            .bg_manager
+            .select_session(&session.id, foreground_state_from_ui(state))
+            .map_err(|error| match error {
+                bg_runtime::BgError::SessionNotInBackground { session_id } => {
+                    format!("session {session_id} is not a live runner")
+                }
+                other => format!("{other:?}"),
+            })?;
+        super::commit_working_dir_projection(ctx, outcome.resumed_working_dir.clone());
+        ctx.runtime = outcome.resumed_endpoint.native;
+        ctx.foreground_runtime_id = outcome.resumed_runtime_id;
+        ctx.current_session = outcome.resumed_session;
+        bind_telemetry_to_session(ctx, &ctx.current_session);
+        apply_resumed_runtime_state(state, outcome.resumed_state);
+        schedule_resumed_runtime_replay(&mut ctx.foreground_replay_events, outcome.replay_events);
+        ctx.live_binding = None;
+        ctx.pending_runtime_request_id = None;
+        sync_session_runtime_registry(ctx, state);
+        return Ok(());
+    }
+    let working_dir = ctx.working_dir.clone();
+    // Keep the previous runner alive whenever it has work or transcript.
+    // Empty idle home is disposable — replace the view's endpoint only.
+    if foreground_worth_parking(ctx.current_session.messages.is_empty(), state.phase) {
+        if !ctx.bg_manager.has_capacity() {
+            return Err(t(Msg::BgSlotLimitReached {
+                max: bg_runtime::MAX_LIVE_SESSIONS,
+            })
+            .into_owned());
+        }
+        let old_replay_events = foreground_turn_replay_events(state);
+        let (runtime_id, endpoint, session) = spawn_runtime(ctx, session);
+        let old_state = foreground_state_from_ui(state);
+        ctx.bg_manager
+            .background_current_with_replay(
+                endpoint.clone(),
+                session.clone(),
+                working_dir,
+                runtime_id,
+                old_state,
+                old_replay_events,
+            )
+            .map_err(|error| match error {
+                bg_runtime::BgError::SlotLimit { max } => {
+                    t(Msg::BgSlotLimitReached { max }).into_owned()
+                }
+                other => format!("{other:?}"),
+            })?;
+        bind_spawned_foreground(ctx, state, runtime_id, endpoint, session);
+        return Ok(());
+    }
+    // Empty idle view: shut down disposable home runner and open the target.
+    let _ = ctx
+        .runtime
+        .dispatch_when_ready(atomcode_coding::DriverCommand::Shutdown);
+    let (runtime_id, endpoint, session) = spawn_runtime(ctx, session);
+    ctx.bg_manager.set_foreground_runtime(
+        runtime_id,
+        endpoint.clone(),
+        session.clone(),
+        working_dir,
+    );
+    bind_spawned_foreground(ctx, state, runtime_id, endpoint, session);
     Ok(())
 }
 
-/// Open a catalog session as the TUI view. If the current runtime is busy or
-/// reconfiguring, park it and spawn a dedicated runner — never `resume_session`
-/// on a locked handle (that produced `coding runtime is unavailable`).
+/// Open a catalog session as the TUI view. The catalog lease is dropped: the
+/// target runner acquires its own ownership. The current runtime is never asked
+/// to reconfigure.
 pub(crate) fn open_catalog_session_view(
     ctx: &mut LoopCtx,
     state: &mut crate::state::UiState,
     renderer: &mut dyn Renderer,
     session: Session,
     lease: atomcode_capabilities::session::SessionLease,
-    working_dir: PathBuf,
-    project_bucket: String,
+    _working_dir: PathBuf,
+    _project_bucket: String,
 ) -> Result<(), String> {
-    let must_detach = session_view_switch_must_detach(
-        ctx.runtime.ui_availability(),
-        ui_phase_is_busy(state.phase),
-        super::provider_transition_pending(ctx),
-    );
-    if must_detach {
-        drop(lease);
-        park_foreground_and_open_session(ctx, state, session)?;
-        crate::modals::session_picker::replay_session(renderer, state, &ctx.current_session, true);
-        let short_id = ctx.current_session.short_id().to_string();
-        renderer.render(UiLine::CommandOutput(
-            t(Msg::SessionSwitched { short_id: &short_id }).into_owned(),
-        ));
-        renderer.flush();
-        return Ok(());
-    }
-    ctx.runtime
-        .resume_session(
-            session.id.clone(),
-            working_dir.clone(),
-            lease,
-            ctx.foreground_runtime_id,
-            ctx.runtime_event_tx.clone(),
-        )
-        .map_err(|error| error.to_string())?;
-    ctx.pending_session_resume = Some(super::PendingSessionResume {
-        project_bucket,
-        session,
-        working_dir,
-        committed: None,
-    });
+    drop(lease);
+    adopt_session_as_view(ctx, state, session)?;
+    crate::modals::session_picker::replay_session(renderer, state, &ctx.current_session, true);
+    let short_id = ctx.current_session.short_id().to_string();
     renderer.render(UiLine::CommandOutput(
-        t(Msg::CmdSessionTransitionPending).into_owned(),
+        t(Msg::SessionSwitched { short_id: &short_id }).into_owned(),
     ));
     renderer.flush();
     Ok(())
@@ -344,6 +354,9 @@ fn ensure_bg_foreground_switch_allowed(
     provider_transition: bool,
     pending_runtime_request: bool,
 ) -> Result<(), &'static str> {
+    // Kept for `/background` one-shot spawn guards and unit tests.
+    // View selection (`/new`, `/sessions`, `/bg N`) must never call this —
+    // OpenCode views are unlocked from execution.
     if provider_transition {
         Err("/bg cannot switch the foreground while a provider transition is in progress")
     } else if pending_runtime_request {
@@ -369,42 +382,61 @@ fn schedule_resumed_runtime_replay(
     replay_queue.extend(events);
 }
 
-fn background_slot_running(state: bg_runtime::RuntimeState) -> bool {
-    matches!(state, bg_runtime::RuntimeState::Running)
-}
-
-/// Mirror TUI foreground/background slots into the L2 session registry.
+/// Publish live runners into the L2 registry (OpenCode model: registry is
+/// authoritative for activity; the TUI only owns ViewBinding + local endpoints).
 pub(crate) fn sync_session_runtime_registry(ctx: &LoopCtx, state: &UiState) {
-    let foreground_running = matches!(
+    use atomcode_coding::session_runtime_registry::{
+        RuntimeActivity, SessionRuntimeRegistry,
+    };
+    use std::collections::HashSet;
+
+    let selected_running = matches!(
         state.phase,
         crate::state::UiPhase::Streaming
             | crate::state::UiPhase::Approval
             | crate::state::UiPhase::UserInput
             | crate::state::UiPhase::RoundCap
     );
-    let foreground_id = ctx.current_session.id.clone();
-    let foreground_dir = ctx.working_dir.clone();
-    let backgrounds: Vec<(String, std::path::PathBuf, bool)> = ctx
-        .bg_manager
-        .backgrounds()
-        .iter()
-        .map(|slot| {
-            (
-                slot.session.id.clone(),
-                slot.working_dir.clone(),
-                background_slot_running(slot.state),
-            )
-        })
-        .collect();
-    tokio::spawn(async move {
-        atomcode_coding::session_runtime_registry::sync_from_tui_slots(
-            foreground_id,
-            foreground_dir,
-            foreground_running,
-            &backgrounds,
-        )
-        .await;
-    });
+    let selected_id = ctx.current_session.id.clone();
+    let selected_dir = ctx.working_dir.clone();
+    let others = ctx.bg_manager.live_runner_bindings();
+
+    let reg = SessionRuntimeRegistry::global();
+    let mut keep = HashSet::new();
+    keep.insert(selected_id.clone());
+    if reg
+        .open_or_attach(selected_id.clone(), selected_dir.clone())
+        .is_ok()
+    {
+        let activity = if selected_running {
+            RuntimeActivity::Running
+        } else {
+            RuntimeActivity::Ready
+        };
+        reg.set_activity(&selected_id, activity);
+        if let Some(handle) = ctx.runtime.active_handle_for_registry() {
+            reg.bind_handle(
+                &selected_id,
+                handle,
+                Some(ctx.foreground_runtime_id.as_u64()),
+            );
+        }
+    }
+    for (session_id, working_dir, running, runtime_id, handle) in others {
+        keep.insert(session_id.clone());
+        if reg.open_or_attach(session_id.clone(), working_dir).is_ok() {
+            let activity = if running {
+                RuntimeActivity::Running
+            } else {
+                RuntimeActivity::Ready
+            };
+            reg.set_activity(&session_id, activity);
+            if let Some(handle) = handle {
+                reg.bind_handle(&session_id, handle, Some(runtime_id));
+            }
+        }
+    }
+    reg.retain_sessions(&keep);
 }
 
 fn render_bg_resume_error(renderer: &mut dyn Renderer, error: bg_runtime::BgError) {
@@ -538,33 +570,16 @@ mod bg_live_guard_tests {
     }
 
     #[test]
-    fn session_view_switch_detaches_instead_of_waiting_on_runtime_lock() {
-        use super::session_view_switch_must_detach;
-        use crate::event_loop::RuntimeUiAvailability;
+    fn empty_idle_view_is_not_parked_as_execution() {
+        use super::foreground_worth_parking;
+        use crate::state::UiPhase;
         assert!(
-            !session_view_switch_must_detach(RuntimeUiAvailability::Available, false, false),
-            "idle ready runtime can resume in place"
+            !foreground_worth_parking(true, UiPhase::Idle),
+            "OpenCode home view has no runner"
         );
-        assert!(session_view_switch_must_detach(
-            RuntimeUiAvailability::Reconfiguring,
-            false,
-            false
-        ));
-        assert!(session_view_switch_must_detach(
-            RuntimeUiAvailability::Starting,
-            false,
-            false
-        ));
-        assert!(session_view_switch_must_detach(
-            RuntimeUiAvailability::Available,
-            true,
-            false
-        ));
-        assert!(session_view_switch_must_detach(
-            RuntimeUiAvailability::Available,
-            false,
-            true
-        ));
+        assert!(foreground_worth_parking(false, UiPhase::Idle));
+        assert!(foreground_worth_parking(true, UiPhase::Streaming));
+        assert!(foreground_worth_parking(true, UiPhase::Approval));
     }
 
     #[test]
@@ -2818,99 +2833,11 @@ fn execute_slash_command_impl(
                     ));
                 }
                 bg_runtime::BgCommand::BackgroundCurrent => {
-                    if let Err(error) = ensure_bg_foreground_switch_allowed(
-                        provider_transition_pending(ctx),
-                        ctx.pending_runtime_request_id.is_some(),
-                    ) {
-                        renderer.render(UiLine::Error(error.into()));
-                        renderer.flush();
-                        return Ok(());
-                    }
-                    sync_bg_foreground(ctx);
-                    if !ctx.bg_manager.has_capacity() {
-                        renderer.render(UiLine::Error(
-                            t(Msg::BgSlotLimitReached {
-                                max: bg_runtime::MAX_BACKGROUND_SLOTS,
-                            })
-                            .into_owned(),
-                        ));
-                        renderer.flush();
-                        return Ok(());
-                    }
-                    let old_short_id = ctx.current_session.short_id().to_string();
-                    let old_replay_events = foreground_turn_replay_events(state);
-                    let new_session = Session::default_session(ctx.working_dir.clone());
-                    let new_short_id = new_session.short_id().to_string();
-                    let (runtime_id, endpoint, new_session) = spawn_runtime(ctx, new_session);
-                    let old_state = foreground_state_from_ui(state);
-                    let slot = match ctx.bg_manager.background_current_with_replay(
-                        endpoint.clone(),
-                        new_session.clone(),
-                        ctx.working_dir.clone(),
-                        runtime_id,
-                        old_state,
-                        old_replay_events,
-                    ) {
-                        Ok(slot) => slot,
-                        Err(bg_runtime::BgError::SlotLimit { max }) => {
-                            renderer.render(UiLine::Error(
-                                t(Msg::BgSlotLimitReached { max }).into_owned(),
-                            ));
-                            renderer.flush();
-                            return Ok(());
-                        }
-                        Err(bg_runtime::BgError::InvalidSlot { .. }) => unreachable!(),
-                        Err(
-                            bg_runtime::BgError::NoRuntimeClient { .. }
-                            | bg_runtime::BgError::SessionProjectionUnavailable { .. }
-                            | bg_runtime::BgError::SessionNotInBackground { .. },
-                        ) => unreachable!("background_current cannot return a resume error"),
-                    };
-                    ctx.runtime = endpoint.native;
-                    ctx.foreground_runtime_id = runtime_id;
-                    ctx.current_session = new_session;
-                    // Keep the live hub bound to the parked runtime so WebUI
-                    // continues the in-flight task. This TUI view is now a
-                    // separate foreground runtime.
-                    ctx.live_binding = None;
-                    bind_telemetry_to_session(ctx, &ctx.current_session);
-                    state.on_turn_complete();
-                    state.on_session_replaced();
-                    // The todo panel is per-session and is NOT cleared at turn end;
-                    // this fresh foreground session has no todos, so drop the prior
-                    // session's list (mirrors reset_to_new_session / native SessionChanged).
-                    state.active_todos = None;
-                    crate::event_loop::sync_todo_titles(state); // drop prior session's titles
-                    state.approval_panel = None;
-                    // One DECSET 2026 envelope around the wipe + welcome
-                    // re-render so the foreground swap shows no blank frame
-                    // (same anti-flicker as `/resume`). Self-contained: the
-                    // arm has no early return between begin/end_sync.
-                    renderer.begin_sync();
-                    renderer.reset();
-                    render_welcome(renderer, ctx);
-                    renderer.render(UiLine::CommandOutput(
-                        t(Msg::BgBackgroundCurrent {
-                            new_id: &new_short_id,
-                            slot,
-                            old_id: &old_short_id,
-                            state: &old_state.localised(),
-                        })
-                        .into_owned(),
-                    ));
-                    renderer.flush();
-                    renderer.end_sync();
+                    // Alias of /new: leave the current runner live, paint an empty view.
+                    reset_to_new_session(ctx, state, renderer);
                 }
                 bg_runtime::BgCommand::Resume(slot) => {
-                    if let Err(error) = ensure_bg_foreground_switch_allowed(
-                        provider_transition_pending(ctx),
-                        ctx.pending_runtime_request_id.is_some(),
-                    ) {
-                        renderer.render(UiLine::Error(error.into()));
-                        renderer.flush();
-                        return Ok(());
-                    }
-                    sync_bg_foreground(ctx);
+                    // View select by ordinal among non-selected live runners.
                     let session_id = ctx
                         .bg_manager
                         .backgrounds()
@@ -5678,80 +5605,47 @@ fn clear_terminal_screen(
     renderer.end_sync();
 }
 
-/// Park the foreground runtime when a session transition must proceed while a
-/// turn is still live on the current runtime (OpenCode-style view switch).
-fn park_foreground_if_busy_turn(
-    ctx: &mut LoopCtx,
-    state: &mut UiState,
-) -> Result<(), String> {
-    if matches!(
-        state.phase,
-        crate::state::UiPhase::Streaming
-            | crate::state::UiPhase::Approval
-            | crate::state::UiPhase::UserInput
-            | crate::state::UiPhase::RoundCap
-    ) {
-        park_foreground_to_background(ctx, state)
-    } else {
-        Ok(())
-    }
+fn render_new_session_started(ctx: &LoopCtx, renderer: &mut dyn Renderer) {
+    renderer.begin_sync();
+    renderer.reset();
+    render_welcome(renderer, ctx);
+    renderer.render(UiLine::CommandOutput(t(Msg::CmdNewSession).into_owned()));
+    renderer.flush();
+    renderer.end_sync();
 }
 
-/// Ask CodingRuntime to atomically replace the current session. The runtime
-/// terminal owns the UI/session projection commit; this function deliberately
-/// does not clear the current screen or bind a locally invented session.
+/// OpenCode `/new` is `navigate({ type: "home" })`: the previous session keeps
+/// running; the client just shows an empty composer. First user message is what
+/// makes a durable session.
+fn open_detached_new_session(
+    ctx: &mut LoopCtx,
+    state: &mut UiState,
+    renderer: &mut dyn Renderer,
+) -> Result<(), String> {
+    if !foreground_worth_parking(ctx.current_session.messages.is_empty(), state.phase) {
+        render_new_session_started(ctx, renderer);
+        return Ok(());
+    }
+    adopt_session_as_view(
+        ctx,
+        state,
+        Session::default_session(ctx.working_dir.clone()),
+    )?;
+    render_new_session_started(ctx, renderer);
+    Ok(())
+}
+
+/// Switch the TUI to an empty view. Never reconfigure the current runtime.
 pub(crate) fn reset_to_new_session(
     ctx: &mut LoopCtx,
     state: &mut UiState,
     renderer: &mut dyn Renderer,
 ) {
-    if provider_transition_pending(ctx) {
-        renderer.render(UiLine::Error(t(Msg::CmdProviderReloading).into_owned()));
-        renderer.flush();
-        return;
-    }
-    if ctx.pending_session_transition.is_some()
-        || ctx.pending_session_resume.is_some()
-        || ctx.pending_session_resume_preparation.is_some()
-        || ctx.pending_capability_reload
-    {
-        renderer.render(UiLine::Warning(
-            t(Msg::CmdSessionTransitionPending).into_owned(),
-        ));
-        renderer.flush();
-        return;
-    }
-    // /new must also halt any active /loop (both self-paced runtime and fixed-interval TUI controller).
     stop_active_loop(state, ctx);
-    if let Err(error) = park_foreground_if_busy_turn(ctx, state) {
+    if let Err(error) = open_detached_new_session(ctx, state, renderer) {
         renderer.render(UiLine::Error(error));
         renderer.flush();
-        return;
     }
-    match ctx
-        .runtime
-        .fresh_session(ctx.foreground_runtime_id, ctx.runtime_event_tx.clone())
-    {
-        Ok(()) => {
-            ctx.pending_session_transition = Some(crate::event_loop::PendingSessionTransition {
-                operation: atomcode_coding::ReconfigureKind::FreshSession,
-                requested_working_dir: ctx.working_dir.clone(),
-                committed: None,
-                effect: crate::event_loop::SessionTransitionEffect::None,
-            });
-            // Success is fast (the reconfigure connects MCP in the background and
-            // never blocks): the transition terminal wipes the screen / re-renders
-            // shortly, so the "reconfiguring…" status is just noise here. It's still
-            // shown by the guards above / on submit while a transition is pending.
-        }
-        Err(error) => renderer.render(UiLine::Error(
-            t(Msg::CmdSessionTransitionFailed {
-                error: &error.to_string(),
-            })
-            .into_owned(),
-        )),
-    }
-    renderer.flush();
 }
 
 /// Start an atomic fresh-session transition into a new working directory.

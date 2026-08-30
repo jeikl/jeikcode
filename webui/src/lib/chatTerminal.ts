@@ -229,13 +229,14 @@ export type LiveDetachDisposition =
   | { allowed: true }
   | { allowed: false; reason: 'active_turn' };
 
+/** Detach from the live stream ownership (rare). View switches use
+ * {@link liveSessionSwitchDisposition} instead and are always allowed. */
 export function liveDetachDisposition(running: boolean): LiveDetachDisposition {
   return running ? { allowed: false, reason: 'active_turn' } : { allowed: true };
 }
 
-/** Switching the WebUI view never rebinds the live runtime. The live stream
- * keeps publishing the task in the background; the sidebar only changes which
- * transcript is on screen. */
+/** Switching the WebUI view never rebinds or cancels a CodingRuntime.
+ * OpenCode model: selected SessionKey is a client ViewBinding only. */
 export function liveSessionSwitchDisposition(_running?: boolean): LiveDetachDisposition {
   return { allowed: true };
 }

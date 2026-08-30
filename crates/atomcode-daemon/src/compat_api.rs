@@ -36,7 +36,7 @@ use tokio_stream::wrappers::UnboundedReceiverStream;
 
 use crate::approval_mode::ApprovalMode;
 use crate::{
-    fanout_chat_events, process_chat_request, public_compat_model_id, resolve_chat_provider,
+    fanout_chat_events_for_session, process_chat_request, public_compat_model_id, resolve_chat_provider,
     ActiveChatAdmissionError, AppState, ChatEvent, ChatRequest, ImageInput, SessionSummary,
 };
 use atomcode_config::config::Config;
@@ -962,7 +962,12 @@ async fn run_compat_turn(state: AppState, turn: CompatTurn, format: WireFormat) 
         .event_bus_with_replay(&admission.operation_id)
         .await
         .map(|(_, r)| r);
-    let fan_tx = fanout_chat_events(client_tx, event_bus, replay);
+    let fan_tx = fanout_chat_events_for_session(
+        client_tx,
+        event_bus,
+        replay,
+        chat_req.session_id.clone(),
+    );
     let active_chats = state.active_chats.clone();
     let mcp_pool = state.mcp_pool.clone();
     let telemetry = state.telemetry.clone();

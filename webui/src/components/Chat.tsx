@@ -3593,7 +3593,7 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
           pushCommandNotice(t('chat.detachedStopped'));
         }
       } else if (attachedToLiveRuntime()) {
-        await postLiveStop();
+        await postLiveStop(liveSessionIdRef.current ?? sessionId ?? activeIdRef.current);
       }
     } catch (error) {
       setQueued([]);
@@ -4350,7 +4350,13 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
     <PermissionCard
       req={{ session_id: '', tool_name: livePending.tool_name, reason: livePending.reason, call_id: livePending.call_id, arguments: livePending.arguments }}
       onDone={() => setLivePending((cur) => resolvePendingAfterDecision(cur, livePending.call_id))}
-      onDecide={async (decision, toolName) => { await postLivePermission(decision, toolName); }}
+      onDecide={async (decision, toolName) => {
+        await postLivePermission(
+          decision,
+          toolName,
+          liveSessionIdRef.current ?? sessionId ?? activeIdRef.current,
+        );
+      }}
     />
   );
 
@@ -4361,7 +4367,10 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
       onDone={() => setUserInputReq(null)}
       submitAnswer={(body) => userInputReq.session_id
         ? postChatUserInput(userInputReq.session_id, body)
-        : postLiveUserInput(body)}
+        : postLiveUserInput(
+            body,
+            liveSessionIdRef.current ?? sessionId ?? activeIdRef.current,
+          )}
     />
   );
 

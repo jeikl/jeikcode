@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex as StdMutex, OnceLock};
 
@@ -109,10 +110,225 @@ pub fn send_remote_command(command: String) -> bool {
         .is_some_and(|sender| sender.send(command).is_ok())
 }
 
+/// True when `/live` should follow `SessionRuntimeRegistry` instead of the
+/// single LiveHub binding (OpenCode multi-view: hub may be on A while client watches B).
+static SESSION_DRAFTS: OnceLock<StdMutex<HashMap<String, PathBuf>>> = OnceLock::new();
+
+fn session_drafts() -> &'static StdMutex<HashMap<String, PathBuf>> {
+    SESSION_DRAFTS.get_or_init(|| StdMutex::new(HashMap::new()))
+}
+
+/// Remember a `/sessions` draft id that has no catalog row yet.
+pub fn register_session_draft(session_id: String, working_dir: PathBuf) {
+    session_drafts()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .insert(session_id, working_dir);
+}
+
+pub fn take_session_draft(session_id: &str) -> Option<PathBuf> {
+    session_drafts()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .remove(session_id)
+}
+
+pub fn is_session_draft(session_id: &str) -> bool {
+    session_drafts()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .contains_key(session_id)
+}
+
+/// Spawn (or attach) a CodingRuntime into the L2 registry without claiming the
+/// LiveHub binding — used when the hub/TUI is already bound to another session.
+pub async fn ensure_registry_runner(
+    working_dir: PathBuf,
+    telemetry: Arc<Telemetry>,
+    provider_name: String,
+    mode: RuntimeMode,
+    session_id: String,
+) -> Result<(), String> {
+    let reg = atomcode_coding::session_runtime_registry::SessionRuntimeRegistry::global();
+    if reg.handle(&session_id).is_some() {
+        return Ok(());
+    }
+
+    let config =
+        atomcode_config::config::Config::load(&atomcode_config::config::Config::default_path())
+            .map_err(|error| error.to_string())?;
+    if !config.selection_exists(&provider_name) {
+        return Err(format!("provider {provider_name:?} not found"));
+    }
+    let runtime_config: CodingRuntimeConfig =
+        crate::live_api::live_runtime_config(&config, &provider_name, &working_dir, telemetry);
+
+    let session_mode = if let Ok(snapshot) = load_snapshot(&working_dir, &session_id) {
+        atomcode_coding::SessionMode::ExternalSnapshot {
+            id: session_id.clone(),
+            snapshot,
+        }
+    } else {
+        // Draft or brand-new id: staged until first Submit.
+        let _ = take_session_draft(&session_id);
+        atomcode_coding::SessionMode::Draft {
+            id: session_id.clone(),
+        }
+    };
+
+    let (runtime, _) = crate::start_native_runtime_with_session(runtime_config, session_mode)
+        .await
+        .map_err(|error| error.to_string())?;
+    let CodingRuntime {
+        handle,
+        mut events,
+        task,
+        ..
+    } = runtime;
+    handle
+        .set_mode(mode)
+        .await
+        .map_err(|error| format!("failed to set registry runner mode: {error}"))?;
+    let _ = handle
+        .wait_mcp_ready(atomcode_capabilities::mcp::CONNECT_TIMEOUT)
+        .await;
+
+    let _ = reg.open_or_attach(session_id.clone(), working_dir.clone());
+    let _ = reg.bind_handle(&session_id, handle.clone(), None);
+
+    let forward_id = session_id.clone();
+    let forward_dir = working_dir;
+    tokio::spawn(async move {
+        let reg = atomcode_coding::session_runtime_registry::SessionRuntimeRegistry::global();
+        let _ = reg.open_or_attach(forward_id.clone(), forward_dir);
+        while let Some(envelope) = events.recv().await {
+            let _ = reg.push_runtime_event(&forward_id, envelope.generation, envelope.event);
+        }
+        let _ = task.await;
+    });
+    Ok(())
+}
+
+pub fn prefer_registry_live_stream(requested_session_id: &str) -> bool {
+    if is_session_draft(requested_session_id) {
+        return true;
+    }
+    if let Ok(current) = join() {
+        if current.binding.session_id != requested_session_id {
+            return true;
+        }
+        return false;
+    }
+    atomcode_coding::session_runtime_registry::SessionRuntimeRegistry::global()
+        .lookup(&requested_session_id.to_string())
+        .is_some()
+}
+
+/// Snapshot for a registry-backed live view (memory first, then disk catalog).
+pub fn registry_session_snapshot(
+    working_dir: &Path,
+    session_id: &str,
+) -> Result<SessionSnapshot, String> {
+    if let Some(snap) =
+        atomcode_coding::session_runtime_registry::SessionRuntimeRegistry::global()
+            .snapshot(&session_id.to_string())
+    {
+        return Ok(snap);
+    }
+    match load_snapshot(working_dir, session_id) {
+        Ok(snapshot) => Ok(snapshot),
+        Err(_) if is_session_draft(session_id) => Ok(SessionSnapshot::new(Vec::new())),
+        Err(error) => Err(error),
+    }
+}
+
+/// Submit to a session owned by the L2 registry (TUI background / non-hub view).
+pub async fn submit_via_registry(
+    session_id: &str,
+    runtime_input: UserInput,
+    echo_input: UserInput,
+    client_input_id: Option<String>,
+) -> Result<atomcode_coding::SubmitReceipt, String> {
+    let handle =
+        atomcode_coding::session_runtime_registry::SessionRuntimeRegistry::global()
+            .handle(&session_id.to_string())
+            .ok_or_else(|| {
+                format!("session {session_id} has no live registry handle for submit")
+            })?;
+    let receipt = handle
+        .submit(runtime_input)
+        .await
+        .map_err(|error| format!("registry submit failed: {error}"))?;
+    let working_dir = atomcode_coding::session_runtime_registry::SessionRuntimeRegistry::global()
+        .lookup(&session_id.to_string())
+        .map(|e| e.working_dir)
+        .unwrap_or_else(|| PathBuf::from("."));
+    let _ = atomcode_coding::session_runtime_registry::SessionRuntimeRegistry::global()
+        .ensure_and_push_view(
+            session_id.to_string(),
+            working_dir,
+            atomcode_coding::session_runtime_registry::SessionViewEvent::InputAccepted {
+                input: echo_input,
+                client_input_id,
+            },
+        );
+    Ok(receipt)
+}
+
+/// Cancel the turn for a registry-owned session.
+pub fn cancel_via_registry(session_id: &str) -> Result<(), String> {
+    atomcode_coding::session_runtime_registry::SessionRuntimeRegistry::global()
+        .cancel(&session_id.to_string())
+        .map_err(|error| error.to_string())
+}
+
+/// Deliver a Respond for a pending request on a registry-owned session.
+pub fn resolve_via_registry(
+    session_id: &str,
+    id: atomcode_kernel::event::RequestId,
+    value: serde_json::Value,
+    kind: &str,
+) -> Result<(), String> {
+    let reg = atomcode_coding::session_runtime_registry::SessionRuntimeRegistry::global();
+    reg.resolve_request(&session_id.to_string(), id, value)
+        .map_err(|error| error.to_string())?;
+    let working_dir = reg
+        .lookup(&session_id.to_string())
+        .map(|e| e.working_dir)
+        .unwrap_or_else(|| PathBuf::from("."));
+    let _ = reg.ensure_and_push_view(
+        session_id.to_string(),
+        working_dir,
+        atomcode_coding::session_runtime_registry::SessionViewEvent::RequestResolved {
+            request_id: id,
+            kind: kind.to_string(),
+        },
+    );
+    Ok(())
+}
+
+/// Respond to the latest pending request on a registry session.
+pub fn resolve_pending_kind_via_registry(
+    session_id: &str,
+    kind: &str,
+    value: serde_json::Value,
+) -> Result<u64, String> {
+    let reg = atomcode_coding::session_runtime_registry::SessionRuntimeRegistry::global();
+    let id = reg
+        .pending_request_id(&session_id.to_string())
+        .ok_or_else(|| format!("session {session_id} has no pending {kind} request"))?;
+    resolve_via_registry(session_id, id, value, kind)?;
+    Ok(id)
+}
+
 pub fn publish(
     binding: &LiveBinding,
     event: atomcode_coding::SequencedRuntimeEvent,
 ) -> Result<(), HubError> {
+    // Dual-write: hub (bound view) + registry (any view of this session).
+    let reg = atomcode_coding::session_runtime_registry::SessionRuntimeRegistry::global();
+    let _ = reg.open_or_attach(binding.session_id.clone(), binding.working_dir.clone());
+    let _ = reg.push_runtime_event(&binding.session_id, event.generation, event.event.clone());
     hub().publish(binding, event)
 }
 
@@ -120,6 +336,9 @@ pub fn publish_unsequenced(
     binding: &LiveBinding,
     event: atomcode_coding::CodingRuntimeEvent,
 ) -> Result<(), HubError> {
+    let reg = atomcode_coding::session_runtime_registry::SessionRuntimeRegistry::global();
+    let _ = reg.open_or_attach(binding.session_id.clone(), binding.working_dir.clone());
+    let _ = reg.push_runtime_event(&binding.session_id, 0, event.clone());
     hub().publish_unsequenced(binding, event)
 }
 
@@ -259,16 +478,11 @@ pub async fn resume_session(
             })?,
     };
     let target_dir = PathBuf::from(&prepared.view.meta.working_dir);
-    if hub().turn_in_progress() {
-        return hub().switch_view_only(
-            session_id,
-            target_dir,
-            prepared.view.snapshot,
-        );
-    }
-    hub()
-        .resume_session_with_lease(session_id, target_dir, prepared.lease)
-        .await
+    // OpenCode model: switching the live WebUI/TUI *view* never reconfigures the
+    // bound CodingRuntime. Execution stays on its session; the hub only projects
+    // another transcript. (Provider reload still refuses ActiveTurn.)
+    let _lease = prepared.lease;
+    hub().switch_view_only(session_id, target_dir, prepared.view.snapshot)
 }
 
 /// Move the bound runtime to a fresh staged session. This is the only safe way
@@ -477,7 +691,7 @@ pub async fn ensure_headless_runtime(
                 }
                 _ => None,
             };
-            match hub().publish(&event_binding, event) {
+            match publish(&event_binding, event) {
                 Ok(()) => {}
                 Err(HubError::StaleEvent) => {
                     tracing::warn!("discarded stale live runtime event");
@@ -509,8 +723,14 @@ pub async fn ensure_headless_runtime(
         }
         let _ = task.await;
     });
-    *owner = Some(HeadlessRuntime { binding, handle });
+    *owner = Some(HeadlessRuntime {
+        binding: binding.clone(),
+        handle: handle.clone(),
+    });
     drop(owner);
+    let reg = atomcode_coding::session_runtime_registry::SessionRuntimeRegistry::global();
+    let _ = reg.open_or_attach(binding.session_id.clone(), binding.working_dir.clone());
+    let _ = reg.bind_handle(&binding.session_id, handle, None);
     join().map_err(|error| format!("live hub join failed: {error:?}"))
 }
 

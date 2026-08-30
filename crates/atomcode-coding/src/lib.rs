@@ -100,7 +100,8 @@ pub use runtime::{
     TurnCompletion, UndoResult, UserInput, VisionNotice,
 };
 pub use session_runtime_registry::{
-    OpenOutcome, RuntimeActivity, SessionKey, SessionRuntimeEntry, SessionRuntimeRegistry,
+    OpenOutcome, RegistryError, RuntimeActivity, SequencedSessionEvent, SessionKey,
+    SessionRuntimeEntry, SessionRuntimeRegistry, SessionViewEvent, MAX_LIVE_SESSIONS,
 };
 pub use telemetry::{TelemetryHook, ToolTelemetryMiddleware};
 pub use todo::TodoHook;

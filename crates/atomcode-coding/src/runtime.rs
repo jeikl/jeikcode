@@ -1790,9 +1790,9 @@ impl CodingRuntime {
                 }
             }
         };
-        parts
-            .publish_staged_session()
-            .map_err(runtime_start_prepare_error)?;
+        // Fresh sessions stay staged (not catalog-visible) until the first real
+        // user Submit — OpenCode-style /new drafts must not litter the session list.
+        // `publish_staged_session` is a no-op when nothing is staged.
 
         let (handle, controls) = coding_runtime_control_channel();
         let (raw_event_tx, _raw_events) = mpsc::unbounded_channel();
@@ -3167,6 +3167,15 @@ fn spawn_runtime_owner_with_optional_agent(
                                     .update_from_user_text(&input.text);
                             }
                         }
+                        // First real user message commits a staged fresh session to disk.
+                        if let Some(runtime) = resources.as_mut() {
+                            if let Err(error) = runtime.parts.publish_staged_session() {
+                                let _ = done.send(Err(RuntimeError::ReconfigureFailed(
+                                    format!("failed to persist staged session: {error}"),
+                                )));
+                                continue;
+                            }
+                        }
                         let receipt = if let Some(turn_id) = active_turn {
                             SubmitReceipt::Steered { generation, turn_id }
                         } else {
@@ -4340,7 +4349,8 @@ fn spawn_runtime_owner_with_optional_agent(
                             .as_ref()
                             .zip(match &input.prepare.session {
                                 crate::SessionMode::Resume(id)
-                                | crate::SessionMode::ExternalSnapshot { id, .. } => Some(id),
+                                | crate::SessionMode::ExternalSnapshot { id, .. }
+                                | crate::SessionMode::Draft { id } => Some(id),
                                 crate::SessionMode::Fresh | crate::SessionMode::Disabled => None,
                             })
                             .is_some_and(|(current, target)| current.id == *target);
@@ -4452,27 +4462,33 @@ fn spawn_runtime_owner_with_optional_agent(
                             }
                         };
 
-                        // Persistence is the transition's irrevocable commit point. Publish
-                        // only after the complete replacement has assembled, while the old
-                        // agent is still executable if this final fallible write fails.
-                        if let Err(publish_error) = candidate.parts.publish_staged_session() {
-                            let cleanup_error =
-                                discard_uncommitted_session(operation, &candidate).err();
-                            controls.state.store(
-                                runtime_phase_state(generation, previous_phase),
-                                Ordering::Release,
-                            );
-                            resources = Some(runtime);
-                            let publish_error = match cleanup_error {
-                                Some(cleanup_error) => {
-                                    format!("{publish_error}; {cleanup_error}")
-                                }
-                                None => publish_error.to_string(),
-                            };
-                            let _ = done.send(Err(RuntimeError::ReconfigureFailed(
-                                publish_error,
-                            )));
-                            continue;
+                        // FreshSession stays staged until the first user Submit so
+                        // /new drafts are not catalog-visible while empty. Other
+                        // transitions still treat publish as the irrevocable commit.
+                        let defer_fresh_persist = matches!(
+                            operation,
+                            ReconfigureKind::FreshSession
+                        ) && candidate.parts.has_staged_fresh_session();
+                        if !defer_fresh_persist {
+                            if let Err(publish_error) = candidate.parts.publish_staged_session() {
+                                let cleanup_error =
+                                    discard_uncommitted_session(operation, &candidate).err();
+                                controls.state.store(
+                                    runtime_phase_state(generation, previous_phase),
+                                    Ordering::Release,
+                                );
+                                resources = Some(runtime);
+                                let publish_error = match cleanup_error {
+                                    Some(cleanup_error) => {
+                                        format!("{publish_error}; {cleanup_error}")
+                                    }
+                                    None => publish_error.to_string(),
+                                };
+                                let _ = done.send(Err(RuntimeError::ReconfigureFailed(
+                                    publish_error,
+                                )));
+                                continue;
+                            }
                         }
 
                         let controller_interrupted = cancel_controllers_and_finish_held(
@@ -6343,7 +6359,9 @@ fn matching_session_lease(
     target: &crate::SessionMode,
 ) -> Option<SessionLease> {
     let target_id = match target {
-        crate::SessionMode::Resume(id) | crate::SessionMode::ExternalSnapshot { id, .. } => id,
+        crate::SessionMode::Resume(id)
+        | crate::SessionMode::ExternalSnapshot { id, .. }
+        | crate::SessionMode::Draft { id } => id,
         crate::SessionMode::Fresh | crate::SessionMode::Disabled => return None,
     };
     parts

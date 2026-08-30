@@ -1036,8 +1036,9 @@ export async function postLiveMessage(
   };
 }
 
-export async function postLiveStop(): Promise<void> {
-  const resp = await apiFetch('/live/stop', {
+export async function postLiveStop(sessionId?: string | null): Promise<void> {
+  const params = sessionId ? `?session_id=${encodeURIComponent(sessionId)}` : '';
+  const resp = await apiFetch(`/live/stop${params}`, {
     method: 'POST',
     headers: authHeaders(),
   });
@@ -1173,11 +1174,16 @@ export async function postLiveReasoningEffort(
 export async function postLivePermission(
   decision: 'allow' | 'deny' | 'always_allow' | 'allow_persist',
   toolName?: string,
+  sessionId?: string | null,
 ): Promise<{ accepted: boolean }> {
   const resp = await apiFetch('/live/permission', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', ...authHeaders() },
-    body: JSON.stringify({ decision, tool_name: toolName }),
+    body: JSON.stringify({
+      decision,
+      tool_name: toolName,
+      ...(sessionId ? { session_id: sessionId } : {}),
+    }),
   });
   if (!resp.ok) throw new Error(`answer live permission failed: ${resp.status}`);
   return resp.json();
@@ -1224,11 +1230,15 @@ export type UserInputAnswer =
 
 export async function postLiveUserInput(
   body: UserInputAnswer,
+  sessionId?: string | null,
 ): Promise<{ accepted: boolean }> {
   const resp = await apiFetch('/live/user-input', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', ...authHeaders() },
-    body: JSON.stringify(body),
+    body: JSON.stringify({
+      ...body,
+      ...(sessionId ? { session_id: sessionId } : {}),
+    }),
   });
   if (!resp.ok) throw new Error(`answer live user input failed: ${resp.status}`);
   const result = await resp.json() as { accepted: boolean; error?: string };

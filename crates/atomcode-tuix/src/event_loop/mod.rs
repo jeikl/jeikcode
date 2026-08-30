@@ -2735,6 +2735,11 @@ impl RuntimeControl {
         }
     }
 
+    /// Expose the live handle for L2 registry bind (multi-view submit/cancel).
+    pub(crate) fn active_handle_for_registry(&self) -> Option<CodingRuntimeHandle> {
+        self.active_handle()
+    }
+
     pub async fn mcp_status(
         &self,
     ) -> Result<atomcode_coding::McpStatusSnapshot, atomcode_coding::RuntimeError> {
@@ -3622,13 +3627,15 @@ pub struct LoopCtx {
     pub shutdown_deadline: Option<std::time::Instant>,
     /// Engine-v2 spawner for in-TUI session switches. See [`RuntimeSpawnOverride`].
     pub runtime_spawn_override: RuntimeSpawnOverride,
+    /// Live runners + current ViewBinding (selected session). OpenCode model:
+    /// selecting another session never reconfigures a different session's handle.
     pub bg_manager: bg_runtime::BgRuntimeManager,
+    /// Transport id of the currently painted session's runner.
     pub foreground_runtime_id: bg_runtime::RuntimeId,
     pub runtime_event_tx: mpsc::UnboundedSender<bg_runtime::RuntimeEvent>,
     pub runtime_event_rx: mpsc::UnboundedReceiver<bg_runtime::RuntimeEvent>,
-    /// Events captured while a runtime was backgrounded. `/bg <slot>` moves
-    /// them here and the loop drains them before reading the shared transport
-    /// again, preserving Request-before-terminal ordering.
+    /// Events captured while a runner was not selected. Selecting that session
+    /// moves them here; the loop drains them before live transport events.
     pub foreground_replay_events: VecDeque<bg_runtime::RuntimeEventPayload>,
     pub working_dir: PathBuf,
     pub previous_dir: Option<PathBuf>,
@@ -8881,6 +8888,11 @@ pub async fn run_loop(mut ctx: LoopCtx, renderer: &mut dyn Renderer) -> Result<E
                         }
                     }
                 } else {
+                    publish_registry_runtime_event(
+                        &ctx,
+                        runtime_event.runtime_id,
+                        &runtime_event.event,
+                    );
                     ctx.bg_manager.apply_background_event(
                         runtime_event.runtime_id,
                         runtime_event.event,
@@ -9247,6 +9259,11 @@ pub async fn run_loop(mut ctx: LoopCtx, renderer: &mut dyn Renderer) -> Result<E
                         }
                     }
                 } else {
+                    publish_registry_runtime_event(
+                        &ctx,
+                        runtime_event.runtime_id,
+                        &runtime_event.event,
+                    );
                     ctx.bg_manager.apply_background_event(
                         runtime_event.runtime_id,
                         runtime_event.event,
@@ -19546,10 +19563,13 @@ fn publish_live_runtime_event(
     event: &bg_runtime::RuntimeEventPayload,
 ) -> Result<(), String> {
     let Some(binding) = &ctx.live_binding else {
+        // No hub binding — still fan out so WebUI/--host can follow via registry.
+        publish_registry_runtime_event(ctx, ctx.foreground_runtime_id, event);
         return Ok(());
     };
     let result = match event {
         bg_runtime::RuntimeEventPayload::SequencedNative(envelope) => {
+            // native_live::publish dual-writes the L2 registry.
             atomcode_daemon::native_live::publish(binding, envelope.clone())
         }
         // Driver-correlated completion is consumed only by this TUI. Publishing
@@ -19567,6 +19587,49 @@ fn publish_live_runtime_event(
         Ok(()) | Err(atomcode_daemon::live_hub::HubError::StaleEvent) => Ok(()),
         Err(error) => Err(format!("Live event synchronization failed: {error:?}")),
     }
+}
+
+fn publish_registry_runtime_event(
+    ctx: &LoopCtx,
+    runtime_id: bg_runtime::RuntimeId,
+    event: &bg_runtime::RuntimeEventPayload,
+) {
+    use atomcode_coding::session_runtime_registry::SessionRuntimeRegistry;
+
+    let (generation, coding) = match event {
+        bg_runtime::RuntimeEventPayload::SequencedNative(envelope) => {
+            (envelope.generation, envelope.event.clone())
+        }
+        bg_runtime::RuntimeEventPayload::Native(
+            CodingRuntimeEvent::SessionResumeFinished(_),
+        ) => return,
+        bg_runtime::RuntimeEventPayload::Native(event) => (0, event.clone()),
+        _ => return,
+    };
+
+    let session_id = if runtime_id == ctx.foreground_runtime_id {
+        ctx.current_session.id.clone()
+    } else if let Some(id) = ctx.bg_manager.session_id_for_runtime(runtime_id) {
+        id
+    } else if let Some(id) =
+        SessionRuntimeRegistry::global().session_id_for_runtime_id(runtime_id.as_u64())
+    {
+        id
+    } else {
+        return;
+    };
+
+    let working_dir = if runtime_id == ctx.foreground_runtime_id {
+        ctx.working_dir.clone()
+    } else {
+        ctx.bg_manager
+            .working_dir_for_runtime(runtime_id)
+            .unwrap_or_else(|| ctx.working_dir.clone())
+    };
+
+    let reg = SessionRuntimeRegistry::global();
+    let _ = reg.open_or_attach(session_id.clone(), working_dir);
+    let _ = reg.push_runtime_event(&session_id, generation, coding);
 }
 
 fn retry_pending_session_projections(

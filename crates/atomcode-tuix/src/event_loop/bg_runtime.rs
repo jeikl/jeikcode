@@ -9,7 +9,10 @@ use atomcode_config::i18n::{t, Msg};
 
 use super::RuntimeEndpoint;
 
-pub const MAX_BACKGROUND_SLOTS: usize = 16;
+pub const MAX_BACKGROUND_SLOTS: usize = atomcode_coding::MAX_LIVE_SESSIONS;
+
+/// Soft cap on concurrent live session runners (OpenCode: not "background slots").
+pub const MAX_LIVE_SESSIONS: usize = atomcode_coding::MAX_LIVE_SESSIONS;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct RuntimeId(u64);
@@ -17,6 +20,10 @@ pub struct RuntimeId(u64);
 impl RuntimeId {
     pub fn new(id: u64) -> Self {
         Self(id)
+    }
+
+    pub fn as_u64(self) -> u64 {
+        self.0
     }
 }
 
@@ -370,7 +377,9 @@ pub struct ResumeOutcome {
 }
 
 pub struct BgRuntimeManager {
+    /// Currently painted session (ViewBinding). Other live runners stay equal peers.
     foreground: ForegroundRuntime,
+    /// Live runners that are not currently selected (not a "background job queue").
     backgrounds: BackgroundSlots,
     next_runtime_id: u64,
 }
@@ -588,6 +597,85 @@ impl BgRuntimeManager {
 
     pub fn slot_for_session_id(&self, session_id: &str) -> Option<usize> {
         self.backgrounds.slot_for_session_id(session_id)
+    }
+
+    /// All live runners visible to any view: selected (foreground) + others.
+    /// OpenCode model — equal peers; the TUI selects which one to paint.
+    pub fn live_runners(&self) -> Vec<(String, PathBuf, bool)> {
+        let mut out = Vec::with_capacity(1 + self.backgrounds.slots.len());
+        out.push((
+            self.foreground.session.id.clone(),
+            self.foreground.working_dir.clone(),
+            false, // selected activity comes from UiPhase at sync time
+        ));
+        for slot in &self.backgrounds.slots {
+            out.push((
+                slot.session.id.clone(),
+                slot.working_dir.clone(),
+                matches!(slot.state, RuntimeState::Running),
+            ));
+        }
+        out
+    }
+
+    /// Background runners with handle + transport id for registry bind.
+    pub fn live_runner_bindings(
+        &self,
+    ) -> Vec<(
+        String,
+        PathBuf,
+        bool,
+        u64,
+        Option<atomcode_coding::CodingRuntimeHandle>,
+    )> {
+        self.backgrounds
+            .slots
+            .iter()
+            .map(|slot| {
+                let handle = slot
+                    .endpoint
+                    .as_ref()
+                    .and_then(|ep| ep.native.active_handle_for_registry());
+                (
+                    slot.session.id.clone(),
+                    slot.working_dir.clone(),
+                    matches!(slot.state, RuntimeState::Running),
+                    slot.runtime_id.as_u64(),
+                    handle,
+                )
+            })
+            .collect()
+    }
+
+    pub fn session_id_for_runtime(&self, runtime_id: RuntimeId) -> Option<String> {
+        if self.foreground.runtime_id == runtime_id {
+            return Some(self.foreground.session.id.clone());
+        }
+        self.backgrounds
+            .slots
+            .iter()
+            .find(|slot| slot.runtime_id == runtime_id)
+            .map(|slot| slot.session.id.clone())
+    }
+
+    pub fn working_dir_for_runtime(&self, runtime_id: RuntimeId) -> Option<PathBuf> {
+        if self.foreground.runtime_id == runtime_id {
+            return Some(self.foreground.working_dir.clone());
+        }
+        self.backgrounds
+            .slots
+            .iter()
+            .find(|slot| slot.runtime_id == runtime_id)
+            .map(|slot| slot.working_dir.clone())
+    }
+
+    /// Select an already-live session as the view (no runtime reconfigure).
+    pub fn select_session(
+        &mut self,
+        session_id: &str,
+        current_state: RuntimeState,
+    ) -> Result<ResumeOutcome, BgError> {
+        self.resume_session_by_id(session_id, current_state)
     }
 
     pub fn resume_slot(

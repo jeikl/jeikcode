@@ -60,9 +60,15 @@ use crate::rate_limit::RateLimitWindowSource;
 /// How `prepare` binds the agent to on-disk session persistence.
 #[derive(Clone, Debug, Default)]
 pub enum SessionMode {
-    /// Allocate a fresh session id (uuid v4) and persist from turn 1.
+    /// Allocate a fresh session id (uuid v4). Catalog write is deferred until the
+    /// first real user Submit when started via CodingRuntime (staged fresh).
     #[default]
     Fresh,
+    /// Same as [`Fresh`] but reuse a pre-assigned id (WebUI/TUI `/new` draft).
+    /// Staged until first Submit — no empty catalog row.
+    Draft {
+        id: String,
+    },
     /// Resume the given session id from its complete native aggregate. `prepare`
     /// errors unless metadata, snapshot, and presentation are all present and the
     /// metadata owner is `Native`; compatibility callers must import first.
@@ -579,6 +585,22 @@ async fn prepare_with_plugin_hooks_reusing_lease(
                 staged_fresh: stage_fresh.then_some(meta),
             })
         }
+        SessionMode::Draft { id } => {
+            let manager = Arc::new(SessionManager::for_project(&cfg.working_dir));
+            let lease = session_lease(&manager, id, reuse_lease.as_ref())?;
+            let now = atomcode_capabilities::session::now_ms();
+            let mut meta = SessionMeta::new(id, cfg.working_dir.to_string_lossy().as_ref(), now);
+            meta.owner = StorageOwner::Native;
+            // Drafts are always staged — never catalog-visible until first Submit.
+            Some(SessionBinding {
+                id: id.clone(),
+                manager,
+                lease,
+                resume: None,
+                pending_resume_prompt: None,
+                staged_fresh: Some(meta),
+            })
+        }
         SessionMode::Resume(id) => {
             let manager = Arc::new(SessionManager::for_project(&cfg.working_dir));
             let lease = session_lease(&manager, id, reuse_lease.as_ref())?;
@@ -929,6 +951,12 @@ impl CodingParts {
             .map_err(io::Error::from)?;
         binding.staged_fresh = None;
         Ok(())
+    }
+
+    pub(crate) fn has_staged_fresh_session(&self) -> bool {
+        self.session
+            .as_ref()
+            .is_some_and(|binding| binding.staged_fresh.is_some())
     }
 
     /// Carry session-scoped runtime decisions across a capability-graph rebuild.

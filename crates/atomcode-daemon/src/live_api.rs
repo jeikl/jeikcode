@@ -1119,7 +1119,11 @@ impl NativeLiveWireProjector {
                 | Kernel::Cancelled
                 | Kernel::CompactionStarted { .. }
                 | Kernel::CompactionFailed { .. } => return None,
-                Kernel::Steered { .. } => return None,
+                Kernel::Steered { count, inputs } => LiveWireEvent::Steered {
+                    count,
+                    inputs,
+                    client_input_ids: Vec::new(),
+                },
                 _ => return None,
             },
             crate::live_hub::LiveViewEvent::Runtime(Runtime::Request(request)) => {
@@ -1330,9 +1334,17 @@ pub(crate) async fn live_stream(
     axum::extract::Query(q): axum::extract::Query<LiveStreamQuery>,
 ) -> impl IntoResponse {
     let working_dir = { state.project.read().await.working_dir.clone() };
+    let wd = live_current_working_dir(&working_dir);
     let sid = parse_session_id(q.session_id);
+
+    if let Some(session_id) = sid.clone() {
+        if crate::native_live::prefer_registry_live_stream(&session_id) {
+            return live_stream_from_registry(wd, session_id).into_response();
+        }
+    }
+
     let join = match crate::native_live::ensure_headless_runtime(
-        live_current_working_dir(&working_dir),
+        wd.clone(),
         state.telemetry.clone(),
         live_current_provider(),
         native_runtime_mode(live_current_approval_mode()),
@@ -1342,13 +1354,187 @@ pub(crate) async fn live_stream(
     {
         Ok(join) => join,
         Err(error) => {
+            // Embedded TUI bound to another session — fall back to registry view.
+            if let Some(session_id) = parse_session_id_from_embedded_mismatch(&error) {
+                return live_stream_from_registry(wd, session_id).into_response();
+            }
             return (
                 StatusCode::NOT_FOUND,
                 Json(serde_json::json!({ "error": error })),
             )
-                .into_response()
+                .into_response();
         }
     };
+    live_stream_from_hub_join(join).into_response()
+}
+
+fn parse_session_id_from_embedded_mismatch(error: &str) -> Option<String> {
+    // "embedded runtime is bound to session \"A\", requested \"B\""
+    let marker = "requested \"";
+    let start = error.find(marker)? + marker.len();
+    let rest = &error[start..];
+    let end = rest.find('"')?;
+    let id = &rest[..end];
+    if id.is_empty() {
+        None
+    } else {
+        Some(id.to_string())
+    }
+}
+
+fn project_registry_event(
+    projector: &mut NativeLiveWireProjector,
+    sequenced: atomcode_coding::session_runtime_registry::SequencedSessionEvent,
+) -> Option<LiveWireEvent> {
+    use atomcode_coding::session_runtime_registry::SessionViewEvent;
+    if let Some(view) = sequenced.view {
+        let live = match view {
+            SessionViewEvent::InputAccepted {
+                input,
+                client_input_id,
+            } => crate::live_hub::LiveViewEvent::InputAccepted {
+                input,
+                client_input_id,
+            },
+            SessionViewEvent::Steered {
+                count,
+                inputs,
+                client_input_ids,
+            } => crate::live_hub::LiveViewEvent::Steered {
+                count,
+                inputs,
+                client_input_ids,
+            },
+            SessionViewEvent::CommandOutput(text) => {
+                crate::live_hub::LiveViewEvent::CommandOutput(text)
+            }
+            SessionViewEvent::RequestResolved { request_id, kind } => {
+                crate::live_hub::LiveViewEvent::RequestResolved { request_id, kind }
+            }
+        };
+        return projector.project(live);
+    }
+    sequenced
+        .runtime
+        .and_then(|runtime| projector.project(crate::live_hub::LiveViewEvent::Runtime(runtime)))
+}
+
+fn live_stream_from_registry(
+    working_dir: std::path::PathBuf,
+    session_id: String,
+) -> axum::response::Response {
+    let snapshot = match crate::native_live::registry_session_snapshot(&working_dir, &session_id) {
+        Ok(snapshot) => snapshot,
+        Err(error) => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(serde_json::json!({ "error": error })),
+            )
+                .into_response();
+        }
+    };
+    let session_name = {
+        let bucket = atomcode_capabilities::session::SessionManager::project_hash(&working_dir);
+        match crate::legacy_convert::load_catalog_session_view_in_project(&bucket, &session_id) {
+            Ok(Some(session)) => session.meta.name,
+            Ok(None) => String::new(),
+            Err(error) => {
+                return (
+                    StatusCode::NOT_FOUND,
+                    Json(serde_json::json!({ "error": error.to_string() })),
+                )
+                    .into_response();
+            }
+        }
+    };
+    let project_hash = crate::hash_path(&working_dir);
+    let provider = live_current_provider();
+    let (tx, out_rx) = mpsc::unbounded_channel::<LiveWireEvent>();
+    let mut snapshot_messages: Vec<crate::MessageInfo> = snapshot
+        .messages
+        .iter()
+        .map(crate::MessageInfo::from_kernel)
+        .collect();
+    crate::attach_display_images(&mut snapshot_messages, &working_dir, &session_id);
+    let _ = tx.send(LiveWireEvent::Snapshot {
+        messages: snapshot_messages,
+        session_id: session_id.clone(),
+        session_name,
+        project_hash,
+        provider,
+        mode: live_current_mode_wire(),
+        working_dir: working_dir.to_string_lossy().to_string(),
+    });
+
+    let reg = atomcode_coding::session_runtime_registry::SessionRuntimeRegistry::global();
+    let (replay, mut rx) = match reg.subscribe_or_empty(&session_id, working_dir.clone(), None) {
+        Ok(pair) => pair,
+        Err(error) => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(serde_json::json!({ "error": error.to_string() })),
+            )
+                .into_response();
+        }
+    };
+
+    let mut projector = NativeLiveWireProjector {
+        session_id: session_id.clone(),
+        ..Default::default()
+    };
+    for sequenced in replay {
+        if let Some(w) = project_registry_event(&mut projector, sequenced) {
+            let _ = tx.send(w);
+        }
+    }
+
+    tokio::spawn(async move {
+        loop {
+            match rx.recv().await {
+                Ok(sequenced) => {
+                    if let Some(w) = project_registry_event(&mut projector, sequenced) {
+                        if tx.send(w).is_err() {
+                            break;
+                        }
+                    }
+                }
+                Err(broadcast::error::RecvError::Lagged(skipped)) => {
+                    let _ = tx.send(LiveWireEvent::Error {
+                        message: format!(
+                            "registry live stream lagged by {skipped} events; reconnect"
+                        ),
+                    });
+                    break;
+                }
+                Err(broadcast::error::RecvError::Closed) => break,
+            }
+        }
+    });
+
+    let stream = tokio_stream::wrappers::UnboundedReceiverStream::new(out_rx).map(|w| {
+        let json = serde_json::to_string(&w).unwrap_or_else(|error| {
+            crate::ctrace!(
+                "LIVE",
+                "live_stream: serde_json serialization failed: {error}"
+            );
+            serde_json::json!({
+                "type": "error",
+                "message": format!("live event serialization failed: {error}"),
+            })
+            .to_string()
+        });
+        Ok::<_, std::convert::Infallible>(Event::default().data(json))
+    });
+    Sse::new(stream)
+        .keep_alive(
+            KeepAlive::new()
+                .interval(std::time::Duration::from_secs(15))
+                .text("ping"),
+        )
+        .into_response()
+}
+
+fn live_stream_from_hub_join(join: crate::live_hub::LiveJoin) -> axum::response::Response {
     let snapshot_wd = join.binding.working_dir.clone();
     let session_name = {
         let bucket = atomcode_capabilities::session::SessionManager::project_hash(&snapshot_wd);
@@ -1363,7 +1549,7 @@ pub(crate) async fn live_stream(
                     StatusCode::NOT_FOUND,
                     Json(serde_json::json!({ "error": error.to_string() })),
                 )
-                    .into_response()
+                    .into_response();
             }
         }
     };
@@ -1661,6 +1847,91 @@ pub(crate) async fn live_message(
     let bootstrap_provider = requested_provider
         .clone()
         .unwrap_or_else(live_current_provider);
+
+    // Multi-view: if this session is live in the registry but not the hub
+    // binding, submit through the registry handle so TUI-owned sessions stay
+    // reachable from WebUI/--host without rebinding the hub.
+    if let Some(session_id) = sid.clone() {
+        if crate::native_live::prefer_registry_live_stream(&session_id)
+            || crate::native_live::is_session_draft(&session_id)
+        {
+            let wd = live_current_working_dir(&working_dir);
+            if atomcode_coding::session_runtime_registry::SessionRuntimeRegistry::global()
+                .handle(&session_id)
+                .is_none()
+            {
+                if let Err(error) = crate::native_live::ensure_registry_runner(
+                    wd.clone(),
+                    state.telemetry.clone(),
+                    bootstrap_provider.clone(),
+                    native_runtime_mode(live_current_approval_mode()),
+                    session_id.clone(),
+                )
+                .await
+                {
+                    return Json(serde_json::json!({ "accepted": false, "error": error }));
+                }
+            }
+            if atomcode_coding::session_runtime_registry::SessionRuntimeRegistry::global()
+                .handle(&session_id)
+                .is_some()
+            {
+            let original_images: Vec<ImageContent> = req
+                .images
+                .into_iter()
+                .map(|image| ImageContent {
+                    media_type: image.media_type,
+                    data: image.data,
+                })
+                .collect();
+            let provider_name = requested_provider.unwrap_or_else(live_current_provider);
+            let runtime_text = preprocess_live_caption(
+                &req.message,
+                &original_images,
+                Some(&provider_name),
+                Some(&session_id),
+                &wd,
+                state.telemetry.clone(),
+            )
+            .await;
+            stash_vl_display_images(&wd, &session_id, &runtime_text, &original_images);
+            let (runtime_input, echo_input) =
+                split_live_inputs(req.message, original_images, runtime_text);
+            return match crate::native_live::submit_via_registry(
+                &session_id,
+                runtime_input,
+                echo_input,
+                req.client_input_id,
+            )
+            .await
+            {
+                Ok(atomcode_coding::SubmitReceipt::Started {
+                    generation,
+                    turn_id,
+                }) => Json(serde_json::json!({
+                    "accepted": true,
+                    "disposition": "started",
+                    "generation": generation,
+                    "turn_id": turn_id,
+                })),
+                Ok(atomcode_coding::SubmitReceipt::Steered {
+                    generation,
+                    turn_id,
+                }) => Json(serde_json::json!({
+                    "accepted": true,
+                    "disposition": "steered",
+                    "generation": generation,
+                    "turn_id": turn_id,
+                })),
+                Err(error) => Json(serde_json::json!({
+                    "accepted": false,
+                    "error": error,
+                })),
+            };
+            }
+        }
+    }
+
     let join = match crate::native_live::ensure_headless_runtime(
         live_current_working_dir(&working_dir),
         state.telemetry.clone(),
@@ -1819,8 +2090,25 @@ fn split_live_inputs(
 }
 
 /// POST /live/stop — cancel the turn shared by the TUI and synchronized webui tabs.
-pub(crate) async fn live_stop() -> impl IntoResponse {
-    let accepted = crate::native_live::cancel_confirmed().await.is_ok();
+#[derive(serde::Deserialize, Default)]
+pub(crate) struct LiveStopReq {
+    #[serde(default)]
+    pub session_id: Option<String>,
+}
+
+pub(crate) async fn live_stop(
+    axum::extract::Query(q): axum::extract::Query<LiveStopReq>,
+) -> impl IntoResponse {
+    let session_id = parse_session_id(q.session_id);
+    let accepted = if let Some(session_id) = session_id {
+        if crate::native_live::prefer_registry_live_stream(&session_id) {
+            crate::native_live::cancel_via_registry(&session_id).is_ok()
+        } else {
+            crate::native_live::cancel_confirmed().await.is_ok()
+        }
+    } else {
+        crate::native_live::cancel_confirmed().await.is_ok()
+    };
     Json(serde_json::json!({ "accepted": accepted }))
 }
 
@@ -1829,12 +2117,11 @@ pub(crate) struct LiveSwitchSessionReq {
     pub session_id: String,
 }
 
-/// POST /live/switch_session — webui 切到「已存在」的会话时广播会话切换，
-/// 让同进程 sync 模式的 TUI 跟随加载该会话（含历史）。
+/// POST /live/switch_session — change the WebUI/TUI *view* to an existing session.
 ///
-/// 目标会话在当前 live binding 的 project bucket 内精确定位，并在
-/// legacy 收敛后将同一 lease 交给 CodingRuntime。无绑定 runtime 时明确
-/// 返回拒绝，不隐式创建另一条执行路径。
+/// OpenCode model: never reconfigure the bound CodingRuntime. The hub projects
+/// another transcript; execution for other sessions is unaffected. `active_turn`
+/// is not returned for view switches.
 pub(crate) async fn live_switch_session_endpoint(
     State(state): State<AppState>,
     Json(req): Json<LiveSwitchSessionReq>,
@@ -1845,10 +2132,9 @@ pub(crate) async fn live_switch_session_endpoint(
             Json(serde_json::json!({ "ok": true }))
         }
         Err(error) => {
-            let active_turn = matches!(error, crate::live_hub::HubError::ActiveTurn);
             Json(serde_json::json!({
                 "ok": false,
-                "active_turn": active_turn,
+                "active_turn": false,
                 "error": format!("session switch rejected: {error:?}"),
             }))
         }
@@ -2155,6 +2441,9 @@ pub(crate) struct LivePermissionReq {
     /// Full MCP tool name (`mcp__{server}__{tool}`); required for `allow_persist`.
     #[serde(default)]
     pub tool_name: Option<String>,
+    /// Target session when the hub is bound to a different view.
+    #[serde(default)]
+    pub session_id: Option<String>,
 }
 
 /// POST /live/permission — Deliver a permission decision for a pending live-session tool-approval
@@ -2196,12 +2485,25 @@ pub(crate) async fn live_permission(
         _ => atomcode_capabilities::tools::ApprovalResponse::deny(),
     };
     let value = serde_json::to_value(response).unwrap_or(serde_json::Value::Null);
-    let ok = crate::native_live::respond_pending_kind_confirmed(
-        atomcode_capabilities::tools::APPROVAL_KIND,
-        value,
-    )
-    .await
-    .is_ok();
+    let session_id = parse_session_id(req.session_id);
+    let ok = if let Some(session_id) = session_id
+        .as_ref()
+        .filter(|id| crate::native_live::prefer_registry_live_stream(id))
+    {
+        crate::native_live::resolve_pending_kind_via_registry(
+            session_id,
+            atomcode_capabilities::tools::APPROVAL_KIND,
+            value,
+        )
+        .is_ok()
+    } else {
+        crate::native_live::respond_pending_kind_confirmed(
+            atomcode_capabilities::tools::APPROVAL_KIND,
+            value,
+        )
+        .await
+        .is_ok()
+    };
     Json(serde_json::json!({ "accepted": ok }))
 }
 
@@ -2218,6 +2520,9 @@ pub(crate) struct UserInputAnswerReq {
     /// the daemon responds `{ "responses": [...] }`; otherwise the flat single shape.
     #[serde(default)]
     pub responses: Option<serde_json::Value>,
+    /// Target session when the hub is bound to a different view.
+    #[serde(default)]
+    pub session_id: Option<String>,
 }
 
 impl UserInputAnswerReq {
@@ -2243,14 +2548,29 @@ pub(crate) async fn live_user_input(
     State(_state): State<AppState>,
     Json(req): Json<UserInputAnswerReq>,
 ) -> impl IntoResponse {
-    // Batch answer (webui stepper) → `{ "responses": [...] }`; single → the flat shape.
+    let session_id = parse_session_id(req.session_id.clone());
     let request_id = req.request_id;
     let value = req.into_response_value();
-    match crate::native_live::respond_confirmed(request_id, value).await {
+    let result = if let Some(session_id) = session_id
+        .as_ref()
+        .filter(|id| crate::native_live::prefer_registry_live_stream(id))
+    {
+        crate::native_live::resolve_via_registry(
+            session_id,
+            request_id,
+            value,
+            atomcode_capabilities::tools::request_user_input::REQUEST_USER_INPUT_KIND,
+        )
+    } else {
+        crate::native_live::respond_confirmed(request_id, value)
+            .await
+            .map_err(|error| format!("{error:?}"))
+    };
+    match result {
         Ok(()) => axum::Json(serde_json::json!({ "accepted": true })),
         Err(error) => axum::Json(serde_json::json!({
             "accepted": false,
-            "error": format!("user input request was not accepted: {error:?}"),
+            "error": format!("user input request was not accepted: {error}"),
         })),
     }
 }
@@ -2277,8 +2597,29 @@ pub(crate) async fn live_command(
 /// POST /live/cancel —— 取消当前正在运行的 turn(停止生成)。
 /// 任一视图(手机 App「停止」/ webui / TUI)都可调用,先到先停。
 /// 返回 `{"cancelled": bool}`:false 表示当前没有运行中的 turn。
-pub(crate) async fn live_cancel(State(_state): State<AppState>) -> impl IntoResponse {
-    let cancelled = crate::native_live::cancel_confirmed().await.is_ok();
+/// POST /live/cancel —— 取消当前正在运行的 turn(停止生成)。
+/// Optional `?session_id=` routes cancel through the L2 registry when the hub
+/// is bound to a different view.
+#[derive(serde::Deserialize, Default)]
+pub(crate) struct LiveCancelReq {
+    #[serde(default)]
+    pub session_id: Option<String>,
+}
+
+pub(crate) async fn live_cancel(
+    State(_state): State<AppState>,
+    axum::extract::Query(q): axum::extract::Query<LiveCancelReq>,
+) -> impl IntoResponse {
+    let session_id = parse_session_id(q.session_id);
+    let cancelled = if let Some(session_id) = session_id {
+        if crate::native_live::prefer_registry_live_stream(&session_id) {
+            crate::native_live::cancel_via_registry(&session_id).is_ok()
+        } else {
+            crate::native_live::cancel_confirmed().await.is_ok()
+        }
+    } else {
+        crate::native_live::cancel_confirmed().await.is_ok()
+    };
     Json(serde_json::json!({ "cancelled": cancelled }))
 }
 

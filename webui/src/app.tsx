@@ -225,7 +225,7 @@ export function App() {
     };
   }, [sessionId]);
 
-  // 在指定目录下创建一个新会话并切过去（落地、侧栏可见）。
+  // 在指定目录下创建一个新会话并切过去（首条用户消息前不写盘）。
   // 先重置画布回落地页给即时反馈，再异步建会话；失败则停在落地页。
   function openNewSession(targetCwd: string | undefined) {
     setSessionId(null);

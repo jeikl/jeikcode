@@ -309,16 +309,9 @@ impl Modal for SessionPicker {
                 ) {
                     return Ok(ModalAction::Close);
                 }
-                if ctx.pending_session_resume.is_some()
-                    || ctx.pending_session_resume_preparation.is_some()
-                {
-                    renderer.render(UiLine::Error(
-                        crate::i18n::t(crate::i18n::Msg::SessionLoadFailed {
-                            error: "another session resume is still in progress",
-                        })
-                        .into_owned(),
-                    ));
-                    renderer.flush();
+                if ctx.pending_session_resume_preparation.as_ref().is_some_and(
+                    |pending| pending.session_id == selected.id,
+                ) {
                     return Ok(ModalAction::Close);
                 }
 

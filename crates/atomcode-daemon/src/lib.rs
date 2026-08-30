@@ -1061,12 +1061,21 @@ pub(crate) fn fanout_chat_events(
     bus: tokio::sync::broadcast::Sender<ChatEvent>,
     replay: Option<Arc<std::sync::Mutex<Vec<ChatEvent>>>>,
 ) -> mpsc::UnboundedSender<ChatEvent> {
+    fanout_chat_events_for_session(primary, bus, replay, None)
+}
+
+/// Like [`fanout_chat_events`], but also mirrors stream events into the L2
+/// `SessionRuntimeRegistry` so `/live?session_id=` viewers see `/chat` / OpenAI
+/// compat turns on the same session.
+pub(crate) fn fanout_chat_events_for_session(
+    primary: mpsc::UnboundedSender<ChatEvent>,
+    bus: tokio::sync::broadcast::Sender<ChatEvent>,
+    replay: Option<Arc<std::sync::Mutex<Vec<ChatEvent>>>>,
+    session_id: Option<String>,
+) -> mpsc::UnboundedSender<ChatEvent> {
     let (tx, mut rx) = mpsc::unbounded_channel::<ChatEvent>();
     tokio::spawn(async move {
         while let Some(event) = rx.recv().await {
-            // Diagnostic tail: every tool call, approval round-trip, model
-            // question and turn terminal lands in `<atomcode_dir>/logs/atomcode.log`
-            // so approval-flow issues can be diagnosed from the file.
             match &event {
                 ChatEvent::ToolCallStarted {
                     name, arguments, ..
@@ -1110,24 +1119,73 @@ pub(crate) fn fanout_chat_events(
                 }
                 _ => {}
             }
-            // Record + broadcast under the same lock as `subscribe_live_with_replay`
-            // so a late joiner cannot miss an event that is not in the snapshot
-            // and also not received on the new subscription (or get it twice).
+            if let Some(ref sid) = session_id {
+                mirror_chat_event_to_registry(sid, &event);
+            }
             if let Some(ref replay) = replay {
                 let mut guard = replay
                     .lock()
                     .unwrap_or_else(|poisoned| poisoned.into_inner());
                 push_chat_replay(&mut guard, event.clone());
-                // Watchers may lag or be absent — never fail the primary turn.
                 let _ = bus.send(event.clone());
             } else {
                 let _ = bus.send(event.clone());
             }
-            // Primary may disconnect (browser closed); keep fanning to watchers.
             let _ = primary.send(event);
         }
     });
     tx
+}
+
+fn mirror_chat_event_to_registry(session_id: &str, event: &ChatEvent) {
+    use atomcode_coding::session_runtime_registry::{
+        SessionRuntimeRegistry, SessionViewEvent,
+    };
+    use atomcode_kernel::event::AgentEvent;
+    let reg = SessionRuntimeRegistry::global();
+    let working_dir = reg
+        .lookup(&session_id.to_string())
+        .map(|e| e.working_dir)
+        .unwrap_or_else(|| PathBuf::from("."));
+    let _ = reg.open_or_attach(session_id.to_string(), working_dir);
+    match event {
+        ChatEvent::TextDelta { content } => {
+            let _ = reg.push_runtime_event(
+                &session_id.to_string(),
+                0,
+                CodingRuntimeEvent::Agent(AgentEvent::TextDelta(content.clone())),
+            );
+        }
+        ChatEvent::ReasoningDelta { content } => {
+            let _ = reg.push_runtime_event(
+                &session_id.to_string(),
+                0,
+                CodingRuntimeEvent::Agent(AgentEvent::Reasoning(content.clone())),
+            );
+        }
+        ChatEvent::User { content, .. } => {
+            let _ = reg.push_view_event(
+                &session_id.to_string(),
+                SessionViewEvent::InputAccepted {
+                    input: atomcode_coding::UserInput::from(content.as_str()),
+                    client_input_id: None,
+                },
+            );
+        }
+        ChatEvent::Done { .. } => {
+            let _ = reg.set_activity(
+                &session_id.to_string(),
+                atomcode_coding::session_runtime_registry::RuntimeActivity::Ready,
+            );
+        }
+        ChatEvent::Stopped => {
+            let _ = reg.set_activity(
+                &session_id.to_string(),
+                atomcode_coding::session_runtime_registry::RuntimeActivity::Ready,
+            );
+        }
+        _ => {}
+    }
 }
 impl Drop for SseConnectionGuard {
     fn drop(&mut self) {
@@ -2982,14 +3040,6 @@ async fn create_session(
     }
 
     let id = uuid::Uuid::new_v4().to_string();
-    let manager = atomcode_capabilities::session::SessionManager::for_project(&working_dir);
-    let lease = match manager.acquire_lease(&id) {
-        Ok(lease) => lease,
-        Err(error) => {
-            let msg = format!("Failed to create session: {error}");
-            return (StatusCode::INTERNAL_SERVER_ERROR, Json(msg)).into_response();
-        }
-    };
     let now = atomcode_capabilities::session::now_ms();
     let mut meta =
         atomcode_capabilities::session::SessionMeta::new(&id, working_dir.to_string_lossy(), now);
@@ -2998,15 +3048,9 @@ async fn create_session(
         meta.name = title;
         meta.user_renamed = true;
     }
-    let snapshot = atomcode_kernel::message::SessionSnapshot::new(Vec::new());
-    let presentation = atomcode_capabilities::session::PresentationFile::default();
-    if let Err(e) =
-        manager.commit_native_import(&lease, Some(&snapshot), Some(&presentation), &meta)
-    {
-        let msg = format!("Failed to save session: {}", e);
-        return (StatusCode::INTERNAL_SERVER_ERROR, Json(msg)).into_response();
-    }
-    drop(lease);
+    // OpenCode-style draft: allocate identity without writing an empty catalog row.
+    // The first real user Submit (via CodingRuntime staged publish) persists it.
+    crate::native_live::register_session_draft(id.clone(), working_dir.clone());
 
     let project_hash = response_project_hash(&working_dir);
 
@@ -5128,7 +5172,12 @@ async fn chat_stream(
         .event_bus_with_replay(&admission.operation_id)
         .await
         .map(|(_, r)| r);
-    let fan_tx = fanout_chat_events(client_tx.clone(), event_bus, replay);
+    let fan_tx = fanout_chat_events_for_session(
+        client_tx.clone(),
+        event_bus,
+        replay,
+        req.session_id.clone(),
+    );
 
     // Clone state for the spawned task
     let active_chats = state.active_chats.clone();
@@ -5783,7 +5832,9 @@ async fn stop_chat(
     daemon_scope(&state, session_uuid, client_mode, || async move {
         // The legacy payload field is named `session_id`, but WebUI sends its
         // first-turn request id here. The registry intentionally resolves both.
-        if state_clone.active_chats.stop_alias(&req.session_id).await {
+        if state_clone.active_chats.stop_alias(&req.session_id).await
+            || crate::native_live::cancel_via_registry(&req.session_id).is_ok()
+        {
             state_clone.telemetry.track(Event::UseCommand {
                 type_: "stop".into(),
                 success: Some(true),
@@ -5830,7 +5881,7 @@ async fn active_chat_sessions(State(state): State<AppState>) -> impl IntoRespons
     if let Some(live_id) = crate::native_live::live_running_session_id() {
         ids.insert(live_id);
     }
-    for entry in SessionRuntimeRegistry::global().list_all().await {
+    for entry in SessionRuntimeRegistry::global().list_all() {
         if matches!(
             entry.activity,
             RuntimeActivity::Running
@@ -5871,7 +5922,6 @@ async fn runtime_sessions() -> impl IntoResponse {
 
     let rows: Vec<RuntimeSessionRow> = SessionRuntimeRegistry::global()
         .list_all()
-        .await
         .into_iter()
         .map(|entry| RuntimeSessionRow {
             session_id: entry.session_id,

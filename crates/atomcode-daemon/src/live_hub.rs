@@ -620,6 +620,7 @@ impl LiveViewHub {
         working_dir: PathBuf,
         snapshot: atomcode_kernel::message::SessionSnapshot,
     ) -> Result<atomcode_coding::SessionChanged, HubError> {
+        // ViewBinding change only — does not touch CodingRuntime / lease / turn.
         let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
         let binding = state
             .binding
@@ -1156,6 +1157,15 @@ impl LiveViewHub {
         let Some(binding) = state.binding.as_ref() else {
             return;
         };
+        let session_id = binding.identity.session_id.clone();
+        let working_dir = binding.identity.working_dir.clone();
+        // Dual-write view coordination to the L2 registry so non-bound clients
+        // (WebUI watching another session_id) see InputAccepted / Steered / etc.
+        if let Some(view) = session_view_from_live(&event) {
+            let reg = atomcode_coding::session_runtime_registry::SessionRuntimeRegistry::global();
+            let _ = reg.open_or_attach(session_id.clone(), working_dir);
+            let _ = reg.push_view_event(&session_id, view);
+        }
         state.next_cursor += 1;
         let observation = LiveObservation {
             binding_id: binding.identity.id,
@@ -1200,6 +1210,40 @@ fn map_session_transition_error(error: atomcode_coding::RuntimeError) -> HubErro
     match error {
         atomcode_coding::RuntimeError::Busy => HubError::ActiveTurn,
         error => HubError::RuntimeRejected(error.to_string()),
+    }
+}
+
+fn session_view_from_live(
+    event: &LiveViewEvent,
+) -> Option<atomcode_coding::session_runtime_registry::SessionViewEvent> {
+    use atomcode_coding::session_runtime_registry::SessionViewEvent;
+    match event {
+        LiveViewEvent::InputAccepted {
+            input,
+            client_input_id,
+        } => Some(SessionViewEvent::InputAccepted {
+            input: input.clone(),
+            client_input_id: client_input_id.clone(),
+        }),
+        LiveViewEvent::Steered {
+            count,
+            inputs,
+            client_input_ids,
+        } => Some(SessionViewEvent::Steered {
+            count: *count,
+            inputs: inputs.clone(),
+            client_input_ids: client_input_ids.clone(),
+        }),
+        LiveViewEvent::CommandOutput(text) => {
+            Some(SessionViewEvent::CommandOutput(text.clone()))
+        }
+        LiveViewEvent::RequestResolved { request_id, kind } => {
+            Some(SessionViewEvent::RequestResolved {
+                request_id: *request_id,
+                kind: kind.clone(),
+            })
+        }
+        LiveViewEvent::Runtime(_) => None,
     }
 }
 

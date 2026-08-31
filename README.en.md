@@ -37,6 +37,7 @@
 During its evolution, JeikCode synthesized the core design strengths of industry-leading open-source and commercial agents while inventing critical proprietary architectures:
 
 - 🛡️ **Absorbed Grok Build's Hardcore Control Strategies**: Integrated rigid prompt precedence hierarchy (Precedence), 5-stage tool error recovery (Repair Chain), structured diagnostic feedback, and repetitive tool invocation circuit breakers (Loop Guard);
+- 🏛️ **Compared and Surpassed OpenAI Codex's Ecosystem Bounds**: Unlike Codex which binds tightly to OpenAI-exclusive models and experiences schema brittleness or hard truncations on foreign LLMs, JeikCode provides autonomous tool argument healing, dual-tier timeout management (hard lifetime + progress-aware idle reset), and cost-effective byte-exact prefix caching;
 - 🌐 **Absorbed OpenCode's Remote Extensible Architecture**: Engineered multi-instance headless remote execution (Serve), interactive WebUI Gateway, and lightweight cross-platform real-time synchronization;
 - 🔍 **Inspired by and Surpassing CodeGraph with Native CodeExplore**: Resolving CodeGraph's critical limitation of only supporting hardcoded symbol indexing with zero natural language semantic understanding, JeikCode engineered its own **Weighted AST Vectors + Bilingual Code & Comment Multi-Vector Semantic Search + Weighted Score Ranking Algorithm**, boosting code search efficiency by **60% - 70%** with **90%+ accuracy**;
 - ⚡ **Proprietary High Cache Hit Prefix Architecture**: `sacred_floor` memory protection + dynamic `user-wrap.md` tail wrapping, ensuring strict byte-level Append-only prefix immutability to eliminate provider KV cache thrashing;
@@ -50,19 +51,20 @@ The following comparison objectively presents the mechanisms and functional stre
 
 ### 1. Core Feature & Mechanism Comparison Matrix
 
-| Core Feature & Mechanism | **JeikCode (This Project)** | **Claude Code (Anthropic)** | **OpenCode (OpenCode AI)** | **Grok Build (SpaceXAI)** | **Legacy Baseline** |
+| Core Feature & Mechanism | **JeikCode (This Project)** | **OpenAI Codex (`@openai/codex`)** | **Claude Code (Anthropic)** | **OpenCode (OpenCode AI)** | **Grok Build (SpaceXAI)** |
 | :--- | :---: | :---: | :---: | :---: | :---: |
-| **Autonomous Read-Edit-Test-Verify Loop** | ✅ **L0/L1/L2 Dynamic State Machine** | ✅ **Unix-Style Autonomous Loop** | ✅ **Effect-TS Async Event Pipeline** | ✅ **PTY Process-Level Flow** | ⚠️ Weak Glue Layer |
-| **5-Stage Tool Repair Chain (with Windows Backslash Rescue)** | ✅ **5-Tier Self-Healing Pipeline** | ⚠️ Relies on Claude Self-Correction | ⚠️ Schema Failure Aborts on Error | ✅ Diagnostic Feedback & Coercion | ❌ Prone to Serde Failure |
-| **Schema Type Coercion (`"3"`→`3`, `"true"`→`true`)** | ✅ **Client-Side Type Level Fix** | ⚠️ Relies on LLM Re-Generation | ⚠️ Relies on LLM Re-Generation | ✅ Partial Type Coercion | ❌ No Type Healing |
-| **3-Attempt Repetitive Tool Circuit Breaker (Loop Guard)** | ✅ **Loop Guard Circuit Breaker** | ⚠️ Context Truncation / Self-Correction | ⚠️ Context Truncation / Manual Stop | ✅ **Loop Guard Guard Active** | ❌ Prone to Infinite Loops |
-| **Code Search: Weighted AST + Bilingual Code/Comment Semantic** | ✅ **CodeExplore Multi-Vector Search** | ⚠️ ripgrep / Glob Full Text Search | ⚠️ LSP Symbols + ripgrep Search | ⚠️ xai-codebase-graph AST Graph | ❌ Basic Hash Misses |
-| **repo_map Structure-First Directory Tree (No Truncation)** | ✅ **Complete Dir Tree Overview** | ⚠️ Explores on Demand by Size | ⚠️ Basic Directory Listing | ✅ Full Directory Tree View | ❌ Coarse Elision |
-| **Low-Relevance Code Collapsed into Minimal Token Budget** | ✅ **Top-Placed Core + Low Budget Rest** | ⚠️ Relies on Model Tool Pruning | ⚠️ Basic File Folding | ✅ Output Budget Management | ❌ Hard Truncation |
-| **KV Cache Prefix Stability (Append-Only Discipline)** | ✅ **`user-wrap.md` Tail Wrapping** | ✅ **Anthropic Ephemeral Cache** | ⚠️ Relies on Native Provider Cache | ⚠️ SQLite Transcript Based | ❌ Reminder Thrashing |
-| **`sacred_floor` Memory / Rule Protection on Compression** | ✅ **Critical Rules Never Dropped** | ✅ **autoDream Memory Consolidation** | ⚠️ Sliding Window Truncation | ✅ Compaction Transcript Log | ❌ Drops Rules/Memory |
-| **Fully Externalized Prompts with Millisecond Hot-Reload** | ✅ **`init/rules/wrap` mtime Hot-Reload** | ⚠️ Supports `CLAUDE.md`, Core is Internal | ⚠️ Supports Custom Prompt on Reload | ⚠️ Supports Precedence, Core Baked | ❌ Restart Needed |
-| **Multi-Project Knowledge Packs Precedence (`rules/dbwords`)** | ✅ **4-Tier Packs Strict Over System** | ✅ **Supports `CLAUDE.md` Project Spec** | ✅ **Context Injection & Rules** | ✅ **Project Rule Configurations** | ❌ Single File Only |
+| **Core Architecture & Runtime** | **Native Rust Core + Dynamic Sandbox** | **Rust (`codex-rs`) + TS CLI** | **TypeScript + CLI** | **TypeScript + Effect-TS** | **Rust (Ptyctl/ChatState)** |
+| **Maximizing Any Foreign LLM Capabilities** | ✅ **Adaptive Healing + Thought-Chain Defense** | ⚠️ OpenAI Centric (o1/o3/4o) | ⚠️ Claude 3.7 Thinking Centric | ⚠️ Standard AISDK Wrapper | ⚠️ Grok Model / API Centric |
+| **5-Stage Tool Repair & Arg Healing** | ✅ **Auto-Heal (JSON / Types / Windows Path)** | ❌ Schema Check Only; Fails on Error | ⚠️ Relies on Claude Self-Correction | ⚠️ Schema Failure Aborts on Error | ✅ Diagnostic Feedback & Coercion |
+| **Circuit Breakers for Repetitive Calls / Loops** | ✅ **3-Attempt Loop Guard + Fuse** | ⚠️ Unified Session Abort | ⚠️ Context Truncation / Self-Correction | ⚠️ Context Truncation / Manual Stop | ✅ **Loop Guard Active** |
+| **KV Cache Prefix Stability (Append-Only Discipline)** | ✅ **`user-wrap.md` Tail Wrapping (Byte-Exact)** | ⚠️ Relies on Server Session Cache | ✅ **Anthropic Ephemeral Cache** | ⚠️ Relies on Native Provider Cache | ⚠️ SQLite Transcript Based |
+| **Tool Large Output 64KB Fold & Budget Control** | ✅ **64KB Fold + `fetch_output` Slicing** | ⚠️ Basic Hard Truncation | ⚠️ Relies on Model Tool Pruning | ⚠️ Basic File Folding | ✅ Output Budget Management |
+| **Tool Timeout Architecture** | ✅ **1800s Hard Cap + 180s Progress Idle Reset** | ⚠️ Unified Timeout (Risk on Long Tasks) | ⚠️ Unified Stream Request Timeout | ⚠️ Unified Effect Timeout | ✅ **PTY Event-Driven & Watchdog** |
+| **Code Search: Weighted AST + Bilingual Semantic** | ✅ **CodeExplore Multi-Vector + Cilin** | ⚠️ Basic File Indexing & Syntax AST | ⚠️ ripgrep / Glob Full Text Search | ⚠️ LSP Symbols + ripgrep Search | ⚠️ xai-codebase-graph AST Graph |
+| **repo_map Structure-First Directory Tree** | ✅ **Complete Dir Tree Overview (No Elision)** | ⚠️ Explores on Demand by Size | ⚠️ Explores on Demand by Size | ⚠️ Basic Directory Listing | ✅ Full Directory Tree View |
+| **`sacred_floor` Memory / Rule Protection** | ✅ **Critical Rules Never Dropped on Compact** | ⚠️ Compaction Dilutes Directives | ✅ autoDream Memory Consolidation | ⚠️ Sliding Window Truncation | ✅ Compaction Transcript Log |
+| **Fully Externalized Prompts with Hot-Reload** | ✅ **`init/rules/wrap` mtime Hot-Reload** | ❌ Core Baked in Binary / Bundle | ⚠️ Supports `CLAUDE.md`, Core is Internal | ⚠️ Supports Custom Prompt on Reload | ⚠️ Supports Precedence, Core Baked |
+| **Multi-Project Knowledge Packs (`rules/dbwords`)** | ✅ **4-Tier Packs Strict Over System** | ⚠️ Basic Agent Role Specs | ✅ **Supports `CLAUDE.md` Project Spec** | ✅ **Context Injection & Rules** | ✅ **Project Rule Configurations** |
 | **Agent Self-Configuration Tool (`jeikcode_config_guide`)** | ✅ **8-Chapter Teaches & Self-Check** | ❌ Relies on Official Web Docs | ❌ Relies on Community Web Docs | ❌ Relies on Internal User Manual | ❌ No Self-Inspection |
 | **MCP (Model Context Protocol) & Skills Ecosystem** | ✅ **Native MCP + Dynamic Skills** | ✅ **Deep MCP & Skills/Hooks** | ✅ **Rich Plugin & MCP Ecosystem** | ✅ **Built-in Tools & MCP Support** | ⚠️ Basic Local Skills |
 | **Multi-Protocol Support (Responses / Completions / Anthropic)** | ✅ **3 Major Protocols Native** | ⚠️ Claude Protocol Focused | ✅ **Standard & Custom Protocols** | ⚠️ xAI Grok Protocol Focused | ❌ No Responses |
@@ -77,16 +79,16 @@ The following comparison objectively presents the mechanisms and functional stre
 
 All agents support major programming languages, with JeikCode's CodeExplore specializing in deep AST structure and bilingual natural language semantic mapping:
 
-| Language & Framework | **JeikCode (CodeExplore)** | **Claude Code** | **OpenCode** | **Grok Build** |
-| :--- | :---: | :---: | :---: | :---: |
-| **Java** | ✅ **AST Graph + Semantic Search** | ✅ **ripgrep Fulltext / Regex** | ✅ **LSP Symbols + Text Search** | ✅ **Syntax Graph + Fuzzy Search** |
-| **C / C++** | ✅ **AST Graph + Semantic Search** | ✅ **ripgrep Fulltext / Regex** | ✅ **LSP Symbols + Text Search** | ✅ **Native PTY + Syntax Graph** |
-| **Python** | ✅ **AST Graph + Semantic Search** | ✅ **ripgrep Fulltext / Regex** | ✅ **LSP Symbols + Text Search** | ✅ **Syntax Graph + Fuzzy Search** |
-| **Vue (Vue2/3 SFC)** | ✅ **Template + Script Dual AST** | ✅ **ripgrep Fulltext / Regex** | ⚠️ Generic File Search | ⚠️ Generic File Search |
-| **TypeScript / JavaScript** | ✅ **JSX / TSX Element Extraction** | ✅ **ripgrep Fulltext / Regex** | ✅ **LSP Symbols + Text Search** | ✅ **Syntax Graph + Fuzzy Search** |
-| **Rust** | ✅ **AST Graph + Semantic Search** | ✅ **ripgrep Fulltext / Regex** | ✅ **LSP Symbols + Text Search** | ✅ **Native Deep Support** |
-| **Go** | ✅ **AST Graph + Semantic Search** | ✅ **ripgrep Fulltext / Regex** | ✅ **LSP Symbols + Text Search** | ✅ **Syntax Graph + Fuzzy Search** |
-| **Svelte / Astro / SCSS** | ✅ **Component & Style Selectors** | ✅ **ripgrep Fulltext / Regex** | ⚠️ Generic File Search | ⚠️ Generic File Search |
+| Language & Framework | **JeikCode (CodeExplore)** | **OpenAI Codex** | **Claude Code** | **OpenCode** | **Grok Build** |
+| :--- | :---: | :---: | :---: | :---: | :---: |
+| **Java** | ✅ **AST Graph + Semantic Search** | ⚠️ File Index + Syntax Tree | ✅ **ripgrep Fulltext / Regex** | ✅ **LSP Symbols + Text Search** | ✅ **Syntax Graph + Fuzzy Search** |
+| **C / C++** | ✅ **AST Graph + Semantic Search** | ⚠️ File Index + Syntax Tree | ✅ **ripgrep Fulltext / Regex** | ✅ **LSP Symbols + Text Search** | ✅ **Native PTY + Syntax Graph** |
+| **Python** | ✅ **AST Graph + Semantic Search** | ⚠️ File Index + Syntax Tree | ✅ **ripgrep Fulltext / Regex** | ✅ **LSP Symbols + Text Search** | ✅ **Syntax Graph + Fuzzy Search** |
+| **Vue (Vue2/3 SFC)** | ✅ **Template + Script Dual AST** | ⚠️ Generic File Search | ✅ **ripgrep Fulltext / Regex** | ⚠️ Generic File Search | ⚠️ Generic File Search |
+| **TypeScript / JavaScript** | ✅ **JSX / TSX Element Extraction** | ⚠️ File Index + Syntax Tree | ✅ **ripgrep Fulltext / Regex** | ✅ **LSP Symbols + Text Search** | ✅ **Syntax Graph + Fuzzy Search** |
+| **Rust** | ✅ **AST Graph + Semantic Search** | ⚠️ File Index + Syntax Tree | ✅ **ripgrep Fulltext / Regex** | ✅ **LSP Symbols + Text Search** | ✅ **Native Deep Support** |
+| **Go** | ✅ **AST Graph + Semantic Search** | ⚠️ File Index + Syntax Tree | ✅ **ripgrep Fulltext / Regex** | ✅ **LSP Symbols + Text Search** | ✅ **Syntax Graph + Fuzzy Search** |
+| **Svelte / Astro / SCSS** | ✅ **Component & Style Selectors** | ⚠️ Generic File Search | ✅ **ripgrep Fulltext / Regex** | ⚠️ Generic File Search | ⚠️ Generic File Search |
 
 ---
 
@@ -122,11 +124,15 @@ Inspired by this insight, JeikCode completely re-architected **`CodeExplore`** a
 - **`sacred_floor` Protection**: On `/compact`, core rules and memories below the floor are never dropped.
 - **Clean UI Display**: WebUI and TUIX automatically unwrap messages so users see clean chat history while LLMs receive structured instructions.
 
-### 2. 5-Stage Resilient Tool Repair Chain (Surpassing Grok)
-- **5-Tier Self-Healing**: Direct JSON → Relaxed JSON (trailing commas/unquoted keys) → `edit_file` Regex extraction → Schema-bound string decoding → Key-Value fallback.
-- **Windows Path Backslash Rescue**: Unescapes `D:\project\src` backslashes before serde parsing.
-- **Schema Type Coercion**: Automatically coerces `"quantity":"3"` → `3` and `"retry":"true"` → `true`.
-- **3-Attempt Loop Guard Circuit Breaker**: Terminates repetitive tool errors after 3 consecutive failures, forcing the agent to switch approaches.
+### 2. 5-Tier Tool Resilience, Parameter Healing & Loop Guard
+- **5-Tier Self-Healing Pipeline**: Direct parse → Lenient JSON repair (trailing commas, unquoted keys, markdown markers strip) → `edit_file` regex rescue → Schema string decoding → Key-value fallback. Seamlessly repairs malformed outputs from foreign small LLMs on the client side without throwing 400 error roundtrips.
+- **Windows Path Backslash Rescue**: Fixes unescaped `D:\project\src` single backslashes before Serde deserialization, preventing Windows path escape panics.
+- **Schema Type Auto-Coercion**: Stringified values (`"quantity":"3"`, `"retry":"true"`) are automatically coerced into target schema types (`3`, `true`).
+- **64KB Large Tool Output Folding & Budget Protection**: High-volume outputs are folded into artifacts with concise head/tail previews, accessible on-demand via `fetch_output` to protect context windows and prevent budget burn.
+- **3-Attempt Loop Guard & Repetition Guard**: Halts repetitive failed calls after 3 consecutive failures to enforce strategy switching.
+- **Dual-Tier Timeout with Progress-Aware Idle Reset**:
+  - **1800s Hard Command Lifetime**: Tree-wide sub-process cleanup with preserved diagnostic outputs.
+  - **180s MCP Idle Budget**: Listens to `notifications/progress` heartbeats to extend timeouts during active tasks, preventing both stalls and premature task kills.
 
 ### 3. Fully Externalized Prompts with Millisecond Hot-Reload
 Externalized under `~/.atomcode/prompts/` with zero-cost mtime caching:

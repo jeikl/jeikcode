@@ -67,9 +67,7 @@ pub enum SessionMode {
     Fresh,
     /// Same as [`Fresh`] but reuse a pre-assigned id (WebUI/TUI `/new` draft).
     /// Staged until first Submit — no empty catalog row.
-    Draft {
-        id: String,
-    },
+    Draft { id: String },
     /// Resume the given session id from its complete native aggregate. `prepare`
     /// errors unless metadata, snapshot, and presentation are all present and the
     /// metadata owner is `Native`; compatibility callers must import first.
@@ -342,7 +340,10 @@ async fn prepare_with_plugin_hooks_reusing_lease(
         std::env::var("ATOMCODE_CODEINTEL_MODE").ok().as_deref(),
         None,
     );
-    atomcode_capabilities::codeintel::register_codeintel_tools_with_mode(&mut registry, &codeintel_mode);
+    atomcode_capabilities::codeintel::register_codeintel_tools_with_mode(
+        &mut registry,
+        &codeintel_mode,
+    );
     match &codeintel_mode {
         atomcode_capabilities::codeintel::CodeIntelMode::Unified => {
             names.extend(
@@ -437,6 +438,7 @@ async fn prepare_with_plugin_hooks_reusing_lease(
                 "edit_file",
                 "write_file",
                 "bash",
+                "bash_timeout_add",
                 "grep",
                 "glob",
                 "search_replace",
@@ -686,11 +688,12 @@ async fn prepare_with_plugin_hooks_reusing_lease(
     // Env / project-instructions / git context — unconditional (v1 parity: always present).
     // Optional client system append (OpenAI/Anthropic compat) lands after AGENTS/glossary/db.
     hooks.push(Arc::new(
-        SessionContextHook::new(&cfg.working_dir).with_extra_append(cfg.extra_system_append.clone()),
+        SessionContextHook::new(&cfg.working_dir)
+            .with_extra_append(cfg.extra_system_append.clone()),
     ));
-    hooks.push(Arc::new(
-        atomcode_capabilities::session::UserWrapHook::new(&cfg.working_dir),
-    ));
+    hooks.push(Arc::new(atomcode_capabilities::session::UserWrapHook::new(
+        &cfg.working_dir,
+    )));
     if opts.memory {
         hooks.push(Arc::new(MemoryHook::for_project(&cfg.working_dir)));
     }
@@ -903,7 +906,10 @@ fn session_lease(
 /// Pin OpenAI / Anthropic / compat JSON `user` (or user_title) onto session meta.
 /// `user_renamed=true` blocks first-prompt seeding and AI title suggestions.
 fn apply_pinned_session_display_name(meta: &mut SessionMeta, display_name: Option<&str>) {
-    if let Some(title) = display_name.map(str::trim).filter(|title| !title.is_empty()) {
+    if let Some(title) = display_name
+        .map(str::trim)
+        .filter(|title| !title.is_empty())
+    {
         meta.name = title.to_string();
         meta.user_renamed = true;
     }
@@ -975,7 +981,10 @@ impl CodingParts {
         let mut presentation = PresentationFile::default();
         let mut seeded_title = None;
 
-        if let Some(raw) = first_user_input.map(str::trim).filter(|text| !text.is_empty()) {
+        if let Some(raw) = first_user_input
+            .map(str::trim)
+            .filter(|text| !text.is_empty())
+        {
             // Persist the raw user turn so catalog/message_count > 0 immediately.
             // turn_start inflight / turn_complete overwrite with the full
             // (possibly wrap-expanded) conversation for the model.
@@ -987,9 +996,7 @@ impl CodingParts {
             });
             meta.message_count = 1;
             if !meta.user_renamed {
-                if let Some(title) =
-                    crate::session_title::provisional_title_from_user_input(raw)
-                {
+                if let Some(title) = crate::session_title::provisional_title_from_user_input(raw) {
                     meta.name = title.clone();
                     seeded_title = Some(title);
                 }
@@ -998,12 +1005,7 @@ impl CodingParts {
 
         binding
             .manager
-            .commit_native_import(
-                &binding.lease,
-                Some(&snapshot),
-                Some(&presentation),
-                &meta,
-            )
+            .commit_native_import(&binding.lease, Some(&snapshot), Some(&presentation), &meta)
             .map_err(io::Error::from)?;
         binding.staged_fresh = None;
         Ok(seeded_title)
@@ -1865,10 +1867,12 @@ fn reconcile_coding_persona(
     snapshot
         .messages
         .retain(|message| !is_persona(message) && !is_model_change(message));
-    
+
     // 如果发生了模型切换，将模型切换通知安全地作为系统前缀的一部分附加在 persona 末尾，
     // 严禁作为独立 System 消息 push 到历史消息末尾（否则会导致中间插入 System 消息而被 Gemini/OpenAI/Claude 协议丢弃或报错导致 content 为空）
-    let full_persona = if let Some(previous_model) = previous_model.filter(|previous| previous != &cfg.model) {
+    let full_persona = if let Some(previous_model) =
+        previous_model.filter(|previous| previous != &cfg.model)
+    {
         format!(
             "{persona}\n\n{MODEL_CHANGE_CONTEXT_PREFIX}\nThe active model changed from {previous_model} to {model}. From this point onward, {model} is the current model. Treat any earlier assistant claim about its model identity as historical context, not the current runtime identity.",
             model = cfg.model
@@ -2088,7 +2092,9 @@ mod tests {
         assert!(snapshot.messages[0]
             .text
             .contains("running the deepseek-v4-flash model"));
-        assert!(snapshot.messages[0].text.contains(MODEL_CHANGE_CONTEXT_PREFIX));
+        assert!(snapshot.messages[0]
+            .text
+            .contains(MODEL_CHANGE_CONTEXT_PREFIX));
         assert!(snapshot.messages[0].text.contains("old-model"));
         assert!(snapshot.messages[0].text.contains("deepseek-v4-flash"));
         assert_eq!(snapshot.cache_epoch, 1);
@@ -2112,7 +2118,9 @@ mod tests {
         reconcile_coding_persona(&mut snapshot, &agent_config("model-b"), true, true, true);
         reconcile_coding_persona(&mut snapshot, &agent_config("model-c"), true, true, true);
 
-        assert!(snapshot.messages[0].text.contains(MODEL_CHANGE_CONTEXT_PREFIX));
+        assert!(snapshot.messages[0]
+            .text
+            .contains(MODEL_CHANGE_CONTEXT_PREFIX));
         assert!(snapshot.messages[0].text.contains("model-b"));
         assert!(snapshot.messages[0].text.contains("model-c"));
         assert!(!snapshot.messages[0].text.contains("model-a"));
@@ -2192,7 +2200,9 @@ mod tests {
 
         reconcile_coding_persona(&mut snapshot, &cfg, true, true, true);
 
-        assert!(snapshot.messages[0].text.contains(MODEL_CHANGE_CONTEXT_PREFIX));
+        assert!(snapshot.messages[0]
+            .text
+            .contains(MODEL_CHANGE_CONTEXT_PREFIX));
         assert!(snapshot.messages[0].text.contains("model-a"));
         assert!(snapshot.messages[0].text.contains("model-b"));
     }

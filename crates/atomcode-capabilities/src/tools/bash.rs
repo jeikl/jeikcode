@@ -1,5 +1,9 @@
-//! `bash` — run a shell command in the working directory, with a timeout and
-//! cooperative cancellation (cancel ⇒ the child is killed via `kill_on_drop`).
+//! `bash` — run a shell command in the working directory, with a per-call wait
+//! and cooperative cancellation (cancel ⇒ the child is killed via `kill_on_drop`).
+//!
+//! `timeout` is a WAIT budget, not a kill. If the wait expires the process is
+//! parked and the model extends it with [`BashTimeoutAddTool`]; the hard process
+//! lifetime is `[tools.bash] max_timeout_secs`. Output is never discarded.
 //!
 //! `risk()` is ARG-AWARE: a command is `Risky` only when [`check_destructive_command`]
 //! flags it (a faithful port of the production destructive-command classifier —
@@ -8,9 +12,14 @@
 //! Live stdout/stderr is forwarded through [`ToolContext::progress`] so drivers
 //! (TUI / WebUI) can render the command like a terminal while it runs; the
 //! final [`ToolResult`] is still the combined sanitized capture.
-//! Dropped vs production: first-error-signature capture, telemetry, and the
-//! setsid/process-group reaping (the neutral version kills the direct child
-//! via `kill_on_drop`).
+
+#[path = "bash_live.rs"]
+mod bash_live;
+
+pub use bash_live::BashTimeoutAddTool;
+pub(crate) use bash_live::{
+    remaining_secs, still_running_footer, KeepAliveOnTimeout, LiveBash, LiveStatus,
+};
 
 use super::{err, ok};
 use async_trait::async_trait;
@@ -97,16 +106,7 @@ impl Tool for BashTool {
                 },
                 "timeout": {
                     "type": "integer",
-                    "description": "REQUIRED seconds before the command is killed. Pick by job kind — do NOT omit.\n\
-        Compile / test / install / link: ALWAYS 900 (they can print nothing for minutes while linking or compiling):\n\
-        cargo build|test|check|clippy|run, npm/pnpm/yarn test|install|ci, make, mvn, gradle, pytest, go test, tsc.\n\
-        GOOD: {\"command\":\"cargo test --offline\",\"timeout\":900}\n\
-        GOOD: {\"command\":\"npm test\",\"timeout\":900}\n\
-        Short commands: 30 (git status, ls, echo, pwd, which).\n\
-        GOOD: {\"command\":\"git status\",\"timeout\":30}\n\
-        Medium (git fetch/clone, one-off scripts): 120.\n\
-        BAD: omit timeout on cargo test / npm install / make\n\
-        BAD: timeout=900 on git status or ls"
+                    "description": "Seconds to WAIT this call (not a kill). Process keeps running if this expires — call bash_timeout_add with at least timeout=600. Hard process lifetime is config max_timeout_secs. Compile/test: 900; short (git status, ls): 30."
                 }
             },
             "required": ["command"]
@@ -173,7 +173,6 @@ impl Tool for BashTool {
                 default_timeout
             })
             .clamp(1, max_timeout);
-        let dur = Duration::from_secs(secs);
 
         // macOS sudo (and some Linux configs) needs explicit `-A` to use SUDO_ASKPASS —
         // rewrite `sudo` → `sudo -A` so a plain `sudo` pops our password modal. Only when
@@ -226,7 +225,7 @@ impl Tool for BashTool {
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())
-            .kill_on_drop(true); // dropping the wait future (cancel/timeout) SIGKILLs the child
+            .kill_on_drop(true); // driver-task drop (cancel / hard cap) SIGKILLs the child
 
         // Unix only: detach from controlling tty (setsid) so sudo/ssh don't fight the TUI
         // for /dev/tty, and inject the askpass env vars so they use our password prompt.
@@ -258,97 +257,54 @@ impl Tool for BashTool {
             Err(e) => return err(format!("bash: failed to spawn shell: {e}")),
         };
         // Reap the WHOLE shell process tree (mvn → java, pipeline sub-shells,
-        // busybox applets) on timeout/cancel — not just the direct child, which
-        // is all `kill_on_drop` covers.
+        // busybox applets) on cancel / hard-cap — not just the direct child.
         //
-        // Windows: a kill-on-close Job Object. Held until this fn returns; the
-        // cancel/timeout arms `terminate()` the job explicitly, and if that's
-        // skipped (or atomcode dies) dropping the guard closes the handle →
-        // KILL_ON_JOB_CLOSE reaps the tree anyway. (A process the command
-        // intentionally left running is in the job too, so it's reaped on
-        // return — consistent with this tool having no background path.)
-        //
-        // Unix: wrap in `PgroupChild` so Drop always `killpg`s. Critical when the
-        // kernel cancel path *drops* this future (outer select) without running
-        // our cancel arm — otherwise grandchildren survive after setsid detach.
+        // Windows: kill-on-close Job Object, moved into the driver task so a
+        // wait-timeout park does not drop the handle (which would kill the tree).
+        // Unix: PgroupChild lives in the same task; Drop killpg's on cancel-drop.
         #[cfg(windows)]
         let job_guard = crate::process_utils::assign_child_to_kill_on_close_job(&child);
         #[cfg(windows)]
         let mut child = child;
         #[cfg(not(target_os = "windows"))]
         let mut child = PgroupChild::new(child);
-        // PID captured before we take the pipes and `wait`. On Unix it is the
-        // pgid (setsid leader); on Windows it's the `taskkill /T` fallback
-        // root for when the Job Object couldn't be set up.
         let child_pid = child.id();
-        let mut stdout = match child.stdout.take() {
+        let stdout = match child.stdout.take() {
             Some(pipe) => pipe,
             None => return err("bash: failed to capture stdout".to_string()),
         };
-        let mut stderr = match child.stderr.take() {
+        let stderr = match child.stderr.take() {
             Some(pipe) => pipe,
             None => return err("bash: failed to capture stderr".to_string()),
         };
 
-        let kill_tree = || {
-            #[cfg(windows)]
-            crate::process_utils::kill_windows_tree(&job_guard, child_pid);
-            #[cfg(not(target_os = "windows"))]
-            if let Some(pgid) = child_pid {
-                // SIGKILL the whole group; `kill_on_drop` already SIGKILLs the
-                // direct child, this extends it to the detached grandchildren.
-                unsafe { killpg(pgid as i32, SIGKILL) };
-            }
-        };
-
+        let job = LiveBash::new(secs, max_timeout);
+        bash_live::register_live_bash(job.clone());
         let progress = ctx.progress.clone();
         let live_sent = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
-        let run = async {
-            let live_out = live_sent.clone();
-            let live_err = live_sent.clone();
-            let progress_out = progress.clone();
-            let progress_err = progress.clone();
-            let (stdout_buf, stderr_buf) = tokio::join!(
-                read_pipe_and_stream(&mut stdout, progress_out, live_out),
-                read_pipe_and_stream(&mut stderr, progress_err, live_err),
-            );
-            let status = child.wait().await;
-            #[cfg(not(target_os = "windows"))]
-            {
-                // wait() reaped the leader — skip Drop's killpg (PID-reuse window).
-                child.terminated = true;
-            }
-            (stdout_buf, stderr_buf, status)
-        };
+        let driver_job = job.clone();
+        tokio::spawn(async move {
+            drive_live_child(
+                child,
+                driver_job,
+                stdout,
+                stderr,
+                progress,
+                live_sent,
+                #[cfg(windows)]
+                job_guard,
+                child_pid,
+            )
+            .await;
+        });
 
-        tokio::select! {
-            biased;
-            // Cooperative cancel: returning drops `run` → PgroupChild/Job reaps the tree.
-            _ = ctx.cancel.cancelled() => {
-                kill_tree();
-                // The command itself is already shown in the `● Bash(…)`
-                // header above (for the user) and in the tool-call record
-                // (for the model), so don't echo it back — a long command
-                // just wraps into several redundant error lines.
-                err("bash: cancelled before completion.".to_string())
-            }
-            res = tokio::time::timeout(dur, run) => match res {
-                Ok((stdout_buf, stderr_buf, Ok(status))) => {
-                    format_captured_output(&stdout_buf, &stderr_buf, status)
-                }
-                Ok((_, _, Err(e))) => err(format!("bash: error running command: {e}")),
-                // Timed out: the timeout future drops `run` → kill_on_drop / PgroupChild.
-                // Don't echo the command (see the cancel arm); point at the actionable
-                // knob — a larger `timeout` — the way the core bash tool does.
-                Err(_) => {
-                    kill_tree();
-                    err(format!(
-                        "bash: timed out after {secs}s — pass a larger `timeout` if this command \
-                         legitimately needs longer."
-                    ))
-                }
-            }
-        }
+        let mut keep = KeepAliveOnTimeout {
+            job: job.clone(),
+            keep_alive: false,
+        };
+        let outcome = wait_on_live_bash(&job, secs, ctx, false).await;
+        keep.keep_alive = true;
+        outcome.into_result()
     }
 }
 
@@ -400,13 +356,11 @@ fn shell_tool_description(
     macro_rules! base {
         () => {
             "Run a shell command in the working directory and return its combined \
-             stdout/stderr and exit code. ALWAYS pass `timeout` (seconds):\n\
-             compile/test/install (cargo build|test|check|clippy, npm test|install, make, \
-             mvn, pytest, go test) → timeout=900 — they can print nothing for minutes;\n\
-             short (git status, ls, echo, pwd) → timeout=30; medium (git fetch/clone) → 120.\n\
-             GOOD: {\"command\":\"cargo test\",\"timeout\":900}\n\
-             GOOD: {\"command\":\"git status\",\"timeout\":30}\n\
-             BAD: omit timeout on cargo/npm; BAD: timeout=900 on git status.\n\
+             stdout/stderr and exit code. `timeout` is seconds to WAIT this call \
+             (not a kill): compile/test/install → 900; short (git status, ls) → 30. \
+             If the wait expires the process keeps running — call bash_timeout_add \
+             with at least timeout=600; do not start a new bash. Hard process lifetime \
+             is config max_timeout_secs.\n\
              Destructive \
              commands (recursive force delete, sudo, dd, history rewrites, …) are flagged \
              risky and may require approval.\n\
@@ -1336,37 +1290,12 @@ fn emit_live_chunk(
     progress.emit(text);
 }
 
-async fn read_pipe_and_stream(
-    reader: &mut (impl tokio::io::AsyncRead + Unpin),
-    progress: ProgressSink,
-    live_sent: std::sync::Arc<std::sync::atomic::AtomicUsize>,
-) -> Vec<u8> {
-    let mut buf = vec![0u8; 65536];
-    let mut collected = Vec::new();
-    let mut decode_pending = Vec::new();
-    loop {
-        match reader.read(&mut buf).await {
-            Ok(0) => break,
-            Ok(n) => {
-                collected.extend_from_slice(&buf[..n]);
-                if let Some(chunk) = decode_stream_chunk(&mut decode_pending, &buf[..n], false) {
-                    emit_live_chunk(&progress, live_sent.as_ref(), &chunk);
-                }
-            }
-            Err(_) => break,
-        }
-    }
-    if let Some(chunk) = decode_stream_chunk(&mut decode_pending, &[], true) {
-        emit_live_chunk(&progress, live_sent.as_ref(), &chunk);
-    }
-    collected
-}
-
-fn format_captured_output(
+fn format_streams(
     stdout: &[u8],
     stderr: &[u8],
-    status: std::process::ExitStatus,
-) -> ToolResult {
+    exit: Option<(bool, Option<i32>)>,
+    incremental: bool,
+) -> String {
     let stdout = sanitize_terminal_output(&decode_output(stdout));
     let stderr = sanitize_terminal_output(&decode_output(stderr));
     let mut s = String::new();
@@ -1380,30 +1309,258 @@ fn format_captured_output(
         s.push_str("[stderr]\n");
         s.push_str(&stderr);
     }
-    match status.code() {
-        Some(0) => {
+    match exit {
+        None => s,
+        Some((true, Some(0))) | Some((true, _)) => {
             if s.trim().is_empty() {
-                s = "(no output)".to_string();
+                if incremental {
+                    "[exit code 0]".to_string()
+                } else {
+                    "(no output)".to_string()
+                }
+            } else {
+                s
             }
         }
-        Some(code) => {
+        Some((_, Some(code))) => {
             if !s.is_empty() && !s.ends_with('\n') {
                 s.push('\n');
             }
             s.push_str(&format!("[exit code {code}]"));
+            s
         }
-        // On Unix, code()==None means the child was terminated by a signal (NOT our
-        // cancel/timeout paths, which return early before reaching here).
-        None => {
+        Some((_, None)) => {
             if !s.is_empty() && !s.ends_with('\n') {
                 s.push('\n');
             }
             s.push_str("[process terminated by signal]");
+            s
         }
     }
-    // The bash invocation itself ran; a non-zero exit is reported in-band (the model
-    // reads the exit code) rather than as a tool error.
+}
+
+fn snapshot_live_output(job: &LiveBash, incremental: bool) -> (Vec<u8>, Vec<u8>) {
+    let mut cap = job.capture.lock().unwrap_or_else(|e| e.into_inner());
+    let (out, err) = if incremental {
+        (
+            cap.stdout
+                .get(cap.reported_stdout..)
+                .unwrap_or(&[])
+                .to_vec(),
+            cap.stderr
+                .get(cap.reported_stderr..)
+                .unwrap_or(&[])
+                .to_vec(),
+        )
+    } else {
+        (cap.stdout.clone(), cap.stderr.clone())
+    };
+    cap.reported_stdout = cap.stdout.len();
+    cap.reported_stderr = cap.stderr.len();
+    (out, err)
+}
+
+fn still_running_result(job: &LiveBash, waited_secs: u64, incremental: bool) -> ToolResult {
+    let (out, err) = snapshot_live_output(job, incremental);
+    let body = format_streams(&out, &err, None, incremental);
+    let footer = still_running_footer(job, waited_secs);
+    let mut s = footer.clone();
+    if !body.trim().is_empty() {
+        s.push('\n');
+        s.push_str(&body);
+        if !s.ends_with('\n') {
+            s.push('\n');
+        }
+        s.push('\n');
+        s.push_str(&footer);
+    }
     ok(s)
+}
+
+pub(crate) enum WaitOutcome {
+    Done(ToolResult),
+    StillRunning(ToolResult),
+    Cancelled(ToolResult),
+}
+
+impl WaitOutcome {
+    pub(crate) fn into_result(self) -> ToolResult {
+        match self {
+            Self::Done(r) | Self::StillRunning(r) | Self::Cancelled(r) => r,
+        }
+    }
+}
+
+pub(crate) async fn wait_on_live_bash(
+    job: &std::sync::Arc<LiveBash>,
+    wait_secs: u64,
+    ctx: &ToolContext,
+    incremental: bool,
+) -> WaitOutcome {
+    tokio::select! {
+        biased;
+        _ = ctx.cancel.cancelled() => {
+            job.kill.cancel();
+            job.wait_until_not_running().await;
+            WaitOutcome::Cancelled(finish_live_job(job))
+        }
+        _ = job.wait_until_not_running() => WaitOutcome::Done(finish_live_job(job)),
+        _ = tokio::time::sleep(Duration::from_secs(wait_secs)) => {
+            if !job.current_status().is_running() {
+                WaitOutcome::Done(finish_live_job(job))
+            } else {
+                WaitOutcome::StillRunning(still_running_result(job, wait_secs, incremental))
+            }
+        }
+    }
+}
+
+pub(crate) fn finish_live_job(job: &LiveBash) -> ToolResult {
+    bash_live::unregister_live_bash(&job.id);
+    let (out, err_bytes) = snapshot_live_output(job, true);
+    match job.current_status() {
+        LiveStatus::Running => still_running_result(job, 0, true),
+        LiveStatus::Exited { success, code } => ok(format_streams(
+            &out,
+            &err_bytes,
+            Some((success, code)),
+            true,
+        )),
+        LiveStatus::Cancelled => {
+            let body = format_streams(&out, &err_bytes, None, true);
+            let mut s = body;
+            if !s.is_empty() && !s.ends_with('\n') {
+                s.push('\n');
+            }
+            s.push_str("bash: cancelled before completion.");
+            err(s)
+        }
+        LiveStatus::KilledMaxTimeout => {
+            let body = format_streams(&out, &err_bytes, None, true);
+            let mut s = body;
+            if !s.is_empty() && !s.ends_with('\n') {
+                s.push('\n');
+            }
+            s.push_str("bash: reached configured max_timeout_secs; the process was then stopped.");
+            err(s)
+        }
+    }
+}
+
+async fn read_pipe_into_job(
+    reader: &mut (impl tokio::io::AsyncRead + Unpin),
+    job: std::sync::Arc<LiveBash>,
+    is_stderr: bool,
+    progress: ProgressSink,
+    live_sent: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+) {
+    let mut buf = vec![0u8; 65536];
+    let mut decode_pending = Vec::new();
+    loop {
+        match reader.read(&mut buf).await {
+            Ok(0) => break,
+            Ok(n) => {
+                {
+                    let mut cap = job.capture.lock().unwrap_or_else(|e| e.into_inner());
+                    if is_stderr {
+                        cap.stderr.extend_from_slice(&buf[..n]);
+                    } else {
+                        cap.stdout.extend_from_slice(&buf[..n]);
+                    }
+                }
+                if let Some(chunk) = decode_stream_chunk(&mut decode_pending, &buf[..n], false) {
+                    emit_live_chunk(&progress, live_sent.as_ref(), &chunk);
+                }
+            }
+            Err(_) => break,
+        }
+    }
+    if let Some(chunk) = decode_stream_chunk(&mut decode_pending, &[], true) {
+        emit_live_chunk(&progress, live_sent.as_ref(), &chunk);
+    }
+}
+
+#[cfg(windows)]
+type LiveChild = tokio::process::Child;
+#[cfg(not(windows))]
+type LiveChild = PgroupChild;
+
+async fn drive_live_child(
+    mut child: LiveChild,
+    job: std::sync::Arc<LiveBash>,
+    mut stdout: tokio::process::ChildStdout,
+    mut stderr: tokio::process::ChildStderr,
+    progress: ProgressSink,
+    live_sent: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    #[cfg(windows)] job_guard: Option<crate::process_utils::JobHandle>,
+    child_pid: Option<u32>,
+) {
+    let job_out = job.clone();
+    let job_err = job.clone();
+    let progress_out = progress.clone();
+    let progress_err = progress.clone();
+    let live_out = live_sent.clone();
+    let live_err = live_sent.clone();
+    let kill = job.kill.clone();
+    let max_wait = remaining_secs(job.max_deadline);
+
+    let readers = async {
+        tokio::join!(
+            read_pipe_into_job(&mut stdout, job_out, false, progress_out, live_out),
+            read_pipe_into_job(&mut stderr, job_err, true, progress_err, live_err),
+        )
+    };
+
+    let wait_exit = async {
+        let kill_tree = || {
+            #[cfg(windows)]
+            crate::process_utils::kill_windows_tree(&job_guard, child_pid);
+            #[cfg(not(target_os = "windows"))]
+            if let Some(pgid) = child_pid {
+                unsafe { killpg(pgid as i32, SIGKILL) };
+            }
+        };
+        tokio::select! {
+            biased;
+            status = child.wait() => {
+                #[cfg(not(target_os = "windows"))]
+                {
+                    child.terminated = true;
+                }
+                match status {
+                    Ok(s) => LiveStatus::Exited {
+                        success: s.success(),
+                        code: s.code(),
+                    },
+                    Err(_) => LiveStatus::Exited {
+                        success: false,
+                        code: None,
+                    },
+                }
+            }
+            _ = kill.cancelled() => {
+                kill_tree();
+                let _ = child.wait().await;
+                #[cfg(not(target_os = "windows"))]
+                {
+                    child.terminated = true;
+                }
+                LiveStatus::Cancelled
+            }
+            _ = tokio::time::sleep(Duration::from_secs(max_wait)) => {
+                kill_tree();
+                let _ = child.wait().await;
+                #[cfg(not(target_os = "windows"))]
+                {
+                    child.terminated = true;
+                }
+                LiveStatus::KilledMaxTimeout
+            }
+        }
+    };
+
+    let (status, _) = tokio::join!(wait_exit, readers);
+    job.publish(status);
 }
 
 /// Whether a `git checkout` operand is (heuristically) a FILE pathspec rather than a
@@ -3185,16 +3342,12 @@ mod tests {
         let schema = BashTool.parameters_schema().to_string();
         assert!(schema.contains("timeout"), "{schema}");
         assert!(
-            schema.contains("900") && schema.contains("cargo"),
-            "schema must tell the agent compile/test uses timeout=900: {schema}"
+            schema.contains("900") && schema.contains("bash_timeout_add"),
+            "schema must say compile wait is 900 and point at bash_timeout_add: {schema}"
         );
         assert!(
             schema.contains("30") && schema.contains("git status"),
             "schema must tell the agent short cmds use timeout=30: {schema}"
-        );
-        assert!(
-            schema.contains("BAD") && schema.contains("omit timeout"),
-            "schema must show omit-timeout as BAD: {schema}"
         );
         assert!(
             schema.contains("powershell")
@@ -3204,8 +3357,8 @@ mod tests {
         );
         let desc = shell_tool_description(false, false, false);
         assert!(
-            desc.contains("timeout=900") && desc.contains("timeout=30"),
-            "tool description must repeat the timeout routing: {desc}"
+            desc.contains("900") && desc.contains("30") && desc.contains("bash_timeout_add"),
+            "tool description must repeat wait routing and add-timeout: {desc}"
         );
     }
 
@@ -4154,14 +4307,84 @@ mod tests {
         assert!(r.content.contains("cancelled"), "{}", r.content);
     }
 
+    fn parse_bash_id(content: &str) -> Option<String> {
+        let key = "bash_id=";
+        let i = content.find(key)?;
+        let rest = &content[i + key.len()..];
+        let id: String = rest
+            .chars()
+            .take_while(|c| c.is_ascii_alphanumeric() || *c == '-')
+            .collect();
+        if id.starts_with("bash-") {
+            Some(id)
+        } else {
+            None
+        }
+    }
+
     #[tokio::test]
-    async fn times_out() {
+    async fn wait_timeout_parks_preserves_output_and_does_not_error() {
         let d = tempfile::tempdir().unwrap();
         let r = BashTool
-            .execute(r#"{"command":"sleep 30","timeout":1}"#, &ctx(d.path()))
+            .execute(
+                r#"{"command":"echo hello && sleep 30","timeout":1}"#,
+                &ctx(d.path()),
+            )
+            .await;
+        assert!(!r.is_error, "park is not a tool error: {}", r.content);
+        assert!(
+            r.content.contains("hello"),
+            "partial output must be kept: {}",
+            r.content
+        );
+        assert!(
+            r.content.contains("bash_timeout_add") && r.content.contains("600"),
+            "must instruct add-timeout >= 600: {}",
+            r.content
+        );
+        let id = parse_bash_id(&r.content).expect(&r.content);
+        bash_live::kill_live_bash_for_test(&id);
+    }
+
+    #[tokio::test]
+    async fn bash_timeout_add_returns_when_command_exits() {
+        let d = tempfile::tempdir().unwrap();
+        let r = BashTool
+            .execute(
+                r#"{"command":"echo hello && sleep 2","timeout":1}"#,
+                &ctx(d.path()),
+            )
+            .await;
+        assert!(!r.is_error, "{}", r.content);
+        let id = parse_bash_id(&r.content).expect(&r.content);
+        let add = BashTimeoutAddTool
+            .execute(
+                &format!(r#"{{"bash_id":"{id}","timeout":10}}"#),
+                &ctx(d.path()),
+            )
+            .await;
+        if add.is_error {
+            bash_live::kill_live_bash_for_test(&id);
+        }
+        assert!(!add.is_error, "{}", add.content);
+        assert!(
+            add.content.contains("[exit code 0]") || !add.content.contains("bash still running"),
+            "expected completion, got {}",
+            add.content
+        );
+    }
+
+    #[tokio::test]
+    async fn bash_timeout_add_unknown_id_errors() {
+        let d = tempfile::tempdir().unwrap();
+        let r = BashTimeoutAddTool
+            .execute(
+                r#"{"bash_id":"bash-does-not-exist","timeout":600}"#,
+                &ctx(d.path()),
+            )
             .await;
         assert!(r.is_error, "{}", r.content);
-        assert!(r.content.contains("timed out after 1s"), "{}", r.content);
+        assert!(r.content.contains("unknown bash_id"), "{}", r.content);
     }
 
     #[test]

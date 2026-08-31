@@ -228,9 +228,9 @@ enabled = true                  # 是否开启任务清单跟踪
 eager = "auto"                  # auto | preferred | always
 
 [tools.bash]
-default_timeout_secs = 120      # 短命令超时（秒）
-max_timeout_secs = 1800         # 编译测试等长任务超时（秒）
-silent_kill_secs = 60           # 无输出静默终止时间
+default_timeout_secs = 120      # 模型省略 timeout 时这一次堵多久
+max_timeout_secs = 1800         # 从启动算命令最长活多久（到点杀树）
+silent_kill_secs = 60           # 仅 !cmd 短命令空闲杀
 
 [tools.tool_output]
 max_bytes = 65536               # 输出折叠阈值（64KiB）

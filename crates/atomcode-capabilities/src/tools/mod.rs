@@ -92,8 +92,8 @@ pub use atomgit::{
 #[cfg(feature = "atomgit")]
 pub use atomgit_bash_gate::AtomgitBashGate;
 pub use bash::{
-    bash_invocations, normalize_command_for_grant, run_shell, BashInvocation, BashTool, ShellExit,
-    ShellOutcome,
+    bash_invocations, normalize_command_for_grant, run_shell, BashInvocation, BashTimeoutAddTool,
+    BashTool, ShellExit, ShellOutcome,
 };
 pub use bash_workspace_gate::BashWorkspaceGate;
 pub use cd::ChangeDirTool;
@@ -143,6 +143,7 @@ pub fn coding_tool_names() -> &'static [&'static str] {
             "list_directory",
             "open_file",
             "bash",
+            "bash_timeout_add",
             "grep",
             "glob",
             "search_replace",
@@ -164,6 +165,7 @@ pub fn coding_tool_names() -> &'static [&'static str] {
             "list_directory",
             "open_file",
             "bash",
+            "bash_timeout_add",
             "grep",
             "glob",
             "search_replace",
@@ -196,6 +198,7 @@ pub fn register_coding_tools_with_vision(reg: &mut ToolRegistry, vision: bool) {
     reg.register(Arc::new(ListDirTool));
     reg.register(Arc::new(OpenFileTool));
     reg.register(Arc::new(BashTool));
+    reg.register(Arc::new(BashTimeoutAddTool));
     reg.register(Arc::new(GrepTool));
     reg.register(Arc::new(GlobTool));
     reg.register(Arc::new(SearchReplaceTool));
@@ -684,6 +687,7 @@ mod tests {
         "list_directory",
         "open_file",
         "bash",
+        "bash_timeout_add",
         "grep",
         "glob",
         "search_replace",

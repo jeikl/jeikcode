@@ -236,11 +236,9 @@ eager = "auto"
 # 内核工具结果上限默认 256 KiB。
 # 设为 0 完全禁用折叠（所有工具输出原样进入上下文，超大输出会占用上下文窗口）。
 # 环境变量 ATOMCODE_TOOL_OUTPUT_THRESHOLD_BYTES 可覆盖本项（env 优先）。
-# bash 超时是两把钟，不要合成一把：
-# default = 短命令墙钟（卡死的 ls/git status）；max = 上限，也是 cargo/npm/make
-# 这类编译/测试/安装的默认墙钟（链接阶段可以几分钟不出字，不会走 silent_kill）。
-# silent_kill 只收拾短命令「一直没新输出」；长任务忽略它。
-# 单次更长：模型传 timeout，不要把 default 抬到 900。
+# bash 超时：模型 timeout = 这一次堵塞多久（到期进程不停，用 bash_timeout_add 加时，每次至少 600 秒）。
+# max_timeout_secs = 从启动算命令最长活多久，到点才杀。silent_kill 只给用户 !cmd 的短命令空闲杀。
+# 单次更长：模型传 timeout / bash_timeout_add，不要把 default 抬到 900。
 [tools.bash]
 default_timeout_secs = 120
 max_timeout_secs = 1800

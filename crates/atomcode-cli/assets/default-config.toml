@@ -4,8 +4,6 @@
 
 language = "zh-CN"
 auto_update = false
-auto_update_interval_secs = 3600
-codeintel_refresh_interval_secs = 5
 auto_commit = false
 keep_interrupted_context = true
 offline_mode = "off"
@@ -36,8 +34,8 @@ enabled = true
 eager = "auto"
 
 [tools.bash]
-# Short hung commands (ls/git status) use default. cargo/npm/make auto-use max
-# (linking can print nothing for minutes). Do not raise default to save compiles.
+# timeout on bash = per-call wait. Process lifetime is max_timeout_secs from start.
+# silent_kill is !cmd only. Do not raise default to save compiles — use bash_timeout_add.
 default_timeout_secs = 120
 max_timeout_secs = 1800
 silent_kill_secs = 60

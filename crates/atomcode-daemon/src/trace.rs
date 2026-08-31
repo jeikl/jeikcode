@@ -59,6 +59,7 @@ pub fn write_line(cat: &str, args: std::fmt::Arguments<'_>) {
     let line = format!("+{:>10}us [{:>3}] {:>14} {}\n", us, cat, tid, args);
     if let Ok(mut f) = sink.lock() {
         let _ = f.write_all(line.as_bytes());
+        let _ = f.flush();
     }
 }
 

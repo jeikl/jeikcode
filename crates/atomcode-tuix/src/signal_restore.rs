@@ -133,10 +133,46 @@ pub(crate) fn claim_foreground_tty() {
 /// SIGCONT arms. Re-asserts job-control ignores, takes the foreground pgrp
 /// back, and puts the terminal in raw mode so the next keystroke is a TUI
 /// event rather than a kernel-generated stop.
+///
+/// Also discards kernel-buffered stdin. That stops the Linux 100% CPU spin
+/// inside crossterm's `event::poll` when echoed DECSET bytes (`CSI ? 2026 h`,
+/// `CSI ? 25 h/l`) keep `POLLIN` asserted without ever completing a key event.
+/// It does **not** clear crossterm's userspace parser; callers that need that
+/// must also emit a DA1 query via the renderer (`unstick_input_parser`).
 pub(crate) fn recover_tty() {
     ignore_job_control_signals();
     claim_foreground_tty();
     let _ = crossterm::terminal::enable_raw_mode();
+    flush_unread_input();
+}
+
+/// Drop unread stdin bytes so a wedged `event::poll` inner loop can observe
+/// `read_count == 0` and return. No-op when stdin is not a TTY.
+pub(crate) fn flush_unread_input() {
+    unsafe {
+        if libc::isatty(libc::STDIN_FILENO) != 0 {
+            let _ = libc::tcflush(libc::STDIN_FILENO, libc::TCIFLUSH);
+        }
+    }
+}
+
+/// Unconditional TTY reclaim for Bash / approval boundaries.
+///
+/// `recover_tty_if_needed` no-ops when termios already looks raw — which is
+/// exactly the Linux freeze: echo may already be off while crossterm's parser
+/// is still wedged on an incomplete `CSI ?` sequence, so the reader never
+/// delivers keys. Call this from the event-loop thread (the reader may already
+/// be stuck inside `event::poll` and cannot process a Recover command).
+pub(crate) fn reclaim_input(stage: &str) {
+    crate::tuix_trace!("TTY", "stage={} action=reclaim_begin", stage);
+    recover_tty();
+    let after = trace_tty("reclaim_done");
+    crate::tuix_trace!(
+        "TTY",
+        "stage={} action=reclaim_end healthy={}",
+        stage,
+        !after.needs_recovery()
+    );
 }
 
 /// Compact Linux TTY health snapshot used by the opt-in TUI diagnostic log.
@@ -205,8 +241,9 @@ pub(crate) fn trace_tty(stage: &str) -> TtyHealth {
 }
 
 /// Recover only when the terminal is observably unhealthy. Safe to call from
-/// the sole stdin-reader thread on a quiet poll timeout or an explicit
-/// Bash/approval boundary; healthy calls do not rewrite termios.
+/// the sole stdin-reader thread on a quiet poll timeout. Healthy calls do not
+/// rewrite termios. Bash/approval boundaries must use [`reclaim_input`]
+/// instead — a wedged crossterm parser is invisible to this health check.
 pub(crate) fn recover_tty_if_needed(stage: &str) -> bool {
     let before = trace_tty(stage);
     if !before.needs_recovery() {
@@ -360,5 +397,14 @@ mod tests {
         // Do NOT call recover_tty() here — it enable_raw_mode()s the test
         // runner's terminal.
         super::claim_foreground_tty();
+        super::flush_unread_input();
+    }
+
+    /// `flush_unread_input` is the kernel-side half of the Linux reader-wedge
+    /// recovery. It must be safe without a TTY (CI / unit tests) and must not
+    /// panic when stdin is a pipe.
+    #[test]
+    fn flush_unread_input_is_safe_without_a_tty() {
+        super::flush_unread_input();
     }
 }

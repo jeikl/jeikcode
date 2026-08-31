@@ -98,6 +98,8 @@ enum RenderCmd {
         detail: String,
         working_dir: std::path::PathBuf,
     },
+    /// DA1 query used to unstick a wedged Unix crossterm parser.
+    UnstickInputParser,
     /// Lifecycle operation requiring an ACK — the worker performs the
     /// op then sends `()` back so the caller can proceed.
     Ack {
@@ -257,6 +259,10 @@ impl Renderer for TaskRenderer {
         });
     }
 
+    fn unstick_input_parser(&mut self) {
+        let _ = self.cmd_tx.send(RenderCmd::UnstickInputParser);
+    }
+
     fn suspend_for_external(&mut self) {
         self.ack(AckOp::SuspendForExternal);
     }
@@ -340,11 +346,16 @@ fn run_worker(
     loop {
         let cmd = match pending_cmds.pop_front() {
             Some(cmd) => cmd,
-            None => match cmd_rx.recv() {
+            None => match cmd_rx.recv_timeout(Duration::from_secs(1)) {
                 Ok(cmd) => cmd,
-                Err(_) => break,
+                Err(mpsc::RecvTimeoutError::Timeout) => {
+                    crate::trace::pulse("REN", "worker_idle", format_args!("waiting_for_cmd"));
+                    continue;
+                }
+                Err(mpsc::RecvTimeoutError::Disconnected) => break,
             },
         };
+        crate::trace::pulse("REN", "worker_cmd", format_args!("processing"));
         // Measure the wall-clock time each terminal I/O takes so the log
         // shows where Mac Terminal.app / iTerm2 / etc. actually spend time.
         // Big `flush` durations = kernel pipe backpressure from a slow
@@ -460,6 +471,9 @@ fn run_worker(
                 crate::tuix_trace!("APV", "stage=notification_worker_begin");
                 inner.notify_approval(config, tool_name, detail, working_dir);
                 crate::tuix_trace!("APV", "stage=notification_worker_end");
+            }
+            RenderCmd::UnstickInputParser => {
+                inner.unstick_input_parser();
             }
             RenderCmd::BeginSync => {
                 inner.begin_sync();
@@ -590,6 +604,7 @@ mod tests {
         begin_syncs: usize,
         end_syncs: usize,
         approval_notifications: usize,
+        unstick_input_parser: usize,
         history_replay_caps: Vec<Option<usize>>,
         resizes: Vec<(u16, u16)>,
         calls: Vec<&'static str>,
@@ -625,6 +640,9 @@ mod tests {
         }
         fn flush_deferred(&mut self) {
             self.counts.lock().unwrap().deferred += 1;
+        }
+        fn unstick_input_parser(&mut self) {
+            self.counts.lock().unwrap().unstick_input_parser += 1;
         }
         fn begin_sync(&mut self) {
             self.counts.lock().unwrap().begin_syncs += 1;
@@ -771,6 +789,14 @@ mod tests {
         let c = counts.lock().unwrap();
         assert_eq!(c.renders, 1);
         assert_eq!(c.shutdowns, 1);
+    }
+
+    #[test]
+    fn unstick_input_parser_reaches_the_inner_renderer() {
+        let (mut r, counts) = setup();
+        r.unstick_input_parser();
+        r.reset();
+        assert_eq!(counts.lock().unwrap().unstick_input_parser, 1);
     }
 
     #[test]

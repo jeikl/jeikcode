@@ -425,6 +425,18 @@ pub trait Renderer: Send {
         self.flush_deferred();
     }
 
+    /// Unstick crossterm's Unix input parser after echoed DECSET bytes
+    /// (`CSI ? 2026 h`, `CSI ? 25 h/l`) have wedged it.
+    ///
+    /// Crossterm treats `CSI ? …` as "wait until `u` or `c`". Those DECSET
+    /// finals never arrive, so `event::poll` spins at 100% CPU on Linux and
+    /// eats every subsequent key — including arrows and Ctrl+C. A DA1 query
+    /// (`CSI c`) makes the terminal reply `CSI ? … c`, which completes the
+    /// wait and is discarded as `PrimaryDeviceAttributes`. Must be written
+    /// by the renderer thread so it cannot interleave with in-flight 2026
+    /// envelopes. Default no-op (plain / test renderers have no TTY).
+    fn unstick_input_parser(&mut self) {}
+
     /// Returns (and clears) whether a body overflow scrolled the whole
     /// viewport — footer included — up one row since the last call. The
     /// render worker calls this after each command and, when true, repaints

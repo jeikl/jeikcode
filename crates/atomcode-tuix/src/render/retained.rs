@@ -1534,6 +1534,13 @@ impl<W: Write + Send> RetainedRenderer<W> {
         };
 
         let is_bash = safe_name.eq_ignore_ascii_case("bash");
+        if is_bash {
+            crate::trace::pulse(
+                "BASH",
+                "inflight_paint",
+                format_args!("detail_len={} meta_len={}", safe_detail.len(), meta.len()),
+            );
+        }
         let mut new_rows = if safe_detail.is_empty() {
             // No detail: simple path — name + meta, all bold
             self.build_mixed_style_rows(
@@ -4091,6 +4098,14 @@ impl<W: Write + Send> RetainedRenderer<W> {
 
                     if m.selected >= header_h && m.selected < len - hint_h && m.selected >= end {
                         while offset < len - hint_h && m.selected >= end {
+                            crate::trace::pulse(
+                                "FOOT",
+                                "menu_page_loop",
+                                format_args!(
+                                    "offset={} end={} selected={} len={}",
+                                    offset, end, m.selected, len
+                                ),
+                            );
                             offset += 1;
                             let mut h_sum = 0;
                             end = offset;
@@ -5806,7 +5821,21 @@ impl<W: Write + Send> RetainedRenderer<W> {
         // (the `cuizk@csdn.net` body row leaked into the user-echo
         // row's cells). LFing until `visible_len < cap` promotes the
         // exact excess to scrollback in one shot.
+        let mut overflow_iters = 0u32;
         while visible_len >= cap {
+            overflow_iters += 1;
+            crate::trace::pulse(
+                "BEMIT",
+                "overflow_lf_loop",
+                format_args!(
+                    "iter={} visible_len={} cap={} scrolled_off={} h={}",
+                    overflow_iters,
+                    visible_len,
+                    cap,
+                    self.scrolled_off,
+                    h
+                ),
+            );
             let scroll_seq = format!("\x1b[{};1H\n", h);
             let _ = self.out.write_all(scroll_seq.as_bytes());
             self.screen.shift_prev_up(1);
@@ -8736,6 +8765,21 @@ impl<W: Write + Send> Renderer for RetainedRenderer<W> {
         std::mem::take(&mut self.pending_scroll_flush)
     }
 
+    fn unstick_input_parser(&mut self) {
+        // Unix only: Windows crossterm reads Win32 key records, not the
+        // ANSI parser this DA1 query is designed to unstick. Emitting
+        // `CSI c` there can leak the DA1 reply into the console buffer.
+        #[cfg(unix)]
+        {
+            // DA1 query. Completes a crossterm parser wedged on `CSI ? …`
+            // (echoed `?2026h` / `?25h` / `?25l`) because that wait only
+            // ends on `u` or `c`. The reply is not a key event.
+            let _ = self.out.write_all(b"\x1b[c");
+            let _ = self.out.flush();
+            crate::tuix_trace!("TTY", "stage=da1_unstick_emitted");
+        }
+    }
+
     fn flush_deferred(&mut self) {
         // The coalesce point. Called every 5ms by the event loop
         // tick. If widget state has changed since the last tick,
@@ -9594,6 +9638,41 @@ mod tests {
         let sink = CapturingSink(buf.clone());
         let r = RetainedRenderer::with_writer(sink, caps_with_color(), w, h);
         (r, buf)
+    }
+
+    /// DA1 (`CSI c`) is the only sequence that completes crossterm's Unix
+    /// `CSI ? …` wait without injecting a key. Echoed DECSET (`?2026h`,
+    /// `?25h`, `?25l`) otherwise wedges `event::poll` at 100% CPU.
+    #[cfg(unix)]
+    #[test]
+    fn unstick_input_parser_emits_da1_query() {
+        let (mut r, buf) = new_capturing(40, 12);
+        buf.lock().unwrap().clear();
+        r.unstick_input_parser();
+        let bytes = buf.lock().unwrap().clone();
+        assert_eq!(
+            bytes, b"\x1b[c",
+            "must emit DA1 so a wedged CSI-? parser sees a `c` terminator: {:?}",
+            bytes
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn unstick_input_parser_is_silent_on_windows() {
+        let (mut r, buf) = new_capturing(40, 12);
+        let before = buf.lock().unwrap().clone();
+        r.unstick_input_parser();
+        let after = buf.lock().unwrap().clone();
+        assert_eq!(
+            after, before,
+            "Windows must not emit DA1 (no Unix ANSI parser to unstick)"
+        );
+        assert!(
+            !after.windows(b"\x1b[c".len()).any(|w| w == b"\x1b[c"),
+            "DA1 query must not appear on Windows: {:?}",
+            after
+        );
     }
 
     /// Phase 7 harness: drain the capture sink's accumulated

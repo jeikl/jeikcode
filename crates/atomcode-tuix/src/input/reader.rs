@@ -314,6 +314,7 @@ fn run(
     #[cfg(unix)]
     let mut last_tty_health_check = std::time::Instant::now();
     crate::tuix_trace!("RD", "stage=reader_started");
+    crate::trace::note_reader_progress();
     #[cfg(unix)]
     crate::signal_restore::recover_tty_if_needed("reader_started");
     // Last accepted (modifiers, timestamp) for a modifier+Enter Press.
@@ -325,14 +326,19 @@ fn run(
         // the child process owns stdin cleanly. Only Resume / Shutdown
         // exit the paused state.
         if paused {
-            match cmd_rx.recv() {
+            crate::trace::set_reader_paused(true);
+            crate::trace::pulse("RD", "reader_paused", format_args!("waiting_for_resume"));
+            match cmd_rx.recv_timeout(Duration::from_secs(1)) {
                 Ok((ReaderCommand::Resume, _)) => {
                     paused = false;
+                    crate::trace::set_reader_paused(false);
                     crate::tuix_trace!("RD", "stage=resume_received");
                     #[cfg(unix)]
                     crate::signal_restore::recover_tty_if_needed("reader_resume");
                 }
-                Ok((ReaderCommand::Shutdown, _)) | Err(_) => return,
+                Ok((ReaderCommand::Shutdown, _)) | Err(stdmpsc::RecvTimeoutError::Disconnected) => {
+                    return
+                }
                 Ok((ReaderCommand::Pause, ack)) => {
                     // Already paused — just re-ack so the caller unblocks.
                     if let Some(ack) = ack {
@@ -346,6 +352,7 @@ fn run(
                         reason
                     );
                 }
+                Err(stdmpsc::RecvTimeoutError::Timeout) => {}
             }
             continue;
         }
@@ -355,6 +362,7 @@ fn run(
         match cmd_rx.try_recv() {
             Ok((ReaderCommand::Pause, ack)) => {
                 paused = true;
+                crate::trace::set_reader_paused(true);
                 crate::tuix_trace!("RD", "stage=pause_received");
                 if let Some(ack) = ack {
                     let _ = ack.send(());
@@ -366,21 +374,49 @@ fn run(
             }
             Ok((ReaderCommand::Recover(reason), _)) => {
                 crate::tuix_trace!("RD", "stage=recover_received reason={}", reason);
+                // Always reclaim: a wedged CSI-`?` parser is invisible to
+                // termios health (echo already off, pgrp still ours) so
+                // `recover_tty_if_needed` would no-op and leave keys dead.
                 #[cfg(unix)]
-                crate::signal_restore::recover_tty_if_needed(reason);
+                crate::signal_restore::reclaim_input(reason);
             }
             Ok((ReaderCommand::Shutdown, _)) => return,
             Err(TryRecvError::Disconnected) => return,
             Err(TryRecvError::Empty) => {}
         }
 
+        crate::trace::set_reader_paused(false);
+        crate::trace::set_reader("poll_enter");
+        crate::trace::set_poll_dt_us(0);
+        crate::trace::note_reader_progress();
+        let poll_t0 = std::time::Instant::now();
         let poll_result = event::poll(Duration::from_millis(100));
+        let poll_dt = poll_t0.elapsed();
+        crate::trace::set_poll_dt_us(poll_dt.as_micros() as u64);
+        crate::trace::note_reader_progress();
         if let Err(error) = &poll_result {
-            crate::tuix_trace!("RD", "stage=poll_error error={}", error);
+            crate::tuix_trace!("RD", "stage=poll_error error={} dt_us={} {}", error, poll_dt.as_micros(), crate::trace::kbd());
+        }
+        // 100ms timeout is the healthy path. Anything much longer means
+        // crossterm's inner read-loop is spinning on incomplete CSI.
+        if poll_dt >= Duration::from_millis(150) {
+            crate::trace::set_reader("poll_slow");
+            crate::trace::pulse(
+                "RD",
+                "poll_slow",
+                format_args!(
+                    "dt_ms={} ready={:?}",
+                    poll_dt.as_millis(),
+                    poll_result.as_ref().ok().copied()
+                ),
+            );
         }
         match classify_poll(poll_result, tx.is_closed()) {
-            PollAction::Read => {}
+            PollAction::Read => {
+                crate::trace::set_reader("poll_ready");
+            }
             PollAction::Continue => {
+                crate::trace::set_reader("poll_timeout");
                 // Canonical/cooked-mode drift is not an I/O error: poll simply
                 // waits for a newline forever. Periodic health checks close that
                 // blind spot without touching a healthy terminal.
@@ -412,6 +448,8 @@ fn run(
                 continue;
             }
         };
+        crate::trace::note_reader_progress();
+        trace_raw_event(&ev);
 
         // Autorepeat dedup for modifier+Enter. iTerm2's current CSI u
         // implementation (3.5+/3.6) disambiguates Shift+Enter modifiers
@@ -486,6 +524,8 @@ fn run(
                     Ok(e) => e,
                     Err(_) => break,
                 };
+                crate::trace::note_reader_progress();
+                trace_raw_event(&nxt);
                 // Windows crossterm in raw mode emits Press + Release
                 // (and Repeat on autorepeat). Release/Repeat interleaved
                 // with the paste burst used to kill aggregation — the
@@ -654,6 +694,26 @@ fn run(
             return;
         }
     }
+}
+
+fn trace_raw_event(ev: &Event) {
+    let Event::Key(k) = ev else {
+        return;
+    };
+    if k.kind != KeyEventKind::Press {
+        return;
+    }
+    let seq = crate::trace::next_tty_key_seq();
+    let label = format!("{:?}", k.code);
+    crate::trace::note_tty_key(&label);
+    crate::tuix_trace!(
+        "RD",
+        "stage=tty_key seq={} code={:?} mods={:?} {}",
+        seq,
+        k.code,
+        k.modifiers,
+        crate::trace::kbd()
+    );
 }
 
 fn mouse_input_event(m: crossterm::event::MouseEvent) -> Option<InputEvent> {

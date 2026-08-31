@@ -8205,6 +8205,28 @@ fn handle_interactive_interrupt(
     }
 }
 
+/// Reclaim the TTY from the event-loop thread and unstick crossterm's Unix
+/// parser. The reader may already be spinning inside `event::poll` on echoed
+/// `CSI ? 2026 h` / `CSI ? 25 h` bytes, so a Recover command queued to that
+/// thread would never run. Termios reclaim happens here; the DA1 query is
+/// serialized through the render worker so it cannot interleave with a 2026
+/// envelope. The Recover command is still sent so a live reader traces it.
+fn reclaim_tty_input(ctx: &LoopCtx, renderer: &mut dyn Renderer, reason: &'static str) {
+    crate::tuix_trace!(
+        "TTY",
+        "stage=reclaim_from_loop reason={} tty_seq={} loop_seq={}",
+        reason,
+        crate::trace::tty_key_seq(),
+        crate::trace::loop_key_seq()
+    );
+    #[cfg(unix)]
+    crate::signal_restore::reclaim_input(reason);
+    renderer.unstick_input_parser();
+    if let Some(reader) = ctx.reader.as_ref() {
+        reader.recover_tty(reason);
+    }
+}
+
 /// Cancel an in-flight `!cmd` local shell if one is running. Returns true when
 /// a cancel was signalled (caller should not also treat this as quit).
 fn cancel_local_shell_if_running(ctx: &mut LoopCtx) -> bool {
@@ -8598,6 +8620,14 @@ pub async fn run_loop(mut ctx: LoopCtx, renderer: &mut dyn Renderer) -> Result<E
     config_poll_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     config_poll_tick.tick().await;
 
+    // Always-on 1s pulse. The 5ms deferred tick and 500ms config poll are
+    // paused during approval, so without this arm a frozen reader looks
+    // identical to a frozen event loop. `LOOP heartbeat` + `RD WATCHDOG`
+    // together pin which thread died.
+    let mut diag_heartbeat = tokio::time::interval(Duration::from_secs(1));
+    diag_heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    diag_heartbeat.tick().await;
+
     // Last emitted integer percent for the /upgrade download line.
     // Gate on change so we don't spam the renderer with a progress
     // line for every chunk (a 10 MB binary at 64 KiB chunks would be
@@ -8685,6 +8715,17 @@ pub async fn run_loop(mut ctx: LoopCtx, renderer: &mut dyn Renderer) -> Result<E
             maybe = ctx.input_rx.recv() => {
                 let Some(ev) = maybe else { break };
                 handle_input(&mut app, &mut ctx, renderer, ev)?;
+            }
+
+            _ = diag_heartbeat.tick() => {
+                crate::trace::set_phase(&format!("{:?}", app.state.phase));
+                crate::trace::set_prompt(input_priority);
+                crate::trace::set_buf_len(app.buf.text.len());
+                crate::tuix_trace!(
+                    "LOOP",
+                    "stage=heartbeat {}",
+                    crate::trace::kbd()
+                );
             }
 
             // ── OS SIGINT while a blocking prompt is up, or `!cmd` ──
@@ -9008,6 +9049,7 @@ pub async fn run_loop(mut ctx: LoopCtx, renderer: &mut dyn Renderer) -> Result<E
                 // Reclaim the TTY (a child may have stolen the foreground pgrp)
                 // and keep raw mode so the next keystroke stays in the TUI.
                 crate::signal_restore::recover_tty();
+                renderer.unstick_input_parser();
                 renderer.reset();
                 match app.state.phase {
                     UiPhase::Streaming => {
@@ -9023,6 +9065,7 @@ pub async fn run_loop(mut ctx: LoopCtx, renderer: &mut dyn Renderer) -> Result<E
             // ── Resume ──
             Some(()) = sigcont.recv() => {
                 crate::signal_restore::recover_tty();
+                renderer.unstick_input_parser();
                 renderer.reset();
                 app.state.on_resume();
                 match app.state.phase {
@@ -9054,6 +9097,17 @@ pub async fn run_loop(mut ctx: LoopCtx, renderer: &mut dyn Renderer) -> Result<E
             maybe = ctx.input_rx.recv() => {
                 let Some(ev) = maybe else { break };
                 handle_input(&mut app, &mut ctx, renderer, ev)?;
+            }
+
+            _ = diag_heartbeat.tick() => {
+                crate::trace::set_phase(&format!("{:?}", app.state.phase));
+                crate::trace::set_prompt(input_priority);
+                crate::trace::set_buf_len(app.buf.text.len());
+                crate::tuix_trace!(
+                    "LOOP",
+                    "stage=heartbeat {}",
+                    crate::trace::kbd()
+                );
             }
 
             _ = config_poll_tick.tick(), if !input_priority => {
@@ -11218,12 +11272,27 @@ fn handle_input(
     // `/codingplan` has extra warning/quota caches beyond the generic config.
     refresh_after_cross_process_codingplan_sync(ctx);
 
+    let loop_n = match &ev {
+        InputEvent::Key(k) if k.kind == crossterm::event::KeyEventKind::Press => {
+            crate::trace::note_loop_key(&format!("{:?}", k.code));
+            crate::trace::next_loop_key_seq()
+        }
+        _ => 0,
+    };
+    crate::trace::set_phase(&format!("{:?}", app.state.phase));
+    crate::trace::set_prompt(blocking_prompt_active(&app.state));
+    crate::trace::set_buf_len(app.buf.text.len());
+    let handler = blocking_prompt_phase(&app.state).unwrap_or(app.state.phase);
     crate::tuix_trace!(
         "IN",
-        "phase={:?} modal={} qlen={} ev={}",
+        "stage=loop_key n={} phase={:?} handler={:?} modal={} qlen={} buf_len={} tty_seq={} ev={}",
+        loop_n,
         app.state.phase,
+        handler,
         app.active_modal.is_some(),
         app.message_queue.len(),
+        app.buf.text.len(),
+        crate::trace::tty_key_seq(),
         match &ev {
             InputEvent::Paste(t) => format!("paste({})", t.len()),
             InputEvent::Eof => "eof".into(),
@@ -12625,7 +12694,7 @@ fn handle_idle_key(
     sync_recalled_attachments(&mut app.state, &app.buf, ctx.history.entries());
     crate::tuix_trace!(
         "KEY",
-        "idle result={} buf_len={} cursor={}",
+        "idle result={} buf_len={} cursor={} code={:?}",
         match &result {
             BufferResult::NoOp => "NoOp",
             BufferResult::Redraw => "Redraw",
@@ -12633,7 +12702,8 @@ fn handle_idle_key(
             BufferResult::Exit => "Exit",
         },
         app.buf.text.len(),
-        app.buf.cursor
+        app.buf.cursor,
+        code
     );
     // Any key that's not the Ctrl+C-on-empty-buffer exit path resets the
     // "press again to exit" arming — otherwise the prompt would stick around
@@ -14890,6 +14960,19 @@ fn handle_streaming_key(
     let action = classify(code, modifiers);
     let apply_result = app.buf.apply(action, ctx.history.entries(), &ctx.commands);
     sync_recalled_attachments(&mut app.state, &app.buf, ctx.history.entries());
+    crate::tuix_trace!(
+        "KEY",
+        "streaming result={} buf_len={} cursor={} code={:?}",
+        match &apply_result {
+            BufferResult::NoOp => "NoOp",
+            BufferResult::Redraw => "Redraw",
+            BufferResult::Commit(_) => "Commit",
+            BufferResult::Exit => "Exit",
+        },
+        app.buf.text.len(),
+        app.buf.cursor,
+        code
+    );
     match apply_result {
         BufferResult::NoOp => {}
         BufferResult::Redraw => {
@@ -16012,11 +16095,13 @@ fn handle_approval_key(
 ) -> Result<()> {
     crate::tuix_trace!(
         "APV",
-        "stage=key_handler_enter code={:?} modifiers={:?} panel={} selected={:?}",
+        "stage=key_handler_enter code={:?} modifiers={:?} panel={} selected={:?} tty_seq={} loop_seq={}",
         code,
         modifiers,
         app.state.approval_panel.is_some(),
-        app.state.approval_panel.as_ref().map(|panel| panel.selected)
+        app.state.approval_panel.as_ref().map(|panel| panel.selected),
+        crate::trace::tty_key_seq(),
+        crate::trace::loop_key_seq()
     );
     // Ctrl+C: first press denies the tool and arms exit confirmation;
     // second press within the window actually exits.
@@ -20904,6 +20989,14 @@ fn handle_agent_event(
         AgentEvent::TextDelta(text) => {
             // Count streamed output for the spinner's `↑ N tokens` liveness
             // indicator (before `text` is moved into the renderer).
+            if state.turn_output_chars == 0 {
+                crate::tuix_trace!(
+                    "MDL",
+                    "stage=first_text chars={} snippet={:?}",
+                    text.chars().count(),
+                    text.chars().take(40).collect::<String>()
+                );
+            }
             state.turn_output_chars += text.chars().count();
             render_assistant_text(text, state, think, renderer);
         }
@@ -20912,6 +21005,14 @@ fn handle_agent_event(
             // visibility — the blank-turn notice uses it to say "only reasoning,
             // press Ctrl+O" vs "no output at all".
             let first = !state.turn_saw_reasoning;
+            if first {
+                crate::tuix_trace!(
+                    "MDL",
+                    "stage=first_reasoning chars={} snippet={:?}",
+                    text.chars().count(),
+                    text.chars().take(40).collect::<String>()
+                );
+            }
             state.turn_saw_reasoning = true;
             // Reasoning counts as streamed output for the `↑ N tokens` indicator.
             state.turn_output_chars += text.chars().count();
@@ -20942,8 +21043,25 @@ fn handle_agent_event(
             }
         }
         AgentEvent::ToolCallStreaming {
-            name, arg_chars, ..
+            name,
+            hint,
+            arg_chars,
         } => {
+            // Bash arguments appear here BEFORE the tool runs. A freeze
+            // at "参数出来了键盘就死" shows up as bash=args with into_loop=false.
+            if name.eq_ignore_ascii_case("bash") {
+                crate::trace::set_bash("args");
+                crate::trace::set_phase(&format!("{:?}", state.phase));
+                crate::trace::pulse(
+                    "BASH",
+                    "args_streaming",
+                    format_args!(
+                        "arg_chars={} hint={:?}",
+                        arg_chars,
+                        hint.chars().take(60).collect::<String>()
+                    ),
+                );
+            }
             // A turn that spends minutes emitting one huge tool call (e.g. a
             // giant script) would otherwise show no motion; count its argument
             // stream so `↑ N tokens` keeps ticking and it doesn't look hung.
@@ -20955,15 +21073,16 @@ fn handle_agent_event(
             name,
             arguments,
         } => {
-            crate::tuix_trace!(
+            crate::trace::set_phase(&format!("{:?}", state.phase));
+            crate::trace::set_bash("before_exec");
+            crate::trace::pulse_now(
                 "TOOL",
-                "stage=started call_id={} name={} phase={:?}",
-                id,
-                name,
-                state.phase
+                "before_exec",
+                format_args!("call_id={} name={}", id, name),
             );
             if name.eq_ignore_ascii_case("bash") {
-                crate::tuix_trace!("BASH", "stage=started call_id={}", id);
+                crate::tuix_trace!("BASH", "stage=started call_id={} {}", id, crate::trace::kbd());
+                reclaim_tty_input(ctx, renderer, "bash_tool_started");
             }
             let detail = format_tool_detail(&name, &arguments);
             let detail = enrich_todo_detail(&name, &arguments, &detail, &state.todo_titles);
@@ -21095,6 +21214,17 @@ fn handle_agent_event(
             state.on_tool_call_started(&display);
         }
         AgentEvent::ToolOutputChunk { call_id, chunk } => {
+            crate::trace::set_bash("running");
+            crate::trace::pulse(
+                "TOOL",
+                "during_exec",
+                format_args!(
+                    "call_id={} bytes={} snippet={:?}",
+                    call_id,
+                    chunk.len(),
+                    chunk.chars().take(40).collect::<String>()
+                ),
+            );
             let tool_display = pending_tools.get(&call_id).map(|(d, ..)| d.as_str());
             if state
                 .active_subtasks
@@ -21141,14 +21271,17 @@ fn handle_agent_event(
             success,
             duration,
         } => {
-            crate::tuix_trace!(
+            crate::trace::set_bash("after_exec");
+            crate::trace::pulse_now(
                 "TOOL",
-                "stage=result_received call_id={} name={} success={} duration_ms={} phase={:?}",
-                call_id,
-                name,
-                success,
-                duration.as_millis(),
-                state.phase
+                "after_exec",
+                format_args!(
+                    "call_id={} name={} success={} duration_ms={}",
+                    call_id,
+                    name,
+                    success,
+                    duration.as_millis()
+                ),
             );
             if name.eq_ignore_ascii_case("bash") {
                 crate::tuix_stage!(
@@ -21158,9 +21291,7 @@ fn handle_agent_event(
                     success,
                     output.len()
                 );
-                if let Some(reader) = ctx.reader.as_ref() {
-                    reader.recover_tty("bash_tool_result");
-                }
+                reclaim_tty_input(ctx, renderer, "bash_tool_result");
             }
             // A result for this call arrived while an approval prompt is still up ⇒ the
             // approval was resolved WITHOUT the user answering (headless timeout fail-close,
@@ -21425,9 +21556,14 @@ fn handle_agent_event(
                 state.phase,
                 ctx.foreground_runtime_id.as_u64()
             );
-            if let Some(reader) = ctx.reader.as_ref() {
-                reader.recover_tty("approval_request");
-            }
+            crate::trace::set_bash("approval");
+            crate::trace::set_prompt(true);
+            crate::trace::pulse_now(
+                "APV",
+                "approval_request",
+                format_args!("tool={} call_id={}", tool_name, call.id),
+            );
+            reclaim_tty_input(ctx, renderer, "approval_request");
             let cache_key = get_approval_cache_key(&tool_name, &call.arguments);
             let already_allowed = {
                 let guard = ctx.allowed_always.lock().unwrap();
@@ -21579,10 +21715,18 @@ fn handle_agent_event(
             );
         }
         AgentEvent::PhaseChange(AgentPhase::Thinking) => {
+            crate::tuix_trace!(
+                "MDL",
+                "stage=thinking phase={:?} tty_seq={} loop_seq={}",
+                state.phase,
+                crate::trace::tty_key_seq(),
+                crate::trace::loop_key_seq()
+            );
             state.footer_persistence_warning = None;
             state.on_thinking();
         }
         AgentEvent::PhaseChange(AgentPhase::CallingTool(name)) => {
+            crate::tuix_trace!("TOOL", "stage=calling name={}", display_tool_name(&name));
             state.on_tool_call_streaming(&display_tool_name(&name));
         }
         AgentEvent::PhaseChange(_) => {}
@@ -21594,6 +21738,15 @@ fn handle_agent_event(
             stop_reason,
             snapshot,
         } => {
+            crate::tuix_trace!(
+                "MDL",
+                "stage=turn_complete duration_ms={} tokens={} tools={} tty_seq={} loop_seq={}",
+                duration.as_millis(),
+                total_tokens,
+                tool_call_count,
+                crate::trace::tty_key_seq(),
+                crate::trace::loop_key_seq()
+            );
             // Seal the assistant-reply buffer so `/copy` reads this completed
             // reply until the next turn's first delta starts a fresh one.
             state.response_finalized = true;

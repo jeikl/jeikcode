@@ -7256,6 +7256,15 @@ impl<W: Write + Send> Renderer for RetainedRenderer<W> {
                 status,
                 attachments,
             } => {
+                if let Some(approval) = status.approval.as_ref() {
+                    crate::tuix_trace!(
+                        "APV",
+                        "stage=render_payload_applied tool={} selected={} options={} cursor_policy=hidden",
+                        approval.tool,
+                        approval.selected,
+                        approval.options.len()
+                    );
+                }
                 // Universal safety net for the hidden-caret bug: reaching the
                 // idle input prompt means the turn is over, so no tool can still
                 // be in flight. Any termination path that failed to commit it
@@ -8572,6 +8581,9 @@ impl<W: Write + Send> Renderer for RetainedRenderer<W> {
     }
 
     fn suspend_for_external(&mut self) {
+        crate::tuix_trace!("FOC", "stage=external_suspend_begin owner=renderer");
+        #[cfg(unix)]
+        crate::signal_restore::trace_tty("external_suspend_before");
         // Disable mouse capture so the external child process (OAuth browser,
         // shell prompt, etc.) runs with a clean terminal state. Disable order:
         // SGR first, then button-event. Mouse mode must be off before
@@ -8618,9 +8630,15 @@ impl<W: Write + Send> Renderer for RetainedRenderer<W> {
         if self.caps.raw_mode {
             let _ = crossterm::terminal::disable_raw_mode();
         }
+        #[cfg(unix)]
+        crate::signal_restore::trace_tty("external_suspend_after");
+        crate::tuix_trace!("FOC", "stage=external_suspend_end owner=external");
     }
 
     fn resume_from_external(&mut self) {
+        crate::tuix_trace!("FOC", "stage=external_resume_begin owner=renderer");
+        #[cfg(unix)]
+        crate::signal_restore::trace_tty("external_resume_before");
         // A child (OAuth browser, `/shell`, git credential helper) may have
         // stolen the foreground pgrp. Reclaim it before flipping raw mode or
         // the next stdin read delivers SIGTTIN and bash prints `[Stopped]`.
@@ -8632,6 +8650,8 @@ impl<W: Write + Send> Renderer for RetainedRenderer<W> {
         if self.caps.raw_mode {
             let _ = crossterm::terminal::enable_raw_mode();
         }
+        #[cfg(unix)]
+        crate::signal_restore::trace_tty("external_resume_raw_enabled");
         if self.caps.bracketed_paste {
             let _ = execute!(self.out, EnableBracketedPaste);
         }
@@ -8709,6 +8729,7 @@ impl<W: Write + Send> Renderer for RetainedRenderer<W> {
         // suspend_for_external is still emitted so any subprocess that
         // somehow turned capture on during its run gets cleaned up here.
         let _ = self.out.flush();
+        crate::tuix_trace!("FOC", "stage=external_resume_end owner=tui");
     }
 
     fn take_pending_scroll_flush(&mut self) -> bool {

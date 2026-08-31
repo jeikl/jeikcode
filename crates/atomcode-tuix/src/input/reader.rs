@@ -148,6 +148,10 @@ pub enum ReaderCommand {
     /// Resume normal event dispatch. No ack — the next keystroke is
     /// the ack.
     Resume,
+    /// Re-check Linux foreground-pgrp + termios state on the reader thread.
+    /// Bash/tool completion and approval boundaries use this as a prompt
+    /// recovery signal; healthy terminals are left untouched.
+    Recover(&'static str),
     /// Exit the thread. Idempotent; dropping the sender also triggers exit.
     Shutdown,
 }
@@ -169,6 +173,7 @@ impl ReaderHandle {
     /// Returns early (Ok) if the reader already exited — callers should
     /// treat that as "nothing to pause" rather than an error.
     pub fn pause_blocking(&self) -> std::io::Result<()> {
+        crate::tuix_trace!("RD", "stage=pause_requested");
         let (ack_tx, ack_rx) = stdmpsc::channel();
         if self
             .cmd_tx
@@ -191,7 +196,17 @@ impl ReaderHandle {
     /// Resume from Pause. Fire-and-forget — the next keystroke the user
     /// presses becomes the implicit ack.
     pub fn resume(&self) {
+        crate::tuix_trace!("RD", "stage=resume_requested");
         let _ = self.cmd_tx.send((ReaderCommand::Resume, None));
+    }
+
+    /// Ask the stdin owner to validate/recover the TTY at a semantic boundary.
+    /// Fire-and-forget: the reader polls for commands at least every 100ms.
+    pub fn recover_tty(&self, reason: &'static str) {
+        crate::tuix_trace!("RD", "stage=recover_requested reason={}", reason);
+        let _ = self
+            .cmd_tx
+            .send((ReaderCommand::Recover(reason), None));
     }
 }
 
@@ -224,7 +239,15 @@ pub fn spawn(tx: mpsc::UnboundedSender<InputEvent>) -> ReaderHandle {
         atomcode_capabilities::notify::set_terminal_focus_state(Some(true));
     }
     let (cmd_tx, cmd_rx) = stdmpsc::channel::<(ReaderCommand, Option<stdmpsc::Sender<()>>)>();
-    let join = std::thread::spawn(move || run(tx, cmd_rx));
+    crate::tuix_trace!(
+        "RD",
+        "stage=spawn focus_tracking={}",
+        focus_tracking_enabled
+    );
+    let join = std::thread::Builder::new()
+        .name("tuix-input".to_string())
+        .spawn(move || run(tx, cmd_rx))
+        .expect("spawn TUI input reader");
     ReaderHandle {
         join: Some(join),
         cmd_tx,
@@ -288,6 +311,11 @@ fn run(
     cmd_rx: stdmpsc::Receiver<(ReaderCommand, Option<stdmpsc::Sender<()>>)>,
 ) {
     let mut paused = false;
+    #[cfg(unix)]
+    let mut last_tty_health_check = std::time::Instant::now();
+    crate::tuix_trace!("RD", "stage=reader_started");
+    #[cfg(unix)]
+    crate::signal_restore::recover_tty_if_needed("reader_started");
     // Last accepted (modifiers, timestamp) for a modifier+Enter Press.
     // Used to drop autorepeat duplicates that slip past the terminal
     // protocol's Repeat filtering.
@@ -300,6 +328,9 @@ fn run(
             match cmd_rx.recv() {
                 Ok((ReaderCommand::Resume, _)) => {
                     paused = false;
+                    crate::tuix_trace!("RD", "stage=resume_received");
+                    #[cfg(unix)]
+                    crate::signal_restore::recover_tty_if_needed("reader_resume");
                 }
                 Ok((ReaderCommand::Shutdown, _)) | Err(_) => return,
                 Ok((ReaderCommand::Pause, ack)) => {
@@ -307,6 +338,13 @@ fn run(
                     if let Some(ack) = ack {
                         let _ = ack.send(());
                     }
+                }
+                Ok((ReaderCommand::Recover(reason), _)) => {
+                    crate::tuix_trace!(
+                        "RD",
+                        "stage=recover_deferred paused=true reason={}",
+                        reason
+                    );
                 }
             }
             continue;
@@ -317,6 +355,7 @@ fn run(
         match cmd_rx.try_recv() {
             Ok((ReaderCommand::Pause, ack)) => {
                 paused = true;
+                crate::tuix_trace!("RD", "stage=pause_received");
                 if let Some(ack) = ack {
                     let _ = ack.send(());
                 }
@@ -325,30 +364,50 @@ fn run(
             Ok((ReaderCommand::Resume, _)) => {
                 // Already running — ignore.
             }
+            Ok((ReaderCommand::Recover(reason), _)) => {
+                crate::tuix_trace!("RD", "stage=recover_received reason={}", reason);
+                #[cfg(unix)]
+                crate::signal_restore::recover_tty_if_needed(reason);
+            }
             Ok((ReaderCommand::Shutdown, _)) => return,
             Err(TryRecvError::Disconnected) => return,
             Err(TryRecvError::Empty) => {}
         }
 
-        match classify_poll(event::poll(Duration::from_millis(100)), tx.is_closed()) {
+        let poll_result = event::poll(Duration::from_millis(100));
+        if let Err(error) = &poll_result {
+            crate::tuix_trace!("RD", "stage=poll_error error={}", error);
+        }
+        match classify_poll(poll_result, tx.is_closed()) {
             PollAction::Read => {}
-            PollAction::Continue => continue,
+            PollAction::Continue => {
+                // Canonical/cooked-mode drift is not an I/O error: poll simply
+                // waits for a newline forever. Periodic health checks close that
+                // blind spot without touching a healthy terminal.
+                #[cfg(unix)]
+                if last_tty_health_check.elapsed() >= Duration::from_secs(1) {
+                    last_tty_health_check = std::time::Instant::now();
+                    crate::signal_restore::recover_tty_if_needed("poll_timeout");
+                }
+                continue;
+            }
             PollAction::Exit => return,
             PollAction::Sleep => {
                 // Unix: EIO here usually means we lost the foreground pgrp
                 // (SIGTTIN ignored → read returns EIO). Reclaim before retrying
                 // or we spin forever while bash shows `[Stopped]`.
                 #[cfg(unix)]
-                crate::signal_restore::recover_tty();
+                crate::signal_restore::recover_tty_if_needed("poll_error");
                 std::thread::sleep(Duration::from_millis(50));
                 continue;
             }
         }
         let ev = match event::read() {
             Ok(e) => e,
-            Err(_) => {
+            Err(error) => {
+                crate::tuix_trace!("RD", "stage=read_error error={}", error);
                 #[cfg(unix)]
-                crate::signal_restore::recover_tty();
+                crate::signal_restore::recover_tty_if_needed("read_error");
                 std::thread::sleep(Duration::from_millis(50));
                 continue;
             }
@@ -495,10 +554,18 @@ fn run(
                         None => continue,
                     },
                     Event::FocusGained => {
+                        crate::tuix_trace!(
+                            "FOC",
+                            "stage=terminal_focus gained=true source=burst_trailing"
+                        );
                         atomcode_capabilities::notify::set_terminal_focus_state(Some(true));
                         continue;
                     }
                     Event::FocusLost => {
+                        crate::tuix_trace!(
+                            "FOC",
+                            "stage=terminal_focus gained=false source=burst_trailing"
+                        );
                         atomcode_capabilities::notify::set_terminal_focus_state(Some(false));
                         continue;
                     }
@@ -573,10 +640,12 @@ fn run(
                 None => continue,
             },
             Event::FocusGained => {
+                crate::tuix_trace!("FOC", "stage=terminal_focus gained=true source=reader");
                 atomcode_capabilities::notify::set_terminal_focus_state(Some(true));
                 continue;
             }
             Event::FocusLost => {
+                crate::tuix_trace!("FOC", "stage=terminal_focus gained=false source=reader");
                 atomcode_capabilities::notify::set_terminal_focus_state(Some(false));
                 continue;
             }
@@ -624,10 +693,18 @@ fn to_input_event(ev: Event) -> Option<InputEvent> {
         Event::Resize(w, h) => Some(InputEvent::Resize(w, h)),
         Event::Mouse(m) => mouse_input_event(m),
         Event::FocusGained => {
+            crate::tuix_trace!(
+                "FOC",
+                "stage=terminal_focus gained=true source=coalesced_event"
+            );
             atomcode_capabilities::notify::set_terminal_focus_state(Some(true));
             None
         }
         Event::FocusLost => {
+            crate::tuix_trace!(
+                "FOC",
+                "stage=terminal_focus gained=false source=coalesced_event"
+            );
             atomcode_capabilities::notify::set_terminal_focus_state(Some(false));
             None
         }

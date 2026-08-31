@@ -257,6 +257,12 @@ impl BackgroundSlots {
                 true
             }
             AgentEvent::ApprovalNeeded { snapshot, .. } => {
+                crate::tuix_trace!(
+                    "BG",
+                    "stage=background_approval_ui_buffered slot={} runtime={} selected_runtime_unchanged=true",
+                    slot,
+                    bg.runtime_id.as_u64()
+                );
                 // Persist mid-turn messages so /bg <N> can replay the
                 // conversation even while the turn is still in progress.
                 if !snapshot.messages.is_empty() {
@@ -975,6 +981,14 @@ impl BgRuntimeManager {
             }
             RuntimeEventPayload::Native(CodingRuntimeEvent::Request(request)) => {
                 if let Some(bg) = self.backgrounds.slot_mut_for_runtime_id(runtime_id) {
+                    crate::tuix_trace!(
+                        "BG",
+                        "stage=background_request_parked runtime={} session={} request_id={} kind={} focus_changed=false",
+                        runtime_id.as_u64(),
+                        bg.session.id,
+                        request.id,
+                        request.kind
+                    );
                     if let Some(snapshot) = request.snapshot.as_deref() {
                         super::apply_session_snapshot(&mut bg.session, snapshot.clone());
                         bg.summary = session_summary(&bg.session);

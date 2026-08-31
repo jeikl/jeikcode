@@ -259,8 +259,17 @@ fn adopt_session_as_view(
     state: &mut crate::state::UiState,
     session: Session,
 ) -> Result<(), String> {
+    crate::tuix_trace!(
+        "FOC",
+        "stage=session_switch_begin from_session={} to_session={} from_runtime={} phase={:?}",
+        ctx.current_session.id,
+        session.id,
+        ctx.foreground_runtime_id.as_u64(),
+        state.phase
+    );
     clear_view_transition_flags(ctx);
     if ctx.current_session.id == session.id {
+        crate::tuix_trace!("FOC", "stage=session_switch_noop reason=already_selected");
         return Ok(());
     }
     sync_bg_foreground(ctx);
@@ -284,6 +293,14 @@ fn adopt_session_as_view(
         ctx.live_binding = None;
         ctx.pending_runtime_request_id = None;
         sync_session_runtime_registry(ctx, state);
+        crate::tuix_trace!(
+            "FOC",
+            "stage=session_switch_end mode=existing_runner session={} runtime={} replay_events={} phase={:?}",
+            ctx.current_session.id,
+            ctx.foreground_runtime_id.as_u64(),
+            ctx.foreground_replay_events.len(),
+            state.phase
+        );
         return Ok(());
     }
     let working_dir = ctx.working_dir.clone();
@@ -315,6 +332,13 @@ fn adopt_session_as_view(
                 other => format!("{other:?}"),
             })?;
         bind_spawned_foreground(ctx, state, runtime_id, endpoint, session);
+        crate::tuix_trace!(
+            "FOC",
+            "stage=session_switch_end mode=spawn_and_park session={} runtime={} phase={:?}",
+            ctx.current_session.id,
+            ctx.foreground_runtime_id.as_u64(),
+            state.phase
+        );
         return Ok(());
     }
     // Empty idle view: shut down disposable home runner and open the target.
@@ -329,6 +353,13 @@ fn adopt_session_as_view(
         working_dir,
     );
     bind_spawned_foreground(ctx, state, runtime_id, endpoint, session);
+    crate::tuix_trace!(
+        "FOC",
+        "stage=session_switch_end mode=replace_empty session={} runtime={} phase={:?}",
+        ctx.current_session.id,
+        ctx.foreground_runtime_id.as_u64(),
+        state.phase
+    );
     Ok(())
 }
 

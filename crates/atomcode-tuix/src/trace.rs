@@ -15,7 +15,7 @@
 //
 // Format: `+{elapsed_us} [{CAT}] {tid} {message}`
 //   elapsed_us — microseconds since the first log event in this process
-//   CAT        — 2-4 char category (IN, KEY, PH, THR, REN, RD, QUE)
+//   CAT        — 2-4 char category (IN, APV, TTY, FOC, BASH, REN, RD, BG)
 //   tid        — short thread name or id (so `event_loop` vs `tuix-render`
 //                is visible at a glance)
 
@@ -26,6 +26,7 @@ use std::time::Instant;
 
 static SINK: OnceLock<Option<Mutex<File>>> = OnceLock::new();
 static ORIGIN: OnceLock<Instant> = OnceLock::new();
+static STAGE_DELAY: OnceLock<std::time::Duration> = OnceLock::new();
 
 pub fn enabled() -> bool {
     sink().is_some()
@@ -83,6 +84,32 @@ pub fn write_line(cat: &str, args: std::fmt::Arguments<'_>) {
     }
 }
 
+/// Optional diagnostic pause after a coarse-grained semantic checkpoint.
+///
+/// `ATOMCODE_TUIX_STAGE_DELAY_MS=3000` is intentionally separate from normal
+/// tracing: per-key/per-frame trace points must never sleep. Only explicit
+/// `tuix_stage!` checkpoints call this function. The delay is capped so a typo
+/// cannot leave the TUI apparently wedged for minutes.
+pub fn stage_delay(cat: &str) {
+    let delay = *STAGE_DELAY.get_or_init(|| {
+        let millis = std::env::var("ATOMCODE_TUIX_STAGE_DELAY_MS")
+            .ok()
+            .and_then(|value| value.parse::<u64>().ok())
+            .unwrap_or(0)
+            .min(30_000);
+        std::time::Duration::from_millis(millis)
+    });
+    if delay.is_zero() {
+        return;
+    }
+    write_line(
+        cat,
+        format_args!("stage=diagnostic_delay_begin delay_ms={}", delay.as_millis()),
+    );
+    std::thread::sleep(delay);
+    write_line(cat, format_args!("stage=diagnostic_delay_end"));
+}
+
 /// `tuix_trace!("CAT", "fmt {}", args)` — compiles to a cheap `enabled()`
 /// check when the env var is unset. Use short 2-4 char categories so
 /// log lines remain grep-able by column:
@@ -93,11 +120,30 @@ pub fn write_line(cat: &str, args: std::fmt::Arguments<'_>) {
 ///   THR — InputThrottle paint/park decision
 ///   REN — render worker command processed
 ///   RD  — raw reader thread event
+///   APV — approval lifecycle / key routing / response ownership
+///   TTY — foreground process-group and termios health / recovery
+///   FOC — terminal focus or external terminal ownership changes
+///   BASH — Bash tool start/completion boundaries
+///   BG  — background-session request parking and replay
 #[macro_export]
 macro_rules! tuix_trace {
     ($cat:expr, $($arg:tt)*) => {{
         if $crate::trace::enabled() {
             $crate::trace::write_line($cat, format_args!($($arg)*));
+        }
+    }};
+}
+
+/// Coarse-grained diagnostic checkpoint. It behaves exactly like
+/// [`tuix_trace!`] unless `ATOMCODE_TUIX_STAGE_DELAY_MS` is set; in that opt-in
+/// mode the calling thread pauses after the line is persisted so a tester can
+/// identify the exact Bash/approval/focus transition where input disappears.
+#[macro_export]
+macro_rules! tuix_stage {
+    ($cat:expr, $($arg:tt)*) => {{
+        if $crate::trace::enabled() {
+            $crate::trace::write_line($cat, format_args!($($arg)*));
+            $crate::trace::stage_delay($cat);
         }
     }};
 }

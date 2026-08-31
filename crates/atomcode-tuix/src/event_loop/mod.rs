@@ -8108,12 +8108,21 @@ fn redraw_interactive_footer(
     ctx: &LoopCtx,
     renderer: &mut dyn Renderer,
 ) {
+    crate::tuix_trace!(
+        "APV",
+        "stage=footer_redraw_begin phase={:?} approval={} user_input={} round_cap={}",
+        state.phase,
+        state.approval_panel.is_some(),
+        state.user_input_panel.is_some() || state.user_input_batch.is_some(),
+        state.round_cap_panel.is_some()
+    );
     redraw_idle_plain(buf, state, ctx, renderer);
     // This is an unconditional trailing-edge paint, not the coalesced 5ms
     // heartbeat. It must sit *after* the InputPrompt in the render-worker FIFO
     // or an older queued flush can paint the pre-approval frame and strand the
     // new card forever once interactive mode pauses periodic repainting.
     renderer.flush_interactive();
+    crate::tuix_trace!("APV", "stage=footer_force_flush_enqueued");
 }
 
 /// A capturing overlay owns keys only when it must (password mid-turn).
@@ -11624,7 +11633,15 @@ fn handle_input(
             match blocking_prompt_phase(&app.state).unwrap_or(app.state.phase) {
                 UiPhase::Idle => handle_idle_key(app, ctx, renderer, code, modifiers)?,
                 UiPhase::Streaming => handle_streaming_key(app, ctx, renderer, code, modifiers)?,
-                UiPhase::Approval => handle_approval_key(app, ctx, renderer, code, modifiers)?,
+                UiPhase::Approval => {
+                    crate::tuix_trace!(
+                        "APV",
+                        "stage=key_routed code={:?} modifiers={:?}",
+                        code,
+                        modifiers
+                    );
+                    handle_approval_key(app, ctx, renderer, code, modifiers)?
+                }
                 UiPhase::UserInput => handle_user_input_key(app, ctx, renderer, code, modifiers)?,
                 UiPhase::RoundCap => handle_round_cap_key(app, ctx, renderer, code, modifiers)?,
                 UiPhase::Suspended => {}
@@ -15197,6 +15214,13 @@ enum ApprovalChoice {
 
 fn deliver_approval(ctx: &mut LoopCtx, choice: ApprovalChoice) {
     if let Some(id) = ctx.pending_runtime_request_id.take() {
+        crate::tuix_trace!(
+            "APV",
+            "stage=response_send_begin request_id={} choice={:?} live_binding={}",
+            id,
+            choice,
+            ctx.live_binding.is_some()
+        );
         use atomcode_capabilities::tools::ApprovalResponse;
         let response = match choice {
             ApprovalChoice::Allow => ApprovalResponse::allow(),
@@ -15216,6 +15240,13 @@ fn deliver_approval(ctx: &mut LoopCtx, choice: ApprovalChoice) {
                 crate::tuix_trace!("LIVE", "approval response failed: {error:?}");
             }
         }
+        crate::tuix_trace!("APV", "stage=response_send_end request_id={}", id);
+    } else {
+        crate::tuix_trace!(
+            "APV",
+            "stage=response_dropped reason=no_pending_request choice={:?}",
+            choice
+        );
     }
 }
 
@@ -15979,6 +16010,14 @@ fn handle_approval_key(
     code: KeyCode,
     modifiers: crossterm::event::KeyModifiers,
 ) -> Result<()> {
+    crate::tuix_trace!(
+        "APV",
+        "stage=key_handler_enter code={:?} modifiers={:?} panel={} selected={:?}",
+        code,
+        modifiers,
+        app.state.approval_panel.is_some(),
+        app.state.approval_panel.as_ref().map(|panel| panel.selected)
+    );
     // Ctrl+C: first press denies the tool and arms exit confirmation;
     // second press within the window actually exits.
     if is_ctrl_letter(code, modifiers, 'c') {
@@ -16011,6 +16050,11 @@ fn handle_approval_key(
         KeyCode::Up | KeyCode::Char('k') | KeyCode::Char('K') => {
             if let Some(p) = app.state.approval_panel.as_mut() {
                 p.move_up();
+                crate::tuix_trace!(
+                    "APV",
+                    "stage=selection_changed direction=up selected={}",
+                    p.selected
+                );
             }
             redraw_interactive_footer(&app.buf, &mut app.state, ctx, renderer);
             return Ok(());
@@ -16018,6 +16062,11 @@ fn handle_approval_key(
         KeyCode::Down | KeyCode::Char('j') | KeyCode::Char('J') => {
             if let Some(p) = app.state.approval_panel.as_mut() {
                 p.move_down();
+                crate::tuix_trace!(
+                    "APV",
+                    "stage=selection_changed direction=down selected={}",
+                    p.selected
+                );
             }
             redraw_interactive_footer(&app.buf, &mut app.state, ctx, renderer);
             return Ok(());
@@ -16052,6 +16101,12 @@ fn handle_approval_key(
         return Ok(());
     };
     let choice = approval_kind_to_choice(kind);
+    crate::tuix_trace!(
+        "APV",
+        "stage=decision_resolved kind={:?} choice={:?}",
+        kind,
+        choice
+    );
     if choice == ApprovalChoice::AllowAlways {
         if let Some(p) = &app.state.approval_panel {
             if !p.cache_key.is_empty() {
@@ -16061,6 +16116,7 @@ fn handle_approval_key(
         }
     }
     deliver_approval(ctx, choice);
+    crate::tuix_trace!("APV", "stage=response_dispatched choice={:?}", choice);
     app.state.on_approval_resolved(); // clears approval_panel + phase → Streaming
                                       // Repaint the footer NOW so the approval panel disappears immediately, the
                                       // same way the `ApprovalNeeded` handler and the Up/Down arms redraw. Without
@@ -18693,7 +18749,19 @@ fn handle_runtime_event(
         ),
         bg_runtime::RuntimeEventPayload::Native(event) => {
             if let CodingRuntimeEvent::Request(request) = &event {
+                crate::tuix_trace!(
+                    "REQ",
+                    "stage=foreground_request_received request_id={} kind={} runtime={}",
+                    request.id,
+                    request.kind,
+                    ctx.foreground_runtime_id.as_u64()
+                );
                 ctx.pending_runtime_request_id = Some(request.id);
+                crate::tuix_trace!(
+                    "REQ",
+                    "stage=foreground_request_bound request_id={}",
+                    request.id
+                );
             }
             match event {
                 CodingRuntimeEvent::Agent(event) => {
@@ -20887,6 +20955,16 @@ fn handle_agent_event(
             name,
             arguments,
         } => {
+            crate::tuix_trace!(
+                "TOOL",
+                "stage=started call_id={} name={} phase={:?}",
+                id,
+                name,
+                state.phase
+            );
+            if name.eq_ignore_ascii_case("bash") {
+                crate::tuix_trace!("BASH", "stage=started call_id={}", id);
+            }
             let detail = format_tool_detail(&name, &arguments);
             let detail = enrich_todo_detail(&name, &arguments, &detail, &state.todo_titles);
             let display = display_tool_name(&name);
@@ -21063,6 +21141,27 @@ fn handle_agent_event(
             success,
             duration,
         } => {
+            crate::tuix_trace!(
+                "TOOL",
+                "stage=result_received call_id={} name={} success={} duration_ms={} phase={:?}",
+                call_id,
+                name,
+                success,
+                duration.as_millis(),
+                state.phase
+            );
+            if name.eq_ignore_ascii_case("bash") {
+                crate::tuix_stage!(
+                    "BASH",
+                    "stage=finished call_id={} success={} output_bytes={}",
+                    call_id,
+                    success,
+                    output.len()
+                );
+                if let Some(reader) = ctx.reader.as_ref() {
+                    reader.recover_tty("bash_tool_result");
+                }
+            }
             // A result for this call arrived while an approval prompt is still up ⇒ the
             // approval was resolved WITHOUT the user answering (headless timeout fail-close,
             // a displaced second approval, or a cancel). Retract the orphaned "Waiting for
@@ -21318,12 +21417,28 @@ fn handle_agent_event(
             snapshot,
             ..
         } => {
+            crate::tuix_stage!(
+                "APV",
+                "stage=1_request_received call_id={} tool={} phase={:?} foreground_runtime={}",
+                call.id,
+                tool_name,
+                state.phase,
+                ctx.foreground_runtime_id.as_u64()
+            );
+            if let Some(reader) = ctx.reader.as_ref() {
+                reader.recover_tty("approval_request");
+            }
             let cache_key = get_approval_cache_key(&tool_name, &call.arguments);
             let already_allowed = {
                 let guard = ctx.allowed_always.lock().unwrap();
                 guard.contains(&cache_key)
             };
             if already_allowed {
+                crate::tuix_trace!(
+                    "APV",
+                    "stage=auto_resolved reason=allow_always_cache call_id={}",
+                    call.id
+                );
                 deliver_approval(ctx, ApprovalChoice::AllowAlways);
                 return;
             }
@@ -21331,6 +21446,11 @@ fn handle_agent_event(
             // skip the prompt. The response goes through the hub when shared, so
             // all views observe the same pending request lifecycle.
             if state.agent_mode.is_auto() {
+                crate::tuix_trace!(
+                    "APV",
+                    "stage=auto_resolved reason=bypass_mode call_id={}",
+                    call.id
+                );
                 deliver_approval(ctx, bypass_approval_choice());
                 return;
             }
@@ -21345,6 +21465,12 @@ fn handle_agent_event(
             // Emit the `▸ Tool(detail)` row BEFORE the approval prompt
             // so the user sees what they're approving.
             let display = display_tool_name(&tool_name);
+            crate::tuix_stage!(
+                "APV",
+                "stage=2_prepare_tool_row call_id={} display={}",
+                call.id,
+                display
+            );
             // Prefer the disambiguated detail from `pending_tools` (populated
             // by ToolBatchStarted for parallel batches) over the raw basename
             // from format_tool_detail. Without this, parallel batch approvals
@@ -21402,10 +21528,25 @@ fn handle_agent_event(
                 selected: 0,
                 cache_key,
             });
+            crate::tuix_stage!(
+                "APV",
+                "stage=3_panel_installed call_id={} options={} selected=0",
+                call.id,
+                state
+                    .approval_panel
+                    .as_ref()
+                    .map_or(0, |panel| panel.options.len())
+            );
             // `display` is the already-PascalCased name (e.g. "Bash",
             // "ReadFile"); on_approval_needed stashes the current
             // "Running X" label so on_approval_resolved can restore it.
             state.on_approval_needed(&display);
+            crate::tuix_stage!(
+                "APV",
+                "stage=4_phase_owned call_id={} phase={:?}",
+                call.id,
+                state.phase
+            );
             // Redraw the footer (input box) so the user can type
             // Y/A/N in response. Without this, a prior
             // on_approval_resolved() transition to Streaming may
@@ -21417,6 +21558,11 @@ fn handle_agent_event(
             // stale/misleading in the approval phase (mirrors the
             // /bg resume path).
             redraw_interactive_footer(buf, state, ctx, renderer);
+            crate::tuix_stage!(
+                "APV",
+                "stage=5_card_render_enqueued call_id={}",
+                call.id
+            );
             // Queue OSC/BEL notification I/O after the card paint on the render
             // worker. A backpressured Linux PTY must not block the event loop
             // before it can receive Y/N/Ctrl+C.
@@ -21425,6 +21571,11 @@ fn handle_agent_event(
                 display_tool_name(&tool_name),
                 format_tool_detail(&tool_name, &call.arguments),
                 ctx.working_dir.clone(),
+            );
+            crate::tuix_stage!(
+                "APV",
+                "stage=6_notification_enqueued call_id={}",
+                call.id
             );
         }
         AgentEvent::PhaseChange(AgentPhase::Thinking) => {

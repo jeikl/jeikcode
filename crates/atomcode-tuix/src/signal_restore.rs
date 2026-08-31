@@ -139,6 +139,91 @@ pub(crate) fn recover_tty() {
     let _ = crossterm::terminal::enable_raw_mode();
 }
 
+/// Compact Linux TTY health snapshot used by the opt-in TUI diagnostic log.
+///
+/// A lost foreground pgrp normally makes `read(2)` fail with EIO, but a lost
+/// raw mode is more treacherous: `poll(2)` keeps returning `Ok(false)` while
+/// canonical mode waits for a whole line. The old reader only recovered on an
+/// error, so arrows/Enter appeared dead forever without producing anything we
+/// could diagnose. Keep the test here beside the code that owns recovery.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct TtyHealth {
+    pub is_tty: bool,
+    pub process_group: i32,
+    pub foreground_group: i32,
+    pub canonical: bool,
+    pub echo: bool,
+    pub signals: bool,
+}
+
+impl TtyHealth {
+    #[inline]
+    pub(crate) fn needs_recovery(self) -> bool {
+        self.is_tty
+            && (self.foreground_group != self.process_group || self.canonical || self.echo)
+    }
+}
+
+pub(crate) fn tty_health() -> TtyHealth {
+    unsafe {
+        let is_tty = libc::isatty(libc::STDIN_FILENO) != 0;
+        let process_group = libc::getpgrp();
+        let foreground_group = if is_tty {
+            libc::tcgetpgrp(libc::STDIN_FILENO)
+        } else {
+            -1
+        };
+        let mut termios: libc::termios = core::mem::zeroed();
+        let have_termios =
+            is_tty && libc::tcgetattr(libc::STDIN_FILENO, &mut termios as *mut _) == 0;
+        TtyHealth {
+            is_tty,
+            process_group,
+            foreground_group,
+            canonical: have_termios && (termios.c_lflag & libc::ICANON) != 0,
+            echo: have_termios && (termios.c_lflag & libc::ECHO) != 0,
+            signals: have_termios && (termios.c_lflag & libc::ISIG) != 0,
+        }
+    }
+}
+
+pub(crate) fn trace_tty(stage: &str) -> TtyHealth {
+    let health = tty_health();
+    crate::tuix_trace!(
+        "TTY",
+        "stage={} tty={} pgrp={} fg_pgrp={} canonical={} echo={} isig={} unhealthy={}",
+        stage,
+        health.is_tty,
+        health.process_group,
+        health.foreground_group,
+        health.canonical,
+        health.echo,
+        health.signals,
+        health.needs_recovery()
+    );
+    health
+}
+
+/// Recover only when the terminal is observably unhealthy. Safe to call from
+/// the sole stdin-reader thread on a quiet poll timeout or an explicit
+/// Bash/approval boundary; healthy calls do not rewrite termios.
+pub(crate) fn recover_tty_if_needed(stage: &str) -> bool {
+    let before = trace_tty(stage);
+    if !before.needs_recovery() {
+        return false;
+    }
+    crate::tuix_trace!("TTY", "stage={} action=recover_begin", stage);
+    recover_tty();
+    let after = trace_tty("recover_done");
+    crate::tuix_trace!(
+        "TTY",
+        "stage={} action=recover_end healthy={}",
+        stage,
+        !after.needs_recovery()
+    );
+    true
+}
+
 /// Capture the cooked `termios` (before raw mode flips it) and install the
 /// terminal-restore handler for SIGTERM / SIGINT / SIGHUP. Idempotent — only the
 /// first call takes effect. Call this immediately before `enable_raw_mode()`.
@@ -176,7 +261,43 @@ pub(crate) fn arm() {
 
 #[cfg(test)]
 mod tests {
-    use super::restore_writes;
+    use super::{restore_writes, TtyHealth};
+
+    #[test]
+    fn tty_health_recovers_foreground_or_raw_mode_drift() {
+        let healthy = TtyHealth {
+            is_tty: true,
+            process_group: 42,
+            foreground_group: 42,
+            canonical: false,
+            echo: false,
+            signals: false,
+        };
+        assert!(!healthy.needs_recovery());
+        assert!(TtyHealth {
+            canonical: true,
+            ..healthy
+        }
+        .needs_recovery());
+        assert!(TtyHealth {
+            foreground_group: 99,
+            ..healthy
+        }
+        .needs_recovery());
+        assert!(TtyHealth {
+            echo: true,
+            ..healthy
+        }
+        .needs_recovery());
+        assert!(!TtyHealth {
+            is_tty: false,
+            canonical: true,
+            echo: true,
+            foreground_group: -1,
+            ..healthy
+        }
+        .needs_recovery());
+    }
 
     /// The whole point over the panic sequence: a signal-kill must ALSO disable
     /// bracketed paste, or the shell wraps every paste in `200~`/`201~`. And it

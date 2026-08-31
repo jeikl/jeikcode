@@ -53,6 +53,10 @@ enum RenderCmd {
     Line(UiLine),
     Flush,
     FlushDeferred,
+    /// Uncoalesced prompt-boundary paint. Distinct from the periodic command
+    /// so diagnostics can prove the approval card reached the terminal and so
+    /// it does not mutate the heartbeat's coalescing flag.
+    FlushInteractive,
     /// Terminal resize — fire-and-forget, the worker updates its
     /// internal DECSTBM region and repaints the footer.
     Resize(u16, u16),
@@ -178,6 +182,17 @@ impl TaskRenderer {
 
 impl Renderer for TaskRenderer {
     fn render(&mut self, line: UiLine) {
+        if let UiLine::InputPrompt { status, .. } = &line {
+            if let Some(approval) = status.approval.as_ref() {
+                crate::tuix_trace!(
+                    "APV",
+                    "stage=render_payload_enqueued tool={} options={} selected={}",
+                    approval.tool,
+                    approval.options.len(),
+                    approval.selected
+                );
+            }
+        }
         let _ = self.cmd_tx.send(RenderCmd::Line(line));
     }
 
@@ -265,7 +280,8 @@ impl Renderer for TaskRenderer {
         // merged with it, that old command would paint the pre-approval frame,
         // then the prompt payload would update retained state with no later
         // heartbeat (interactive phases pause it) to make the card visible.
-        let _ = self.cmd_tx.send(RenderCmd::FlushDeferred);
+        crate::tuix_trace!("APV", "stage=force_flush_command_enqueued");
+        let _ = self.cmd_tx.send(RenderCmd::FlushInteractive);
     }
 
     fn on_resize(&mut self, cols: u16, rows: u16) {
@@ -361,6 +377,16 @@ fn run_worker(
                     crate::tuix_trace!("REN", "FlushDeferred deferred={}µs", d.as_micros());
                 }
             }
+            RenderCmd::FlushInteractive => {
+                crate::tuix_stage!("APV", "stage=7_force_flush_worker_begin");
+                let t0 = Instant::now();
+                inner.flush_deferred();
+                crate::tuix_stage!(
+                    "APV",
+                    "stage=8_force_flush_worker_end duration_us={}",
+                    t0.elapsed().as_micros()
+                );
+            }
             RenderCmd::Resize(mut cols, mut rows) => {
                 // Rebuild only after the terminal has stopped reporting
                 // intermediate geometries. Besides avoiding redundant work,
@@ -431,7 +457,9 @@ fn run_worker(
                 detail,
                 working_dir,
             } => {
+                crate::tuix_trace!("APV", "stage=notification_worker_begin");
                 inner.notify_approval(config, tool_name, detail, working_dir);
+                crate::tuix_trace!("APV", "stage=notification_worker_end");
             }
             RenderCmd::BeginSync => {
                 inner.begin_sync();

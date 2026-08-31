@@ -64,7 +64,7 @@ fn review_tool_names(no_web: bool, mount_graph: bool) -> Vec<&'static str> {
     if !no_web {
         names.push("web_search");
     }
-    // Code-graph tools (find_references/trace_callers/blast_radius/read_symbol/…) build an
+    // Code-graph tools (repo_map/code_explore) build an
     // O(repo) tree-sitter call graph — only mount them when the repo is small enough to index
     // cheaply (see `should_mount_graph`). On a huge repo they blow the wall-clock budget for
     // ~zero quality gain (measured on the 85k-file kernel: 1080s CPU → 3.94s with them off).
@@ -690,7 +690,7 @@ mod persona_compose_tests {
         let c = cfg().with_persona_append("## Domain Rules\n- no fmt nits");
         let p = compose_persona(&c);
         assert!(
-            p.starts_with("You are AtomCode Reviewer"),
+            p.starts_with("You are JeikCode Reviewer"),
             "built-in stays as the base"
         );
         assert!(

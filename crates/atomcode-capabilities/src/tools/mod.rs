@@ -35,11 +35,6 @@ const DEFAULT_CHILD_MAX_ROUNDS: u32 = 200;
 
 pub mod approval;
 pub mod ast_grep;
-/// AtomGit REST tools (repo / pr / issue). Opt-in `atomgit` feature.
-#[cfg(feature = "atomgit")]
-pub mod atomgit;
-#[cfg(feature = "atomgit")]
-pub mod atomgit_bash_gate;
 pub mod bash;
 pub mod bash_workspace_gate;
 pub mod cd;
@@ -85,15 +80,9 @@ pub use approval::{
     ApprovalResponse, InMemoryPermissionStore, PermissionDecision, PermissionStore, APPROVAL_KIND,
 };
 pub use ast_grep::AstGrepTool;
-#[cfg(feature = "atomgit")]
-pub use atomgit::{
-    atomgit_tool_names, register_atomgit_tools, AtomgitIssueTool, AtomgitPrTool, AtomgitRepoTool,
-};
-#[cfg(feature = "atomgit")]
-pub use atomgit_bash_gate::AtomgitBashGate;
 pub use bash::{
-    bash_invocations, normalize_command_for_grant, run_shell, BashInvocation, BashTimeoutAddTool,
-    BashTool, ShellExit, ShellOutcome,
+    bash_invocations, normalize_command_for_grant, run_shell, BashInvocation, BashTool, ShellExit,
+    ShellOutcome,
 };
 pub use bash_workspace_gate::BashWorkspaceGate;
 pub use cd::ChangeDirTool;
@@ -143,7 +132,6 @@ pub fn coding_tool_names() -> &'static [&'static str] {
             "list_directory",
             "open_file",
             "bash",
-            "bash_timeout_add",
             "grep",
             "glob",
             "search_replace",
@@ -165,7 +153,6 @@ pub fn coding_tool_names() -> &'static [&'static str] {
             "list_directory",
             "open_file",
             "bash",
-            "bash_timeout_add",
             "grep",
             "glob",
             "search_replace",
@@ -198,7 +185,6 @@ pub fn register_coding_tools_with_vision(reg: &mut ToolRegistry, vision: bool) {
     reg.register(Arc::new(ListDirTool));
     reg.register(Arc::new(OpenFileTool));
     reg.register(Arc::new(BashTool));
-    reg.register(Arc::new(BashTimeoutAddTool));
     reg.register(Arc::new(GrepTool));
     reg.register(Arc::new(GlobTool));
     reg.register(Arc::new(SearchReplaceTool));
@@ -275,6 +261,61 @@ pub fn register_coding_tools_with_vision(reg: &mut ToolRegistry, vision: bool) {
 /// local copy was deduped into that home, which also carries the `std` `_sync` variant).
 pub(crate) use crate::process_utils::suppress_console_window;
 
+/// Outcome of waiting on a spawned command capped by `[tools.bash] max_timeout_secs`.
+#[derive(Debug)]
+pub(crate) enum CappedCommandOutput {
+    Output(std::process::Output),
+    Io(std::io::Error),
+    TimedOut(u64),
+}
+
+/// Run `cmd.output()` with `kill_on_drop` and the shared command hard-cap
+/// (`[tools.bash] max_timeout_secs`). Every tool that waits on a spawned process
+/// (`bash`, `ast_grep`, `git clone`, `web_fetch` curl fallback,
+/// `parallel_edit` build probe) must go through this or `bash`'s own execute
+/// loop, which reads the same config.
+pub(crate) async fn output_with_max_timeout(cmd: tokio::process::Command) -> CappedCommandOutput {
+    output_with_timeout_secs(cmd, bash::command_max_timeout_secs()).await
+}
+
+/// Same as [`output_with_max_timeout`] with an explicit wait budget (tests).
+pub(crate) async fn output_with_timeout_secs(
+    mut cmd: tokio::process::Command,
+    secs: u64,
+) -> CappedCommandOutput {
+    use std::process::Stdio;
+    cmd.kill_on_drop(true)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let secs = secs.max(1);
+    let child = match cmd.spawn() {
+        Ok(c) => c,
+        Err(e) => return CappedCommandOutput::Io(e),
+    };
+    // Windows: Job Object reaps grandchildren (`cmd.exe` → `ping`, `git` →
+    // `git-remote-https`). Direct `kill_on_drop` only kills the leader and
+    // leaves the tree running, so the wait future (and the test runtime)
+    // would sit until the descendant exits.
+    #[cfg(windows)]
+    let job = crate::process_utils::assign_child_to_kill_on_close_job(&child);
+    #[cfg(windows)]
+    let pid = child.id();
+    match tokio::time::timeout(
+        std::time::Duration::from_secs(secs),
+        child.wait_with_output(),
+    )
+    .await
+    {
+        Ok(Ok(out)) => CappedCommandOutput::Output(out),
+        Ok(Err(e)) => CappedCommandOutput::Io(e),
+        Err(_) => {
+            #[cfg(windows)]
+            crate::process_utils::kill_windows_tree(&job, pid);
+            CappedCommandOutput::TimedOut(secs)
+        }
+    }
+}
+
 /// Resolve a model-supplied path: leading `~`/`~/` → home dir; absolute → as-is;
 /// relative → joined to `working_dir`. NO escape enforcement (see the module
 /// trust-model note). `~` expansion (via the crate-shared [`crate::pathutil`], so
@@ -309,13 +350,13 @@ const HINT_MAX_ENTRIES: usize = 40;
 /// directory into model context".
 ///
 /// HANG-SAFE: the blocking `canonicalize`/`read_dir` run OFF the async runtime thread and are
-/// bounded by [`GATE_FS_TIMEOUT`] (a workspace on a stalled network mount can wedge these for
+/// bounded by [`gate_fs_timeout`] (a workspace on a stalled network mount can wedge these for
 /// minutes — the same reason the permission gate uses [`run_bounded`]). A timeout degrades to
 /// no hint, never a frozen turn loop. Centralized here so no call site can forget it.
 pub(crate) async fn not_found_hint(missing: &Path, working_dir: &Path) -> String {
     let missing = missing.to_path_buf();
     let working_dir = working_dir.to_path_buf();
-    run_bounded(GATE_FS_TIMEOUT, String::new(), move || {
+    run_bounded(gate_fs_timeout(), String::new(), move || {
         not_found_hint_blocking(&missing, &working_dir)
     })
     .await
@@ -503,12 +544,20 @@ pub(crate) fn err(content: impl Into<String>) -> ToolResult {
     }
 }
 
+/// Load `[tools.timeouts]` from `~/.atomcode/config.toml`, else recommended defaults.
+pub(crate) fn tool_timeouts() -> atomcode_config::config::ToolTimeoutsConfig {
+    atomcode_config::config::ToolTimeoutsConfig::load_effective()
+}
+
 /// Max wall-clock a permission gate may spend on blocking filesystem classification
 /// (path canonicalization). The workspace can sit on a stalled mount (e.g. a hung
 /// network share) where `std::fs::canonicalize` blocks for minutes; bounding it keeps
 /// the kernel's turn loop responsive (Esc/Ctrl-C stay live) instead of freezing — the
 /// exact symptom of a `before()` gate hanging on `/Volumes/<share>`.
-pub(crate) const GATE_FS_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3);
+/// Sourced from `[tools.timeouts] fs_gate_secs` (default 36s).
+pub(crate) fn gate_fs_timeout() -> std::time::Duration {
+    std::time::Duration::from_secs(tool_timeouts().fs_gate_secs)
+}
 
 /// Run blocking `f` OFF the async worker (so a stalled syscall can't pin the runtime
 /// thread mid-poll), bounded by `timeout`. Returns `default` if `f` doesn't finish in
@@ -530,6 +579,78 @@ where
 mod tests {
     use super::*;
     use atomcode_kernel::tool::ToolRegistry;
+
+    fn hanging_shell_command() -> tokio::process::Command {
+        #[cfg(windows)]
+        {
+            let mut c = tokio::process::Command::new("cmd.exe");
+            c.args(["/C", "ping -n 30 127.0.0.1 >nul"]);
+            crate::process_utils::suppress_console_window(&mut c);
+            c
+        }
+        #[cfg(not(windows))]
+        {
+            let mut c = tokio::process::Command::new("sh");
+            c.args(["-c", "sleep 30"]);
+            c
+        }
+    }
+
+    fn echo_shell_command() -> tokio::process::Command {
+        #[cfg(windows)]
+        {
+            let mut c = tokio::process::Command::new("cmd.exe");
+            c.args(["/C", "echo ok"]);
+            crate::process_utils::suppress_console_window(&mut c);
+            c
+        }
+        #[cfg(not(windows))]
+        {
+            let mut c = tokio::process::Command::new("sh");
+            c.args(["-c", "echo ok"]);
+            c
+        }
+    }
+
+    #[tokio::test]
+    async fn output_with_timeout_secs_kills_hanging_command() {
+        let start = std::time::Instant::now();
+        let got = output_with_timeout_secs(hanging_shell_command(), 1).await;
+        assert!(
+            start.elapsed() < std::time::Duration::from_secs(5),
+            "hard cap must kill the process tree, not wait out the 30s hang: {:?}",
+            start.elapsed()
+        );
+        match got {
+            CappedCommandOutput::TimedOut(secs) => {
+                assert_eq!(secs, 1, "timeout budget is the value we passed in")
+            }
+            CappedCommandOutput::Output(out) => panic!(
+                "expected TimedOut, command exited {:?} stdout={:?}",
+                out.status,
+                String::from_utf8_lossy(&out.stdout)
+            ),
+            CappedCommandOutput::Io(e) => panic!("expected TimedOut, got Io: {e}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn output_with_timeout_secs_returns_output_when_fast() {
+        let got = output_with_timeout_secs(echo_shell_command(), 15).await;
+        match got {
+            CappedCommandOutput::Output(out) => {
+                assert!(out.status.success(), "echo must succeed: {:?}", out.status);
+                assert!(
+                    String::from_utf8_lossy(&out.stdout)
+                        .to_ascii_lowercase()
+                        .contains("ok"),
+                    "stdout={:?}",
+                    String::from_utf8_lossy(&out.stdout)
+                );
+            }
+            other => panic!("expected Output, got {other:?}"),
+        }
+    }
 
     #[tokio::test]
     async fn run_bounded_yields_default_when_blocking_exceeds_timeout() {
@@ -687,7 +808,6 @@ mod tests {
         "list_directory",
         "open_file",
         "bash",
-        "bash_timeout_add",
         "grep",
         "glob",
         "search_replace",

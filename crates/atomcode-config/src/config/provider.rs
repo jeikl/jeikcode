@@ -145,11 +145,7 @@ pub struct ProviderConfig {
 ///
 /// When the main model accepts images, paste/send go straight to it and VL
 /// preprocessing is skipped — even if `vision_preprocessor_provider` is set.
-pub fn resolve_supports_vision(
-    explicit: Option<bool>,
-    provider_type: &str,
-    model: &str,
-) -> bool {
+pub fn resolve_supports_vision(explicit: Option<bool>, provider_type: &str, model: &str) -> bool {
     if let Some(v) = explicit {
         return v;
     }
@@ -164,11 +160,7 @@ pub fn resolve_supports_vision(
 /// Priority:
 /// 1. Explicit `reasoning_model` in config (`Some(true|false)`)
 /// 2. If unset (`None`), auto-detect based on model name & base_url (e.g. grok, deepseek-v4, kimi, etc.)
-pub fn resolve_is_reasoning_model(
-    explicit: Option<bool>,
-    model: &str,
-    base_url: &str,
-) -> bool {
+pub fn resolve_is_reasoning_model(explicit: Option<bool>, model: &str, base_url: &str) -> bool {
     if let Some(v) = explicit {
         return v;
     }
@@ -196,12 +188,7 @@ pub fn resolve_is_reasoning_model(
 pub fn default_reasoning_levels_for(model: &str) -> Vec<String> {
     let m = model.to_ascii_lowercase();
     if m.contains("grok") {
-        vec![
-            "low".into(),
-            "medium".into(),
-            "high".into(),
-            "xhigh".into(),
-        ]
+        vec!["low".into(), "medium".into(), "high".into(), "xhigh".into()]
     } else if m.contains("deepseek") || m.contains("v4") {
         vec!["low".into(), "medium".into(), "high".into(), "max".into()]
     } else {
@@ -722,12 +709,20 @@ output_per_million = 0
 
     #[test]
     fn resolve_supports_vision_prefers_explicit_then_protocol() {
-        assert!(resolve_supports_vision(Some(true), "openai", "deepseek-chat"));
+        assert!(resolve_supports_vision(
+            Some(true),
+            "openai",
+            "deepseek-chat"
+        ));
         assert!(!resolve_supports_vision(Some(false), "openai", "gpt-4o"));
         // Unset + OpenAI/Anthropic protocol → false (opt-in).
         assert!(!resolve_supports_vision(None, "openai", "any-custom-model"));
         assert!(!resolve_supports_vision(None, "claude", "any-custom-model"));
-        assert!(!resolve_supports_vision(None, "anthropic", "any-custom-model"));
+        assert!(!resolve_supports_vision(
+            None,
+            "anthropic",
+            "any-custom-model"
+        ));
         // Ollama falls back to the name heuristic.
         assert!(!resolve_supports_vision(None, "ollama", "llama3"));
         assert!(resolve_supports_vision(None, "ollama", "llava"));
@@ -893,12 +888,36 @@ output_per_million = 0
         assert_eq!(m_alias.reasoning_model, Some(false));
 
         // Auto-detection for grok and deepseek-v4 without explicit flag
-        assert!(resolve_is_reasoning_model(None, "grok-4.6", "https://api.x.ai/v1"));
-        assert!(resolve_is_reasoning_model(None, "grok-4.5", "https://api.x.ai/v1"));
-        assert!(resolve_is_reasoning_model(None, "deepseek-v4-flash", "https://api.deepseek.com/v1"));
-        assert!(resolve_is_reasoning_model(None, "kimi-k2.5", "https://api.moonshot.cn/v1"));
-        assert!(!resolve_is_reasoning_model(None, "gpt-4o", "https://api.openai.com/v1"));
-        assert!(!resolve_is_reasoning_model(None, "glm-5.1", "https://open.bigmodel.cn/v1"));
+        assert!(resolve_is_reasoning_model(
+            None,
+            "grok-4.6",
+            "https://api.x.ai/v1"
+        ));
+        assert!(resolve_is_reasoning_model(
+            None,
+            "grok-4.5",
+            "https://api.x.ai/v1"
+        ));
+        assert!(resolve_is_reasoning_model(
+            None,
+            "deepseek-v4-flash",
+            "https://api.deepseek.com/v1"
+        ));
+        assert!(resolve_is_reasoning_model(
+            None,
+            "kimi-k2.5",
+            "https://api.moonshot.cn/v1"
+        ));
+        assert!(!resolve_is_reasoning_model(
+            None,
+            "gpt-4o",
+            "https://api.openai.com/v1"
+        ));
+        assert!(!resolve_is_reasoning_model(
+            None,
+            "glm-5.1",
+            "https://open.bigmodel.cn/v1"
+        ));
 
         // Explicit override wins over name heuristic
         assert!(!resolve_is_reasoning_model(Some(false), "grok-4.6", ""));

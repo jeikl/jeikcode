@@ -924,11 +924,12 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
-    /// Sign in with AtomGit OAuth and claim CodingPlan models in one
-    /// flow: OAuth (if needed) → claim → fetch models → register
-    /// providers → fetch status. Reports each step and exits.
+    /// Retired AtomGit OAuth / CodingPlan entry. Hidden; prints a
+    /// pointer to `/provider` instead of claiming gateway models.
+    #[command(hide = true)]
     Login,
-    /// Logout from AtomCode
+    /// Clear leftover AtomGit OAuth tokens if present.
+    #[command(hide = true)]
     Logout,
     /// Show current login status
     Status,
@@ -1695,61 +1696,9 @@ async fn run() -> Result<i32> {
     if let Some(cmd) = cli.command {
         match cmd {
             Commands::Login | Commands::Codingplan => {
-                // Unified login flow: OAuth (if needed) → claim → fetch
-                // models → register providers → fetch status. Falls
-                // through to TUI startup regardless of outcome. On
-                // success the freshly saved config.toml is picked up by
-                // `Config::load` further down. On failure the TUI opens
-                // in onboarding mode (no providers) so the user can
-                // retry via `/login` without re-launching the binary.
-                // Emits open_atomcode (mode=headless) then take_codingplan
-                // (emitted internally by run_codingplan_core via coding_plan::run).
-                HEADLESS_MODE.store(true, Ordering::Relaxed);
-                let repo = atomcode_telemetry::detect_repo_origin(
-                    &std::env::current_dir().unwrap_or_default(),
+                eprintln!(
+                    "AtomGit OAuth / CodingPlan is removed. Configure a provider with /provider or in ~/.atomcode/config.toml."
                 );
-                telemetry.set_account_id(auth::get_stored_auth().map(|a| a.user.id.to_string()));
-                let scope_ctx = CurrentContext {
-                    repo_origin: Some(repo),
-                    mode: Some(SessionMode::Headless),
-                    ..CurrentContext::current()
-                };
-                // Emit the open event inside the async task-local scope — this
-                // is a cheap, non-blocking mpsc send.
-                let dsp = cli.dangerously_skip_permissions;
-                let tel_for_event = telemetry.clone();
-                CurrentContext::scope(scope_ctx.clone(), || async move {
-                    tel_for_event.track(Event::OpenAtomcode {
-                        dangerously_skip_permissions: dsp,
-                    });
-                })
-                .await;
-                // The OAuth + claim flow is fully synchronous and builds a
-                // `reqwest::blocking` client, which stands up its own tokio
-                // runtime. Running it directly on an async worker thread panics
-                // when that inner runtime is dropped ("Cannot drop a runtime in
-                // a context where blocking is not allowed"). Move it onto a
-                // dedicated blocking thread — the same convention the plugin
-                // bootstrap uses — and re-establish the telemetry task-local
-                // there, since spawn_blocking threads don't inherit it.
-                let outcome = {
-                    let telemetry = telemetry.clone();
-                    tokio::task::spawn_blocking(move || {
-                        CurrentContext::scope_blocking(scope_ctx, || {
-                            run_codingplan_core(Some(&telemetry))
-                        })
-                    })
-                    .await
-                    .unwrap_or_else(|e| Err(anyhow::anyhow!("codingplan login task failed: {e}")))
-                };
-                match outcome {
-                    Ok(report) => {
-                        print!("{}", report);
-                    }
-                    Err(e) => {
-                        eprintln!("login setup failed: {:#}", e);
-                    }
-                }
                 println!("\n  Starting JeikCode...\n");
                 HEADLESS_MODE.store(false, Ordering::Relaxed);
                 // Fall through to TUI startup below
@@ -3301,8 +3250,8 @@ async fn handle_command(cmd: Commands, telemetry: &std::sync::Arc<Telemetry>) ->
                 }
                 println!("  Auth file: {}\n", auth::auth_file_path().display());
             } else {
-                println!("\n  Not logged in.");
-                println!("  Run 'atomcode login' to authenticate.\n");
+                println!("\n  No leftover AtomGit OAuth session.");
+                println!("  Configure a provider with /provider or in ~/.atomcode/config.toml.\n");
             }
             Ok(())
         }
@@ -4074,6 +4023,7 @@ fn run_rollback_cli() -> Result<()> {
 /// `coding_plan::setup` orchestrator, persists the config on success,
 /// and returns the rendered human-readable report — the caller decides
 /// whether to print it to stdout or stash it for the TUI to surface.
+#[allow(dead_code)]
 fn run_codingplan_core(
     telemetry: Option<&std::sync::Arc<atomcode_telemetry::Telemetry>>,
 ) -> Result<String> {

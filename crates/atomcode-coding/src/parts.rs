@@ -344,29 +344,11 @@ async fn prepare_with_plugin_hooks_reusing_lease(
         &mut registry,
         &codeintel_mode,
     );
-    match &codeintel_mode {
-        atomcode_capabilities::codeintel::CodeIntelMode::Unified => {
-            names.extend(
-                atomcode_capabilities::codeintel::codeintel_unified_tool_names()
-                    .iter()
-                    .map(|s| s.to_string()),
-            );
-        }
-        atomcode_capabilities::codeintel::CodeIntelMode::Full => {
-            names.extend(
-                atomcode_capabilities::codeintel::codeintel_tool_names()
-                    .iter()
-                    .map(|s| s.to_string()),
-            );
-        }
-        atomcode_capabilities::codeintel::CodeIntelMode::Custom(tools) => {
-            names.extend(tools.clone());
-        }
-    }
-    if atomcode_capabilities::codeintel::register_lsp_tool(&mut registry, &cfg.lsp) {
-        names.push("lsp".into());
-    }
-
+    names.extend(
+        atomcode_capabilities::codeintel::codeintel_tool_names()
+            .iter()
+            .map(|s| s.to_string()),
+    );
     if opts.web && !atomcode_config::config::offline::is_offline_active() {
         registry.register(Arc::new(WebFetchTool));
         // web_search backend: explicit config wins; else the `ATOMCODE_WEB_SEARCH_PROVIDER`
@@ -438,7 +420,6 @@ async fn prepare_with_plugin_hooks_reusing_lease(
                 "edit_file",
                 "write_file",
                 "bash",
-                "bash_timeout_add",
                 "grep",
                 "glob",
                 "search_replace",
@@ -1568,14 +1549,6 @@ pub fn assemble(
         .middleware(Arc::new(SensitivePathGate::with_store(
             parts.sensitive_path_grants.clone(),
         )));
-    #[cfg(feature = "atomgit")]
-    {
-        // Typed AtomGit tools are the only supported API path: they keep credentials
-        // outside model-visible arguments and retain action-aware approval semantics.
-        builder = builder.middleware(Arc::new(
-            atomcode_capabilities::tools::AtomgitBashGate::new(),
-        ));
-    }
     // CC external hooks (PreToolUse gate). Runs AFTER the hard PlanMode/SensitivePath gates
     // (which must stay un-bypassable by a hook `allow`) but BEFORE every auto-approve
     // convenience gate — OpenFileWorkspaceGate and especially WriteApprovalGate, which
@@ -1739,18 +1712,6 @@ pub fn assemble(
             parts.review_provider.is_some(),
         );
         builder = builder.resume(snapshot);
-    }
-    // Ensure the repo's `atomcode` project label after a successful `git push` to a
-    // gitcode/atomgit remote. THIS is the production mount: the terminal TUI, daemon, and
-    // webui all build their agent here via `parts::assemble`. (`assemble.rs::build_coding_agent`
-    // also mounts it, but that path is reachable only from tests/examples — so before this the
-    // middleware never ran for a real session.) Best-effort: every failure is a `tracing::warn`
-    // and the turn proceeds. Gated on `atomgit` (its sole consumer).
-    #[cfg(feature = "atomgit")]
-    {
-        builder = builder.middleware(Arc::new(
-            atomcode_capabilities::tools::GitPushLabelMiddleware::new(cfg.working_dir.clone()),
-        ));
     }
     // Artifact spill middleware: intercepts oversized tool results and saves them to disk so
     // the conversation only carries a preview + handle. Only wired when a session is present

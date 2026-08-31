@@ -5,7 +5,6 @@
 //! `docs/superpowers/plans/2026-07-11-extract-atomcode-config.md`.
 
 /// UI language selection (`Config.language`).
-
 pub mod locale;
 
 /// Localization message tables + `t()`/`Msg`.
@@ -26,10 +25,6 @@ pub mod endpoints;
 /// endpoint-scoped first-party fallback latch. Pure URL/env/atomic logic; HTTP
 /// clients remain in their owning leaf/provider crates.
 pub mod tls;
-
-/// The `LspServerConfig` config type (`Config.lsp.servers`). The LSP runtime is
-/// owned by `atomcode-capabilities::codeintel::lsp`.
-pub mod lsp_registry;
 
 /// The disk/TOML config system: [`Config`](config::Config) + all sub-configs,
 /// load/save and paths.

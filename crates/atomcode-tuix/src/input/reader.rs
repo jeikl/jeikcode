@@ -204,9 +204,7 @@ impl ReaderHandle {
     /// Fire-and-forget: the reader polls for commands at least every 100ms.
     pub fn recover_tty(&self, reason: &'static str) {
         crate::tuix_trace!("RD", "stage=recover_requested reason={}", reason);
-        let _ = self
-            .cmd_tx
-            .send((ReaderCommand::Recover(reason), None));
+        let _ = self.cmd_tx.send((ReaderCommand::Recover(reason), None));
     }
 }
 
@@ -395,7 +393,13 @@ fn run(
         crate::trace::set_poll_dt_us(poll_dt.as_micros() as u64);
         crate::trace::note_reader_progress();
         if let Err(error) = &poll_result {
-            crate::tuix_trace!("RD", "stage=poll_error error={} dt_us={} {}", error, poll_dt.as_micros(), crate::trace::kbd());
+            crate::tuix_trace!(
+                "RD",
+                "stage=poll_error error={} dt_us={} {}",
+                error,
+                poll_dt.as_micros(),
+                crate::trace::kbd()
+            );
         }
         // 100ms timeout is the healthy path. Anything much longer means
         // crossterm's inner read-loop is spinning on incomplete CSI.

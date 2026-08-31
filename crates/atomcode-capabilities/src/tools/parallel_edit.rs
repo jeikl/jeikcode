@@ -338,21 +338,32 @@ impl Tool for ParallelEditTool {
             build_cmd.args([flag, &cmd]).current_dir(&build_dir);
             // Suppress the Windows console-window flash for the probe; no-op off Windows.
             crate::process_utils::suppress_console_window(&mut build_cmd);
-            let output = build_cmd.output().await;
-            if let Ok(out) = output {
-                let stdout = String::from_utf8_lossy(&out.stdout);
-                let stderr = String::from_utf8_lossy(&out.stderr);
-                let combined = format!("{}{}", stdout, stderr);
-                if !out.status.success() || combined.to_lowercase().contains("error") {
-                    let err_lines: String =
-                        combined.lines().take(15).collect::<Vec<_>>().join("\n");
+            match crate::tools::output_with_max_timeout(build_cmd).await {
+                crate::tools::CappedCommandOutput::Output(out) => {
+                    let stdout = String::from_utf8_lossy(&out.stdout);
+                    let stderr = String::from_utf8_lossy(&out.stderr);
+                    let combined = format!("{}{}", stdout, stderr);
+                    if !out.status.success() || combined.to_lowercase().contains("error") {
+                        let err_lines: String =
+                            combined.lines().take(15).collect::<Vec<_>>().join("\n");
+                        summary.push_str(&format!(
+                            "\n⚠ BUILD ERRORS after merge:\n{}\nFix these before proceeding.\n",
+                            err_lines
+                        ));
+                        all_success = false;
+                    } else {
+                        summary.push_str("\n✓ Build verification passed.\n");
+                    }
+                }
+                crate::tools::CappedCommandOutput::Io(e) => {
+                    summary.push_str(&format!("\n⚠ BUILD verification failed to run: {e}\n"));
+                    all_success = false;
+                }
+                crate::tools::CappedCommandOutput::TimedOut(secs) => {
                     summary.push_str(&format!(
-                        "\n⚠ BUILD ERRORS after merge:\n{}\nFix these before proceeding.\n",
-                        err_lines
+                        "\n⚠ BUILD verification reached configured max_timeout_secs ({secs}s) and was stopped.\n"
                     ));
                     all_success = false;
-                } else {
-                    summary.push_str("\n✓ Build verification passed.\n");
                 }
             }
         }

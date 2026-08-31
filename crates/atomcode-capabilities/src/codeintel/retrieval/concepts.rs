@@ -176,7 +176,14 @@ const CONCEPT_ROOTS: &[ConceptRoot] = &[
     },
     ConceptRoot {
         cn: &["熔", "断", "死循环", "停滞"],
-        en: &["circuit", "breaker", "doom", "loop_guard", "stall", "echo_loop"],
+        en: &[
+            "circuit",
+            "breaker",
+            "doom",
+            "loop_guard",
+            "stall",
+            "echo_loop",
+        ],
     },
     ConceptRoot {
         cn: &["压", "缩", "紧凑", "摘要"],

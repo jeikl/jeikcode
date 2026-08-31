@@ -17,7 +17,9 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 use std::time::Duration;
 
-const REQUEST_TIMEOUT_SECS: u64 = 25;
+fn web_request_secs() -> u64 {
+    super::tool_timeouts().web_request_secs
+}
 
 /// Flip the offline verdict toward offline on a transport failure (offline_mode="auto"
 /// self-correction). No-op unless the `offline` feature is enabled (which pulls the
@@ -163,7 +165,7 @@ impl Tool for WebSearchTool {
 impl WebSearchTool {
     fn client() -> Result<reqwest::Client, String> {
         crate::proxy::apply_async_proxy_policy(reqwest::Client::builder())
-            .timeout(Duration::from_secs(REQUEST_TIMEOUT_SECS))
+            .timeout(Duration::from_secs(web_request_secs()))
             .user_agent("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko)")
             .build()
             .map_err(|e| format!("failed to build HTTP client: {e}"))

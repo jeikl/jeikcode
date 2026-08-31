@@ -37,13 +37,12 @@ pub fn render_review_impact_plan(diff: &str) -> String {
 
     out.push_str(
         "\nHigh-risk review targets. For each target, first inspect the changed hunk, then use \
-         `list_symbols`/`read_symbol` for local context and `find_references` + \
-         `trace_callers`/`trace_callees` or `file_dependencies`/`blast_radius` for the \
-         affected path. Do not conclude clean until these target contracts are checked:\n",
+         `code_explore` on the containing module for call-graph and local context. \
+         Do not conclude clean until these target contracts are checked:\n",
     );
     for t in targets {
         out.push_str(&format!(
-            "\n- `{}` in `{}` [{}]\n  - why: {}\n  - code-graph recipe: `list_symbols`/`read_symbol` in this file; `find_references` for `{}`; `trace_callers`/`trace_callees` if the graph has this symbol; `file_dependencies` or `blast_radius` for the file when symbol graph is unavailable.\n",
+            "\n- `{}` in `{}` [{}]\n  - why: {}\n  - code-graph recipe: `read_file` the hunk; `code_explore` query=`{}` on the module directory for callers/callees.\n",
             t.symbol, t.file, t.kind, t.reason, t.symbol
         ));
     }
@@ -405,8 +404,7 @@ diff --git a/crates/atomcode-tuix/src/event_loop/mod.rs b/crates/atomcode-tuix/s
 
         assert!(plan.contains("Review impact plan"), "{plan}");
         assert!(plan.contains("state/lifecycle"), "{plan}");
-        assert!(plan.contains("find_references"), "{plan}");
-        assert!(plan.contains("trace_callers"), "{plan}");
+        assert!(plan.contains("code_explore"), "{plan}");
         assert!(plan.contains("GoalUpdate"), "{plan}");
         assert!(plan.contains("finish_turn"), "{plan}");
         assert!(plan.contains("TurnComplete"), "{plan}");
@@ -459,6 +457,6 @@ diff --git a/crates/atomcode-tuix/src/event_loop/mod.rs b/crates/atomcode-tuix/s
 
         assert!(plan.contains("Review impact plan"), "{plan}");
         assert!(plan.contains("No high-risk symbol targets"), "{plan}");
-        assert!(!plan.contains("trace_callers"), "{plan}");
+        assert!(!plan.contains("code_explore"), "{plan}");
     }
 }

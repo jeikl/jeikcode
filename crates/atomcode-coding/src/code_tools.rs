@@ -21,7 +21,7 @@ Natural-language code question or precise symbol lookup \
   BAD:  path=src/auth.rs            (file → read_file)
 Workspace layout only → `repo_map` (do not pair with list_directory)
 Exact literals / error strings / TODO → `grep(pattern, path)`
-Already-located file and line → `read_file` (default 1000 lines; if a footer remains, \
+Already-located file and line → `read_file` (default 1500 lines; if a footer remains, \
 call again with that offset and omit `limit` to finish the file)
 Do not wander with grep+read in place of `code_explore`. Never pass a file to `code_explore`.
 A thin/empty `code_explore` result is not absence — read Coverage/CATALOG and retry synonyms \

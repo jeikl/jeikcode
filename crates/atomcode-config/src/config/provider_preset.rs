@@ -104,15 +104,6 @@ pub const RESPONSES_COMPATIBLE: ProviderPreset = ProviderPreset {
 /// vendor defaults and may be overridden per account.
 pub const PRESETS: &[ProviderPreset] = &[
     ProviderPreset {
-        id: "atomgit",
-        display_name: "AtomGit",
-        provider_type: ProviderType::OpenAi,
-        default_base_url: Some("https://llm-api.atomgit.com/v1"),
-        auth_kind: AuthKind::ApiKey,
-        api_key_env: None,
-        model_source: ModelSource::DiscoveryApi,
-    },
-    ProviderPreset {
         id: "aliyun",
         display_name: "Alibaba Cloud Model Studio (DashScope)",
         provider_type: ProviderType::OpenAi,
@@ -250,17 +241,16 @@ mod tests {
     use super::*;
     use std::collections::HashSet;
 
-    /// The curated vendor set (14 vendors + 3 generic compatible presets) must
+    /// The curated vendor set (13 vendors + 3 generic compatible presets) must
     /// all be present and resolvable by id.
     #[test]
     fn registry_covers_the_curated_vendors() {
         assert!(
-            PRESETS.len() >= 17,
-            "expected the curated vendor set (>=17), got {}",
+            PRESETS.len() >= 16,
+            "expected the curated vendor set (>=16), got {}",
             PRESETS.len()
         );
         for id in [
-            "atomgit",
             "aliyun",
             "volcengine",
             "xiaomi-mimo",
@@ -317,7 +307,10 @@ mod tests {
             // public endpoint (Xiaomi MiMo) legitimately leave it unset.
             let endpoint_optional = matches!(
                 p.id,
-                "openai-compatible" | "anthropic-compatible" | "responses-compatible" | "xiaomi-mimo"
+                "openai-compatible"
+                    | "anthropic-compatible"
+                    | "responses-compatible"
+                    | "xiaomi-mimo"
             );
             if !endpoint_optional {
                 assert!(

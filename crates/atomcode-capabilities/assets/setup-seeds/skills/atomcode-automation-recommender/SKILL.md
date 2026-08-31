@@ -1,14 +1,14 @@
 ---
 name: setup
-description: Analyze a codebase and recommend AtomCode automations (hooks, subagents, skills, plugins, MCP servers). Use when user asks for automation recommendations, wants to optimize their AtomCode setup, mentions improving AtomCode workflows, asks how to first set up AtomCode for a project, or wants to know what AtomCode features they should use.
+description: Analyze a codebase and recommend JeikCode automations (hooks, subagents, skills, plugins, MCP servers). Use when user asks for automation recommendations, wants to optimize their JeikCode setup, mentions improving JeikCode workflows, asks how to first set up JeikCode for a project, or wants to know what JeikCode features they should use.
 user_invocable: true
 argument_hint: "[focus area, e.g. hooks, mcp, skills, all]"
 allowed_tools: Read, Glob, Grep, Bash, Write, Edit
 ---
 
-# AtomCode Automation Recommender
+# JeikCode Automation Recommender
 
-Analyze codebase patterns to recommend tailored AtomCode automations, then **offer to install them**.
+Analyze codebase patterns to recommend tailored JeikCode automations, then **offer to install them**.
 
 ## Core Principles
 
@@ -42,7 +42,7 @@ cat package.json 2>/dev/null | head -50
 # Check dependencies
 cat package.json 2>/dev/null | grep -E '"(react|vue|angular|next|express|fastapi|django|prisma|supabase|stripe)"'
 
-# Check existing AtomCode config
+# Check existing JeikCode config
 ls -la .atomcode/ CLAUDE.md .mcp.json 2>/dev/null
 
 # Project structure
@@ -126,9 +126,9 @@ See [references/skills-reference.md](references/skills-reference.md) for built-i
 
 | Codebase Signal | Skill | Install Command | Invocation |
 |-----------------|-------|-----------------|------------|
-| Any project (AtomCode Q&A) | **/guide** | Built in — no install. Run `/guide <question>` (also auto-dispatches). | Both |
+| Any project (JeikCode Q&A) | **/guide** | Built in — no install. Run `/guide <question>` (also auto-dispatches). | Both |
 
-> The official plugin marketplace (`/plugin marketplace add https://atomgit.com/atomgit_atomcode/atomcode-plugins-official`) ships workflow plugins like `atomcode-workflows`, `commit-craft`, and `git-worktree`. AtomCode usage Q&A is now the built-in `/guide` subagent, so it no longer needs a plugin install.
+> The official plugin marketplace (`/plugin marketplace add https://atomgit.com/atomgit_atomcode/atomcode-plugins-official`) ships workflow plugins like `atomcode-workflows`, `commit-craft`, and `git-worktree`. JeikCode usage Q&A is now the built-in `/guide` subagent, so it no longer needs a plugin install.
 
 **Custom skills to suggest creating:**
 
@@ -139,7 +139,7 @@ See [references/skills-reference.md](references/skills-reference.md) for built-i
 | Test suite | **gen-test** (example tests) | User-only |
 | Component library | **new-component** (templates) | User-only |
 | PR workflow | **pr-check** (checklist) | User-only |
-| Code style | **project-conventions** | AtomCode-only |
+| Code style | **project-conventions** | JeikCode-only |
 
 #### B. MCP Server Recommendations
 
@@ -171,7 +171,7 @@ See [references/hooks-patterns.md](references/hooks-patterns.md) for configurati
 
 See [references/subagent-templates.md](references/subagent-templates.md) for templates.
 
-In AtomCode, subagents are implemented as skills with specialized reviewer prompts:
+In JeikCode, subagents are implemented as skills with specialized reviewer prompts:
 
 | Codebase Signal | Recommended Subagent |
 |-----------------|---------------------|
@@ -186,7 +186,7 @@ In AtomCode, subagents are implemented as skills with specialized reviewer promp
 Format recommendations clearly, then **offer to install**.
 
 ```markdown
-## AtomCode Automation Recommendations
+## JeikCode Automation Recommendations
 
 ### Codebase Profile
 - **Type**: [detected language/runtime]
@@ -296,11 +296,11 @@ Use the Write tool to create `.atomcode/commands/<name>.md`.
 
 已安装：
   ✓ skill: [name] — [source]
-  ✓ mcp: [name] — 写入 .mcp.json（重启 AtomCode 后生效）
+  ✓ mcp: [name] — 写入 .mcp.json（重启 JeikCode 后生效）
   ✓ hook: [name] — 写入 .atomcode/settings.json
   ✓ subagent: [name] — 创建 .atomcode/skills/[name]/SKILL.md
 
-💡 MCP 服务需要重启 AtomCode 后生效。
+💡 MCP 服务需要重启 JeikCode 后生效。
 💡 输入 /help 查看新增的 slash commands。
 ```
 
@@ -320,7 +320,7 @@ Use the Write tool to create `.atomcode/commands/<name>.md`.
 
 **Invocation control:**
 - `disable_model_invocation: true` — User-only (for side effects: deploy, commit)
-- `user_invocable: false` — AtomCode-only (for background knowledge)
+- `user_invocable: false` — JeikCode-only (for background knowledge)
 - Default — Both can invoke
 
 ### When to Recommend Hooks

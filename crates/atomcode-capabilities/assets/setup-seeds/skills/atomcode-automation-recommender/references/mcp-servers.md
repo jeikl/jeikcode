@@ -1,6 +1,6 @@
 # MCP Server Recommendations
 
-MCP (Model Context Protocol) servers extend AtomCode's capabilities by connecting to external tools and services.
+MCP (Model Context Protocol) servers extend JeikCode's capabilities by connecting to external tools and services.
 
 **Note**: These are common MCP servers. Use web search to find MCP servers specific to the codebase's services and integrations.
 
@@ -18,7 +18,7 @@ MCP (Model Context Protocol) servers extend AtomCode's capabilities by connectin
 ## Documentation & Knowledge
 
 ### context7
-**Best for**: Projects using popular libraries/SDKs where you want AtomCode to code with up-to-date documentation
+**Best for**: Projects using popular libraries/SDKs where you want JeikCode to code with up-to-date documentation
 
 | Recommend When | Examples |
 |----------------|----------|
@@ -29,7 +29,7 @@ MCP (Model Context Protocol) servers extend AtomCode's capabilities by connectin
 | Using AWS SDK, Google Cloud | Cloud SDKs |
 | Using LangChain, OpenAI SDK | AI/ML libraries |
 
-**Value**: AtomCode fetches live documentation instead of relying on training data, reducing hallucinated APIs and outdated patterns.
+**Value**: JeikCode fetches live documentation instead of relying on training data, reducing hallucinated APIs and outdated patterns.
 
 ---
 
@@ -46,7 +46,7 @@ MCP (Model Context Protocol) servers extend AtomCode's capabilities by connectin
 | Debugging UI issues | See what user sees |
 | Form testing | Multi-step workflows |
 
-**Value**: AtomCode can interact with your running app, take screenshots, fill forms, and verify UI behavior.
+**Value**: JeikCode can interact with your running app, take screenshots, fill forms, and verify UI behavior.
 
 ### Puppeteer MCP
 **Best for**: Headless browser automation, web scraping
@@ -70,7 +70,7 @@ MCP (Model Context Protocol) servers extend AtomCode's capabilities by connectin
 | Auth + database needs | User management apps |
 | Real-time features | Live data sync |
 
-**Value**: AtomCode can query tables, manage auth, and interact with Supabase storage directly.
+**Value**: JeikCode can query tables, manage auth, and interact with Supabase storage directly.
 
 ### PostgreSQL MCP
 **Best for**: Direct PostgreSQL database access
@@ -103,7 +103,7 @@ MCP (Model Context Protocol) servers extend AtomCode's capabilities by connectin
 | GitHub Actions | CI/CD pipeline access |
 | Release management | Tag and release automation |
 
-**Value**: AtomCode can create issues, review PRs, check workflow runs, and manage releases.
+**Value**: JeikCode can create issues, review PRs, check workflow runs, and manage releases.
 
 ### GitLab MCP
 **Best for**: GitLab-hosted repositories
@@ -158,7 +158,7 @@ MCP (Model Context Protocol) servers extend AtomCode's capabilities by connectin
 | Error patterns | Group similar issues |
 | Release tracking | Correlate deploys with errors |
 
-**Value**: AtomCode can investigate Sentry issues, find root causes, and suggest fixes.
+**Value**: JeikCode can investigate Sentry issues, find root causes, and suggest fixes.
 
 ### Datadog MCP
 **Best for**: APM, logs, and metrics
@@ -207,7 +207,7 @@ MCP (Model Context Protocol) servers extend AtomCode's capabilities by connectin
 | User preferences | Store settings |
 | Learning patterns | Build knowledge |
 
-**Value**: AtomCode remembers project context, decisions, and patterns across conversations.
+**Value**: JeikCode remembers project context, decisions, and patterns across conversations.
 
 ---
 

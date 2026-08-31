@@ -70,8 +70,7 @@ const HOSTED_CODINGPLAN_API_BASE: &str = "https://api.gitcode.com/api/v5";
 const HOSTED_CODINGPLAN_LLM_BASE_URL: &str = "https://llm-api.atomgit.com/v1";
 const HOSTED_UPDATE_MANIFEST_URL: &str =
     "https://raw.githubusercontent.com/jeikl/jeikcode/local-dev/latest.json";
-const HOSTED_UPDATE_DOWNLOAD_BASE: &str =
-    "https://github.com/jeikl/jeikcode/releases/download";
+const HOSTED_UPDATE_DOWNLOAD_BASE: &str = "https://github.com/jeikl/jeikcode/releases/download";
 const HOSTED_DESKTOP_DOWNLOAD_URL: &str =
     "https://atomgit.com/atomgit_atomcode/atomCode-air-releases/releases";
 const HOSTED_RELAY_URL: &str = "https://relay-atomcode.atomgit.com";
@@ -161,12 +160,7 @@ pub fn codingplan_api_base() -> &'static str {
 /// `models-v2` payload may override this per model.
 pub fn codingplan_llm_base_url() -> &'static str {
     static URL: OnceLock<String> = OnceLock::new();
-    URL.get_or_init(|| {
-        resolve(
-            CODINGPLAN_LLM_BASE_URL_ENV,
-            HOSTED_CODINGPLAN_LLM_BASE_URL,
-        )
-    })
+    URL.get_or_init(|| resolve(CODINGPLAN_LLM_BASE_URL_ENV, HOSTED_CODINGPLAN_LLM_BASE_URL))
 }
 
 /// Version manifest (`latest.json`) for self-update.
@@ -342,7 +336,10 @@ mod tests {
     #[test]
     fn an_override_is_taken_whole_not_derived() {
         // A deployment need not mirror the hosted subdomain layout.
-        std::env::set_var("ATOMCODE_TEST_EP_WHOLE", "https://sso.corp.example:8443/auth");
+        std::env::set_var(
+            "ATOMCODE_TEST_EP_WHOLE",
+            "https://sso.corp.example:8443/auth",
+        );
         assert_eq!(
             resolve("ATOMCODE_TEST_EP_WHOLE", "https://hosted.test"),
             "https://sso.corp.example:8443/auth"
@@ -418,7 +415,10 @@ mod tests {
             normalize_codingplan_prefix("  Longyuan  ").as_deref(),
             Some("Longyuan")
         );
-        assert_eq!(normalize_codingplan_prefix("ly_gw-1").as_deref(), Some("ly_gw-1"));
+        assert_eq!(
+            normalize_codingplan_prefix("ly_gw-1").as_deref(),
+            Some("ly_gw-1")
+        );
     }
 
     #[test]

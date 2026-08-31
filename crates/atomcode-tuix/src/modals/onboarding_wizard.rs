@@ -260,7 +260,7 @@ fn center_lines(
 }
 
 /// Mirror of `/clear`'s "fresh idle view" emission: clear has
-/// already been issued by the caller, this pushes the AtomCode
+/// already been issued by the caller, this pushes the JeikCode
 /// banner + cwd + model + slash-hint tips that the renderer's
 /// `UiLine::Welcome` handler paints. Used when OnboardingWizard
 /// exits to drop the user onto the standard session view (same
@@ -795,7 +795,7 @@ impl OnboardingWizard {
     /// Layout (when `start_login` succeeded):
     /// ```text
     /// Step 1/1 · 扫码登录
-    /// ┌─ AtomCode ──────────────────────────────────┐
+    /// ┌─ JeikCode ──────────────────────────────────┐
     /// │   扫码登录,自动领取 CodingPlan 免费额度    │
     /// │                                              │
     /// │              <QR block>                      │
@@ -912,7 +912,7 @@ impl OnboardingWizard {
 
         let mut out = Vec::new();
         out.push("扫码登录 · 领取CodingPlan".to_string());
-        let panel_title = format!("AtomCode · v{}", env!("CARGO_PKG_VERSION"));
+        let panel_title = format!("JeikCode · v{}", env!("CARGO_PKG_VERSION"));
         out.extend(draw_panel(
             &panel_title,
             &content,
@@ -1056,7 +1056,7 @@ impl crate::modals::Modal for OnboardingWizard {
                 // returning Close so the next view starts on a clean
                 // canvas. For Skip (no follow-up flag) we also
                 // render the welcome banner here so the user lands
-                // on the regular idle session view (AtomCode banner
+                // on the regular idle session view (JeikCode banner)
                 // + cwd + model + tips), not a blank screen with
                 // just an input prompt. CodingPlan and Provider
                 // takeovers paint their own UI, so we only emit
@@ -1257,15 +1257,15 @@ mod tests {
 
     #[test]
     fn top_border_has_title() {
-        let lines = draw_panel("AtomCode", &[], "Step 1/3", 60, true);
+        let lines = draw_panel("JeikCode", &[], "Step 1/3", 60, true);
         let plain = strip_sgr(&lines[0]);
-        assert!(plain.starts_with("┌─ AtomCode "));
+        assert!(plain.starts_with("┌─ JeikCode "));
         assert!(plain.ends_with("─┐"));
     }
 
     #[test]
     fn bottom_border_has_step_indicator() {
-        let lines = draw_panel("AtomCode", &[], "Step 1/3", 60, true);
+        let lines = draw_panel("JeikCode", &[], "Step 1/3", 60, true);
         let plain = strip_sgr(lines.last().unwrap());
         assert!(plain.starts_with("└─ Step 1/3 "));
         assert!(plain.ends_with("─┘"));
@@ -1298,10 +1298,10 @@ mod tests {
 
     #[test]
     fn narrow_terminal_does_not_panic() {
-        // width=10 has inner_width=6 which won't fit "AtomCode" title;
+        // width=10 has inner_width=6 which won't fit "JeikCode" title;
         // saturating_sub guards against underflow. We just assert it
         // doesn't panic and produces *some* output.
-        let lines = draw_panel("AtomCode", &["x".into()], "S", 10, true);
+        let lines = draw_panel("JeikCode", &["x".into()], "S", 10, true);
         assert_eq!(lines.len(), 3); // top + 1 content + bottom
     }
 
@@ -1643,10 +1643,7 @@ mod tests {
         }
     }
 
-    /// Minimal Config used by the apply_language tests. Config has no
-    /// Default impl (every field is intentionally required so adding
-    /// a new field forces every test to update), so we mirror the
-    /// blank_config_with_lsp helper from `core::config::tests` here.
+    /// Minimal Config used by the apply_language tests.
     fn blank_config_for_test() -> atomcode_config::config::Config {
         atomcode_config::config::Config::default()
     }
@@ -1897,7 +1894,7 @@ mod tests {
     #[test]
     fn draw_panel_ascii_fallback_uses_plus_dash_pipe() {
         let lines = draw_panel(
-            "AtomCode",
+            "JeikCode",
             &["row one".into(), "row two".into()],
             "Step 3/3",
             30,

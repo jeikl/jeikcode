@@ -11,8 +11,6 @@ use serde::Serialize;
 
 use super::{AtomgitConfig, TokenProvider};
 
-const REQUEST_TIMEOUT_SECS: u64 = 30;
-
 /// Thin async wrapper over the AtomGit REST API.
 pub struct AtomgitClient {
     http: reqwest::Client,
@@ -23,9 +21,10 @@ pub struct AtomgitClient {
 impl AtomgitClient {
     /// Build the client. Errors only if the TLS/HTTP stack fails to initialise.
     pub fn new(cfg: AtomgitConfig) -> Result<Self, String> {
+        let request_secs = crate::tools::tool_timeouts().web_request_secs;
         let http = crate::proxy::apply_async_proxy_policy(reqwest::Client::builder())
             .user_agent(cfg.user_agent)
-            .timeout(Duration::from_secs(REQUEST_TIMEOUT_SECS))
+            .timeout(Duration::from_secs(request_secs))
             .build()
             .map_err(|e| format!("failed to build AtomGit HTTP client: {e}"))?;
         let base_url = cfg.base_url.trim_end_matches('/').to_string();

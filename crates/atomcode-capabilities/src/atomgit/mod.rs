@@ -1,5 +1,5 @@
-//! AtomGit REST tools (L1): an async `AtomgitClient` + serde models backing the
-//! `atomgit_repo` / `atomgit_pr` / `atomgit_issue` agent tools.
+//! AtomGit REST client (L1): async `AtomgitClient` used by silent post-push
+//! labelling. Not a model-facing tool.
 //!
 //! # Layering & auth
 //!
@@ -17,9 +17,7 @@
 //! via [`AtomgitConfig::user_agent`].
 
 pub mod client;
-pub mod issue;
 pub mod models;
-pub mod pr;
 pub mod push_label_mw;
 pub mod remote;
 pub mod repo;

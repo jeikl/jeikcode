@@ -80,6 +80,32 @@ impl McpConfigSource {
     }
 }
 
+/// Spawned-command hard lifetime in ms (`[tools.bash] max_timeout_secs`).
+/// MCP progress-reset idle waits still cannot outlive this.
+pub fn hard_cap_ms() -> u64 {
+    let path = atomcode_config::config::Config::default_path();
+    let max_secs = if path.is_file() {
+        atomcode_config::config::Config::load(&path)
+            .ok()
+            .map(|c| c.tools.bash.max_timeout_secs.max(1))
+            .unwrap_or(1800)
+    } else {
+        1800
+    };
+    max_secs.saturating_mul(1000).max(1)
+}
+
+/// Resolve an MCP JSON-RPC / tool-call **idle** budget.
+///
+/// `mcp.json` `timeout_ms` wins when set; otherwise `[tools.timeouts] mcp_secs`.
+/// This is the gap with no new bytes / no `notifications/progress`. A slow but
+/// progressing call keeps running until [`hard_cap_ms`].
+pub fn resolve_timeout_ms(configured: Option<u64>) -> u64 {
+    let timeouts = atomcode_config::config::ToolTimeoutsConfig::load_effective();
+    let default_ms = timeouts.mcp_secs.saturating_mul(1000).max(1);
+    configured.unwrap_or(default_ms).max(1).min(hard_cap_ms())
+}
+
 /// Raw MCP config file format (for deserialization).
 #[derive(Debug, Deserialize)]
 struct McpConfigFile {

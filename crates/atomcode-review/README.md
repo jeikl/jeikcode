@@ -37,9 +37,7 @@ let _ = outcome;
 ```
 
 agent 只挂载**只读工具集** —— `read_file`、`grep`、`glob`、`list_directory`、`ast_grep`、
-`web_search`、`report_finding`,以及代码智能(`list_symbols` / `read_symbol` /
-`find_references` / `trace_callers` / `trace_callees` / `trace_chain` / `blast_radius` /
-`file_dependencies`)。它无法写入/编辑/运行任何东西。diff 由你作为任务提供,所以 agent 不需要 shell。
+`web_search`、`report_finding`,以及代码智能(`repo_map` / `code_explore`)。它无法写入/编辑/运行任何东西。diff 由你作为任务提供,所以 agent 不需要 shell。
 
 > 想要实时轨迹 / 事件流而非 `run_to_completion`?用 `agent.spawn()` 消费 `AgentEvent`
 > (`atomcode-clix` 就是这样打印逐工具进度的)。

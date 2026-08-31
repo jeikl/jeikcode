@@ -1138,9 +1138,7 @@ pub(crate) fn fanout_chat_events_for_session(
 }
 
 fn mirror_chat_event_to_registry(session_id: &str, event: &ChatEvent) {
-    use atomcode_coding::session_runtime_registry::{
-        SessionRuntimeRegistry, SessionViewEvent,
-    };
+    use atomcode_coding::session_runtime_registry::{SessionRuntimeRegistry, SessionViewEvent};
     use atomcode_kernel::event::AgentEvent;
     let reg = SessionRuntimeRegistry::global();
     let working_dir = reg
@@ -1544,8 +1542,7 @@ impl MessageInfo {
         });
         if msg.role == Role::User {
             let cwd = working_dir.unwrap_or_else(|| std::path::Path::new("."));
-            content =
-                atomcode_capabilities::session::UserWrapHook::unwrap_input_for(cwd, &content);
+            content = atomcode_capabilities::session::UserWrapHook::unwrap_input_for(cwd, &content);
             let (display, had_vision_marker) = strip_vision_marker(&content);
             if had_vision_marker {
                 content = display;

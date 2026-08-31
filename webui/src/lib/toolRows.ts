@@ -117,7 +117,17 @@ export function appendToolOutput(
     output = output.slice(output.length - MAX_LIVE_TOOL_OUTPUT);
   }
   const next = parts.slice();
-  next[idx] = { kind: 'tool', tool: { ...tp.tool, output } };
+  const finished = /\[exit code |\[bash cancelled\]|\[bash reached max_timeout_secs\]/.test(
+    output,
+  );
+  next[idx] = {
+    kind: 'tool',
+    tool: {
+      ...tp.tool,
+      output,
+      status: finished ? (tp.tool.status === 'error' ? 'error' : 'done') : tp.tool.status,
+    },
+  };
   return next;
 }
 

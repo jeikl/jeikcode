@@ -236,13 +236,24 @@ eager = "auto"
 # 内核工具结果上限默认 256 KiB。
 # 设为 0 完全禁用折叠（所有工具输出原样进入上下文，超大输出会占用上下文窗口）。
 # 环境变量 ATOMCODE_TOOL_OUTPUT_THRESHOLD_BYTES 可覆盖本项（env 优先）。
-# bash 超时：模型 timeout = 这一次堵塞多久（到期进程不停，用 bash_timeout_add 加时，每次至少 600 秒）。
-# max_timeout_secs = 从启动算命令最长活多久，到点才杀。silent_kill 只给用户 !cmd 的短命令空闲杀。
-# 单次更长：模型传 timeout / bash_timeout_add，不要把 default 抬到 900。
+# 命令类工具共用硬寿命：bash / ast_grep / git clone / web_fetch curl 回退 / parallel_edit 构建探测。
+# 模型 bash 不传 timeout。max_timeout_secs = 从启动算子进程最长活多久，到点才杀（bash 保留已有输出）。
+# silent_kill / default_timeout 只给用户 !cmd。
 [tools.bash]
 default_timeout_secs = 120
 max_timeout_secs = 1800
 silent_kill_secs = 60
+
+# 短超时：进程内搜索 / HTTP / skill !cmd / hooks / 权限门文件系统。
+# 不是上面的命令硬寿命。缺省即下列推荐值。
+[tools.timeouts]
+search_secs = 72              # Grok WSL 60s +20%
+web_connect_secs = 12     # Grok 10s +20%
+web_request_secs = 72     # web_fetch 空闲；web_search 整请求。Grok 60s +20%。慢但在传的下载不杀
+mcp_secs = 180            # MCP 缺省；mcp.json timeout_ms 优先，封顶仍是 max_timeout_secs
+skill_cmd_secs = 40
+hook_secs = 30
+fs_gate_secs = 36         # Grok 30s +20%
 
 [tools.tool_output]
 max_bytes = 65536
@@ -250,9 +261,6 @@ no_fold_tools = [
     "fetch_output",
     "repo_map",
     "code_explore",
-    "find_symbol",
-    "trace_chain",
-    "blast_radius",
     "web_fetch",
     "web_search",
 ]
@@ -277,16 +285,6 @@ max_turns = 12          # 遗留字段，不生效
 max_concurrent = 3      # 生效：并发子 agent 上限（下限 1）
 timeout_secs = 900      # 遗留字段：仍可解析，但不生效
 max_rounds = 200        # 生效：单个子任务模型轮次高水位（0=不设上限；继承上面的精确防护策略）
-
-# =============================================================================
-# LSP（语言服务器协议）
-# =============================================================================
-# opt-in。enabled=true 才挂载只读 `lsp` 工具（definition / references / hover / diagnostics）。
-# 本机没有对应语言服务器时该工具会降级，不阻塞回合。图工具（find_symbol 等）始终可用。
-[lsp]
-enabled = false
-auto_detect = false
-diagnostics_settle_delay_ms = 150
 
 # =============================================================================
 # 插件

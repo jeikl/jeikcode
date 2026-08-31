@@ -40,7 +40,7 @@
 
 ```
 30-40 个并发会话
-├─ 28-38 个:查询/解答类(读)—— code_explore / find_symbol / repo_map 为主
+├─ 28-38 个:查询/解答类(读)—— code_explore / repo_map 为主
 │    ├─ 每次查询 = 加载/复用索引 + 检索 + 评分(当前每会话独立 CodeIndex → 重复加载 N 份)
 │    └─ 弱模型 + 读密集 → 检索慢直接放大 N 倍
 └─ 1-2 个:编程写代码类(写)—— bash/edit/write 为主

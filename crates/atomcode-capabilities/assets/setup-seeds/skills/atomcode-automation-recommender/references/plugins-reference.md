@@ -1,6 +1,6 @@
 # Plugin Recommendations
 
-Plugins are installable collections of skills, commands, agents, and hooks. AtomCode supports plugin installation to extend functionality.
+Plugins are installable collections of skills, commands, agents, and hooks. JeikCode supports plugin installation to extend functionality.
 
 **Note**: These are common plugin patterns. Use web search to discover additional community plugins.
 
@@ -8,17 +8,17 @@ Plugins are installable collections of skills, commands, agents, and hooks. Atom
 
 ## Core Plugins
 
-### AtomCode Official
+### JeikCode Official
 
 | Plugin | Best For | Key Features |
 |--------|----------|--------------|
-| **atomcode** | AtomCode usage & documentation | Offline docs index, install/config/troubleshooting reference |
+| **atomcode** | JeikCode usage & documentation | Offline docs index, install/config/troubleshooting reference |
 
 ### Development & Code Quality
 
 | Plugin | Best For | Key Features |
 |--------|----------|--------------|
-| **plugin-dev** | Building AtomCode plugins | Skills for creating skills, hooks, commands, agents |
+| **plugin-dev** | Building JeikCode plugins | Skills for creating skills, hooks, commands, agents |
 | **pr-review-toolkit** | PR review workflows | Specialized review agents (code, tests, types) |
 | **code-review** | Automated code review | Multi-agent review with confidence scoring |
 | **code-simplifier** | Code refactoring | Simplify code while preserving functionality |
@@ -84,7 +84,7 @@ Plugins are installable collections of skills, commands, agents, and hooks. Atom
 ## When to Recommend Plugins
 
 **Recommend plugin installation when:**
-- User wants to install AtomCode automations from a shared repository
+- User wants to install JeikCode automations from a shared repository
 - User needs multiple related capabilities
 - Team wants standardized workflows
-- First-time AtomCode setup
+- First-time JeikCode setup

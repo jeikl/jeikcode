@@ -91,7 +91,11 @@ mod tests {
         let hook = SkillFirstHook::new("deepseek-v4-flash", true);
         let mut c = convo(vec![Message::system("s"), Message::user("hi")]);
         hook.turn_start(&mut c).await;
-        assert_eq!(c.messages.len(), 3, "opening turn inserts exactly one reminder");
+        assert_eq!(
+            c.messages.len(),
+            3,
+            "opening turn inserts exactly one reminder"
+        );
         assert!(
             c.messages[1].synthetic
                 && c.messages[1].text.starts_with("<system-reminder>")

@@ -195,8 +195,7 @@ pub(crate) struct TtyHealth {
 impl TtyHealth {
     #[inline]
     pub(crate) fn needs_recovery(self) -> bool {
-        self.is_tty
-            && (self.foreground_group != self.process_group || self.canonical || self.echo)
+        self.is_tty && (self.foreground_group != self.process_group || self.canonical || self.echo)
     }
 }
 

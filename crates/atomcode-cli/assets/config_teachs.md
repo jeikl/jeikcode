@@ -1,4 +1,4 @@
-# JeikCode / AtomCode 配置文件（config.toml）Agent 指南与配置教程
+# JeikCode 配置文件（config.toml）Agent 指南与配置教程
 
 > **目标受众**：AI Agent / 自动化配置脚本 / 开发者。
 > **文档用途**：当用户请求配置模型、添加 Provider、配置代理或调整运行时参数时，Agent 必须严格依据本文档中的真实代码 Schema、内置预设库与协议规范，安全且精准地读取或修改 `~/.atomcode/config.toml`。
@@ -25,7 +25,7 @@
 
 ## 2. 提供商体系与底层通信协议
 
-AtomCode / JeikCode 采用分层解耦的 Provider 体系，支持 **内置预设提供商** 与 **底层自定义协议提供商**：
+JeikCode 采用分层解耦的 Provider 体系，支持 **内置预设提供商** 与 **底层自定义协议提供商**：
 
 ### 2.1 内置预设提供商列表（Built-in Presets）
 直接引用内置提供商 ID 时，系统会自动填充默认的 `base_url`、环境变量后备与协议映射：
@@ -43,7 +43,6 @@ AtomCode / JeikCode 采用分层解耦的 Provider 体系，支持 **内置预�
 | `openai` | OpenAI 官方 | OpenAI 兼容 | `https://api.openai.com/v1` | `OPENAI_API_KEY` |
 | `anthropic` | Anthropic Claude 官方 | Anthropic Messages | `https://api.anthropic.com` | `ANTHROPIC_API_KEY` |
 | `ollama` | 本地 Ollama | Ollama 原生 | `http://localhost:11434` | (无需密钥) |
-| `atomgit` | AtomGit | OpenAI 兼容 | `https://llm-api.atomgit.com/v1` | (专属网关) |
 | `taotoken` | TaoToken | OpenAI 兼容 | `https://taotoken.net/api/v1` | - |
 | `xiaomi-mimo` | 小米 MiMo | OpenAI 兼容 | - | - |
 
@@ -228,13 +227,22 @@ enabled = true                  # 是否开启任务清单跟踪
 eager = "auto"                  # auto | preferred | always
 
 [tools.bash]
-default_timeout_secs = 120      # 短命令超时（秒）
-max_timeout_secs = 1800         # 编译测试等长任务超时（秒）
-silent_kill_secs = 60           # 无输出静默终止时间
+default_timeout_secs = 120      # 仅 !cmd 默认墙钟
+max_timeout_secs = 1800         # 所有 spawn 命令的工具共用硬寿命（秒）
+silent_kill_secs = 60           # 仅 !cmd 短命令空闲杀
+
+[tools.timeouts]
+search_secs = 72                # grep / glob（Grok WSL 60s +20%）
+web_connect_secs = 12           # HTTP connect（Grok 10s +20%）
+web_request_secs = 72           # web_fetch 空闲 / API 整请求（Grok 60s +20%）
+mcp_secs = 180                  # MCP 空闲；有 progress 则等到 max_timeout_secs
+skill_cmd_secs = 40             # skill 模板 !`cmd`
+hook_secs = 30                  # CC hook 默认+封顶
+fs_gate_secs = 36               # 权限门 canonicalize（Grok 30s +20%）
 
 [tools.tool_output]
 max_bytes = 65536               # 输出折叠阈值（64KiB）
-no_fold_tools = ["fetch_output", "repo_map", "code_explore", "find_symbol", "trace_chain", "blast_radius", "web_fetch", "web_search"]
+no_fold_tools = ["fetch_output", "repo_map", "code_explore", "web_fetch", "web_search"]
 
 # =============================================================================
 # 网络代理 [network.proxy]
@@ -243,14 +251,6 @@ no_fold_tools = ["fetch_output", "repo_map", "code_explore", "find_symbol", "tra
 mode = "follow_system"          # "follow_system" | "default_proxy" | "no_proxy"
 # http = "http://127.0.0.1:7890"
 # https = "http://127.0.0.1:7890"
-
-# =============================================================================
-# 语言服务器 [lsp]
-# =============================================================================
-[lsp]
-enabled = false
-auto_detect = false
-diagnostics_settle_delay_ms = 150
 
 # =============================================================================
 # 会话日志 [datalog]

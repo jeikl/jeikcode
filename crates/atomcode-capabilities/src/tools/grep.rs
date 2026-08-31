@@ -31,8 +31,7 @@ const MAX_RESULTS_CAP: usize = 10_000;
 /// file's search errors and is skipped: the absolute memory guard, independent of the
 /// per-line default.
 const MAX_LINE_BUF_BYTES: usize = 10 * 1024 * 1024;
-/// Grok-style wall clock; stop the walk rather than hanging on a huge tree.
-const GREP_TIMEOUT: Duration = Duration::from_secs(20);
+
 /// Grok default tool-output budget (40 KB). Remainder: narrow path/glob or raise max_results.
 const MAX_OUTPUT_BYTES: usize = 40_000;
 
@@ -144,7 +143,8 @@ impl Tool for GrepTool {
         let base = ctx.working_dir.clone();
         let pattern = a.pattern.clone();
         let display_path = raw.clone();
-        let deadline = Instant::now() + GREP_TIMEOUT;
+        let search_secs = super::tool_timeouts().search_secs;
+        let deadline = Instant::now() + Duration::from_secs(search_secs);
         let res = tokio::task::spawn_blocking(move || {
             search(
                 &root,
@@ -190,9 +190,9 @@ impl Tool for GrepTool {
                     ));
                 }
                 if timed_out {
-                    out.push_str(
-                        "\n[Search timed out after 20s; showing matches collected so far. Narrow `path`/`glob` or use code_explore.]",
-                    );
+                    out.push_str(&format!(
+                        "\n[Search timed out after {search_secs}s; showing matches collected so far. Narrow `path`/`glob` or use code_explore.]"
+                    ));
                 }
                 if let Some(note) = recovered {
                     out = format!("{note}\n{out}");

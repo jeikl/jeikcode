@@ -180,10 +180,7 @@ pub fn should_pulse(site: &'static str) -> bool {
     if !enabled() {
         return false;
     }
-    let Ok(mut map) = PULSE_AT
-        .get_or_init(|| Mutex::new(HashMap::new()))
-        .lock()
-    else {
+    let Ok(mut map) = PULSE_AT.get_or_init(|| Mutex::new(HashMap::new())).lock() else {
         return true;
     };
     match map.get(site) {
@@ -394,7 +391,10 @@ pub fn stage_delay(cat: &str) {
     }
     write_line(
         cat,
-        format_args!("stage=diagnostic_delay_begin delay_ms={}", delay.as_millis()),
+        format_args!(
+            "stage=diagnostic_delay_begin delay_ms={}",
+            delay.as_millis()
+        ),
     );
     std::thread::sleep(delay);
     write_line(cat, format_args!("stage=diagnostic_delay_end"));

@@ -675,11 +675,7 @@ mod tests {
         assert!(!t_with(Locale::ZhCn, Msg::ProviderPanelModelPlaceholder).is_empty());
         assert!(!t_with(Locale::En, Msg::ProviderPanelUpstreamListLabel).is_empty());
         assert!(!t_with(Locale::ZhCn, Msg::ProviderPanelUpstreamListLabel).is_empty());
-        assert!(t_with(
-            Locale::En,
-            Msg::ProviderPanelUpstreamLoaded { n: 4 }
-        )
-        .contains("4"));
+        assert!(t_with(Locale::En, Msg::ProviderPanelUpstreamLoaded { n: 4 }).contains("4"));
         assert!(t_with(
             Locale::ZhCn,
             Msg::ProviderPanelUpstreamFailed { error: "HTTP 401" }

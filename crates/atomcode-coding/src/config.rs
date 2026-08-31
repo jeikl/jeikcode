@@ -194,9 +194,6 @@ pub struct CodingAgentConfig {
     /// /unknown ⇒ Exa. Mirrors v1's `[web_search] provider` config knob — without this the
     /// tool was hardwired to Exa with no way to opt into DDG.
     pub web_search_provider: Option<String>,
-    /// Opt-in read-only LSP policy. The manager is created by this runtime's tool
-    /// assembly, so provider/session reloads cannot create a second hidden owner.
-    pub lsp: atomcode_capabilities::codeintel::LspSettings,
     /// On Ctrl-C / cancel: `false` (default) ⇒ CANCEL = UNDO (roll back the interrupted
     /// turn). `true` ⇒ PRESERVE the partial turn + backfill dangling tool_calls + inject
     /// an interruption marker, forwarded to the kernel `Agent` builder
@@ -302,7 +299,6 @@ pub struct CodingRuntimeConfig {
     /// user_title). Applied only when the native runtime creates the session meta;
     /// existing sessions keep their stored name.
     pub session_display_name: Option<String>,
-    pub lsp: atomcode_capabilities::codeintel::LspSettings,
     /// Tool-result fold threshold in bytes (`[tools.tool_output] max_bytes`).
     /// `None` → built-in default (64 KiB); `Some(0)` disables folding.
     pub tool_output_max_bytes: Option<usize>,
@@ -312,30 +308,6 @@ pub struct CodingRuntimeConfig {
     /// When provided and `mcp == true`, the runtime reuses this pre-connected
     /// registry directly rather than spawning fresh MCP client child processes.
     pub shared_mcp_registry: Option<Arc<atomcode_capabilities::mcp::McpRegistry>>,
-}
-
-pub fn lsp_settings_from_config(
-    config: &atomcode_config::config::LspConfig,
-) -> atomcode_capabilities::codeintel::LspSettings {
-    atomcode_capabilities::codeintel::LspSettings {
-        enabled: config.enabled,
-        auto_detect: config.auto_detect,
-        settle_delay_ms: config.diagnostics_settle_delay_ms,
-        servers: config
-            .servers
-            .iter()
-            .map(|(extension, server)| {
-                (
-                    extension.clone(),
-                    atomcode_capabilities::codeintel::LspServerSetting {
-                        command: server.command.clone(),
-                        args: server.args.clone(),
-                        root_markers: server.root_markers.clone(),
-                    },
-                )
-            })
-            .collect(),
-    }
 }
 
 impl CodingRuntimeConfig {
@@ -428,7 +400,6 @@ impl CodingRuntimeConfig {
             supports_vision: r.map(|r| r.accepts_images()).unwrap_or(false),
             extra_system_append: None,
             session_display_name: None,
-            lsp: lsp_settings_from_config(&config.lsp),
             // env wins over `[tools.tool_output] max_bytes`; missing → None (default).
             tool_output_max_bytes: std::env::var("ATOMCODE_TOOL_OUTPUT_THRESHOLD_BYTES")
                 .ok()
@@ -486,7 +457,6 @@ impl CodingRuntimeConfig {
         config.round_cap_checkpoint = self.round_cap_checkpoint;
         config.next_prompt_suggestions = self.next_prompt_suggestions;
         config.pricing = self.pricing;
-        config.lsp = self.lsp.clone();
         config.tool_output_max_bytes = self.tool_output_max_bytes;
         config.tool_output_no_fold_tools = self.tool_output_no_fold_tools.clone();
         config
@@ -809,7 +779,6 @@ impl CodingAgentConfig {
             thinking_keep: None,
             compact_threshold: 0.7,
             web_search_provider: None,
-            lsp: Default::default(),
             keep_interrupted_context: false,
             user_agent: None,
             skip_tls_verify: false,
@@ -841,41 +810,6 @@ mod tests {
         // The wall-clock cap is OFF by default (0 = disabled); the goal is bounded
         // by the round cap + evaluator instead. Re-enable via env if ever needed.
         assert_eq!(c.goal_max_duration_secs, 0);
-    }
-
-    #[test]
-    fn lsp_config_maps_to_runtime_and_agent_without_becoming_default_on() {
-        let mut config = atomcode_config::config::Config::default();
-        assert!(!config.lsp.enabled);
-        config.lsp.enabled = true;
-        config.lsp.auto_detect = false;
-        config.lsp.diagnostics_settle_delay_ms = 725;
-        config.lsp.servers.insert(
-            ".rs".into(),
-            atomcode_config::lsp_registry::LspServerConfig {
-                command: "custom-ra".into(),
-                args: vec!["--stdio".into()],
-                root_markers: vec!["Cargo.toml".into()],
-            },
-        );
-        let runtime = CodingRuntimeConfig::from_config(
-            &config,
-            std::path::Path::new("/workspace"),
-            None,
-            None,
-            false,
-            false,
-        );
-        assert!(runtime.lsp.enabled);
-        assert!(!runtime.lsp.auto_detect);
-        assert_eq!(runtime.lsp.settle_delay_ms, 725);
-        let agent = runtime.agent_config();
-        let rust = agent.lsp.servers.get(".rs").unwrap();
-        assert_eq!(rust.command, "custom-ra");
-        assert_eq!(rust.args, vec!["--stdio"]);
-
-        let defaults = CodingAgentConfig::new("", "", "", "/workspace");
-        assert!(!defaults.lsp.enabled);
     }
 
     #[test]

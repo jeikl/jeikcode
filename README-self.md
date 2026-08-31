@@ -91,7 +91,7 @@ env  ATOMCODE_UPDATE_MANIFEST_URL / ATOMCODE_UPDATE_DOWNLOAD_BASE   (最高)
 **推荐白名单**(已是代码默认,写不写行为一致):
 ```toml
 [tools.tool_output]
-no_fold_tools = ["fetch_output", "repo_map", "code_explore", "find_symbol", "trace_chain", "blast_radius", "web_fetch", "web_search"]
+no_fold_tools = ["fetch_output", "repo_map", "code_explore", "web_fetch", "web_search"]
 
 [config]  # 可选,想换渠道时
 # update_manifest_url = "https://.../latest.json"
@@ -125,11 +125,11 @@ auto_update = true  # 打开后重启自动无感更新(默认关,按需开)
 
 **本 fork 额外支持:Project Knowledge Packs(多 md 加载)** —— 提交 `1ff6bc68f`(2026-08-03,"project knowledge packs with per-turn hot-reload",作者 Jeik 即本 fork 维护者),实现在 `crates/atomcode-capabilities/src/session/instructions.rs`:
 
-> 在 AGENTS 级指令之外,**附加加载三组 knowledge md,每组多路径首中即止,互不替代**;每次用户回合热重载(无大小上限);术语表还指导 find_symbol 做符号升级定位(业务词 → 代码符号)。
+> 在 AGENTS 级指令之外,**附加加载三组 knowledge md,每组多路径首中即止,互不替代**;每次用户回合热重载(无大小上限);术语表还指导 code_explore 做符号升级定位(业务词 → 代码符号)。
 
 | 知识包 | 用途 | 候选路径(首中即止) |
 |---|---|---|
-| **Glossary(业务词表)** | 业务术语 → 代码别名;提示模型"用户说业务词时先扩成代码词再 find_symbol" | `.atomcode/glossary.md` · `.atomcode/domain-glossary.md` · `docs/domain-glossary.md` · `docs/glossary.md` · `domain-glossary.md` · `DOMAIN.md` |
+| **Glossary(业务词表)** | 业务术语 → 代码别名;提示模型"用户说业务词时先扩成代码词再 code_explore" | `.atomcode/glossary.md` · `.atomcode/domain-glossary.md` · `docs/domain-glossary.md` · `docs/glossary.md` · `domain-glossary.md` · `DOMAIN.md` |
 | **Rules(业务规则)** | 组织结构/审批流/业务约束,实现时视为权威 | `.atomcode/rules.md` · `.atomcode/business-rules.md` · `docs/rules.md` · `docs/business-rules.md` · `rules.md` |
 | **DbWords(库表/字段词)** | 数据库 schema / 表 / 字段的业务词 | `.atomcode/dbwords.md` · `.atomcode/db-words.md` · `.atomcode/schema.md` · `docs/dbwords.md` · `docs/db-words.md` |
 
@@ -148,8 +148,7 @@ keep_interrupted_context = true   # Ctrl-C 保留部分上下文; false 则回�
 
 # ── fork 独有:codeintel 图谱工具可见性 ──────────────────────────
 [codeintel]
-# "unified"(默认)= 只暴露 repo_map + code_explore(报告/探索两件套)
-# "full" = 暴露全部底层图谱工具(find_symbol/trace_*/blast_radius/file_deps…)
+# 只暴露 repo_map + code_explore
 mode = "unified"
 
 [codeintel.ignore]
@@ -163,22 +162,26 @@ patterns = [                                     # 额外自定义忽略通配�
 # ── fork 独有:工具输出折叠阈值 + 不折叠白名单 ──────────────────
 [tools.tool_output]
 max_bytes = 65536                                # 超此字节折叠为头尾预览;0=禁用折叠
-no_fold_tools = ["fetch_output", "repo_map", "code_explore", "find_symbol",
-                 "trace_chain", "blast_radius", "web_fetch", "web_search"]
+no_fold_tools = ["fetch_output", "repo_map", "code_explore", "web_fetch", "web_search"]
 
 [tools.bash]
-default_timeout_secs = 120   # 模型省略 timeout 时这一次堵多久；不要为了编译把它抬到 900
-max_timeout_secs = 1800      # 从启动算命令最长活多久；到点杀树
-silent_kill_secs = 60        # 仅 !cmd 短命令空闲杀；模型 bash / 加时不读此项
+default_timeout_secs = 120   # 仅 !cmd 省略超时时的默认墙钟
+max_timeout_secs = 1800      # 所有 spawn 命令的工具共用硬寿命；到点杀树（bash 保留已有输出）
+silent_kill_secs = 60        # 仅 !cmd 短命令空闲杀
+
+[tools.timeouts]
+search_secs = 72             # grep / glob（Grok WSL 60s +20%）
+web_connect_secs = 12        # HTTP connect（Grok 10s +20%）
+web_request_secs = 72        # web_fetch 空闲 / API 整请求（Grok 60s +20%）
+mcp_secs = 180               # MCP 缺省
+skill_cmd_secs = 40          # skill 模板 !`cmd`
+hook_secs = 30               # CC hook 默认+封顶
+fs_gate_secs = 36            # 权限门 canonicalize（Grok 30s +20%）
 
 # ── 官方字段但默认值常被自定义(保持手写以便新机可调) ──────────
 [tools.todo]
 enabled = true
 eager = "auto"
-
-[lsp]
-enabled = false                                  # fork 默认关 LSP(快)
-auto_detect = false
 
 [subagent]
 enabled = true

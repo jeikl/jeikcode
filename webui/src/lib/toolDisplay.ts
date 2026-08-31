@@ -16,9 +16,6 @@ export function toolCategory(name: string): ToolCategory {
   if (name.startsWith('mcp__')) return 'mcp';
   switch (name) {
     case 'read_file':
-    case 'read_symbol':
-    case 'list_symbols':
-    case 'file_dependencies':
       return 'file';
     case 'edit_file':
     case 'write_file':
@@ -29,11 +26,6 @@ export function toolCategory(name: string): ToolCategory {
     case 'grep':
     case 'glob':
     case 'code_explore':
-    case 'find_references':
-    case 'trace_callees':
-    case 'trace_callers':
-    case 'trace_chain':
-    case 'blast_radius':
       return 'search';
     case 'bash':
       return 'terminal';

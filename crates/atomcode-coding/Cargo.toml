@@ -4,11 +4,6 @@ version.workspace = true
 edition = "2021"
 description = "L2 coding specialization: assembles the neutral kernel + capabilities into a runnable, self-correcting coding agent."
 
-[features]
-# Forward the AtomGit REST tool feature to the capabilities layer so the
-# CLI can enable it on the coding dep without reaching into capabilities directly.
-atomgit = ["atomcode-capabilities/atomgit"]
-
 [dependencies]
 atomcode-kernel = { path = "../atomcode-kernel" }
 # Config system leaf consumed directly by the coding assembly.
@@ -17,7 +12,7 @@ atomcode-config = { path = "../atomcode-config" }
 # with web/skills/mcp/session/memory wired (the leaner features exist for other
 # embedders, not for this crate).
 atomcode-capabilities = { path = "../atomcode-capabilities", features = [
-    "provider", "tools", "web", "codeintel", "lsp", "skills", "mcp", "session", "memory",
+    "provider", "tools", "web", "codeintel", "skills", "mcp", "session", "memory",
     # CC-compatible external hooks (hooks.json): production parity with the legacy
     # core engine, which always ran them. Zero overhead when no hooks.json exists
     # (prepare skips registration — see CCExternalHooks::is_empty).

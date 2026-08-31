@@ -255,7 +255,9 @@ impl SessionRuntimeRegistry {
     }
 
     pub fn lookup(&self, key: &SessionKey) -> Option<SessionRuntimeEntry> {
-        self.entries.read().unwrap_or_else(|e| e.into_inner())
+        self.entries
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
             .get(key)
             .map(|inner| inner.meta.clone())
     }
@@ -265,11 +267,10 @@ impl SessionRuntimeRegistry {
     }
 
     /// List sessions with live runners under `working_dir` (exact path match).
-    pub fn list_activity(
-        &self,
-        working_dir: &Path,
-    ) -> Vec<(SessionKey, RuntimeActivity)> {
-        self.entries.read().unwrap_or_else(|e| e.into_inner())
+    pub fn list_activity(&self, working_dir: &Path) -> Vec<(SessionKey, RuntimeActivity)> {
+        self.entries
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
             .values()
             .filter(|e| e.meta.working_dir == working_dir)
             .map(|e| (e.meta.session_id.clone(), e.meta.activity))
@@ -278,7 +279,9 @@ impl SessionRuntimeRegistry {
 
     /// All live runners (any working directory).
     pub fn list_all(&self) -> Vec<SessionRuntimeEntry> {
-        self.entries.read().unwrap_or_else(|e| e.into_inner())
+        self.entries
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
             .values()
             .map(|e| e.meta.clone())
             .collect()
@@ -351,7 +354,9 @@ impl SessionRuntimeRegistry {
     }
 
     pub fn snapshot(&self, key: &SessionKey) -> Option<SessionSnapshot> {
-        self.entries.read().unwrap_or_else(|e| e.into_inner())
+        self.entries
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
             .get(key)
             .and_then(|e| e.meta.snapshot.clone())
     }
@@ -377,21 +382,14 @@ impl SessionRuntimeRegistry {
     }
 
     /// Submit a turn to the session's bound handle.
-    pub fn submit(
-        &self,
-        key: &SessionKey,
-        input: UserInput,
-    ) -> Result<(), RegistryError> {
+    pub fn submit(&self, key: &SessionKey, input: UserInput) -> Result<(), RegistryError> {
         let guard = self.entries.read().unwrap_or_else(|e| e.into_inner());
         let inner = guard.get(key).ok_or(RegistryError::UnknownSession {
             session_id: key.clone(),
         })?;
-        let handle = inner
-            .handle
-            .as_ref()
-            .ok_or(RegistryError::HandleNotReady {
-                session_id: key.clone(),
-            })?;
+        let handle = inner.handle.as_ref().ok_or(RegistryError::HandleNotReady {
+            session_id: key.clone(),
+        })?;
         handle
             .dispatch(DriverCommand::Submit(input))
             .map_err(|_| RegistryError::Unavailable {
@@ -412,8 +410,7 @@ impl SessionRuntimeRegistry {
         id: RequestId,
         value: serde_json::Value,
     ) -> Result<(), RegistryError> {
-        self.dispatch(key, DriverCommand::Respond { id, value })
-            ?;
+        self.dispatch(key, DriverCommand::Respond { id, value })?;
         let mut guard = self.entries.write().unwrap_or_else(|e| e.into_inner());
         if let Some(inner) = guard.get_mut(key) {
             if inner.pending_request_id == Some(id) {
@@ -423,21 +420,14 @@ impl SessionRuntimeRegistry {
         Ok(())
     }
 
-    pub fn dispatch(
-        &self,
-        key: &SessionKey,
-        command: DriverCommand,
-    ) -> Result<(), RegistryError> {
+    pub fn dispatch(&self, key: &SessionKey, command: DriverCommand) -> Result<(), RegistryError> {
         let guard = self.entries.read().unwrap_or_else(|e| e.into_inner());
         let inner = guard.get(key).ok_or(RegistryError::UnknownSession {
             session_id: key.clone(),
         })?;
-        let handle = inner
-            .handle
-            .as_ref()
-            .ok_or(RegistryError::HandleNotReady {
-                session_id: key.clone(),
-            })?;
+        let handle = inner.handle.as_ref().ok_or(RegistryError::HandleNotReady {
+            session_id: key.clone(),
+        })?;
         handle
             .dispatch(command)
             .map_err(|_: RuntimeUnavailable| RegistryError::Unavailable {
@@ -499,7 +489,6 @@ impl SessionRuntimeRegistry {
         self.push_view_event(&key, view)
     }
 
-
     /// Push by TUI transport runtime id (foreground / background runners).
     pub fn push_runtime_event_by_runtime_id(
         &self,
@@ -540,8 +529,13 @@ impl SessionRuntimeRegistry {
         &self,
         key: &SessionKey,
         after_sequence: Option<u64>,
-    ) -> Result<(Vec<SequencedSessionEvent>, broadcast::Receiver<SequencedSessionEvent>), RegistryError>
-    {
+    ) -> Result<
+        (
+            Vec<SequencedSessionEvent>,
+            broadcast::Receiver<SequencedSessionEvent>,
+        ),
+        RegistryError,
+    > {
         let guard = self.entries.read().unwrap_or_else(|e| e.into_inner());
         let inner = guard.get(key).ok_or(RegistryError::UnknownSession {
             session_id: key.clone(),
@@ -564,8 +558,13 @@ impl SessionRuntimeRegistry {
         key: &SessionKey,
         working_dir: PathBuf,
         after_sequence: Option<u64>,
-    ) -> Result<(Vec<SequencedSessionEvent>, broadcast::Receiver<SequencedSessionEvent>), RegistryError>
-    {
+    ) -> Result<
+        (
+            Vec<SequencedSessionEvent>,
+            broadcast::Receiver<SequencedSessionEvent>,
+        ),
+        RegistryError,
+    > {
         match self.subscribe(key, after_sequence) {
             Ok(pair) => Ok(pair),
             Err(RegistryError::UnknownSession { .. }) => {
@@ -675,12 +674,10 @@ mod tests {
         let reg = SessionRuntimeRegistry::new();
         let (o1, e1) = reg
             .open_or_attach("s1".into(), PathBuf::from("/proj"))
-            
             .unwrap();
         assert_eq!(o1, OpenOutcome::Registered);
         let (o2, e2) = reg
             .open_or_attach("s1".into(), PathBuf::from("/proj"))
-            
             .unwrap();
         assert_eq!(o2, OpenOutcome::Attached);
         assert_eq!(e1.session_id, e2.session_id);
@@ -690,10 +687,8 @@ mod tests {
     async fn list_activity_scopes_by_working_dir() {
         let reg = SessionRuntimeRegistry::new();
         reg.open_or_attach("a".into(), PathBuf::from("/p1"))
-            
             .unwrap();
         reg.open_or_attach("b".into(), PathBuf::from("/p2"))
-            
             .unwrap();
         let p1 = reg.list_activity(Path::new("/p1"));
         assert_eq!(p1.len(), 1);
@@ -704,22 +699,11 @@ mod tests {
     async fn select_semantics_do_not_require_reconfigure() {
         // Registry holds A and B independently; "view switch" is a client concern.
         let reg = SessionRuntimeRegistry::new();
-        reg.open_or_attach("a".into(), PathBuf::from("/p"))
-            
-            .unwrap();
-        reg.open_or_attach("b".into(), PathBuf::from("/p"))
-            
-            .unwrap();
-        reg.set_activity(&"a".into(), RuntimeActivity::Running)
-            ;
-        assert_eq!(
-            reg.activity(&"a".into()),
-            Some(RuntimeActivity::Running)
-        );
-        assert_eq!(
-            reg.activity(&"b".into()),
-            Some(RuntimeActivity::Starting)
-        );
+        reg.open_or_attach("a".into(), PathBuf::from("/p")).unwrap();
+        reg.open_or_attach("b".into(), PathBuf::from("/p")).unwrap();
+        reg.set_activity(&"a".into(), RuntimeActivity::Running);
+        assert_eq!(reg.activity(&"a".into()), Some(RuntimeActivity::Running));
+        assert_eq!(reg.activity(&"b".into()), Some(RuntimeActivity::Starting));
         // Switching the view to B must not clear A's busy state.
         assert!(reg.activity(&"a".into()).unwrap().is_busy());
     }
@@ -728,15 +712,11 @@ mod tests {
     async fn retain_sessions_drops_idle_stale_only() {
         let reg = SessionRuntimeRegistry::new();
         reg.open_or_attach("keep".into(), PathBuf::from("/p"))
-            
             .unwrap();
         reg.open_or_attach("drop".into(), PathBuf::from("/p"))
-            
             .unwrap();
-        reg.set_activity(&"drop".into(), RuntimeActivity::Ready)
-            ;
-        reg.set_activity(&"keep".into(), RuntimeActivity::Running)
-            ;
+        reg.set_activity(&"drop".into(), RuntimeActivity::Ready);
+        reg.set_activity(&"keep".into(), RuntimeActivity::Running);
         let mut keep = HashSet::new();
         keep.insert("keep".into());
         reg.retain_sessions(&keep);
@@ -747,26 +727,24 @@ mod tests {
     #[tokio::test]
     async fn subscribe_replays_journal_after_sequence() {
         let reg = SessionRuntimeRegistry::new();
-        reg.open_or_attach("s".into(), PathBuf::from("/p"))
-            
-            .unwrap();
-        reg.set_activity(&"s".into(), RuntimeActivity::Ready)
-            ;
-        reg.set_activity(&"s".into(), RuntimeActivity::Running)
-            ;
+        reg.open_or_attach("s".into(), PathBuf::from("/p")).unwrap();
+        reg.set_activity(&"s".into(), RuntimeActivity::Ready);
+        reg.set_activity(&"s".into(), RuntimeActivity::Running);
         let (replay, _rx) = reg.subscribe(&"s".into(), Some(0)).unwrap();
-        assert!(replay.iter().any(|e| e.activity == RuntimeActivity::Running));
+        assert!(replay
+            .iter()
+            .any(|e| e.activity == RuntimeActivity::Running));
     }
 
     #[tokio::test]
     async fn push_runtime_event_fans_out_text_delta_to_subscribers() {
         use atomcode_kernel::event::AgentEvent;
         let reg = SessionRuntimeRegistry::new();
-        reg.open_or_attach("s".into(), PathBuf::from("/p"))
-            
-            .unwrap();
+        reg.open_or_attach("s".into(), PathBuf::from("/p")).unwrap();
         let (replay_before, mut rx) = reg.subscribe(&"s".into(), None).unwrap();
-        assert!(replay_before.iter().all(|e| e.runtime.is_none() && e.view.is_none()));
+        assert!(replay_before
+            .iter()
+            .all(|e| e.runtime.is_none() && e.view.is_none()));
         assert!(reg.push_runtime_event(
             &"s".into(),
             1,

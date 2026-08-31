@@ -1,6 +1,6 @@
 # Skills Recommendations
 
-Skills are packaged expertise with workflows, reference materials, and best practices. Create them in `.atomcode/skills/<name>/SKILL.md`. Skills can be invoked by AtomCode automatically when relevant, or by users directly with `/skill-name`.
+Skills are packaged expertise with workflows, reference materials, and best practices. Create them in `.atomcode/skills/<name>/SKILL.md`. Skills can be invoked by JeikCode automatically when relevant, or by users directly with `/skill-name`.
 
 Some pre-built skills are available through the setup installer (`atomcode setup`).
 
@@ -52,7 +52,7 @@ Skills distributed as plugins — install with `/plugin marketplace add <url>` t
 | **commit-craft** | commit-craft | (same marketplace) `/plugin install commit-craft@atomcode` | Conventional commit messages, PR descriptions, changelogs |
 | **git-worktree** | git-worktree | (same marketplace) `/plugin install git-worktree@atomcode` | `/worktree` — isolated worktrees for parallel work |
 
-> **AtomCode usage & docs Q&A** (installation, config, slash commands,
+> **JeikCode usage & docs Q&A** (installation, config, slash commands,
 > troubleshooting) is now the **built-in `/guide`** subagent — run
 > `/guide <question>`, no plugin install needed.
 
@@ -81,14 +81,14 @@ Create project-specific skills in `.atomcode/skills/<name>/SKILL.md`.
 name: skill-name
 description: What this skill does and when to use it
 disable-model-invocation: true  # Only user can invoke (for side effects)
-user-invocable: false           # Only AtomCode can invoke (for background knowledge)
+user-invocable: false           # Only JeikCode can invoke (for background knowledge)
 allowed-tools: Read, Grep, Glob # Restrict tool access
 ---
 ```
 
 ### Invocation Control
 
-| Setting | User | AtomCode | Use for |
+| Setting | User | JeikCode | Use for |
 |---------|------|----------|---------|
 | (default) | Yes | Yes | General-purpose skills |
 | `disable-model-invocation: true` | Yes | No | Side effects (deploy, send) |
@@ -317,9 +317,9 @@ Generate release notes:
 
 ---
 
-### Project Conventions (AtomCode-only)
+### Project Conventions (JeikCode-only)
 
-Background knowledge AtomCode applies automatically:
+Background knowledge JeikCode applies automatically:
 
 **SKILL.md:**
 ```yaml
@@ -398,4 +398,4 @@ Use `` !`command` `` to inject live data before the skill runs:
 - Status: !`git status --short`
 ```
 
-The command output replaces the placeholder before AtomCode sees the skill content.
+The command output replaces the placeholder before JeikCode sees the skill content.

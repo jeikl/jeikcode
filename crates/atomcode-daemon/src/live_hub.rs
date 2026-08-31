@@ -267,10 +267,7 @@ impl LiveViewHub {
     /// Replace the projected view snapshot without emitting `SessionChanged`.
     /// Used when a view-only switch left an empty hub projection while a
     /// registry runner (or catalog) already has the real transcript.
-    pub fn replace_view_snapshot_silent(
-        &self,
-        snapshot: SessionSnapshot,
-    ) -> Result<(), HubError> {
+    pub fn replace_view_snapshot_silent(&self, snapshot: SessionSnapshot) -> Result<(), HubError> {
         let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
         if state.binding.is_none() {
             return Err(HubError::Unbound);
@@ -574,9 +571,7 @@ impl LiveViewHub {
             state
                 .pending_requests
                 .iter()
-                .filter(|(_, kind)| {
-                    kind.as_str() == atomcode_capabilities::tools::APPROVAL_KIND
-                })
+                .filter(|(_, kind)| kind.as_str() == atomcode_capabilities::tools::APPROVAL_KIND)
                 .map(|(id, _)| *id)
                 .collect()
         };
@@ -638,10 +633,7 @@ impl LiveViewHub {
     ) -> Result<atomcode_coding::SessionChanged, HubError> {
         // ViewBinding change only — does not touch CodingRuntime / lease / turn.
         let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
-        let binding = state
-            .binding
-            .as_mut()
-            .ok_or(HubError::Unbound)?;
+        let binding = state.binding.as_mut().ok_or(HubError::Unbound)?;
         binding.identity.session_id = session_id.clone();
         binding.identity.working_dir = working_dir.clone();
         let generation = binding.identity.generation;
@@ -900,7 +892,8 @@ impl LiveViewHub {
         let apply_agent_config_reload = matches!(
             &event,
             CodingRuntimeEvent::TurnFinished(TurnCompletion::Completed { .. })
-        ) && atomcode_capabilities::config_reload::take_pending_live_reload();
+        )
+            && atomcode_capabilities::config_reload::take_pending_live_reload();
         let reload_handle = apply_agent_config_reload
             .then(|| {
                 state
@@ -1256,9 +1249,7 @@ fn session_view_from_live(
             inputs: inputs.clone(),
             client_input_ids: client_input_ids.clone(),
         }),
-        LiveViewEvent::CommandOutput(text) => {
-            Some(SessionViewEvent::CommandOutput(text.clone()))
-        }
+        LiveViewEvent::CommandOutput(text) => Some(SessionViewEvent::CommandOutput(text.clone())),
         LiveViewEvent::RequestResolved { request_id, kind } => {
             Some(SessionViewEvent::RequestResolved {
                 request_id: *request_id,

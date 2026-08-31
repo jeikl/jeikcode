@@ -765,7 +765,7 @@ impl ToolMiddleware for BashWorkspaceGate {
             let mv_pairs = mv_pairs.clone();
             let cwd = cwd.clone();
             let fallback = (false, Vec::<String>::new());
-            super::run_bounded(super::GATE_FS_TIMEOUT, fallback, move || {
+            super::run_bounded(super::gate_fs_timeout(), fallback, move || {
                 // Written/deleted TARGETS that land OUTSIDE the workspace (path canonicalizes —
                 // filesystem I/O). Temp-dir targets (codex parity: /tmp + $TMPDIR are
                 // default-writable) count as in-workspace: `cargo build > /tmp/x.json` is benign

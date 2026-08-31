@@ -8,17 +8,10 @@ auto_commit = false
 keep_interrupted_context = true
 offline_mode = "off"
 
-[lsp]
-enabled = false
-auto_detect = false
-diagnostics_settle_delay_ms = 150
-
 [subagent]
-enabled = true
-initial_turns = 4
-max_turns = 12
+# Live knobs: max_concurrent / max_rounds. enabled / initial_turns / max_turns /
+# timeout_secs are kept only so old config files still parse.
 max_concurrent = 3
-timeout_secs = 900
 max_rounds = 200
 
 [loop_config]
@@ -34,11 +27,24 @@ enabled = true
 eager = "auto"
 
 [tools.bash]
-# timeout on bash = per-call wait. Process lifetime is max_timeout_secs from start.
-# silent_kill is !cmd only. Do not raise default to save compiles — use bash_timeout_add.
+# Shared hard lifetime for every tool that waits on a spawned command
+# (bash, ast_grep, git clone, web_fetch curl fallback, parallel_edit build probe).
+# Agent bash has no timeout argument. silent_kill / default_timeout are !cmd only.
 default_timeout_secs = 120
 max_timeout_secs = 1800
 silent_kill_secs = 60
+
+[tools.timeouts]
+# Short budgets — not the spawned-command hard lifetime above.
+# Values are Grok-like categories, ~20% more lenient than Grok (keep longer
+# ones that already exceed that, e.g. MCP 180 > Grok 60s).
+search_secs = 72          # grep / glob walk (Grok WSL 60s +20%)
+web_connect_secs = 12     # HTTP connect (web_fetch); Grok 10s +20%
+web_request_secs = 72     # web_fetch idle / web_search request; Grok 60s +20%
+mcp_secs = 180            # MCP tool-call default when mcp.json omits timeout_ms
+skill_cmd_secs = 40       # skill template !`cmd`
+hook_secs = 30            # CC hook default + ceiling (Grok observe default 5s)
+fs_gate_secs = 36         # hung NFS canonicalize; Grok 30s +20%
 
 [tools.tool_output]
 max_bytes = 65536
@@ -46,9 +52,6 @@ no_fold_tools = [
     "fetch_output",
     "repo_map",
     "code_explore",
-    "find_symbol",
-    "trace_chain",
-    "blast_radius",
     "web_fetch",
     "web_search",
 ]

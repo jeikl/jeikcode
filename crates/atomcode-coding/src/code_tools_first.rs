@@ -16,8 +16,7 @@ pub struct CodeToolsFirstHook {
 impl CodeToolsFirstHook {
     pub fn new(model: &str, code_explore_mounted: bool) -> Self {
         Self {
-            enabled: code_explore_mounted
-                && crate::persona::model_needs_firm_tool_steering(model),
+            enabled: code_explore_mounted && crate::persona::model_needs_firm_tool_steering(model),
         }
     }
 

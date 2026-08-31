@@ -3,8 +3,7 @@ use std::sync::Arc;
 use atomcode_capabilities::provider::{
     atomgit_request_signer, is_atomgit_gateway, signer_available, AnthropicConfig,
     AnthropicProvider, OllamaConfig, OllamaProvider, OpenAiCompatConfig, OpenAiCompatProvider,
-    ResponsesConfig, ResponsesProvider,
-    ReasoningPolicy, RequestSigner,
+    ReasoningPolicy, RequestSigner, ResponsesConfig, ResponsesProvider,
 };
 use atomcode_kernel::provider::LlmProvider;
 

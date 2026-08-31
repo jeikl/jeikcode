@@ -32,9 +32,9 @@ provider 的构建不会编译 MCP/skills 的传递依赖：
   Anthropic Messages（Claude）、Ollama 原生（`/api/chat`）。
 - `tools`（**default**）：真实中性工具（fs read/write/edit/list + bash + grep/glob）+ 通用审批中间件。
 - `web`：`web_fetch` / `web_search`（基于 `tools`，拉 HTTP 栈）。
-- `atomgit`：AtomGit REST 工具（repo / pr / issue）。
-- `codeintel`：代码智能（`list_symbols` / `read_symbol`，tree-sitter 符号提取）。
-- `lsp`：LSP 诊断（spawn 外部语言服务器，JSON-RPC over stdio）。
+- `atomgit`：静默 post-push 打标（非模型工具）。
+- `codeintel`：代码智能（`repo_map` / `code_explore`）。
+
 - `notify`：桌面 / 终端通知（turn-finished + approval-needed），读取 `atomcode-config` 的 `NotificationConfig`。
 - `skills`：markdown/frontmatter skill 加载器 + `use_skill` / `list_skills` 工具。
 - `cc-hooks`：CC 兼容外部 hooks（`hooks.json`），在 kernel seam 上运行用户命令。
@@ -42,7 +42,7 @@ provider 的构建不会编译 MCP/skills 的传递依赖：
 - `session`：会话持久化 + 跨会话 recall（两层级 on-disk store + Snapshot/Transcript 钩子）。
 - `memory`：用户持久记忆（生产 `memory.md` 存储）。
 - `offline`：连接失败时自动切换 offline 模式（基于 `atomcode-config`）。
-- `lsp-e2e`（default-off）：真实 LSP 端到端测试，需要 rust-analyzer 等已安装。
+
 - `e2e`（default-off）：命中真实 provider 的集成测试。
 
 ---
@@ -57,6 +57,6 @@ provider 的构建不会编译 MCP/skills 的传递依赖：
 - `pathnorm` —— 路径归一化。
 
 feature / 平台门控模块（启用对应 feature 或仅特定平台编译）：
-- `provider` / `tools` / `notify` / `atomgit` / `codeintel` / `lsp` / `skills` / `mcp` / `session` / `memory`（feature 门控）。
+- `provider` / `tools` / `notify` / `atomgit` / `codeintel` / `skills` / `mcp` / `session` / `memory`（feature 门控）。
 - `cc_hooks` —— CC 外部 hook 准备 / 注册，受 `cc-hooks` feature 门控（非常驻）。
 - `askpass` —— 凭据询问（`askpass::server::start` 等），**仅 Unix 编译**，Windows 上不存在。

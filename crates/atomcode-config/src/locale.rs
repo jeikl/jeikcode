@@ -121,18 +121,47 @@ mod tests {
         let parsed_hyphen: Locale = serde_json::from_str(r#""zh-CN""#).unwrap();
         assert_eq!(parsed_hyphen, Locale::ZhCn);
         let toml_parsed: toml::Value = toml::from_str(r#"language = "zh-CN""#).unwrap();
-        let lang: Option<Locale> = toml_parsed.get("language").unwrap().clone().try_into().unwrap();
+        let lang: Option<Locale> = toml_parsed
+            .get("language")
+            .unwrap()
+            .clone()
+            .try_into()
+            .unwrap();
         assert_eq!(lang, Some(Locale::ZhCn));
 
-        for val in &["zh-CN", "zh_CN", "zh-cn", "zh_cn", "ZH-CN", "ZH_CN", "zh", "ZH", "简体中文", "zh-TW", "zh_TW"] {
+        for val in &[
+            "zh-CN",
+            "zh_CN",
+            "zh-cn",
+            "zh_cn",
+            "ZH-CN",
+            "ZH_CN",
+            "zh",
+            "ZH",
+            "简体中文",
+            "zh-TW",
+            "zh_TW",
+        ] {
             let toml_doc: toml::Value = toml::from_str(&format!(r#"language = "{val}""#)).unwrap();
-            let parsed_lang: Option<Locale> = toml_doc.get("language").unwrap().clone().try_into().unwrap();
+            let parsed_lang: Option<Locale> = toml_doc
+                .get("language")
+                .unwrap()
+                .clone()
+                .try_into()
+                .unwrap();
             assert_eq!(parsed_lang, Some(Locale::ZhCn), "failed for {val}");
         }
 
-        for val in &["en", "EN", "en-US", "en_US", "en-us", "en_us", "English", "english"] {
+        for val in &[
+            "en", "EN", "en-US", "en_US", "en-us", "en_us", "English", "english",
+        ] {
             let toml_doc: toml::Value = toml::from_str(&format!(r#"language = "{val}""#)).unwrap();
-            let parsed_lang: Option<Locale> = toml_doc.get("language").unwrap().clone().try_into().unwrap();
+            let parsed_lang: Option<Locale> = toml_doc
+                .get("language")
+                .unwrap()
+                .clone()
+                .try_into()
+                .unwrap();
             assert_eq!(parsed_lang, Some(Locale::En), "failed for {val}");
         }
     }

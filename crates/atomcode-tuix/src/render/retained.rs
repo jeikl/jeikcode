@@ -5829,11 +5829,7 @@ impl<W: Write + Send> RetainedRenderer<W> {
                 "overflow_lf_loop",
                 format_args!(
                     "iter={} visible_len={} cap={} scrolled_off={} h={}",
-                    overflow_iters,
-                    visible_len,
-                    cap,
-                    self.scrolled_off,
-                    h
+                    overflow_iters, visible_len, cap, self.scrolled_off, h
                 ),
             );
             let scroll_seq = format!("\x1b[{};1H\n", h);
@@ -12600,7 +12596,7 @@ mod tests {
     }
 
     /// Welcome via vterm: after receiving UiLine::Welcome, all expected
-    /// welcome pieces (brand / cwd / model / tips heading / /login) must
+    /// welcome pieces (brand / cwd / model / tips heading / /provider) must
     /// appear on the screen above the footer.
     #[test]
     fn retained_welcome_lines_render_via_vterm() {
@@ -12628,8 +12624,8 @@ mod tests {
         let found_brand = (0..30).any(|r| vterm.row_text(r).contains("JeikCode"));
         let found_cwd = (0..30).any(|r| vterm.row_text(r).contains("~/p/a"));
         let found_model = (0..30).any(|r| vterm.row_text(r).contains("glm-5"));
-        // New layout shows tips (/login always pinned) instead of idle hint text.
-        let found_hint = (0..30).any(|r| vterm.row_text(r).contains("/login"));
+        // New layout shows tips (/provider always pinned) instead of idle hint text.
+        let found_hint = (0..30).any(|r| vterm.row_text(r).contains("/provider"));
         assert!(
             found_brand && found_cwd && found_model && found_hint,
             "welcome rows missing (brand={} cwd={} model={} hint={})\ndump:\n{}",
@@ -12990,11 +12986,11 @@ mod tests {
             "model should wrap instead of disappearing on narrow terminal\n{}",
             vterm.dump()
         );
-        // New layout: tips replace old idle hint text. /login is always
+        // New layout: tips replace old idle hint text. /provider is always
         // pinned; tips heading is always present.
         assert!(
-            (0..30).any(|row| vterm.row_text(row).contains("/login")),
-            "pinned /login tip should be visible on narrow terminal\n{}",
+            (0..30).any(|row| vterm.row_text(row).contains("/provider")),
+            "pinned /provider tip should be visible on narrow terminal\n{}",
             vterm.dump()
         );
         assert!(
@@ -15755,12 +15751,12 @@ mod tests {
         r.flush_deferred();
         drain_into_vterm(&buf, &mut vterm);
 
-        // Welcome fingerprint: `/login` is unique to the welcome
+        // Welcome fingerprint: `/provider` is unique to the welcome
         // hint row and is a single non-wrapping token, so it gives a
         // stable single-row marker even when the combined hint line
         // soft-wraps at narrower widths. Must appear exactly once in
         // the *visible* viewport and zero times in scrollback.
-        let hint = "/login";
+        let hint = "/provider";
         let visible_count = (0..24)
             .filter(|r| vterm.row_text(*r).contains(hint))
             .count();

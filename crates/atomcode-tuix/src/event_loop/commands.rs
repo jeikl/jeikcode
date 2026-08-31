@@ -22,7 +22,7 @@
 use std::path::{Path, PathBuf};
 
 use super::{
-    apply_persisted_config, bg_runtime, deactivate_runtime_provider_after_logout,
+    apply_persisted_config, bg_runtime,
     provider_transition_pending, reload_persisted_config, request_context_stats_render,
     save_and_reload, save_language_and_reload, LoopCtx, PersistedConfigReload,
 };
@@ -380,7 +380,10 @@ pub(crate) fn open_catalog_session_view(
     crate::modals::session_picker::replay_session(renderer, state, &ctx.current_session, true);
     let short_id = ctx.current_session.short_id().to_string();
     renderer.render(UiLine::CommandOutput(
-        t(Msg::SessionSwitched { short_id: &short_id }).into_owned(),
+        t(Msg::SessionSwitched {
+            short_id: &short_id,
+        })
+        .into_owned(),
     ));
     renderer.flush();
     Ok(())
@@ -425,9 +428,7 @@ fn schedule_resumed_runtime_replay(
 /// Publish live runners into the L2 registry (OpenCode model: registry is
 /// authoritative for activity; the TUI only owns ViewBinding + local endpoints).
 pub(crate) fn sync_session_runtime_registry(ctx: &LoopCtx, state: &UiState) {
-    use atomcode_coding::session_runtime_registry::{
-        RuntimeActivity, SessionRuntimeRegistry,
-    };
+    use atomcode_coding::session_runtime_registry::{RuntimeActivity, SessionRuntimeRegistry};
     use std::collections::HashSet;
 
     let selected_running = matches!(
@@ -481,13 +482,11 @@ pub(crate) fn sync_session_runtime_registry(ctx: &LoopCtx, state: &UiState) {
 
 fn render_bg_resume_error(renderer: &mut dyn Renderer, error: bg_runtime::BgError) {
     let message = match error {
-        bg_runtime::BgError::InvalidSlot { slot, len } => {
-            t(Msg::BgInvalidSlot {
-                slot,
-                available: len,
-            })
-            .into_owned()
-        }
+        bg_runtime::BgError::InvalidSlot { slot, len } => t(Msg::BgInvalidSlot {
+            slot,
+            available: len,
+        })
+        .into_owned(),
         bg_runtime::BgError::SlotLimit { max } => t(Msg::BgSlotLimitReached { max }).into_owned(),
         bg_runtime::BgError::NoRuntimeClient { .. } => t(Msg::BgNoRuntimeClient).into_owned(),
         bg_runtime::BgError::SessionProjectionUnavailable { error, .. } => {
@@ -519,7 +518,10 @@ pub(crate) fn apply_resume_outcome(
     schedule_resumed_runtime_replay(&mut ctx.foreground_replay_events, outcome.replay_events);
     let short_id = ctx.current_session.short_id().to_string();
     renderer.render(UiLine::CommandOutput(
-        t(Msg::SessionSwitched { short_id: &short_id }).into_owned(),
+        t(Msg::SessionSwitched {
+            short_id: &short_id,
+        })
+        .into_owned(),
     ));
     renderer.flush();
     sync_session_runtime_registry(ctx, state);
@@ -2254,36 +2256,6 @@ fn execute_slash_command_impl(
         "rewind" => {
             dispatch_rewind(state, ctx, renderer);
         }
-        "usage" => {
-            // Mid-turn (Streaming): keep a text snapshot in the footer directly
-            // below the input box. It must not enter conversation scrollback,
-            // and Esc dismisses it without cancelling the running turn.
-            // Idle: open the interactive modal.
-            if matches!(state.phase, crate::state::UiPhase::Streaming) {
-                // Fetch the FULL dataset (overview + models) so the footer report
-                // is tab-switchable mid-stream — the interactive modal can't
-                // install here (live token redraws own the footer), so we stash
-                // the panel and re-render its active tab in place on each tab
-                // key. Two gateway calls, once per `/usage`; switching tabs is
-                // then purely local.
-                match fetch_usage_data() {
-                    Some(data) => {
-                        let panel = UsageModal::new(data);
-                        state.footer_command_output = Some(
-                            panel.active_snapshot_text(ctx.caps.colors, ctx.caps.unicode_symbols),
-                        );
-                        state.footer_usage = Some(panel);
-                    }
-                    None => {
-                        state.footer_command_output =
-                            Some(t(Msg::UsageCodingPlanOnly).into_owned());
-                        state.footer_usage = None;
-                    }
-                }
-            } else {
-                open_usage(renderer, active_modal);
-            }
-        }
         "cost" => {
             let text = build_session_cost_text(ctx, state);
             if matches!(state.phase, crate::state::UiPhase::Streaming) {
@@ -2756,53 +2728,11 @@ fn execute_slash_command_impl(
             renderer.render(UiLine::CommandOutput(msg));
             renderer.flush();
         }
-        "login" => {
-            run_login_flow(renderer, ctx)?;
-        }
-        "logout" => {
-            // Provider config is a user asset and stays in config.toml. Logout removes
-            // credentials first, then asks the runtime owner to destroy the live provider;
-            // a later /login can reassemble it without losing the user's provider choice.
-            //
-            // 安全：登出时自动关闭 App 远程访问，防止隧道仍在线。
-            if ctx
-                .app_relay_child
-                .take()
-                .map_or(false, |mut c| c.start_kill().is_ok())
-            {
-                let _ = ctx.app_relay_child.take();
-            }
-            atomcode_daemon::stop_app_server();
-            match atomcode_auth::logout() {
-                Ok(()) => {
-                    match deactivate_runtime_provider_after_logout(ctx) {
-                        Ok(true) => {
-                            // Runtime owner emits the completion only after the
-                            // active AtomGit provider has been torn down.
-                        }
-                        Ok(false) => renderer
-                            .render(UiLine::CommandOutput(t(Msg::CmdLogoutDone).into_owned())),
-                        Err(error) => {
-                            let message = format!(
-                                "credentials removed, but provider deactivation failed: {error}"
-                            );
-                            renderer.render(UiLine::Error(
-                                t(Msg::CmdLogoutFailed { error: &message }).into_owned(),
-                            ));
-                        }
-                    }
-                }
-                Err(e) => {
-                    let msg = format!("{}", e);
-                    renderer.render(UiLine::Error(
-                        t(Msg::CmdLogoutFailed { error: &msg }).into_owned(),
-                    ));
-                }
-            }
-            renderer.flush();
-        }
-        "whoami" => {
-            renderer.render(UiLine::CommandOutput(build_whoami_text()));
+        "login" | "logout" | "whoami" | "codingplan" | "usage" => {
+            renderer.render(UiLine::CommandOutput(
+                "AtomGit OAuth / CodingPlan is removed. Configure a provider with /provider."
+                    .into(),
+            ));
             renderer.flush();
         }
         "upgrade" => {
@@ -5272,6 +5202,7 @@ pub(super) fn build_diff_stat_text(ctx: &LoopCtx) -> Result<String, String> {
 ///
 /// Two round-trips: `status_v2` (plan + window) and the heavier `usage()` that powers
 /// the Overview/Models tabs.
+#[allow(dead_code)]
 fn fetch_usage_data() -> Option<UsageData> {
     tokio::task::block_in_place(|| {
         let client = atomcode_codingplan::client::Client::from_stored_auth().ok()?;
@@ -5304,6 +5235,7 @@ fn fetch_usage_data() -> Option<UsageData> {
 
 /// `/usage` — open the CodingPlan usage modal (idle). Renders a notice when the user
 /// isn't on a CodingPlan account, otherwise pushes the modal into `active_modal`.
+#[allow(dead_code)]
 fn open_usage(renderer: &mut dyn Renderer, active_modal: &mut Option<Box<dyn Modal>>) {
     match fetch_usage_data() {
         Some(data) => *active_modal = Some(Box::new(UsageModal::new(data))),
@@ -5661,11 +5593,7 @@ fn spawn_session_catalog_picker(ctx: &mut LoopCtx, renderer: &mut dyn Renderer) 
 
 /// Wipe the terminal viewport and re-render the welcome banner. Does not change
 /// the active session or interrupt a running turn.
-fn clear_terminal_screen(
-    state: &UiState,
-    ctx: &LoopCtx,
-    renderer: &mut dyn Renderer,
-) {
+fn clear_terminal_screen(state: &UiState, ctx: &LoopCtx, renderer: &mut dyn Renderer) {
     renderer.begin_sync();
     renderer.clear_screen();
     renderer.reset();
@@ -7048,10 +6976,13 @@ fn run_coding_plan_blocking(
 /// then sees `is_logged_in() == true` and skips its own `auth::login`
 /// path — that path prints to stdout and is reserved for CLI callers.
 pub(crate) fn run_login_flow(renderer: &mut dyn Renderer, ctx: &mut LoopCtx) -> Result<()> {
-    // Source/self-built binaries cannot sign AtomGit gateway requests. Running
-    // OAuth + claim here only writes auth.toml / partial config and then fails
-    // every provider reload — leaving the TUI unable to add custom providers.
-    // Fail fast and point at /provider (or the official build).
+    let _ = &ctx;
+    renderer.render(UiLine::CommandOutput(
+        "AtomGit OAuth / CodingPlan is removed. Configure a provider with /provider.".into(),
+    ));
+    renderer.flush();
+    return Ok(());
+    #[allow(unreachable_code)]
     if !atomcode_capabilities::provider::signer_available() {
         renderer.render(UiLine::Error(
             t(Msg::CmdProviderUnsupportedBuild).into_owned(),

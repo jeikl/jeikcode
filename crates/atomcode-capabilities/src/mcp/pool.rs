@@ -122,9 +122,7 @@ impl ProjectMcpPool {
     /// Read-through accessor for daemon status endpoints.
     pub async fn cached_registry(&self, project_dir: &Path) -> Option<Arc<McpRegistry>> {
         let slots = self.slots.read().await;
-        slots
-            .get(project_dir)
-            .map(|slot| slot.registry.clone())
+        slots.get(project_dir).map(|slot| slot.registry.clone())
     }
 
     async fn get_or_init(&self, project_dir: &Path) -> Arc<McpRegistry> {
@@ -142,12 +140,7 @@ impl ProjectMcpPool {
         registry
     }
 
-    async fn insert_slot(
-        &self,
-        project_dir: &Path,
-        registry: Arc<McpRegistry>,
-        generation: u64,
-    ) {
+    async fn insert_slot(&self, project_dir: &Path, registry: Arc<McpRegistry>, generation: u64) {
         let mut slots = self.slots.write().await;
         self.evict_oldest_if_needed(&mut slots).await;
         slots.insert(

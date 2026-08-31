@@ -260,9 +260,7 @@ async fn full_assembly_lifecycle() {
         );
         let memory_count = first
             .iter()
-            .filter(|m| {
-                m.role == Role::User && m.synthetic && m.text.starts_with("=== MEMORY ===")
-            })
+            .filter(|m| m.role == Role::User && m.synthetic && m.text.starts_with("=== MEMORY ==="))
             .count();
         assert_eq!(
             memory_count, 1,

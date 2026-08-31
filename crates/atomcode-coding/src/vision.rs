@@ -186,10 +186,7 @@ mod tests {
     fn should_skip_when_no_images_or_vision_model() {
         assert!(should_skip(false, false), "no images → skip");
         assert!(should_skip(true, true), "vision model → skip");
-        assert!(
-            !should_skip(false, true),
-            "text model + images → run"
-        );
+        assert!(!should_skip(false, true), "text model + images → run");
     }
 
     #[tokio::test]

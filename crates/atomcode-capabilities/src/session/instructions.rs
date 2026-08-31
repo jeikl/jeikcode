@@ -42,7 +42,7 @@ const KNOWLEDGE_PACKS: &[KnowledgePack] = &[
         hint: "\
 Use this glossary when the user speaks in business terms: expand each term into the \
 listed code aliases, then search those aliases (and the original term) in parallel. \
-Prefer find_symbol once you have an exact type/method name from the glossary.",
+Prefer code_explore once you have an exact type/method name from the glossary.",
         candidates: &[
             ".atomcode/glossary.md",
             ".atomcode/domain-glossary.md",

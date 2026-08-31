@@ -18,8 +18,7 @@ use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
 
 /// JSON arg fields that carry a filesystem path across the review toolset
-/// (read_file/grep/glob/list_directory/ast_grep/read_symbol/list_symbols/
-/// find_references/blast_radius/file_dependencies/diagnostics). `paths` (ast_grep)
+/// (read_file/grep/glob/list_directory/ast_grep). `paths` (ast_grep)
 /// is the only array-valued one.
 const PATH_KEYS: &[&str] = &["path", "file_path", "file", "dir", "paths"];
 

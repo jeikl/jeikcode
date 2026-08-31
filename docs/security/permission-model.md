@@ -169,15 +169,12 @@ Current mappings are:
 |---|---|
 | `read_file` | `Read` |
 | `grep` | `Read` |
-| `find_references` | `Read` |
-| `list_symbols` | `Read` |
-| `read_symbol` | `Read` |
+| `code_explore` | `Read` |
 | `diagnostics` with `file_path` | `Read` |
 | `list_directory` | `Enumerate` |
 | `glob` | `Enumerate` |
 | `cd` | `Enumerate` |
-| `file_dependencies` | `Enumerate` |
-| `blast_radius` | `Enumerate` |
+| `repo_map` | `Enumerate` |
 | `edit_file` | `Write` |
 | `write_file` | `Write` |
 | `search_replace` | `Write` |

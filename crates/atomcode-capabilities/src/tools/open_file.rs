@@ -387,7 +387,7 @@ impl ToolMiddleware for OpenFileWorkspaceGate {
         let in_workspace = {
             let args = call.arguments.clone();
             let cwd = cwd.clone();
-            super::run_bounded(super::GATE_FS_TIMEOUT, false, move || {
+            super::run_bounded(super::gate_fs_timeout(), false, move || {
                 Self::target_in_workspace(&args, &cwd)
             })
             .await

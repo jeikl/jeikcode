@@ -18,9 +18,6 @@ use super::types::{
     initialize_params, CallToolResult, InitializeResult, ListToolsResult, ServerStatus,
 };
 
-/// Default timeout for HTTP operations (30 seconds).
-const DEFAULT_TIMEOUT_MS: u64 = 30_000;
-
 /// Maximum response body accepted from an HTTP MCP server.
 ///
 /// This is enforced while streaming the body, rather than after `bytes()` or `text()`
@@ -66,10 +63,13 @@ impl HttpClient {
         auth: Option<McpHttpAuthConfig>,
         timeout_ms: Option<u64>,
     ) -> Self {
-        let timeout = Duration::from_millis(timeout_ms.unwrap_or(DEFAULT_TIMEOUT_MS));
-
+        let idle = Duration::from_millis(super::config::resolve_timeout_ms(timeout_ms));
+        // Client-level timeout is the spawn hard cap so a progressing tools/call
+        // is not killed by mcp_secs. initialize / list still use a shorter
+        // per-request tokio timeout below.
         let client = crate::proxy::apply_async_proxy_policy(reqwest::Client::builder())
-            .timeout(timeout)
+            .connect_timeout(idle.min(Duration::from_secs(30)))
+            .timeout(Duration::from_millis(super::config::hard_cap_ms()))
             .build()
             .unwrap_or_else(|_| reqwest::Client::new());
 
@@ -78,7 +78,7 @@ impl HttpClient {
             url,
             headers,
             auth,
-            timeout_ms: timeout_ms.unwrap_or(DEFAULT_TIMEOUT_MS),
+            timeout_ms: super::config::resolve_timeout_ms(timeout_ms),
             status: Arc::new(Mutex::new(ServerStatus::Disconnected)),
             next_id: AtomicU64::new(1),
             client,
@@ -142,6 +142,14 @@ impl HttpClient {
         if let Some(p) = params {
             request.insert("params".to_string(), p);
         }
+        if method == "tools/call" {
+            if let Some(serde_json::Value::Object(map)) = request.get_mut("params") {
+                map.insert(
+                    "_meta".to_string(),
+                    serde_json::json!({ "progressToken": id }),
+                );
+            }
+        }
         let request = serde_json::Value::Object(request);
 
         let mut req = self.client.post(&self.url).json(&request);
@@ -185,13 +193,20 @@ impl HttpClient {
             req = req.header(MCP_PROTOCOL_VERSION_HEADER, version);
         }
 
-        let timeout_duration = Duration::from_millis(self.timeout_ms);
+        // tools/call: progressing servers may exceed mcp_secs; use the spawn
+        // hard cap. initialize / tools/list stay on the short idle budget.
+        let timeout_duration = Duration::from_millis(if method == "tools/call" {
+            super::config::hard_cap_ms()
+        } else {
+            self.timeout_ms
+        });
         let response = timeout(timeout_duration, req.send())
             .await
             .with_context(|| {
                 format!(
                     "HTTP request to MCP server {} timed out after {}ms",
-                    self.server_name, self.timeout_ms
+                    self.server_name,
+                    timeout_duration.as_millis()
                 )
             })?
             .with_context(|| format!("HTTP request to MCP server {} failed", self.server_name))?;

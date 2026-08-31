@@ -20,9 +20,6 @@ use super::types::{
     initialize_params, CallToolResult, InitializeResult, ListToolsResult, ServerStatus,
 };
 
-/// Default timeout for MCP operations (30 seconds).
-const DEFAULT_TIMEOUT_MS: u64 = 30_000;
-
 /// Maximum non-protocol lines to skip before giving up.
 /// Protects against servers that spam stdout with logs.
 const MAX_SKIP_LINES: usize = 100;
@@ -104,7 +101,7 @@ impl StdioClient {
             command,
             args,
             env,
-            timeout_ms: timeout_ms.unwrap_or(DEFAULT_TIMEOUT_MS),
+            timeout_ms: super::config::resolve_timeout_ms(timeout_ms),
             status: Arc::new(Mutex::new(ServerStatus::Disconnected)),
             next_id: Arc::new(AtomicU64::new(1)),
             process: Arc::new(Mutex::new(None)),
@@ -217,9 +214,22 @@ impl StdioClient {
         if let Some(p) = params {
             request.insert("params".to_string(), p);
         }
+        // Advertise a progress token so servers that honor MCP progress
+        // emit `notifications/progress` — those frames reset the idle budget.
+        if method == "tools/call" {
+            if let Some(serde_json::Value::Object(map)) = request.get_mut("params") {
+                map.insert(
+                    "_meta".to_string(),
+                    serde_json::json!({ "progressToken": id }),
+                );
+            }
+        }
         let request = serde_json::Value::Object(request);
 
-        let deadline = tokio::time::Instant::now() + Duration::from_millis(self.timeout_ms);
+        let idle = Duration::from_millis(self.timeout_ms.max(1));
+        let hard_deadline = tokio::time::Instant::now()
+            + Duration::from_millis(super::config::hard_cap_ms());
+        let deadline = tokio::time::Instant::now() + idle;
 
         // Write request (NDJSON).
         {
@@ -289,25 +299,54 @@ impl StdioClient {
                 })?;
         }
 
-        // The write, flush, and read phases use one operation deadline.
-        let result = tokio::time::timeout_at(deadline, self.recv_jsonrpc_response())
-            .await
-            .with_context(|| {
-                format!(
-                    "MCP request {} timed out after {}ms",
-                    method, self.timeout_ms
-                )
-            })
-            .map_err(|error| RequestAttemptError {
-                error,
-                generation,
-                request_may_have_been_sent: true,
-            })?
-            .map_err(|error| RequestAttemptError {
-                error,
-                generation,
-                request_may_have_been_sent: true,
-            })?;
+        // Idle budget (`mcp_secs` / timeout_ms) resets on every stdout frame
+        // (progress notifications included). Hard cap is max_timeout_secs so a
+        // silent server still dies quickly while a slow-but-progressing one
+        // can finish without an extra model round.
+        let result = loop {
+            if tokio::time::Instant::now() >= hard_deadline {
+                return Err(RequestAttemptError {
+                    error: anyhow::anyhow!(
+                        "MCP request {method} reached configured max_timeout_secs ({}ms)",
+                        super::config::hard_cap_ms()
+                    ),
+                    generation,
+                    request_may_have_been_sent: true,
+                });
+            }
+            let remaining = hard_deadline.saturating_duration_since(tokio::time::Instant::now());
+            let wait = idle.min(remaining);
+            let value = match tokio::time::timeout(wait, self.recv_jsonrpc_value()).await {
+                Ok(Ok(v)) => v,
+                Ok(Err(error)) => {
+                    return Err(RequestAttemptError {
+                        error,
+                        generation,
+                        request_may_have_been_sent: true,
+                    });
+                }
+                Err(_) => {
+                    return Err(RequestAttemptError {
+                        error: anyhow::anyhow!(
+                            "MCP request {method} timed out after {}ms with no progress",
+                            self.timeout_ms
+                        ),
+                        generation,
+                        request_may_have_been_sent: true,
+                    });
+                }
+            };
+            if jsonrpc_id_matches(&value, id) {
+                break serde_json::from_value::<super::types::JsonRpcResponse>(value)
+                    .context("Failed to parse NDJSON MCP message as JSON-RPC")
+                    .map_err(|error| RequestAttemptError {
+                        error,
+                        generation,
+                        request_may_have_been_sent: true,
+                    })?;
+            }
+            // Notification / unrelated id: drop it and reset idle by looping.
+        };
 
         if let Some(error) = result.error {
             return Err(RequestAttemptError {
@@ -610,8 +649,8 @@ impl McpClient for StdioClient {
 }
 
 impl StdioClient {
-    /// Read one JSON-RPC response (NDJSON per MCP stdio spec, or legacy `Content-Length` framing).
-    async fn recv_jsonrpc_response(&self) -> Result<super::types::JsonRpcResponse> {
+    /// Read one JSON-RPC message (response or notification).
+    async fn recv_jsonrpc_value(&self) -> Result<serde_json::Value> {
         let mut reader = self.reader.lock().await;
         let reader = reader
             .as_mut()
@@ -644,7 +683,7 @@ impl StdioClient {
                     .context("Failed to parse NDJSON MCP message as JSON-RPC");
             }
             if strip_prefix_ci(body, "content-length:").is_some() {
-                return read_content_length_message(reader, line).await;
+                return read_content_length_value(reader, line).await;
             }
 
             // Some third-party MCP servers incorrectly print status logs to stdout
@@ -664,7 +703,7 @@ impl StdioClient {
     /// Drain non-protocol lines the server may print to stdout before the first MCP message.
     ///
     /// Lines that look like NDJSON or `Content-Length` are **not** consumed; they are moved to
-    /// [`Self::preread_line`] for [`Self::recv_jsonrpc_response`].
+    /// [`Self::preread_line`] for [`Self::recv_jsonrpc_value`].
     async fn drain_startup_messages(&self) -> Result<()> {
         let _ = tokio::time::timeout(Duration::from_millis(500), async {
             loop {
@@ -740,10 +779,41 @@ fn is_reconnectable_stdio_error(error: &anyhow::Error) -> bool {
     })
 }
 
-async fn read_content_length_message(
+fn jsonrpc_id_matches(value: &serde_json::Value, id: u64) -> bool {
+    match value.get("id") {
+        Some(serde_json::Value::Number(n)) => n.as_u64() == Some(id),
+        Some(serde_json::Value::String(s)) => s.parse::<u64>().ok() == Some(id),
+        _ => false,
+    }
+}
+
+#[cfg(test)]
+mod idle_progress_tests {
+    use super::jsonrpc_id_matches;
+    use serde_json::json;
+
+    #[test]
+    fn matching_response_id_is_detected() {
+        assert!(jsonrpc_id_matches(&json!({"jsonrpc":"2.0","id":7,"result":{}}), 7));
+        assert!(jsonrpc_id_matches(
+            &json!({"jsonrpc":"2.0","id":"7","result":{}}),
+            7
+        ));
+    }
+
+    #[test]
+    fn progress_notification_does_not_match_request_id() {
+        assert!(!jsonrpc_id_matches(
+            &json!({"jsonrpc":"2.0","method":"notifications/progress","params":{"progressToken":7}}),
+            7
+        ));
+    }
+}
+
+async fn read_content_length_value(
     reader: &mut BufReader<ChildStdout>,
     mut line: String,
-) -> Result<super::types::JsonRpcResponse> {
+) -> Result<serde_json::Value> {
     let mut content_length: Option<usize> = None;
     loop {
         let t = line.trim_end_matches(['\r', '\n']).trim();

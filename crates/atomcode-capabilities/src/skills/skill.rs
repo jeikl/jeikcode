@@ -6,7 +6,8 @@
 //! is by design, not arbitrary remote code.
 
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
+use std::time::Duration;
 
 #[derive(Clone, Debug)]
 pub struct Skill {
@@ -262,15 +263,27 @@ fn expand_shell_injections(template: &str) -> String {
 }
 
 fn run_shell_command(cmd: &str) -> String {
+    let secs = atomcode_config::config::ToolTimeoutsConfig::load_effective().skill_cmd_secs;
     let mut command = Command::new("sh");
-    command.arg("-c").arg(cmd);
+    command
+        .arg("-c")
+        .arg(cmd)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
     #[cfg(unix)]
     crate::process_utils::apply_utf8_locale_env_sync(&mut command);
-    // No console-window flash when run from a console-less daemon (mirrors core's
-    // skill runner); no-op off Windows.
     crate::process_utils::suppress_console_window_sync(&mut command);
-    match command.output() {
-        Ok(out) => {
+    let child = match command.spawn() {
+        Ok(c) => c,
+        Err(e) => return format!("[error: {e}]"),
+    };
+    let pid = child.id();
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = tx.send(child.wait_with_output());
+    });
+    match rx.recv_timeout(Duration::from_secs(secs)) {
+        Ok(Ok(out)) => {
             let mut s = String::from_utf8_lossy(&out.stdout).into_owned();
             if !out.status.success() {
                 let stderr = String::from_utf8_lossy(&out.stderr);
@@ -281,7 +294,16 @@ fn run_shell_command(cmd: &str) -> String {
             }
             s.trim_end().to_string()
         }
-        Err(e) => format!("[error: {e}]"),
+        Ok(Err(e)) => format!("[error: {e}]"),
+        Err(_) => {
+            #[cfg(windows)]
+            crate::process_utils::taskkill_tree(pid);
+            #[cfg(unix)]
+            unsafe {
+                libc::kill(pid as i32, libc::SIGKILL);
+            }
+            format!("[timed out after {secs}s]")
+        }
     }
 }
 

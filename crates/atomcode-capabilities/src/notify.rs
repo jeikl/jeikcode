@@ -237,11 +237,11 @@ fn build_turn_terminal_notification_text(
 
 fn build_turn_system_notification_text(turn: &TurnNotification<'_>) -> (Cow<'static, str>, String) {
     let title = match turn.stop_reason {
-        NotifyStopReason::Natural => Cow::Borrowed("AtomCode done"),
-        NotifyStopReason::Cancelled => Cow::Borrowed("AtomCode cancelled"),
-        NotifyStopReason::Error => Cow::Borrowed("AtomCode failed"),
-        NotifyStopReason::TurnLimit => Cow::Borrowed("AtomCode stopped"),
-        NotifyStopReason::StepLimit => Cow::Borrowed("AtomCode stopped"),
+        NotifyStopReason::Natural => Cow::Borrowed("JeikCode done"),
+        NotifyStopReason::Cancelled => Cow::Borrowed("JeikCode cancelled"),
+        NotifyStopReason::Error => Cow::Borrowed("JeikCode failed"),
+        NotifyStopReason::TurnLimit => Cow::Borrowed("JeikCode stopped"),
+        NotifyStopReason::StepLimit => Cow::Borrowed("JeikCode stopped"),
     };
     let status = match turn.stop_reason {
         NotifyStopReason::Natural => "Done",
@@ -267,7 +267,7 @@ fn build_system_notification_text(turn: &TurnNotification<'_>) -> (Cow<'static, 
 fn build_approval_notification_text(
     approval: &ApprovalNotification<'_>,
 ) -> (Cow<'static, str>, String) {
-    let title = Cow::Borrowed("AtomCode approval needed");
+    let title = Cow::Borrowed("JeikCode approval needed");
     let mut body = format!("{} is waiting for Y/A/N", approval.tool_name);
     if let Some(scope) = approval
         .working_dir
@@ -559,7 +559,7 @@ mod tests {
             stop_reason: NotifyStopReason::Natural,
             working_dir: Some(Path::new("/tmp/demo")),
         });
-        assert_eq!(title, "AtomCode done");
+        assert_eq!(title, "JeikCode done");
         assert_eq!(body, "Done · 12.0s · 3 rounds · 5 tools");
     }
 
@@ -576,7 +576,7 @@ mod tests {
                 working_dir: Some(Path::new("/tmp/atomcode")),
             },
         );
-        assert_eq!(title, "AtomCode done");
+        assert_eq!(title, "JeikCode done");
         assert_eq!(body, "Done · 49.0s · 4 rounds · 9 tools");
     }
 
@@ -605,7 +605,7 @@ mod tests {
             detail: Some("ls -la ~/.ssh/"),
             working_dir: Some(Path::new("/tmp/demo")),
         });
-        assert_eq!(title, "AtomCode approval needed");
+        assert_eq!(title, "JeikCode approval needed");
         assert!(body.contains("Bash is waiting for Y/A/N"));
         assert!(body.contains("demo"));
         assert!(body.contains("ls -la ~/.ssh/"));
@@ -614,7 +614,7 @@ mod tests {
     #[test]
     fn background_only_is_preserved_for_approval_notifications() {
         let plan = NotificationPlan {
-            title: Cow::Borrowed("AtomCode approval needed"),
+            title: Cow::Borrowed("JeikCode approval needed"),
             body: "Bash is waiting for Y/A/N".into(),
             terminal_id: "atomcode-approval",
             visibility: VisibilityPolicy::BackgroundOnlyBestEffort,
@@ -631,7 +631,7 @@ mod tests {
     #[test]
     fn iterm2_uses_osc9_notification_sequence() {
         let plan = NotificationPlan {
-            title: Cow::Borrowed("AtomCode approval needed"),
+            title: Cow::Borrowed("JeikCode approval needed"),
             body: "Bash is waiting for Y/A/N".into(),
             terminal_id: "atomcode-approval",
             visibility: VisibilityPolicy::BackgroundOnlyBestEffort,
@@ -649,7 +649,7 @@ mod tests {
     #[test]
     fn apple_terminal_has_no_native_terminal_notification_path() {
         let plan = NotificationPlan {
-            title: Cow::Borrowed("AtomCode done"),
+            title: Cow::Borrowed("JeikCode done"),
             body: "Done · 12.0s".into(),
             terminal_id: "atomcode-task",
             visibility: VisibilityPolicy::BackgroundOnlyBestEffort,

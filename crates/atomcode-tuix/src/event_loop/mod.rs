@@ -6949,7 +6949,7 @@ mod tool_format_tests {
         assert_eq!(display_tool_name_short("grep"), "Grep");
         assert_eq!(display_tool_name_short("search_replace"), "SearchReplace");
         assert_eq!(display_tool_name_short("web_fetch"), "WebFetch");
-        assert_eq!(display_tool_name_short("blast_radius"), "BlastRadius");
+        assert_eq!(display_tool_name_short("code_explore"), "CodeExplore");
     }
 
     /// The short form must NOT strip `_file`/`_files`/`_directory` from an
@@ -6988,12 +6988,6 @@ mod tool_format_tests {
             r#"line 2"}"#
         );
         assert_eq!(format_tool_detail("edit_file", args), "test.txt");
-    }
-
-    #[test]
-    fn format_tool_detail_read_symbol_combines_symbol_and_file() {
-        let args = r#"{"symbol":"parse","file_path":"src/lexer.rs"}"#;
-        assert_eq!(format_tool_detail("read_symbol", args), "parse in lexer.rs");
     }
 
     #[test]
@@ -8160,9 +8154,10 @@ fn yield_overlays_for_blocking_prompt(app: &mut App, ctx: &mut LoopCtx) {
     if !blocking_prompt_active(&app.state) {
         return;
     }
-    let drop_overlay = app.active_modal.as_ref().is_some_and(|m| {
-        m.captures_all_keys() && m.yield_to_interactive_prompt()
-    });
+    let drop_overlay = app
+        .active_modal
+        .as_ref()
+        .is_some_and(|m| m.captures_all_keys() && m.yield_to_interactive_prompt());
     if drop_overlay {
         app.active_modal = None;
         ctx.session_catalog_loading = false;
@@ -8263,11 +8258,7 @@ fn suppress_streaming_footer(app: &App, ctx: &LoopCtx) -> bool {
 }
 
 /// Redraw streaming chrome, or keep a capturing overlay on top.
-fn refresh_streaming_or_modal(
-    app: &mut App,
-    ctx: &LoopCtx,
-    renderer: &mut dyn Renderer,
-) {
+fn refresh_streaming_or_modal(app: &mut App, ctx: &LoopCtx, renderer: &mut dyn Renderer) {
     if suppress_streaming_footer(app, ctx) {
         if let Some(modal) = app.active_modal.as_ref() {
             modal.draw(&app.buf, &app.state, ctx, renderer);
@@ -13753,7 +13744,10 @@ fn redraw_after_slash(
 /// Apply a `jeikcode_config_reload` request the agent queued during the last
 /// turn. Must run at an idle boundary — remounting MCP/skills while a turn is
 /// live is Busy and the tool catalog is a cache prefix anyway.
-fn poll_agent_requested_config_reload(ctx: &mut LoopCtx, renderer: &mut dyn crate::render::Renderer) {
+fn poll_agent_requested_config_reload(
+    ctx: &mut LoopCtx,
+    renderer: &mut dyn crate::render::Renderer,
+) {
     if !atomcode_capabilities::config_reload::take_pending_live_reload() {
         return;
     }
@@ -15036,7 +15030,10 @@ fn handle_streaming_key(
                 // type-ahead queue, in-flight tools, thinking/reasoning buffers). Framed
                 // as "read-only is the safe default" so a future allowlisted report can't
                 // silently corrupt a running turn by being forgotten in this list.
-                let readonly = !matches!(cmd.as_str(), "bg" | "quit" | "exit" | "goal" | "loop" | "new");
+                let readonly = !matches!(
+                    cmd.as_str(),
+                    "bg" | "quit" | "exit" | "goal" | "loop" | "new"
+                );
                 if matches!(cmd.as_str(), "quit" | "exit") {
                     cancel_active_turn(ctx);
                     clear_capturing_modal_on_cancel(app);
@@ -17454,11 +17451,7 @@ mod interactive_input_priority_tests {
 
     #[test]
     fn blocking_prompt_phases_prioritize_keyboard() {
-        for phase in [
-            UiPhase::Approval,
-            UiPhase::UserInput,
-            UiPhase::RoundCap,
-        ] {
+        for phase in [UiPhase::Approval, UiPhase::UserInput, UiPhase::RoundCap] {
             assert!(
                 interactive_input_priority(phase),
                 "{phase:?} should prioritize input"
@@ -17521,11 +17514,7 @@ mod interactive_input_priority_tests {
             capturing_overlay_owns_keys(UiPhase::Approval, true, false),
             "askpass must keep keys even if an approval prompt is also up"
         );
-        assert!(!capturing_overlay_owns_keys(
-            UiPhase::Approval,
-            false,
-            true
-        ));
+        assert!(!capturing_overlay_owns_keys(UiPhase::Approval, false, true));
     }
 }
 
@@ -18626,10 +18615,7 @@ fn session_picker_running_map(
     running
 }
 
-fn merge_background_only_sessions(
-    sessions: &mut Vec<crate::session::SessionMeta>,
-    ctx: &LoopCtx,
-) {
+fn merge_background_only_sessions(sessions: &mut Vec<crate::session::SessionMeta>, ctx: &LoopCtx) {
     let bucket = ctx
         .current_session_project_bucket
         .clone()
@@ -19876,9 +19862,9 @@ fn publish_registry_runtime_event(
         bg_runtime::RuntimeEventPayload::SequencedNative(envelope) => {
             (envelope.generation, envelope.event.clone())
         }
-        bg_runtime::RuntimeEventPayload::Native(
-            CodingRuntimeEvent::SessionResumeFinished(_),
-        ) => return,
+        bg_runtime::RuntimeEventPayload::Native(CodingRuntimeEvent::SessionResumeFinished(_)) => {
+            return
+        }
         bg_runtime::RuntimeEventPayload::Native(event) => (0, event.clone()),
         _ => return,
     };
@@ -21081,7 +21067,12 @@ fn handle_agent_event(
                 format_args!("call_id={} name={}", id, name),
             );
             if name.eq_ignore_ascii_case("bash") {
-                crate::tuix_trace!("BASH", "stage=started call_id={} {}", id, crate::trace::kbd());
+                crate::tuix_trace!(
+                    "BASH",
+                    "stage=started call_id={} {}",
+                    id,
+                    crate::trace::kbd()
+                );
                 reclaim_tty_input(ctx, renderer, "bash_tool_started");
             }
             let detail = format_tool_detail(&name, &arguments);
@@ -21694,11 +21685,7 @@ fn handle_agent_event(
             // stale/misleading in the approval phase (mirrors the
             // /bg resume path).
             redraw_interactive_footer(buf, state, ctx, renderer);
-            crate::tuix_stage!(
-                "APV",
-                "stage=5_card_render_enqueued call_id={}",
-                call.id
-            );
+            crate::tuix_stage!("APV", "stage=5_card_render_enqueued call_id={}", call.id);
             // Queue OSC/BEL notification I/O after the card paint on the render
             // worker. A backpressured Linux PTY must not block the event loop
             // before it can receive Y/N/Ctrl+C.
@@ -21708,11 +21695,7 @@ fn handle_agent_event(
                 format_tool_detail(&tool_name, &call.arguments),
                 ctx.working_dir.clone(),
             );
-            crate::tuix_stage!(
-                "APV",
-                "stage=6_notification_enqueued call_id={}",
-                call.id
-            );
+            crate::tuix_stage!("APV", "stage=6_notification_enqueued call_id={}", call.id);
         }
         AgentEvent::PhaseChange(AgentPhase::Thinking) => {
             crate::tuix_trace!(
@@ -23190,7 +23173,7 @@ fn handle_oauth_poll_event(
             crate::modals::onboarding_wizard::paint_welcome(ctx, renderer);
             if let Err(e) = crate::event_loop::commands::run_login_flow(renderer, ctx) {
                 renderer.render(UiLine::Error(format!(
-                    "CodingPlan 自动配置失败: {e:#}。可运行 /login 手动重试，或用 /provider 配置自定义模型。"
+                    "CodingPlan 已下线: {e:#}。请用 /provider 配置模型。"
                 )));
                 renderer.flush();
             }
@@ -23202,7 +23185,7 @@ fn handle_oauth_poll_event(
             // blank body with only an error line.
             crate::modals::onboarding_wizard::paint_welcome(ctx, renderer);
             renderer.render(UiLine::Error(format!(
-                "登录失败: {reason}。运行 /login 可重试，或用 /provider 配置自定义模型。"
+                "登录失败: {reason}。请用 /provider 配置模型。"
             )));
             renderer.flush();
         }
@@ -24325,26 +24308,13 @@ pub(crate) fn format_tool_detail(name: &str, args_json: &str) -> String {
     let basename = |p: &str| p.rsplit('/').next().unwrap_or(p).to_string();
 
     match name {
-        "read_file" | "edit_file" | "write_file" | "create_file" | "list_symbols" => {
+        "read_file" | "edit_file" | "write_file" | "create_file" => {
             // Single-call path: basename only (compact). Batch disambiguation
             // is handled by `disambiguate_batch_details` which runs after
             // all child details are computed and can compare them.
             get_str("file_path")
                 .map(|p| basename(&p))
                 .unwrap_or_default()
-        }
-        "read_symbol" => {
-            let sym = get_str("symbol").unwrap_or_default();
-            let file = get_str("file_path")
-                .map(|p| basename(&p))
-                .unwrap_or_default();
-            if sym.is_empty() {
-                file
-            } else if file.is_empty() {
-                sym
-            } else {
-                format!("{} in {}", sym, file)
-            }
         }
         "code_explore" => {
             let q = get_str("query").unwrap_or_default();
@@ -24423,25 +24393,6 @@ pub(crate) fn format_tool_detail(name: &str, args_json: &str) -> String {
         "web_search" => get_str("query")
             .map(|q| crate::width::truncate_with_ellipsis(&q, 100))
             .unwrap_or_default(),
-        "find_references" | "trace_callees" | "trace_callers" => {
-            get_str("symbol").unwrap_or_default()
-        }
-        "trace_chain" => {
-            // trace_chain takes `from`/`to`, not `symbol` — keep this branch
-            // separate so the detail isn't blank. See trace_chain.rs Args.
-            let from = get_str("from").unwrap_or_default();
-            let to = get_str("to").unwrap_or_default();
-            if from.is_empty() || to.is_empty() {
-                String::new()
-            } else {
-                format!("{} → {}", from, to)
-            }
-        }
-        "blast_radius" | "file_dependencies" => {
-            // Same as above: basename for single-call; batch disambiguation
-            // handled by `disambiguate_batch_details`.
-            get_str("file").map(|p| basename(&p)).unwrap_or_default()
-        }
         "search_replace" => {
             // SearchReplaceArgs uses search/replace/glob/path (not
             // file_path/file/pattern/old). Show "search → replace" so
@@ -24626,12 +24577,10 @@ fn disambiguate_batch_details(
         };
         let get_str = |k: &str| v.get(k).and_then(|x| x.as_str()).map(str::to_string);
         match name {
-            "read_file" | "edit_file" | "write_file" | "create_file" | "list_symbols"
-            | "blast_radius" | "file_dependencies" => {
+            "read_file" | "edit_file" | "write_file" | "create_file" => {
                 get_str("file_path").or_else(|| get_str("file"))
             }
             "search_replace" => get_str("file_path").or_else(|| get_str("file")),
-            "read_symbol" => get_str("file_path"),
             _ => None,
         }
     };

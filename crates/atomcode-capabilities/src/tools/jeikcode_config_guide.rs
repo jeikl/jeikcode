@@ -5,7 +5,7 @@
 //! - Models, providers, thinking gears, reasoning trace back-transmission, token limits
 //! - MCP servers, skills structure, plugins ecosystem
 //! - Cilin thesaurus (`thesaurus/*.txt`), bilingual code search relevance
-//! - Tool execution timeouts (bash, max_rounds, first_token_timeout, output folding)
+//! - Tool execution timeouts (shared command max_timeout_secs, max_rounds, first_token_timeout, output folding)
 //! - Complete `~/.atomcode` directory layout and file catalog
 
 use super::ok;
@@ -136,7 +136,7 @@ impl Tool for JeikcodeConfigGuideTool {
                         "all"
                     ],
                     "default": "overview",
-                    "description": "Category of configuration guide to retrieve: 'overview' (index map), 'prompts' (init.yaml / rules.yaml hot-reload & seed docs), 'models' (models, providers, reasoning effort/history, tokens), 'mcp' (mcp.json), 'skills' (SKILL.md & plugins), 'thesaurus' (词林 bilingual code search), 'tools' (bash timeout, output fold, coding knobs), 'directories' (full ~/.atomcode map), 'project' (AGENTS.md, ATOMCODE.md, rules.md, glossary.md, dbwords.md project constraints), 'updates' (default update source, /upgrade command, release build), 'all' (complete guide)."
+                    "description": "Category of configuration guide to retrieve: 'overview' (index map), 'prompts' (init.yaml / rules.yaml hot-reload & seed docs), 'models' (models, providers, reasoning effort/history, tokens), 'mcp' (mcp.json), 'skills' (SKILL.md & plugins), 'thesaurus' (词林 bilingual code search), 'tools' (bash hard cap, short timeouts, output fold, coding knobs), 'directories' (full ~/.atomcode map), 'project' (AGENTS.md, ATOMCODE.md, rules.md, glossary.md, dbwords.md project constraints), 'updates' (default update source, /upgrade command, release build), 'all' (complete guide)."
                 }
             }
         })
@@ -320,6 +320,7 @@ mod tests {
         assert!(!res.is_error);
         assert!(res.content.contains("silent_kill_secs"));
         assert!(res.content.contains("default_timeout_secs"));
+        assert!(res.content.contains("skill_cmd_secs"));
         assert!(res.content.contains("tool_output"));
     }
 

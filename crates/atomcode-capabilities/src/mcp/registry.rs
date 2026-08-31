@@ -714,7 +714,10 @@ impl McpRegistry {
     pub async fn list_tools_timeout(&self, server_name: &str) -> Duration {
         let configured_ms = {
             let timeouts = self.server_timeouts_ms.read().await;
-            timeouts.get(server_name).copied().unwrap_or(30_000)
+            timeouts
+                .get(server_name)
+                .copied()
+                .unwrap_or_else(|| super::config::resolve_timeout_ms(None))
         };
         Duration::from_millis(configured_ms.saturating_add(5_000))
     }
@@ -1134,7 +1137,7 @@ impl McpServerConfig {
         match &self.config {
             super::config::McpTransportConfig::Stdio { timeout_ms, .. }
             | super::config::McpTransportConfig::Http { timeout_ms, .. } => {
-                timeout_ms.unwrap_or(30_000)
+                super::config::resolve_timeout_ms(*timeout_ms)
             }
         }
     }
@@ -1290,6 +1293,8 @@ mod tests {
         fn status(&self) -> ServerStatus {
             ServerStatus::Connected
         }
+
+        async fn shutdown(&self) {}
     }
 
     #[async_trait::async_trait]
@@ -1318,6 +1323,8 @@ mod tests {
         fn status(&self) -> ServerStatus {
             ServerStatus::Connected
         }
+
+        async fn shutdown(&self) {}
     }
 
     #[async_trait::async_trait]
@@ -1347,6 +1354,8 @@ mod tests {
         fn status(&self) -> ServerStatus {
             ServerStatus::Connected
         }
+
+        async fn shutdown(&self) {}
     }
 
     #[tokio::test]

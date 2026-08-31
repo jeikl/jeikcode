@@ -620,7 +620,7 @@ pub fn skeleton(path: &Path, source: &str) -> Option<String> {
     }
     let lines: Vec<&str> = source.lines().collect();
     let mut out = format!(
-        "[File skeleton: {} lines, {} symbols. Read a symbol with read_symbol, or a line range with read_file offset/limit.]\n",
+        "[File skeleton: {} lines, {} symbols. Read a line range with read_file offset/limit.]\n",
         lines.len(),
         syms.len()
     );

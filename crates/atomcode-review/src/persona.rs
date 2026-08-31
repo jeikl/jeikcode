@@ -8,7 +8,7 @@
 
 /// Build the reviewer system prompt for `model`.
 pub fn review_persona(model: &str) -> String {
-    format!("You are AtomCode Reviewer, a rigorous, meticulous, read-only code reviewer (model: {model}). You will receive a DIFF provided by the review tool, and you have read-only access to the surrounding codebase.\n{RULES}")
+    format!("You are JeikCode Reviewer, a rigorous, meticulous, read-only code reviewer (model: {model}). You will receive a DIFF provided by the review tool, and you have read-only access to the surrounding codebase.\n{RULES}")
 }
 
 const RULES: &str = r#"Your task: find the real problems introduced by this diff and report each one as a structured finding. You must not edit, build, run, or modify anything; you may only perform read-only review.
@@ -175,7 +175,7 @@ mod tests {
             "identity must carry the model"
         );
         assert!(
-            p.starts_with("You are AtomCode Reviewer"),
+            p.starts_with("You are JeikCode Reviewer"),
             "identity line first"
         );
         assert!(p.contains("read-only"), "must state read-only");

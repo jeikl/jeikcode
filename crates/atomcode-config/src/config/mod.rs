@@ -102,9 +102,13 @@ impl Default for TodoToolConfig {
 #[serde(default)]
 pub struct ToolsConfig {
     pub todo: TodoToolConfig,
-    /// Bash tool timeout and execution policy. Persisted as `[tools.bash]`.
+    /// Shared command-spawn timeout and bash execution policy. Persisted as `[tools.bash]`.
     #[serde(default)]
     pub bash: BashToolConfig,
+    /// Short budgets for in-process search, HTTP, skill `!cmd`, and hooks.
+    /// Persisted as `[tools.timeouts]`. Distinct from `[tools.bash] max_timeout_secs`.
+    #[serde(default)]
+    pub timeouts: ToolTimeoutsConfig,
     /// Tool-result fold threshold. Persisted as `[tools.tool_output]`.
     #[serde(default)]
     pub tool_output: ToolOutputConfig,
@@ -114,12 +118,15 @@ pub struct ToolsConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct BashToolConfig {
-    /// Per-call wait when the model omits `timeout` on `bash`.
+    /// Default wall-clock for user `!cmd` when that path omits a timeout. Agent `bash` ignores this.
     pub default_timeout_secs: u64,
-    /// Hard process lifetime from spawn (seconds). Wait/add cannot extend past this.
+    /// Hard process lifetime from spawn, in seconds, for every tool that waits
+    /// on a spawned command (`bash`, `ast_grep`, `git clone`,
+    /// `web_fetch` curl fallback, `parallel_edit` build probe). Also the ceiling
+    /// for user `!cmd` / `run_shell`. Agent `bash` has no per-call timeout arg.
     pub max_timeout_secs: u64,
     /// Idle kill for user `!cmd` SHORT commands: no new stdout/stderr for this long.
-    /// Agent `bash` / `bash_timeout_add` do not use this. Compile families ignore it.
+    /// Agent `bash` does not use this. Compile families ignore it.
     pub silent_kill_secs: u64,
 }
 
@@ -133,6 +140,72 @@ impl Default for BashToolConfig {
     }
 }
 
+/// `[tools.timeouts]` — short wall-clock budgets for tools that are NOT spawned-command
+/// hard-lifetime (`max_timeout_secs`). Missing section → these defaults.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ToolTimeoutsConfig {
+    /// In-process `grep` / `glob` walk (seconds).
+    /// Grok: 20s native / 60s WSL; default is WSL +20%.
+    pub search_secs: u64,
+    /// HTTP connect budget for `web_fetch` (seconds).
+    pub web_connect_secs: u64,
+    /// HTTP body idle / API request budget (seconds). `web_fetch` treats this as
+    /// "no new bytes for this long"; `web_search` treats it as the whole-request
+    /// budget. Slow-but-progressing downloads are not killed by this.
+    pub web_request_secs: u64,
+    /// Default MCP JSON-RPC / tool-call budget (seconds) when `mcp.json` omits
+    /// `timeout_ms`. Ceiling is still `[tools.bash] max_timeout_secs`.
+    pub mcp_secs: u64,
+    /// Skill template `` !`cmd` `` expansion (seconds).
+    pub skill_cmd_secs: u64,
+    /// CC hook default and ceiling (seconds).
+    pub hook_secs: u64,
+    /// Hung-filesystem canonicalize in permission gates (seconds).
+    /// Grok uses 30s; default is ~20% more lenient.
+    pub fs_gate_secs: u64,
+}
+
+impl Default for ToolTimeoutsConfig {
+    fn default() -> Self {
+        Self {
+            search_secs: 72,
+            web_connect_secs: 12,
+            web_request_secs: 72,
+            mcp_secs: 180,
+            skill_cmd_secs: 40,
+            hook_secs: 30,
+            fs_gate_secs: 36,
+        }
+    }
+}
+
+impl ToolTimeoutsConfig {
+    /// Clamp every field to at least 1 second.
+    pub fn sanitized(&self) -> Self {
+        Self {
+            search_secs: self.search_secs.max(1),
+            web_connect_secs: self.web_connect_secs.max(1),
+            web_request_secs: self.web_request_secs.max(1),
+            mcp_secs: self.mcp_secs.max(1),
+            skill_cmd_secs: self.skill_cmd_secs.max(1),
+            hook_secs: self.hook_secs.max(1),
+            fs_gate_secs: self.fs_gate_secs.max(1),
+        }
+    }
+
+    /// Load `[tools.timeouts]` from `~/.atomcode/config.toml`, else defaults.
+    pub fn load_effective() -> Self {
+        let path = Config::default_path();
+        if path.is_file() {
+            if let Ok(cfg) = Config::load(&path) {
+                return cfg.tools.timeouts.sanitized();
+            }
+        }
+        Self::default()
+    }
+}
+
 /// `[tools.tool_output]` — where oversized tool results are folded into a
 /// head+tail preview and spilled to an artifact (recoverable via fetch_output).
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -141,14 +214,20 @@ pub struct ToolOutputConfig {
     /// Fold threshold in bytes. Results larger than this are replaced by a
     /// preview. `None` (or missing) → the built-in default
     /// (`THRESHOLD_BYTES`, 64 KiB). `0` disables folding entirely.
-    #[serde(default = "default_tool_output_max_bytes", skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default = "default_tool_output_max_bytes",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub max_bytes: Option<usize>,
     /// Tool names whose output must reach the model verbatim (never folded),
     /// regardless of size. Batch whitelist: list any built-in tool name
     /// (see `.atomcode/builtin-tools.txt` for the full catalog) and its
     /// results skip the fold preview entirely — like the intrinsic
     /// `never_truncate_result()` contract (repo_map / code_explore).
-    #[serde(default = "default_no_fold_tools", skip_serializing_if = "Vec::is_empty")]
+    #[serde(
+        default = "default_no_fold_tools",
+        skip_serializing_if = "Vec::is_empty"
+    )]
     pub no_fold_tools: Vec<String>,
 }
 
@@ -161,9 +240,6 @@ fn default_no_fold_tools() -> Vec<String> {
         "fetch_output",
         "repo_map",
         "code_explore",
-        "find_symbol",
-        "trace_chain",
-        "blast_radius",
         "web_fetch",
         "web_search",
     ]
@@ -319,9 +395,6 @@ pub struct Config {
     /// impl that matches the no-section-present semantics.
     #[serde(default, skip_serializing)]
     pub telemetry: TelemetryConfig,
-    /// LSP integration configuration.
-    #[serde(default)]
-    pub lsp: LspConfig,
     /// Automatically commit edited files after each agent turn completes.
     /// Only applies when working inside a git repository.
     #[serde(default)]
@@ -651,7 +724,6 @@ impl Default for Config {
             update_manifest_url: None,
             update_download_base: None,
             telemetry: Default::default(),
-            lsp: Default::default(),
             auto_commit: false,
             subagent: Default::default(),
             loop_config: Default::default(),
@@ -1275,82 +1347,6 @@ pub struct NetworkConfig {
     pub proxy: ProxyConfig,
 }
 
-/// Controls LSP (Language Server Protocol) integration.
-///
-/// Off by default. 5-7 atomgr datalog (build 942b615): the only `diagnostics`
-/// call in a 99-turn session took 33.6s (cold rust-analyzer spin-up) and
-/// returned "No diagnostics found", contributing nothing to task completion.
-/// LSP is also platform/toolchain-specific (rust-analyzer, gopls, etc.) and
-/// pulling those binaries unprompted violates the project's
-/// tech-stack-neutrality rule. Users who want it can flip `enabled = true`
-/// in their config.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct LspConfig {
-    /// Master switch for LSP diagnostics. Off by default — opt-in only.
-    #[serde(default)]
-    pub enabled: bool,
-    /// Automatically detect and start language servers from the built-in
-    /// registry. Off by default — even when `enabled = true`, users must
-    /// explicitly opt in to auto-detect (or list specific `servers`) to
-    /// avoid surprising the user with binary spawns.
-    #[serde(default)]
-    pub auto_detect: bool,
-    /// Custom server configurations keyed by file extension.
-    #[serde(default)]
-    pub servers: std::collections::HashMap<String, crate::lsp_registry::LspServerConfig>,
-    /// Time in milliseconds to wait after file sync before reading diagnostics.
-    /// LSP servers need time to process notifications and publish diagnostics.
-    /// Larger files or slower servers may need higher values.
-    #[serde(default = "default_diagnostics_settle_delay_ms")]
-    pub diagnostics_settle_delay_ms: u64,
-}
-
-fn default_diagnostics_settle_delay_ms() -> u64 {
-    150
-}
-
-impl Default for LspConfig {
-    fn default() -> Self {
-        Self {
-            enabled: false,
-            auto_detect: false,
-            servers: Default::default(),
-            diagnostics_settle_delay_ms: default_diagnostics_settle_delay_ms(),
-        }
-    }
-}
-
-/// One-shot migration for users who had atomcode installed before the
-/// "LSP off by default" flip (commit 5b07e2a, 2026-05-07). The setup
-/// wizard at install time used `LspConfig::default()` which **at that
-/// time** was `enabled=true, auto_detect=true, delay=150, servers={}`,
-/// and `Config::save()` serialized those literals into
-/// `~/.atomcode/config.toml`. Subsequent loads see explicit `enabled=true`
-/// and ignore the new in-memory default — old installs keep spawning
-/// rust-analyzer / gopls and surface init failures the user never asked
-/// for.
-///
-/// Heuristic: if the on-disk LspConfig matches the OLD wizard-written
-/// shape **byte-for-byte** (every field equals its old default), reset
-/// to the new default. Any deviation (custom server, non-default delay,
-/// auto_detect=false) means the user customised it intentionally —
-/// leave alone.
-///
-/// False-positive risk: a user who manually wrote `enabled=true +
-/// auto_detect=true + delay=150 + servers={}` exactly gets silently
-/// reset. The shape is identical to the auto-written default, so
-/// distinguishing intent is impossible without a schema-version field.
-/// Probability is low; failure mode is mild (re-enable explicitly).
-fn migrate_legacy_lsp_default(cfg: &mut Config) {
-    let looks_auto_written = cfg.lsp.enabled
-        && cfg.lsp.auto_detect
-        && cfg.lsp.diagnostics_settle_delay_ms == 150
-        && cfg.lsp.servers.is_empty();
-    if looks_auto_written {
-        cfg.lsp = LspConfig::default();
-    }
-}
-
 fn default_true() -> bool {
     true
 }
@@ -1446,8 +1442,12 @@ fn render_datalog_section(cfg: &DatalogConfig) -> String {
     let mut out = String::new();
     out.push_str("\n# Per-turn datalog. Each turn writes a markdown summary; each LLM\n");
     out.push_str("# round appends its final request to the paired JSONL file.\n");
-    out.push_str("# Logs contain raw prompts, responses, tool inputs and tool outputs; protect them\n");
-    out.push_str("# as sensitive data. AtomCode creates project directories/files as 0700/0600 on Unix.\n");
+    out.push_str(
+        "# Logs contain raw prompts, responses, tool inputs and tool outputs; protect them\n",
+    );
+    out.push_str(
+        "# as sensitive data. AtomCode creates project directories/files as 0700/0600 on Unix.\n",
+    );
     out.push_str("# A per-project subdirectory is always appended under `dir` so multiple\n");
     out.push_str("# projects never share a bucket.\n");
     out.push_str("# - enabled = false        -> disable logging entirely\n");
@@ -1679,9 +1679,8 @@ impl Config {
     }
 
     pub(crate) fn parse_disk_content(content: &str, path: &Path) -> Result<Self> {
-        let mut config: Config = toml::from_str(content)
+        let config: Config = toml::from_str(content)
             .map_err(|e| anyhow::anyhow!("Failed to parse config {}: {e}", path.display()))?;
-        migrate_legacy_lsp_default(&mut config);
         Ok(config)
     }
 
@@ -1718,7 +1717,6 @@ impl Config {
             .try_into()
             .map_err(|e| anyhow::anyhow!("Failed to parse config {}: {e}", path.display()))?;
         config.quarantined_providers = quarantined;
-        migrate_legacy_lsp_default(&mut config);
         if config
             .quarantined_providers
             .contains_key(&config.default_provider)
@@ -2172,21 +2170,6 @@ model = "missing-type"
         assert!(!target.exists());
     }
 
-    /// LSP must default to disabled. 5-7 atomgr datalog (build 942b615):
-    /// the only `diagnostics` call in 99 turns took 33.6s for a "No
-    /// diagnostics found" reply. Spinning up rust-analyzer / gopls /
-    /// pyright unprompted also conflicts with the framework's
-    /// tech-stack-neutrality stance. Users must opt in explicitly.
-    #[test]
-    fn lsp_config_defaults_to_disabled_opt_in() {
-        let cfg = LspConfig::default();
-        assert!(!cfg.enabled, "LSP enabled must default to false");
-        assert!(
-            !cfg.auto_detect,
-            "LSP auto_detect must default to false even if enabled flips on"
-        );
-    }
-
     #[test]
     fn auto_copy_on_select_defaults_off() {
         let ui = UiConfig::default();
@@ -2288,112 +2271,6 @@ model = "missing-type"
         assert!(super::request_user_input_enabled_from_env(Some("true")));
         assert!(super::request_user_input_enabled_from_env(Some("yes")));
         assert!(super::request_user_input_enabled_from_env(Some("on")));
-    }
-
-    /// Migration: on-disk config that looks like it was auto-written by
-    /// the OLD setup wizard (enabled=true + auto_detect=true + delay=150
-    /// + no custom servers) must be silently reset to disabled. Without
-    /// this, users installed before commit 5b07e2a keep spawning
-    /// rust-analyzer / gopls every startup despite the new default.
-    #[test]
-    fn migrate_resets_auto_written_lsp_to_disabled() {
-        let mut cfg = blank_config_with_lsp(LspConfig {
-            enabled: true,
-            auto_detect: true,
-            servers: Default::default(),
-            diagnostics_settle_delay_ms: 150,
-        });
-        migrate_legacy_lsp_default(&mut cfg);
-        assert!(
-            !cfg.lsp.enabled,
-            "auto-written shape must reset to disabled"
-        );
-        assert!(!cfg.lsp.auto_detect);
-    }
-
-    /// User who deliberately customised LSP (e.g. added a custom server
-    /// or tuned the settle delay) must NOT be reset. Migration only fires
-    /// for byte-perfect old-default shape.
-    #[test]
-    fn migrate_keeps_user_customised_lsp_intact() {
-        // Case 1: custom server registered.
-        let mut servers = std::collections::HashMap::new();
-        servers.insert(
-            "rs".to_string(),
-            crate::lsp_registry::LspServerConfig {
-                command: "my-custom-rust-ls".to_string(),
-                args: vec![],
-                root_markers: vec![],
-            },
-        );
-        let mut cfg = blank_config_with_lsp(LspConfig {
-            enabled: true,
-            auto_detect: true,
-            servers,
-            diagnostics_settle_delay_ms: 150,
-        });
-        migrate_legacy_lsp_default(&mut cfg);
-        assert!(cfg.lsp.enabled, "custom servers means user opt-in; keep");
-
-        // Case 2: tuned settle delay.
-        let mut cfg2 = blank_config_with_lsp(LspConfig {
-            enabled: true,
-            auto_detect: true,
-            servers: Default::default(),
-            diagnostics_settle_delay_ms: 500,
-        });
-        migrate_legacy_lsp_default(&mut cfg2);
-        assert!(cfg2.lsp.enabled, "non-default delay means user tuned; keep");
-
-        // Case 3: auto_detect=false but enabled=true (explicit narrow
-        // setup with `servers` listed) — already deviates, keep.
-        let mut cfg3 = blank_config_with_lsp(LspConfig {
-            enabled: true,
-            auto_detect: false,
-            servers: Default::default(),
-            diagnostics_settle_delay_ms: 150,
-        });
-        migrate_legacy_lsp_default(&mut cfg3);
-        assert!(
-            cfg3.lsp.enabled,
-            "auto_detect=false means user picked manual; keep"
-        );
-    }
-
-    /// Already-disabled config: migration must be a no-op (don't flip
-    /// disabled → re-disabled, but more importantly don't trigger any
-    /// surprise side effects).
-    #[test]
-    fn migrate_noop_on_already_disabled() {
-        let mut cfg = blank_config_with_lsp(LspConfig::default());
-        migrate_legacy_lsp_default(&mut cfg);
-        assert!(!cfg.lsp.enabled);
-        assert!(!cfg.lsp.auto_detect);
-    }
-
-    fn blank_config_with_lsp(lsp: LspConfig) -> Config {
-        Config {
-            lsp,
-            ..Config::with_default_provider("x")
-        }
-    }
-
-    /// Empty/missing `[lsp]` section in user TOML must produce the
-    /// disabled default — not silently flip back to enabled via a
-    /// stray `default = "default_true"` serde attribute.
-    #[test]
-    fn lsp_section_omitted_in_toml_yields_disabled() {
-        let toml_str = r#"
-            default_provider = "claude"
-
-            [providers.claude]
-            type = "claude"
-            api_key = "sk-ant-test"
-            model = "claude-opus-4-6"
-        "#;
-        let cfg: Config = toml::from_str(toml_str).expect("config parses");
-        assert!(!cfg.lsp.enabled, "missing [lsp] must keep LSP off");
-        assert!(!cfg.lsp.auto_detect);
     }
 
     #[test]
@@ -2545,7 +2422,6 @@ model = "missing-type"
             update_manifest_url: None,
             update_download_base: None,
             telemetry: Default::default(),
-            lsp: Default::default(),
             auto_commit: false,
             subagent: Default::default(),
             loop_config: Default::default(),
@@ -2557,6 +2433,7 @@ model = "missing-type"
                 },
                 tool_output: ToolOutputConfig::default(),
                 bash: BashToolConfig::default(),
+                timeouts: ToolTimeoutsConfig::default(),
             },
             vision_preprocessor_provider: None,
             language: None,
@@ -3697,5 +3574,25 @@ context_window = 131072
         assert_eq!(configured.tools.bash.default_timeout_secs, 300);
         assert_eq!(configured.tools.bash.max_timeout_secs, 3600);
         assert_eq!(configured.tools.bash.silent_kill_secs, 600);
+    }
+
+    #[test]
+    fn tool_timeouts_config_defaults_and_parses() {
+        let defaulted: Config = toml::from_str("").unwrap();
+        assert_eq!(defaulted.tools.timeouts.search_secs, 72);
+        assert_eq!(defaulted.tools.timeouts.web_connect_secs, 12);
+        assert_eq!(defaulted.tools.timeouts.web_request_secs, 72);
+        assert_eq!(defaulted.tools.timeouts.mcp_secs, 180);
+        assert_eq!(defaulted.tools.timeouts.skill_cmd_secs, 40);
+        assert_eq!(defaulted.tools.timeouts.hook_secs, 30);
+        assert_eq!(defaulted.tools.timeouts.fs_gate_secs, 36);
+
+        let configured: Config = toml::from_str(
+            "[tools.timeouts]\nsearch_secs = 60\nweb_connect_secs = 15\nweb_request_secs = 45\nskill_cmd_secs = 40\nhook_secs = 20\nfs_gate_secs = 12\n",
+        )
+        .unwrap();
+        assert_eq!(configured.tools.timeouts.search_secs, 60);
+        assert_eq!(configured.tools.timeouts.web_request_secs, 45);
+        assert_eq!(configured.tools.timeouts.skill_cmd_secs, 40);
     }
 }

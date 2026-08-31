@@ -275,11 +275,16 @@ pub fn render_identity_and_precedence(model: &str) -> (String, Option<String>) {
     if let Some(cfg) = get_custom_prompt_config() {
         let identity = if let Some(id) = &cfg.identity {
             if let Some(template) = &id.template {
-                let agent_name = id.agent_name.as_deref().unwrap_or("AtomCode");
-                let provider = id.provider.as_deref().unwrap_or("AtomGit");
-                let desc = id.description.as_deref().unwrap_or("an AI coding agent by AtomGit running the {model} model");
-                let role = id.role_summary.as_deref().unwrap_or("You help users with software engineering tasks within the current project.");
-                
+                let agent_name = id.agent_name.as_deref().unwrap_or("JeikCode");
+                let provider = id.provider.as_deref().unwrap_or("Jeik");
+                let desc = id
+                    .description
+                    .as_deref()
+                    .unwrap_or("an AI coding agent by JeikCode running the {model} model");
+                let role = id.role_summary.as_deref().unwrap_or(
+                    "You help users with software engineering tasks within the current project.",
+                );
+
                 template
                     .replace("{agent_name}", agent_name)
                     .replace("{provider}", provider)
@@ -287,17 +292,17 @@ pub fn render_identity_and_precedence(model: &str) -> (String, Option<String>) {
                     .replace("{role_summary}", role)
                     .replace("{model}", model)
             } else {
-                format!("You are AtomCode, an AI coding agent by AtomGit running the {model} model. You help users with software engineering tasks within the current project.")
+                format!("You are JeikCode, an AI coding agent by JeikCode running the {model} model. You help users with software engineering tasks within the current project.")
             }
         } else {
-            format!("You are AtomCode, an AI coding agent by AtomGit running the {model} model. You help users with software engineering tasks within the current project.")
+            format!("You are JeikCode, an AI coding agent by JeikCode running the {model} model. You help users with software engineering tasks within the current project.")
         };
 
         let precedence = cfg.precedence.as_ref().and_then(|p| p.rule.clone());
         (identity, precedence)
     } else {
         (
-            format!("You are AtomCode, an AI coding agent by AtomGit running the {model} model. You help users with software engineering tasks within the current project."),
+            format!("You are JeikCode, an AI coding agent by JeikCode running the {model} model. You help users with software engineering tasks within the current project."),
             None,
         )
     }
@@ -313,12 +318,22 @@ pub fn render_init_live_prefix() -> Option<String> {
 pub(crate) fn render_init_live_prefix_from(cfg: &CustomPromptConfig) -> Option<String> {
     let mut out = String::new();
     if let Some(sec) = &cfg.security {
-        if let Some(s) = sec.system_reminders.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+        if let Some(s) = sec
+            .system_reminders
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
             out.push_str("## SYSTEM REMINDERS:\n");
             out.push_str(s);
             out.push_str("\n\n");
         }
-        if let Some(s) = sec.mcp_instructions.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+        if let Some(s) = sec
+            .mcp_instructions
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
             out.push_str("## MCP SERVER INSTRUCTIONS:\n");
             out.push_str(s);
             out.push_str("\n\n");
@@ -368,7 +383,6 @@ pub fn render_custom_rules() -> Option<String> {
 pub(crate) fn render_custom_rules_from(cfg: &CustomRulesConfig) -> String {
     let mut out = String::new();
 
-
     // Workflow
     if let Some(wf) = &cfg.workflow {
         out.push_str("## WORKFLOW:\n");
@@ -417,7 +431,12 @@ pub(crate) fn render_custom_rules_from(cfg: &CustomRulesConfig) -> String {
             }
             out.push('\n');
         }
-        if let Some(firm) = td.firm_tool_discipline.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+        if let Some(firm) = td
+            .firm_tool_discipline
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
             out.push_str("## TOOL DISCIPLINE (MANDATORY):\n");
             out.push_str(firm);
             out.push_str("\n\n");
@@ -551,8 +570,14 @@ precedence:
   rule: "Custom precedence."
 "#;
         let cfg: CustomPromptConfig = serde_yaml::from_str(yaml).unwrap();
-        assert_eq!(cfg.identity.as_ref().unwrap().agent_name.as_deref(), Some("TestAgent"));
-        assert_eq!(cfg.precedence.as_ref().unwrap().rule.as_deref(), Some("Custom precedence."));
+        assert_eq!(
+            cfg.identity.as_ref().unwrap().agent_name.as_deref(),
+            Some("TestAgent")
+        );
+        assert_eq!(
+            cfg.precedence.as_ref().unwrap().rule.as_deref(),
+            Some("Custom precedence.")
+        );
     }
 
     #[test]
@@ -565,7 +590,10 @@ doing_tasks:
   - "Read before modify."
 "#;
         let cfg: CustomRulesConfig = serde_yaml::from_str(yaml).unwrap();
-        assert_eq!(cfg.workflow.as_ref().unwrap().first_round_reflex.as_deref(), Some("Structure then dive."));
+        assert_eq!(
+            cfg.workflow.as_ref().unwrap().first_round_reflex.as_deref(),
+            Some("Structure then dive.")
+        );
         assert_eq!(cfg.doing_tasks.as_ref().unwrap().len(), 1);
     }
 
@@ -577,7 +605,10 @@ doing_tasks:
             "serde_yaml rejects a leading BOM — the loader must strip it first"
         );
         let cfg: CustomPromptConfig = serde_yaml::from_str(strip_utf8_bom(yaml)).unwrap();
-        assert_eq!(cfg.precedence.as_ref().unwrap().rule.as_deref(), Some("bom-ok"));
+        assert_eq!(
+            cfg.precedence.as_ref().unwrap().rule.as_deref(),
+            Some("bom-ok")
+        );
     }
 
     #[test]
@@ -690,7 +721,10 @@ doing_tasks:
             "## EXECUTION DISCIPLINE (MANDATORY):",
             "## TASK TRACKING:",
         ] {
-            assert!(out.contains(needle), "missing live field {needle} in:\n{out}");
+            assert!(
+                out.contains(needle),
+                "missing live field {needle} in:\n{out}"
+            );
         }
         assert!(
             !out.contains("## CONTEXT MANAGEMENT:"),

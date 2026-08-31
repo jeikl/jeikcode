@@ -19,9 +19,14 @@ use url::Url;
 
 const MAX_RESPONSE_BYTES: usize = 2 * 1024 * 1024; // 2 MiB hard buffer cap
 const MAX_REDIRECTS: u8 = 5;
-const REQUEST_TIMEOUT_SECS: u64 = 20;
-const CONNECT_TIMEOUT_SECS: u64 = 5;
 const MAX_CHARS_CAP: usize = 50_000;
+
+fn web_connect_secs() -> u64 {
+    super::tool_timeouts().web_connect_secs
+}
+fn web_request_secs() -> u64 {
+    super::tool_timeouts().web_request_secs
+}
 
 /// A real browser UA — many sites 403 a generic/bot UA. Shared by the reqwest client and the
 /// curl fallback so both present the same identity.
@@ -191,14 +196,34 @@ impl Tool for WebFetchTool {
             .and_then(|v| v.to_str().ok())
             .map(|s| s.to_string());
 
-        // Stream with a byte cap (defends against an endless slow-serve under the timeout).
+        // Stream with a byte cap. Idle budget (`web_request_secs`) resets on every
+        // chunk so a slow-but-progressing download is not killed; the process hard
+        // cap is still `[tools.bash] max_timeout_secs`.
+        let idle = Duration::from_secs(web_request_secs());
+        let hard_deadline = std::time::Instant::now()
+            + Duration::from_secs(crate::tools::bash::command_max_timeout_secs());
         let mut stream = response.bytes_stream();
         let mut buf: Vec<u8> = Vec::with_capacity(16 * 1024);
         let mut hit_cap = false;
-        while let Some(chunk) = stream.next().await {
-            let chunk = match chunk {
-                Ok(c) => c,
-                Err(e) => return err(format!("web_fetch: failed mid-stream for {final_url}: {e}")),
+        loop {
+            if std::time::Instant::now() >= hard_deadline {
+                return err(format!(
+                    "web_fetch: reached configured max_timeout_secs while reading {final_url}"
+                ));
+            }
+            let next = tokio::time::timeout(idle, stream.next()).await;
+            let chunk = match next {
+                Ok(Some(Ok(c))) => c,
+                Ok(Some(Err(e))) => {
+                    return err(format!("web_fetch: failed mid-stream for {final_url}: {e}"))
+                }
+                Ok(None) => break,
+                Err(_) => {
+                    return err(format!(
+                        "web_fetch: stalled after {}s with no new bytes from {final_url}",
+                        idle.as_secs()
+                    ))
+                }
             };
             if buf.len() + chunk.len() > MAX_RESPONSE_BYTES {
                 buf.extend_from_slice(&chunk[..MAX_RESPONSE_BYTES - buf.len()]);
@@ -333,8 +358,9 @@ fn parse_curl_meta(stdout: &[u8]) -> Option<(u16, Option<String>, Vec<u8>)> {
 /// yields the improved error — acceptable for a best-effort fallback; SSRF pinning comes first.)
 /// Returns `(http_code, content_type, body, hit_cap)` only on a 2xx with a non-empty body;
 /// `None` if curl is missing / also blocked / non-2xx. Memory note: like the `web_search` curl
-/// path, stdout is buffered by `.output()`; `--max-filesize` caps sized responses and
-/// `--max-time` bounds the rest.
+/// path, stdout is buffered by `.output()`; `--max-filesize` caps sized responses,
+/// `--max-time` is the HTTP request budget, and the shared
+/// `[tools.bash] max_timeout_secs` is the process hard cap.
 async fn curl_fallback(
     url: &Url,
     pinned: &[SocketAddr],
@@ -354,7 +380,7 @@ async fn curl_fallback(
         .arg("--max-redirs")
         .arg("0") // single hop → only the validated IP is dialed
         .arg("--max-time")
-        .arg(REQUEST_TIMEOUT_SECS.to_string())
+        .arg(crate::tools::bash::command_max_timeout_secs().to_string())
         .arg("--max-filesize")
         .arg((MAX_RESPONSE_BYTES as u64 * 2).to_string())
         .arg("-A")
@@ -368,13 +394,13 @@ async fn curl_fallback(
             .arg(resolve_entry(host, port, addr.ip()));
     }
     cmd.arg("--").arg(url.as_str());
-    cmd.kill_on_drop(true);
     crate::process_utils::suppress_console_window(&mut cmd);
 
-    let out = tokio::time::timeout(Duration::from_secs(REQUEST_TIMEOUT_SECS + 5), cmd.output())
-        .await
-        .ok()?
-        .ok()?;
+    let out = match crate::tools::output_with_max_timeout(cmd).await {
+        crate::tools::CappedCommandOutput::Output(out) => out,
+        crate::tools::CappedCommandOutput::Io(_)
+        | crate::tools::CappedCommandOutput::TimedOut(_) => return None,
+    };
     if !out.status.success() {
         return None; // curl couldn't reach it either (transport failure) — nothing to add
     }
@@ -532,8 +558,12 @@ fn build_client(host: &str, pinned: &[SocketAddr]) -> Result<reqwest::Client, St
         // Follow redirects MANUALLY so every hop re-runs scheme + IP checks; the built-in
         // follower would let a 302 rebind to 127.0.0.1 after the start URL passed.
         .redirect(Policy::none())
-        .connect_timeout(Duration::from_secs(CONNECT_TIMEOUT_SECS))
-        .timeout(Duration::from_secs(REQUEST_TIMEOUT_SECS))
+        .connect_timeout(Duration::from_secs(web_connect_secs()))
+        // Whole-request hard cap (slow-but-progressing bodies are gated by the
+        // stream idle loop, not this). Matches bash max_timeout_secs.
+        .timeout(Duration::from_secs(
+            crate::tools::bash::command_max_timeout_secs(),
+        ))
         // A real browser UA — many sites (docs hosts, forges) 403 a generic/bot UA.
         .user_agent(BROWSER_UA);
     if !pinned.is_empty() {

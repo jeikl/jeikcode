@@ -12,6 +12,7 @@ use ignore::WalkBuilder;
 use serde::Deserialize;
 use serde_json::json;
 use std::path::PathBuf;
+use std::time::{Duration, Instant};
 
 const DEFAULT_MAX_RESULTS: usize = 300;
 const MAX_RESULTS_CAP: usize = 2000;
@@ -97,7 +98,10 @@ impl Tool for GlobTool {
         let wd = ctx.working_dir.clone();
         let base2 = base.clone();
         let pattern = a.pattern.clone();
+        let search_secs = super::tool_timeouts().search_secs;
         let res = tokio::task::spawn_blocking(move || {
+            let deadline = Instant::now() + Duration::from_secs(search_secs);
+            let mut timed_out = false;
             let mut hits: Vec<String> = Vec::new();
             let mut builder = WalkBuilder::new(&base2);
             builder
@@ -129,6 +133,10 @@ impl Tool for GlobTool {
                 })
                 .build();
             for entry in walk.flatten() {
+                if Instant::now() >= deadline {
+                    timed_out = true;
+                    break;
+                }
                 let path = entry.path();
                 if !path.is_file() {
                     continue;
@@ -142,13 +150,21 @@ impl Tool for GlobTool {
                 }
             }
             hits.sort();
-            hits
+            (hits, timed_out)
         })
         .await;
 
         match res {
-            Ok(hits) if hits.is_empty() => ok(format!("No files matching \"{pattern}\"")),
-            Ok(mut hits) => {
+            Ok((hits, timed_out)) if hits.is_empty() => {
+                let mut msg = format!("No files matching \"{pattern}\"");
+                if timed_out {
+                    msg.push_str(&format!(
+                        "\n[Search timed out after {search_secs}s; narrow the pattern/path]"
+                    ));
+                }
+                ok(msg)
+            }
+            Ok((mut hits, timed_out)) => {
                 let cap = a
                     .limit
                     .unwrap_or(DEFAULT_MAX_RESULTS)
@@ -162,6 +178,11 @@ impl Tool for GlobTool {
                 if extra > 0 {
                     out.push_str(&format!(
                         "\n[{extra} more files not shown; raise `limit` or narrow the pattern/path]"
+                    ));
+                }
+                if timed_out {
+                    out.push_str(&format!(
+                        "\n[Search timed out after {search_secs}s; showing matches collected so far]"
                     ));
                 }
                 ok(out)

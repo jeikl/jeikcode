@@ -78,8 +78,8 @@ impl ArtifactStore {
 
 /// Default fold threshold: results larger than this (bytes) are replaced by a
 /// head+tail preview and spilled to an artifact. 64 KiB — bash/grep and other
-/// unbounded tools fold here. `read_file` self-caps at 80 KiB and opts out via
-/// `never_truncate_result()`, so a 2000-line page is not folded into fetch_output.
+/// unbounded tools fold here. `read_file` self-caps at 65 KiB and opts out via
+/// `never_truncate_result()`, so a default page is not folded into fetch_output.
 /// Configurable per instance via [`ArtifactMiddleware::with_threshold_bytes`];
 /// `0` disables folding.
 pub const THRESHOLD_BYTES: usize = 64 * 1024;

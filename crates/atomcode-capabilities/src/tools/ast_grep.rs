@@ -208,13 +208,22 @@ async fn run_ast_grep(argv: &[String], cwd: &Path) -> Result<std::process::Outpu
         cmd.args(argv).current_dir(cwd);
         // No console-window flash when spawned from a console-less daemon (Windows-only).
         crate::process_utils::suppress_console_window(&mut cmd);
-        match cmd.output().await {
-            Ok(o) => return Ok(o),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+        match crate::tools::output_with_max_timeout(cmd).await {
+            crate::tools::CappedCommandOutput::Output(o) => return Ok(o),
+            crate::tools::CappedCommandOutput::Io(e)
+                if e.kind() == std::io::ErrorKind::NotFound =>
+            {
                 last_err = Some(e);
                 continue;
             }
-            Err(e) => return Err(format!("ast_grep: failed to run `{bin}`: {e}")),
+            crate::tools::CappedCommandOutput::Io(e) => {
+                return Err(format!("ast_grep: failed to run `{bin}`: {e}"))
+            }
+            crate::tools::CappedCommandOutput::TimedOut(secs) => {
+                return Err(format!(
+                "ast_grep: reached configured max_timeout_secs ({secs}s); the process was stopped."
+            ))
+            }
         }
     }
     let _ = last_err;

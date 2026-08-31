@@ -5,10 +5,8 @@ use crate::discipline::VerifyCadenceHook;
 use crate::execution_policy::TurnExecutionPolicy;
 use crate::persona::coding_persona_with_language;
 use atomcode_capabilities::codeintel::{codeintel_tool_names, register_codeintel_tools};
-use atomcode_capabilities::codeintel::{register_lsp_tool, LspSettings};
-use atomcode_capabilities::provider::{
-    OpenAiCompatConfig, OpenAiCompatProvider,
-};
+
+use atomcode_capabilities::provider::{OpenAiCompatConfig, OpenAiCompatProvider};
 use atomcode_capabilities::session::SessionContextHook;
 use atomcode_capabilities::tools::{
     coding_tool_names, register_coding_tools_with_vision, ApprovalMiddleware,
@@ -60,23 +58,16 @@ pub fn build_coding_agent(cfg: CodingAgentConfig) -> Result<Agent, String> {
 /// (a mock for tests, or any custom [`LlmProvider`]). Use this when you construct the
 /// provider yourself; otherwise prefer [`build_coding_agent`].
 ///
-/// This compatibility entry point keeps its historical infallible signature. If optional
-/// AtomGit client setup fails, the agent remains usable without those tools and receives an
-/// explicit persona warning. New callers that need startup failure propagation should use
+/// This compatibility entry point keeps its historical infallible signature.
+/// New callers that need startup failure propagation should use
 /// [`try_build_coding_agent_with`].
 pub fn build_coding_agent_with(cfg: &CodingAgentConfig, provider: Arc<dyn LlmProvider>) -> Agent {
     let todo_enabled = crate::persona::todo_switch_enabled_for(cfg.todo.enabled);
-    match mount_coding_tools(cfg.supports_vision, todo_enabled, &cfg.lsp) {
+    match mount_coding_tools(cfg.supports_vision, todo_enabled) {
         Ok((tools, live)) => build_coding_agent_from_tools(cfg, provider, tools, live, None),
         Err(_error) => {
-            let (tools, live) = mount_base_coding_tools(cfg.supports_vision, todo_enabled, &cfg.lsp);
-            build_coding_agent_from_tools(
-                cfg,
-                provider,
-                tools,
-                live,
-                Some("AtomGit tools are unavailable because capability setup failed.".to_string()),
-            )
+            let (tools, live) = mount_base_coding_tools(cfg.supports_vision, todo_enabled);
+            build_coding_agent_from_tools(cfg, provider, tools, live, None)
         }
     }
 }
@@ -88,8 +79,10 @@ pub fn try_build_coding_agent_with(
     provider: Arc<dyn LlmProvider>,
 ) -> Result<Agent, String> {
     let todo_enabled = crate::persona::todo_switch_enabled_for(cfg.todo.enabled);
-    let (tools, live) = mount_coding_tools(cfg.supports_vision, todo_enabled, &cfg.lsp)?;
-    Ok(build_coding_agent_from_tools(cfg, provider, tools, live, None))
+    let (tools, live) = mount_coding_tools(cfg.supports_vision, todo_enabled)?;
+    Ok(build_coding_agent_from_tools(
+        cfg, provider, tools, live, None,
+    ))
 }
 
 fn build_coding_agent_from_tools(
@@ -125,10 +118,6 @@ fn build_coding_agent_from_tools(
         // Repair model-produced arguments before approval inspects them.
         .middleware(Arc::new(RepairToolArgsMiddleware))
         .middleware(turn_execution_policy.clone());
-    #[cfg(feature = "atomgit")]
-    let builder = builder.middleware(Arc::new(
-        atomcode_capabilities::tools::AtomgitBashGate::new(),
-    ));
     let mut builder = builder
         // Auto-approve in-workspace open_file (it's Risky → would otherwise prompt on every
         // preview). This path pins an immutable working_dir, so the gate pins the same root.
@@ -149,9 +138,9 @@ fn build_coding_agent_from_tools(
             SessionContextHook::new(cfg.working_dir.clone())
                 .with_extra_append(cfg.extra_system_append.clone()),
         ))
-        .hook(Arc::new(
-            atomcode_capabilities::session::UserWrapHook::new(cfg.working_dir.clone()),
-        ))
+        .hook(Arc::new(atomcode_capabilities::session::UserWrapHook::new(
+            cfg.working_dir.clone(),
+        )))
         .hook(turn_execution_policy.clone())
         .hook(Arc::new(VerifyCadenceHook::with_execution_policy(
             cfg.working_dir.clone(),
@@ -203,12 +192,6 @@ fn build_coding_agent_from_tools(
             cfg.todo.eager,
         )));
     }
-    #[cfg(feature = "atomgit")]
-    {
-        builder = builder.middleware(Arc::new(
-            atomcode_capabilities::tools::GitPushLabelMiddleware::new(cfg.working_dir.clone()),
-        ));
-    }
     builder.build()
 }
 
@@ -217,9 +200,8 @@ fn build_coding_agent_from_tools(
 fn mount_coding_tools(
     vision: bool,
     todo_enabled: bool,
-    lsp: &LspSettings,
 ) -> Result<(MountedTools, Option<atomcode_capabilities::tools::TodoLive>), String> {
-    let (registry, names, live) = base_coding_tools(vision, todo_enabled, lsp);
+    let (registry, names, live) = base_coding_tools(vision, todo_enabled);
     let refs: Vec<&str> = names.iter().map(String::as_str).collect();
     Ok((registry.mount(&refs), live))
 }
@@ -227,9 +209,8 @@ fn mount_coding_tools(
 fn mount_base_coding_tools(
     vision: bool,
     todo_enabled: bool,
-    lsp: &LspSettings,
 ) -> (MountedTools, Option<atomcode_capabilities::tools::TodoLive>) {
-    let (registry, names, live) = base_coding_tools(vision, todo_enabled, lsp);
+    let (registry, names, live) = base_coding_tools(vision, todo_enabled);
     let refs: Vec<&str> = names.iter().map(String::as_str).collect();
     (registry.mount(&refs), live)
 }
@@ -237,7 +218,6 @@ fn mount_base_coding_tools(
 fn base_coding_tools(
     vision: bool,
     todo_enabled: bool,
-    lsp: &LspSettings,
 ) -> (
     ToolRegistry,
     Vec<String>,
@@ -251,31 +231,22 @@ fn base_coding_tools(
         None
     };
     register_codeintel_tools(&mut registry);
-    let mut names: Vec<String> = coding_tool_names()
+    let names: Vec<String> = coding_tool_names()
         .iter()
         .filter(|name| todo_enabled || **name != "todowrite")
         .chain(codeintel_tool_names().iter())
         .map(|name| (*name).to_string())
         .collect();
-    if register_lsp_tool(&mut registry, lsp) {
-        names.push("lsp".into());
-    }
     (registry, names, todo_live)
 }
-
-/// Register the shipped AtomGit REST capabilities into a coding tool catalog.
-///
-/// Both the minimal builder above and the production `parts::prepare → assemble`
-
 
 #[cfg(test)]
 mod tests {
     use super::mount_base_coding_tools;
-    use atomcode_capabilities::codeintel::{LspServerSetting, LspSettings};
 
     #[test]
     fn disabled_todo_is_not_exposed_to_the_model() {
-        let names: Vec<String> = mount_base_coding_tools(false, false, &Default::default())
+        let names: Vec<String> = mount_base_coding_tools(false, false)
             .0
             .defs()
             .into_iter()
@@ -285,49 +256,42 @@ mod tests {
     }
 
     #[test]
-    fn lsp_is_mounted_only_when_runtime_policy_enables_it() {
-        // Full codeintel mode so the graph tools (incl. find_symbol) are mounted —
-        // the default Unified mode only mounts repo_map + code_explore. Guard the
-        // env so the process-wide ATOMCODE_CODEINTEL_MODE is restored after the test.
-        struct EnvGuard;
-        impl Drop for EnvGuard {
-            fn drop(&mut self) {
-                std::env::remove_var("ATOMCODE_CODEINTEL_MODE");
-            }
+    fn lsp_tool_is_not_mounted() {
+        let names: Vec<String> = mount_base_coding_tools(false, true)
+            .0
+            .defs()
+            .into_iter()
+            .map(|def| def.name)
+            .collect();
+        assert!(!names.iter().any(|name| name == "lsp"));
+        assert!(!names.iter().any(|name| name == "diagnostics"));
+    }
+
+    #[test]
+    fn fine_grained_codeintel_tools_are_not_mounted() {
+        let names: Vec<String> = mount_base_coding_tools(false, true)
+            .0
+            .defs()
+            .into_iter()
+            .map(|def| def.name)
+            .collect();
+        for retired in [
+            "list_symbols",
+            "read_symbol",
+            "find_symbol",
+            "find_references",
+            "trace_callers",
+            "trace_callees",
+            "trace_chain",
+            "blast_radius",
+            "file_dependencies",
+        ] {
+            assert!(
+                !names.iter().any(|name| name == retired),
+                "{retired} must not be mounted"
+            );
         }
-        let _guard = EnvGuard;
-        std::env::set_var("ATOMCODE_CODEINTEL_MODE", "full");
-
-        let disabled: Vec<_> = mount_base_coding_tools(false, true, &LspSettings::default())
-            .0
-            .defs()
-            .into_iter()
-            .map(|definition| definition.name)
-            .collect();
-        assert!(!disabled.iter().any(|name| name == "lsp"));
-        assert!(disabled.iter().any(|name| name == "find_symbol"));
-
-        let mut enabled = LspSettings {
-            enabled: true,
-            auto_detect: false,
-            ..Default::default()
-        };
-        enabled.servers.insert(
-            "rs".into(),
-            LspServerSetting {
-                command: "rust-analyzer".into(),
-                args: Vec::new(),
-                root_markers: vec!["Cargo.toml".into()],
-            },
-        );
-        let mounted: Vec<_> = mount_base_coding_tools(false, true, &enabled)
-            .0
-            .defs()
-            .into_iter()
-            .map(|definition| definition.name)
-            .collect();
-        assert!(mounted.iter().any(|name| name == "lsp"));
-        assert!(mounted.iter().any(|name| name == "find_symbol"));
-        assert!(!mounted.iter().any(|name| name == "diagnostics"));
+        assert!(names.iter().any(|name| name == "repo_map"));
+        assert!(names.iter().any(|name| name == "code_explore"));
     }
 }

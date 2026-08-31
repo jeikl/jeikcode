@@ -16,14 +16,15 @@ use serde_json::json;
 /// UTF-8/GB18030 detection and codeintel. Refuse pathological inputs uniformly,
 /// including callers that supplied an offset/limit.
 const MAX_IN_MEMORY_BYTES: u64 = 64 * 1024 * 1024;
-/// Default page size when the caller omits `limit`. Matches Grok Build (1000).
-/// Remainder is always recoverable via `offset` + omit `limit` (same continuation
-/// contract as Grok); do not dump the rest into this page.
-const DEFAULT_READ_LIMIT: usize = 1000;
-/// Keep one page (body plus continuation) under this budget. 80 KiB ≈ Grok's
-/// 25k-token FileTooLarge ceiling for typical numbered source; OpenCode uses 50 KiB.
-/// A footer always tells the model how to read the rest.
-const MAX_READ_OUTPUT_BYTES: usize = 80 * 1024;
+/// Default page size when the caller omits `limit`. Midway between Grok (1000)
+/// and OpenCode (2000). Remainder is always recoverable via `offset` + omit
+/// `limit` (same continuation contract as Grok); do not dump the rest into this page.
+const DEFAULT_READ_LIMIT: usize = 1500;
+/// Keep one page (body plus continuation) under this budget.
+/// OpenCode caps at 50 KiB; Grok rejects ranges above ~25k tokens (~80 KiB of
+/// numbered source). Midpoint 65 KiB. A footer always tells the model how to
+/// read the rest.
+const MAX_READ_OUTPUT_BYTES: usize = 65 * 1024;
 /// Per-line display cap (very long minified lines are truncated with a marker).
 const MAX_LINE_LEN: usize = 2000;
 
@@ -176,7 +177,7 @@ impl Tool for ReadFileTool {
     fn description(&self) -> &str {
         "Read a file from the filesystem. Returns the contents prefixed with 1-based \
          line numbers (`<n>\\t<content>`). Omit `offset` and `limit` unless the file is too \
-         large to read at once — the default page is 1000 lines (an 80 KiB budget may return \
+         large to read at once — the default page is 1500 lines (a 65 KiB budget may return \
          fewer). Do not request tiny windows (20–70 lines). If a footer reports remaining \
          lines, call again with that `offset` and omit `limit` to continue — that is how you \
          finish a truncated file (do not repeat a small page). Prefer `code_explore` for \
@@ -197,7 +198,7 @@ impl Tool for ReadFileTool {
                     "type": "integer",
                     "minimum": 1,
                     "default": DEFAULT_READ_LIMIT,
-                    "description": "Maximum lines to read. Omit unless you need a specific window. Defaults to 1000; the output byte budget may return fewer. After a partial page, omit `limit` and use the footer offset to read the rest. Do not use 20–70 line slices."
+                    "description": "Maximum lines to read. Omit unless you need a specific window. Defaults to 1500; the output byte budget may return fewer. After a partial page, omit `limit` and use the footer offset to read the rest. Do not use 20–70 line slices."
                 }
             },
             "required": ["file_path"]
@@ -208,7 +209,7 @@ impl Tool for ReadFileTool {
     fn read_only_hint(&self) -> bool {
         true
     }
-    /// Self-capped to `MAX_READ_OUTPUT_BYTES`. Skipping the generic 64 KiB artifact
+    /// Self-capped to `MAX_READ_OUTPUT_BYTES` (65 KiB). Skipping the generic 64 KiB artifact
     /// fold / kernel cap is what makes one numbered page reach the model; remainder
     /// is recovered with `offset` (Grok-style), not `fetch_output`.
     fn never_truncate_result(&self) -> bool {
@@ -256,7 +257,7 @@ impl Tool for ReadFileTool {
         if meta.len() > MAX_IN_MEMORY_BYTES {
             return err(format!(
                 "File too large for read_file's in-memory decoder: {} bytes ({:.1} MB; \
-                 limit is {:.0} MB). Use grep/list_symbols to locate relevant content, or \
+                 limit is {:.0} MB). Use grep/code_explore to locate relevant content, or \
                  bash (sed -n / rg) to read a bounded range.",
                 meta.len(),
                 meta.len() as f64 / 1_048_576.0,
@@ -635,7 +636,7 @@ mod tests {
     #[tokio::test]
     async fn omitted_limit_uses_a_bounded_page_with_an_actionable_continuation() {
         let d = tempfile::tempdir().unwrap();
-        let text = (1..=2505)
+        let text = (1..=3505)
             .map(|n| format!("line {n}"))
             .collect::<Vec<_>>()
             .join("\n");
@@ -646,11 +647,11 @@ mod tests {
             .await;
 
         assert!(!r.is_error, "{}", r.content);
-        assert!(r.content.contains("1000\tline 1000"), "{}", r.content);
-        assert!(!r.content.contains("1001\tline 1001"), "{}", r.content);
+        assert!(r.content.contains("1500\tline 1500"), "{}", r.content);
+        assert!(!r.content.contains("1501\tline 1501"), "{}", r.content);
         assert!(
-            r.content.contains("Showing lines 1-1000 of 2505")
-                && r.content.contains("offset=1001")
+            r.content.contains("Showing lines 1-1500 of 3505")
+                && r.content.contains("offset=1501")
                 && r.content.to_ascii_lowercase().contains("omit `limit`")
                 && !r.content.contains("\"limit\":"),
             "{}",
@@ -658,27 +659,27 @@ mod tests {
         );
 
         let page2 = ReadFileTool::default()
-            .execute(r#"{"file_path":"notes.txt","offset":1001}"#, &ctx(d.path()))
+            .execute(r#"{"file_path":"notes.txt","offset":1501}"#, &ctx(d.path()))
             .await;
         assert!(!page2.is_error, "{}", page2.content);
         assert!(
-            page2.content.contains("1001\tline 1001"),
+            page2.content.contains("1501\tline 1501"),
             "{}",
             page2.content
         );
-        assert!(page2.content.contains("offset=2001"), "{}", page2.content);
+        assert!(page2.content.contains("offset=3001"), "{}", page2.content);
 
         let page3 = ReadFileTool::default()
-            .execute(r#"{"file_path":"notes.txt","offset":2001}"#, &ctx(d.path()))
+            .execute(r#"{"file_path":"notes.txt","offset":3001}"#, &ctx(d.path()))
             .await;
         assert!(!page3.is_error, "{}", page3.content);
         assert!(
-            page3.content.contains("2001\tline 2001"),
+            page3.content.contains("3001\tline 3001"),
             "{}",
             page3.content
         );
         assert!(
-            page3.content.contains("2505\tline 2505"),
+            page3.content.contains("3505\tline 3505"),
             "{}",
             page3.content
         );
@@ -967,7 +968,7 @@ mod tests {
         assert!(r.content.contains("line 799"), "{}", r.content);
         assert!(
             !r.content.contains("read_file("),
-            "an 800-line file must not paginate under a 1000-line default: {}",
+            "an 800-line file must not paginate under a 1500-line default: {}",
             r.content
         );
     }

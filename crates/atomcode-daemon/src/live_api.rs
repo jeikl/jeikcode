@@ -461,7 +461,6 @@ pub(crate) fn chat_runtime_config(
         supports_vision: p.map(|provider| provider.accepts_images()).unwrap_or(false),
         extra_system_append: None,
         session_display_name: None,
-        lsp: atomcode_coding::config::lsp_settings_from_config(&config.lsp),
         // env wins over `[tools.tool_output] max_bytes`; missing → None (default).
         // Mirrors `CodingRuntimeConfig::from_config` so the daemon path honors the
         // same fold threshold as CLI/TUI.
@@ -1885,58 +1884,58 @@ pub(crate) async fn live_message(
                 .handle(&session_id)
                 .is_some()
             {
-            let original_images: Vec<ImageContent> = req
-                .images
-                .into_iter()
-                .map(|image| ImageContent {
-                    media_type: image.media_type,
-                    data: image.data,
-                })
-                .collect();
-            let provider_name = requested_provider.unwrap_or_else(live_current_provider);
-            let runtime_text = preprocess_live_caption(
-                &req.message,
-                &original_images,
-                Some(&provider_name),
-                Some(&session_id),
-                &wd,
-                state.telemetry.clone(),
-            )
-            .await;
-            stash_vl_display_images(&wd, &session_id, &runtime_text, &original_images);
-            let (runtime_input, echo_input) =
-                split_live_inputs(req.message, original_images, runtime_text);
-            return match crate::native_live::submit_via_registry(
-                &session_id,
-                runtime_input,
-                echo_input,
-                req.client_input_id,
-            )
-            .await
-            {
-                Ok(atomcode_coding::SubmitReceipt::Started {
-                    generation,
-                    turn_id,
-                }) => Json(serde_json::json!({
-                    "accepted": true,
-                    "disposition": "started",
-                    "generation": generation,
-                    "turn_id": turn_id,
-                })),
-                Ok(atomcode_coding::SubmitReceipt::Steered {
-                    generation,
-                    turn_id,
-                }) => Json(serde_json::json!({
-                    "accepted": true,
-                    "disposition": "steered",
-                    "generation": generation,
-                    "turn_id": turn_id,
-                })),
-                Err(error) => Json(serde_json::json!({
-                    "accepted": false,
-                    "error": error,
-                })),
-            };
+                let original_images: Vec<ImageContent> = req
+                    .images
+                    .into_iter()
+                    .map(|image| ImageContent {
+                        media_type: image.media_type,
+                        data: image.data,
+                    })
+                    .collect();
+                let provider_name = requested_provider.unwrap_or_else(live_current_provider);
+                let runtime_text = preprocess_live_caption(
+                    &req.message,
+                    &original_images,
+                    Some(&provider_name),
+                    Some(&session_id),
+                    &wd,
+                    state.telemetry.clone(),
+                )
+                .await;
+                stash_vl_display_images(&wd, &session_id, &runtime_text, &original_images);
+                let (runtime_input, echo_input) =
+                    split_live_inputs(req.message, original_images, runtime_text);
+                return match crate::native_live::submit_via_registry(
+                    &session_id,
+                    runtime_input,
+                    echo_input,
+                    req.client_input_id,
+                )
+                .await
+                {
+                    Ok(atomcode_coding::SubmitReceipt::Started {
+                        generation,
+                        turn_id,
+                    }) => Json(serde_json::json!({
+                        "accepted": true,
+                        "disposition": "started",
+                        "generation": generation,
+                        "turn_id": turn_id,
+                    })),
+                    Ok(atomcode_coding::SubmitReceipt::Steered {
+                        generation,
+                        turn_id,
+                    }) => Json(serde_json::json!({
+                        "accepted": true,
+                        "disposition": "steered",
+                        "generation": generation,
+                        "turn_id": turn_id,
+                    })),
+                    Err(error) => Json(serde_json::json!({
+                        "accepted": false,
+                        "error": error,
+                    })),
+                };
             }
         }
     }
@@ -2140,13 +2139,11 @@ pub(crate) async fn live_switch_session_endpoint(
             crate::update_project_state(&mut *state.project.write().await, &changed.working_dir);
             Json(serde_json::json!({ "ok": true }))
         }
-        Err(error) => {
-            Json(serde_json::json!({
-                "ok": false,
-                "active_turn": false,
-                "error": format!("session switch rejected: {error:?}"),
-            }))
-        }
+        Err(error) => Json(serde_json::json!({
+            "ok": false,
+            "active_turn": false,
+            "error": format!("session switch rejected: {error:?}"),
+        })),
     }
 }
 

@@ -875,19 +875,7 @@ pub async fn run(
         loop_ctrl: None,
     };
 
-    // CodingPlan drift monitor — kick off a startup check if the current
-    // default provider is CodingPlan-managed. Non-CodingPlan users skip
-    // this entirely (no HTTP, no state touched). Check runs in the
-    // background via tokio::spawn → the warning shows up on the next
-    // footer repaint once it resolves.
-    if event_loop::monitor::is_codingplan_provider(&ctx.config.default_provider) {
-        event_loop::monitor::spawn_check(
-            ctx.config.clone(),
-            ctx.model_name.clone(),
-            ctx.monitor_warning.clone(),
-            ctx.wake_tx.clone(),
-        );
-    }
+    // CodingPlan drift monitor retired with AtomGit OAuth / CodingPlan.
 
     crate::tuix_trace!(
         "START",

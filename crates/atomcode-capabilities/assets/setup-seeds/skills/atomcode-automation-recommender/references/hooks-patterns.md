@@ -1,6 +1,6 @@
 # Hooks Recommendations
 
-Hooks automatically run commands in response to AtomCode events. They're ideal for enforcement and automation that should happen consistently.
+Hooks automatically run commands in response to JeikCode events. They're ideal for enforcement and automation that should happen consistently.
 
 **Note**: These are common patterns. Use web search to find hooks for tools/frameworks not listed here to recommend the best hooks for the user.
 
@@ -139,12 +139,12 @@ Hooks automatically run commands in response to AtomCode events. They're ideal f
 
 ## Notification Hooks
 
-Notification hooks run when AtomCode sends notifications. Use matchers to filter by notification type.
+Notification hooks run when JeikCode sends notifications. Use matchers to filter by notification type.
 
 ### Permission Alerts
 | Matcher | Use Case |
 |---------|----------|
-| `permission_prompt` | Alert when AtomCode requests permissions |
+| `permission_prompt` | Alert when JeikCode requests permissions |
 
 **Recommend**: Play sound, send desktop notification, or log permission requests
 **Value**: Never miss permission prompts when multitasking
@@ -152,10 +152,10 @@ Notification hooks run when AtomCode sends notifications. Use matchers to filter
 ### Idle Notifications
 | Matcher | Use Case |
 |---------|----------|
-| `idle_prompt` | Alert when AtomCode is waiting for input (60+ seconds idle) |
+| `idle_prompt` | Alert when JeikCode is waiting for input (60+ seconds idle) |
 
-**Recommend**: Play sound or send notification when AtomCode needs attention
-**Value**: Know when AtomCode is ready for your input
+**Recommend**: Play sound or send notification when JeikCode needs attention
+**Value**: Know when JeikCode is ready for your input
 
 ### Example Configuration
 
@@ -177,7 +177,7 @@ Notification hooks run when AtomCode sends notifications. Use matchers to filter
         "hooks": [
           {
             "type": "command",
-            "command": "osascript -e 'display notification \"AtomCode is waiting\" with title \"AtomCode\"'"
+            "command": "osascript -e 'display notification \"JeikCode is waiting\" with title \"JeikCode\"'"
           }
         ]
       }
@@ -190,8 +190,8 @@ Notification hooks run when AtomCode sends notifications. Use matchers to filter
 
 | Matcher | Triggers When |
 |---------|---------------|
-| `permission_prompt` | AtomCode needs permission for a tool |
-| `idle_prompt` | AtomCode waiting for input (60+ seconds) |
+| `permission_prompt` | JeikCode needs permission for a tool |
+| `idle_prompt` | JeikCode waiting for input (60+ seconds) |
 | `auth_success` | Authentication succeeds |
 | `elicitation_dialog` | MCP tool needs input |
 

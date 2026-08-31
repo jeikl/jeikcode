@@ -1328,7 +1328,7 @@ pub enum Msg<'a> {
     TodoListHeader,
     /// `/todo add` used without any task text after it.
     TodoAddUsage,
-    /// `/guide` menu header: "📖 AtomCode Guide — type /guide <question>"
+    /// `/guide` menu header: "📖 JeikCode Guide — type /guide <question>"
     GuideMenuHeader,
     /// `/guide` menu: "Common topics:" section label
     GuideMenuTopics,
@@ -1617,7 +1617,7 @@ pub enum Msg<'a> {
     BypassWarningHeadless,
 
     // ── admin / root privilege warning ──
-    /// TUI scrollback warning when AtomCode is running as admin/root.
+    /// TUI scrollback warning when JeikCode is running as admin/root.
     /// Includes leading "⚠ " and trailing "\n".
     AdminWarningBanner,
     /// Headless-mode stderr warning when running as admin/root.

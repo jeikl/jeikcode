@@ -146,7 +146,7 @@ struct ReviewArgs {
     /// tools are unaffected. Default: web_search stays available.
     #[arg(long)]
     no_web: bool,
-    /// Mount the code-graph tools (find_references/trace_callers/…) only when the repo has AT
+    /// Mount the code-graph tools (repo_map/code_explore) only when the repo has AT
     /// MOST this many git-tracked indexable source files; above it they're dropped (grep-only),
     /// since their O(repo) tree-sitter graph build blows the wall-clock budget on huge repos for
     /// no measured quality gain. Omit ⇒ UNLIMITED (always mount — bare-CLI default). Engineering
@@ -1634,15 +1634,15 @@ base_url = "https://openrouter.ai/api/v1"
 
     #[test]
     fn detects_signing_gateways_by_host() {
-        assert!(is_signing_gateway("https://llm-api.atomgit.com/v1"));
-        assert!(is_signing_gateway(
+        // Gateway signing is retired — AtomGit/gitcode hosts are treated
+        // as ordinary OpenAI-compatible endpoints (or fail like any other).
+        assert!(!is_signing_gateway("https://llm-api.atomgit.com/v1"));
+        assert!(!is_signing_gateway(
             "https://api-ai.gitcode.com/v1/chat/completions"
         ));
-        assert!(is_signing_gateway("https://pre-llm-api-cce.atomgit.com/v1"));
-        // plain providers are fine.
+        assert!(!is_signing_gateway("https://pre-llm-api-cce.atomgit.com/v1"));
         assert!(!is_signing_gateway("https://openrouter.ai/api/v1"));
         assert!(!is_signing_gateway("https://api.deepseek.com/v1"));
-        // a lookalike path must NOT trip the host check.
         assert!(!is_signing_gateway(
             "https://evil.com/llm-api.atomgit.com/v1"
         ));

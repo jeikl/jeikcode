@@ -247,9 +247,8 @@ impl ToolMiddleware for WorkerScopeGate {
 }
 
 /// The middleware stack for a subagent child: sensitive-path guard for everyone,
-/// the feature-enabled AtomGit bash guard, plus a `WorkerScopeGate` confining a
-/// `worker`'s writes to its `scope`. `explore` children mount only read tools, so the latter
-/// gate is unnecessary.
+/// plus a `WorkerScopeGate` confining a `worker`'s writes to its `scope`.
+/// `explore` children mount only read tools, so the latter gate is unnecessary.
 fn child_middlewares(
     is_worker: bool,
     scope: &[String],
@@ -260,8 +259,6 @@ fn child_middlewares(
     if is_worker {
         mw.extend(inherited_worker_middlewares.iter().cloned());
     }
-    #[cfg(feature = "atomgit")]
-    mw.push(Arc::new(super::AtomgitBashGate::new()));
     if is_worker {
         mw.push(Arc::new(WorkerScopeGate::new(scope, working_dir)));
     }
@@ -1768,9 +1765,6 @@ mod tests {
     fn child_middlewares_add_the_scope_gate_only_for_workers() {
         use super::{child_middlewares, DenySensitivePaths};
         use std::path::Path;
-        #[cfg(feature = "atomgit")]
-        let base = 2; // DenySensitivePaths + AtomgitBashGate.
-        #[cfg(not(feature = "atomgit"))]
         let base = 1; // DenySensitivePaths.
         assert_eq!(
             child_middlewares(false, &[], Path::new("/w"), &[]).len(),

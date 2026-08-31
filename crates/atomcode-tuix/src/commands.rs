@@ -135,7 +135,6 @@ pub fn command_display_name(canonical: &str) -> String {
 }
 
 const BUILTIN_COMMANDS: &[Command] = &[
-    Command { name: "login",   desc: "Sign in with AtomGit OAuth and claim CodingPlan models", needs_args: false, hidden: true },
     // needs_args=true so selecting it only completes to `/webui ` (does NOT
     // launch) — lets the user append a subcommand (stop / lan / --host <addr>)
     // before Enter. A bare `/webui ` + Enter still launches on 127.0.0.1.
@@ -145,8 +144,6 @@ const BUILTIN_COMMANDS: &[Command] = &[
     Command { name: "setup",      desc: "First run: install recommender skill + run it. Extra text forwarded as a steering hint", needs_args: true, hidden: false },
     Command { name: "sessions", desc: "List and switch between sessions", needs_args: false, hidden: false },
     Command { name: "rename",  desc: "Rename current session", needs_args: true, hidden: false },
-    Command { name: "logout",  desc: "Sign out of AtomGit", needs_args: false, hidden: true },
-    Command { name: "whoami",  desc: "Show current logged-in user", needs_args: false, hidden: true },
     Command { name: "model",   desc: "Switch provider / model", needs_args: false, hidden: false },
     Command { name: "modeladd", desc: "Add a model; fetches upstream /models as a picker", needs_args: false, hidden: false },
     Command { name: "provider", desc: "Manage providers (add / edit / delete)", needs_args: false, hidden: false },
@@ -197,7 +194,7 @@ const BUILTIN_COMMANDS: &[Command] = &[
     Command { name: "goal",    desc: "Set a completion goal (autonomous loop until met)", needs_args: true, hidden: false },
     Command { name: "loop",    desc: "Repeat a prompt/command on an interval, or let the model self-pace", needs_args: true, hidden: false },
     Command { name: "help",    desc: "Show this help", needs_args: false, hidden: false },
-    Command { name: "guide",   desc: "Ask atomcode-guide how to use", needs_args: true, hidden: false },
+    Command { name: "guide",   desc: "Ask JeikCode how to use", needs_args: true, hidden: false },
     Command { name: "keys",    desc: "Show keyboard shortcuts", needs_args: false, hidden: false },
     Command { name: "language", desc: "Switch display and commit language", needs_args: false, hidden: false },
     Command { name: "welcome", desc: "Re-run the onboarding wizard", needs_args: false, hidden: false },
@@ -226,7 +223,7 @@ const BUILTIN_COMMANDS: &[Command] = &[
     Command { name: "view",    desc: "View file content in an overlay modal", needs_args: true, hidden: false },
     Command { name: "todo",    desc: "Show the todo list; /todo add <task> appends one, /todo clear wipes it", needs_args: false, hidden: false },
     Command { name: "schedule", desc: "List scheduled tasks and next run times", needs_args: false, hidden: false },
-    Command { name: "desktop", desc: "Open the AtomCode desktop app (or show the download link)", needs_args: false, hidden: false },
+    Command { name: "desktop", desc: "Open the JeikCode desktop app (or show the download link)", needs_args: false, hidden: false },
 ];
 
 /// Look up the i18n translation for a built-in command description.
@@ -450,7 +447,10 @@ mod tests {
 
     #[test]
     fn display_name_annotates_aliased_commands_only() {
-        assert_eq!(command_display_name("sessions"), "sessions (resume, continue)");
+        assert_eq!(
+            command_display_name("sessions"),
+            "sessions (resume, continue)"
+        );
         assert_eq!(command_display_name("quit"), "quit (exit)");
         assert_eq!(command_display_name("new"), "new");
         assert_eq!(command_display_name("clear"), "clear");
@@ -461,7 +461,9 @@ mod tests {
     #[test]
     fn find_resolves_alias_to_canonical_command() {
         let reg = CommandRegistry::builtin();
-        let via_resume = reg.find("resume").expect("/resume must resolve to /sessions");
+        let via_resume = reg
+            .find("resume")
+            .expect("/resume must resolve to /sessions");
         assert_eq!(via_resume.name, "sessions");
 
         let via_exit = reg.find("exit").expect("/exit must resolve to /quit");

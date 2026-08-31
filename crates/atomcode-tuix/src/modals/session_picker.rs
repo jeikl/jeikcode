@@ -19,9 +19,7 @@ use crossterm::event::{KeyCode, KeyModifiers};
 use std::collections::HashMap;
 
 use super::{Modal, ModalAction};
-use crate::event_loop::{
-    build_status, format_tool_detail, summarise, Buffer, LoopCtx,
-};
+use crate::event_loop::{build_status, format_tool_detail, summarise, Buffer, LoopCtx};
 use crate::render::{MenuPayload, Renderer, UiLine};
 use crate::state::UiState;
 
@@ -309,9 +307,11 @@ impl Modal for SessionPicker {
                 ) {
                     return Ok(ModalAction::Close);
                 }
-                if ctx.pending_session_resume_preparation.as_ref().is_some_and(
-                    |pending| pending.session_id == selected.id,
-                ) {
+                if ctx
+                    .pending_session_resume_preparation
+                    .as_ref()
+                    .is_some_and(|pending| pending.session_id == selected.id)
+                {
                     return Ok(ModalAction::Close);
                 }
 

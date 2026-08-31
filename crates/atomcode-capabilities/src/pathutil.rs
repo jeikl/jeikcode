@@ -2,7 +2,7 @@
 //! `tools/` and free of any feature `cfg` because `codeintel` is deliberately
 //! independent of the `tools` feature (see `codeintel/mod.rs`) yet must resolve
 //! model-supplied paths the SAME way — including leading-`~` expansion, so
-//! `read_file("~/x")` and `read_symbol("~/x")` and `glob("~/x/**")` agree with the
+//! `read_file("~/x")` and `code_explore("~/x")` and `glob("~/x/**")` agree with the
 //! shell (which the `bash` tool relies on).
 
 use std::path::{Path, PathBuf};

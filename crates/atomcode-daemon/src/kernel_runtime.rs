@@ -224,9 +224,8 @@ pub fn spawn_native_runtime_for_session_deferred_with_preprocessor(
             atomcode_coding::ProviderBootstrap::RecoverAuthentication
         };
         let session_mode = {
-            let manager = atomcode_capabilities::session::SessionManager::for_project(
-                &cfg.working_dir,
-            );
+            let manager =
+                atomcode_capabilities::session::SessionManager::for_project(&cfg.working_dir);
             let has_existing = manager.meta_path(&id).ok().is_some_and(|p| p.exists())
                 || manager.snapshot_path(&id).ok().is_some_and(|p| p.exists())
                 || manager.legacy_path(&id).ok().is_some_and(|p| p.exists());

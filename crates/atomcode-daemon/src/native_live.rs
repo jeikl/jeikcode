@@ -270,9 +270,8 @@ pub fn registry_session_snapshot(
     working_dir: &Path,
     session_id: &str,
 ) -> Result<SessionSnapshot, String> {
-    if let Some(snap) =
-        atomcode_coding::session_runtime_registry::SessionRuntimeRegistry::global()
-            .snapshot(&session_id.to_string())
+    if let Some(snap) = atomcode_coding::session_runtime_registry::SessionRuntimeRegistry::global()
+        .snapshot(&session_id.to_string())
     {
         return Ok(snap);
     }
@@ -290,12 +289,9 @@ pub async fn submit_via_registry(
     echo_input: UserInput,
     client_input_id: Option<String>,
 ) -> Result<atomcode_coding::SubmitReceipt, String> {
-    let handle =
-        atomcode_coding::session_runtime_registry::SessionRuntimeRegistry::global()
-            .handle(&session_id.to_string())
-            .ok_or_else(|| {
-                format!("session {session_id} has no live registry handle for submit")
-            })?;
+    let handle = atomcode_coding::session_runtime_registry::SessionRuntimeRegistry::global()
+        .handle(&session_id.to_string())
+        .ok_or_else(|| format!("session {session_id} has no live registry handle for submit"))?;
     let receipt = handle
         .submit(runtime_input)
         .await
@@ -516,11 +512,7 @@ pub async fn resume_session(
     // live *view* to an empty transcript so --host/sync "新建会话" does not fail
     // and rebound to the TUI's previous session.
     if let Some(draft_dir) = session_draft_working_dir(&session_id) {
-        return hub().switch_view_only(
-            session_id,
-            draft_dir,
-            SessionSnapshot::new(Vec::new()),
-        );
+        return hub().switch_view_only(session_id, draft_dir, SessionSnapshot::new(Vec::new()));
     }
     let project_bucket =
         atomcode_capabilities::session::SessionManager::project_hash(&binding.working_dir);

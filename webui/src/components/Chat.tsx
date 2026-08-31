@@ -567,15 +567,7 @@ function formatToolDetail(name: string, argsJson: string): string {
     case 'edit_file':
     case 'write_file':
     case 'create_file':
-    case 'list_symbols':
       return getStr('file_path') ? basename(getStr('file_path')) : '';
-    case 'read_symbol': {
-      const sym = getStr('symbol');
-      const file = getStr('file_path') ? basename(getStr('file_path')) : '';
-      if (!sym) return file;
-      if (!file) return sym;
-      return `${sym} in ${file}`;
-    }
     case 'glob':
     case 'grep':
       return getStr('pattern');
@@ -588,14 +580,7 @@ function formatToolDetail(name: string, argsJson: string): string {
       return getStr('url');
     case 'web_search':
       return getStr('query');
-    case 'find_references':
-    case 'trace_callees':
-    case 'trace_callers':
-    case 'trace_chain':
-      return getStr('symbol');
-    case 'blast_radius':
-    case 'file_dependencies':
-      return getStr('file') ? basename(getStr('file')) : '';
+
     case 'search_replace': {
       const s = getStr('search');
       const r = getStr('replace');

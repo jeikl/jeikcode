@@ -97,23 +97,9 @@ pub fn signer_available() -> bool {
     false
 }
 
-pub fn is_atomgit_gateway(base_url: &str) -> bool {
-    let url = match url::Url::parse(base_url) {
-        Ok(url) => url,
-        Err(_) => return false,
-    };
-    // These fixed production hosts carry OAuth bearer credentials and request
-    // signatures. Never classify their plaintext HTTP form as an authenticated
-    // gateway, otherwise a misconfigured base URL can expose the bearer token.
-    if url.scheme() != "https" {
-        return false;
-    }
-    matches!(
-        url.host_str(),
-        Some("llm-api.atomgit.com")
-            | Some("pre-llm-api-cce.atomgit.com")
-            | Some("api-ai.gitcode.com")
-    )
+pub fn is_atomgit_gateway(_base_url: &str) -> bool {
+    // Product no longer treats AtomGit/gitcode hosts as a signed gateway.
+    false
 }
 
 pub fn canonical_chat_completions_path(base_url: &str) -> String {
@@ -150,25 +136,13 @@ mod tests {
     }
 
     #[test]
-    fn gateway_matching_is_host_based() {
+    fn gateway_matching_is_disabled() {
         for url in [
             "https://llm-api.atomgit.com/v1",
-            "https://pre-llm-api-cce.atomgit.com/v1/chat/completions",
             "https://api-ai.gitcode.com/v1",
-        ] {
-            assert!(is_atomgit_gateway(url), "expected gateway: {url}");
-        }
-        for url in [
             "https://api.openai.com/v1",
-            "http://llm-api.atomgit.com/v1",
-            "http://pre-llm-api-cce.atomgit.com/v1",
-            "http://api-ai.gitcode.com/v1",
-            "https://pre-llm-api-cce.atomgit.com.evil.example",
-            "https://evil.pre-llm-api-cce.atomgit.com",
-            "ftp://pre-llm-api-cce.atomgit.com",
-            "not a url",
         ] {
-            assert!(!is_atomgit_gateway(url), "expected external: {url}");
+            assert!(!is_atomgit_gateway(url), "gateway signing is retired: {url}");
         }
     }
 

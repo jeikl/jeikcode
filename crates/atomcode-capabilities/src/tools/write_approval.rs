@@ -342,7 +342,7 @@ impl ToolMiddleware for WriteApprovalGate {
             let cwd = cwd.clone();
             let name = name.to_string();
             let fallback = (false, format!("{name}::"));
-            super::run_bounded(super::GATE_FS_TIMEOUT, fallback, move || {
+            super::run_bounded(super::gate_fs_timeout(), fallback, move || {
                 let in_ws = !targets.is_empty()
                     && targets.iter().all(|t| {
                         !t.trim().is_empty()

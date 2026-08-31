@@ -151,13 +151,13 @@ pub mod setup;
 #[cfg(feature = "tools")]
 pub mod tools;
 
-/// AtomGit REST tools (repo / pull-request / issue). Opt-in `atomgit` feature.
+/// AtomGit REST client for silent post-push labelling. Opt-in `atomgit` feature.
+/// Not a model-facing tool catalog.
 #[cfg(feature = "atomgit")]
 pub mod atomgit;
 
-/// Code-intelligence capability: tree-sitter `list_symbols` / `read_symbol` over 12
-/// languages. Single-file + stateless (no shared index, no ctx coupling). Opt-in
-/// `codeintel` feature (heavy grammar compilation). See [`codeintel`].
+/// Code-intelligence capability: `repo_map` + `code_explore` over 12 languages.
+/// Opt-in `codeintel` feature (heavy grammar compilation). See [`codeintel`].
 #[cfg(feature = "codeintel")]
 pub mod codeintel;
 

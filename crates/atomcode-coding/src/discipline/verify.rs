@@ -657,16 +657,31 @@ mod tests {
         let root = ws.to_string_lossy();
         let other = other_root.to_string_lossy();
         // Inside.
-        assert!(path_in_workspace_lexical(&format!("{root}/src/main.rs"), ws));
+        assert!(path_in_workspace_lexical(
+            &format!("{root}/src/main.rs"),
+            ws
+        ));
         assert!(path_in_workspace_lexical("src/main.rs", ws)); // relative → joined to ws
         assert!(path_in_workspace_lexical("./a/b.rs", ws));
-        assert!(path_in_workspace_lexical(&format!("{root}/./sub/../x.rs"), ws)); // normalizes inside
-                                                                                  // Outside.
-        assert!(!path_in_workspace_lexical(&format!("{other}/tmp/test.txt"), ws));
-        assert!(!path_in_workspace_lexical(&format!("{other}/other/x.rs"), ws));
+        assert!(path_in_workspace_lexical(
+            &format!("{root}/./sub/../x.rs"),
+            ws
+        )); // normalizes inside
+            // Outside.
+        assert!(!path_in_workspace_lexical(
+            &format!("{other}/tmp/test.txt"),
+            ws
+        ));
+        assert!(!path_in_workspace_lexical(
+            &format!("{other}/other/x.rs"),
+            ws
+        ));
         assert!(!path_in_workspace_lexical("../sibling/x.rs", ws)); // escapes via ..
-        assert!(!path_in_workspace_lexical(&format!("{root}/../evil.rs"), ws)); // climbs out
-                                                                                // Sibling-prefix must not false-match (/home/proj2 is NOT under /home/proj).
+        assert!(!path_in_workspace_lexical(
+            &format!("{root}/../evil.rs"),
+            ws
+        )); // climbs out
+            // Sibling-prefix must not false-match (/home/proj2 is NOT under /home/proj).
         assert!(!path_in_workspace_lexical(&format!("{root}2/x.rs"), ws));
         // Empty / unparseable → conservative in-workspace.
         assert!(path_in_workspace_lexical("", ws));
@@ -791,7 +806,7 @@ mod tests {
             tool_result("e1", false),
             Message::assistant("created", vec![]),
             user("what model are you"),
-            Message::assistant("I am AtomCode.", vec![]),
+            Message::assistant("I am JeikCode.", vec![]),
         ];
 
         assert!(

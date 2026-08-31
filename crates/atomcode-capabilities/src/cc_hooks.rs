@@ -125,7 +125,14 @@ impl HookConfig {
 }
 
 fn default_timeout_ms() -> u64 {
-    10_000
+    atomcode_config::config::ToolTimeoutsConfig::load_effective()
+        .hook_secs
+        .saturating_mul(1000)
+        .max(1)
+}
+
+fn hook_timeout_budget_ms(requested_ms: u64) -> u64 {
+    requested_ms.max(1).min(default_timeout_ms())
 }
 
 // ───────────────────────────── config loading ─────────────────────────────
@@ -323,7 +330,11 @@ async fn run_command_hook(
         ))
     };
 
-    (tokio::time::timeout(Duration::from_millis(hook.timeout_ms), fut).await)
+    (tokio::time::timeout(
+        Duration::from_millis(hook_timeout_budget_ms(hook.timeout_ms)),
+        fut,
+    )
+    .await)
         .ok()
         .flatten()
 }
@@ -925,7 +936,7 @@ mod tests {
         let h2 = HookConfig::from_plugin_spec("post_tool_use", None, "x".into(), None, "/p".into())
             .unwrap();
         assert_eq!(h2.event, HookEvent::PostToolUse);
-        assert_eq!(h2.timeout_ms, 10_000);
+        assert_eq!(h2.timeout_ms, default_timeout_ms());
 
         // Unsupported event → None (caller skips it).
         assert!(
@@ -951,7 +962,7 @@ mod tests {
         assert_eq!(hooks.len(), 1);
         assert_eq!(hooks[0].event, HookEvent::PreToolUse);
         assert_eq!(hooks[0].matcher.as_deref(), Some("bash"));
-        assert_eq!(hooks[0].timeout_ms, 10_000);
+        assert_eq!(hooks[0].timeout_ms, default_timeout_ms());
     }
 
     #[test]

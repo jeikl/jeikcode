@@ -1,7 +1,7 @@
 //! `repo_map` — high-density, multi-language architectural codebase map.
 //!
 //! Index-backed: reuses the shared [`CodeIndex`] the graph tools hold, so the
-//! directory tree shows EXACTLY the files `code_explore` / `find_symbol` can
+//! directory tree shows EXACTLY the files `code_explore` can
 //! resolve — one source of truth, never a separate (and drifting) walk.
 //!
 //! The **full directory tree is never truncated**: every index-backed source
@@ -280,7 +280,7 @@ fn build_repo_map(
     // directory on first use (fast multi-threaded unit sync — the same update
     // `atomcode init` produces), so a `path:` pointing at a never-indexed
     // directory is indexed on the spot, exactly like every other index-backed
-    // tool (code_explore / find_symbol). The graph is rooted at `target_dir`,
+    // tool (code_explore). The graph is rooted at `target_dir`,
     // so every indexed file lives inside it — no disk walk, no filter needed.
     let graph = index.get(target_dir);
     let files: Vec<PathBuf> = graph.file_symbols.keys().cloned().collect();

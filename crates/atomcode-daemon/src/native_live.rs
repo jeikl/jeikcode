@@ -223,16 +223,16 @@ pub async fn ensure_registry_runner(
 pub fn prefer_registry_live_stream(requested_session_id: &str) -> bool {
     let key = requested_session_id.to_string();
     let reg = atomcode_coding::session_runtime_registry::SessionRuntimeRegistry::global();
-    match join() {
-        Ok(current) => prefer_registry_decision(
+    match hub().execution_view_info() {
+        Some((execution_id, snapshot_empty)) => prefer_registry_decision(
             requested_session_id,
             is_session_draft(requested_session_id),
-            Some(current.binding.session_id.as_str()),
-            current.snapshot.messages.is_empty(),
+            Some(execution_id.as_str()),
+            snapshot_empty,
             reg.handle(&key).is_some(),
             reg.lookup(&key).is_some(),
         ),
-        Err(_) => prefer_registry_decision(
+        None => prefer_registry_decision(
             requested_session_id,
             is_session_draft(requested_session_id),
             None,
@@ -241,6 +241,18 @@ pub fn prefer_registry_live_stream(requested_session_id: &str) -> bool {
             reg.lookup(&key).is_some(),
         ),
     }
+}
+
+/// Observe / submit against a session that is not the bound execution runtime
+/// via the registry, never by rebinding or erroring the embedded runtime.
+pub fn should_use_registry_for_session(session_id: &str) -> bool {
+    if prefer_registry_live_stream(session_id) || is_session_draft(session_id) {
+        return true;
+    }
+    if let Some(embedded) = embedded_binding() {
+        return embedded.session_id != session_id;
+    }
+    false
 }
 
 /// Route `/live?session_id=` to the registry when the hub identity was only
@@ -635,19 +647,21 @@ pub async fn ensure_headless_runtime(
                 requested_session_id.as_deref().unwrap_or_default()
             ));
         }
-        return join().map_err(|error| format!("live hub join failed: {error:?}"));
+        return join_for_provider(requested_session_id.as_deref())
+            .map_err(|error| format!("live hub join failed: {error:?}"));
     }
 
     let mut owner = headless().lock().await;
     let can_reuse = owner.is_some()
-        && join().is_ok_and(|current| {
+        && join_for_provider(requested_session_id.as_deref()).is_ok_and(|current| {
             current.binding.working_dir == working_dir
                 && requested_session_id
                     .as_deref()
                     .is_none_or(|requested| requested == current.binding.session_id)
         });
     if can_reuse {
-        return join().map_err(|error| format!("live hub join failed: {error:?}"));
+        return join_for_provider(requested_session_id.as_deref())
+            .map_err(|error| format!("live hub join failed: {error:?}"));
     }
 
     if let Some(old) = owner.take() {

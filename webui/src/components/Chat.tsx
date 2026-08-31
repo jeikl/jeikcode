@@ -104,6 +104,12 @@ import {
   restoreLiveSnapshot,
   keepCanvasOnEmptyLiveSnapshot,
   stayOnNewSessionLanding,
+  shouldReuseLiveStream,
+  resumeTurnStartedAt,
+  transcriptHasInFlightAssistant,
+  shouldKeepCachedTranscript,
+  thisTabOwnsTurn,
+  shouldLockSendAsDetached,
   resolveTokenCache,
   formatCacheHitRate,
   createTokenCacheState,
@@ -1051,6 +1057,8 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
   // 2) light history poll as a fallback for events missed before join
   const detachedPollTimerRef = useRef<number | null>(null);
   const detachedWatchAbortRef = useRef<AbortController | null>(null);
+  const watchAssistantStashRef = useRef<Message | null>(null);
+  const watchReplaySeenRef = useRef(false);
   function stopDetachedHistoryPoll() {
     if (detachedPollTimerRef.current != null) {
       window.clearInterval(detachedPollTimerRef.current);
@@ -1076,18 +1084,18 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
     });
   }
   /**
-   * Drop a trailing in-flight assistant row before consuming a full `/chat/watch`
-   * replay. Mid-turn refresh used to keep a half-rendered bubble and then only
-   * append *new* deltas from the bus (no history), so earlier thinking/text
-   * vanished. Server now replays the whole turn; start from a clean assistant.
+   * Drop the trailing assistant before `/chat/watch` replay. The server now
+   * replays the whole turn (user + thinking + text + tools). Keeping a painted
+   * bubble made replay concatenate earlier rounds onto the last text part and
+   * duplicate bash output. The dropped bubble is stashed and restored if the
+   * watch stream is live-only (empty replay).
    */
   function dropTrailingAssistantForWatchReplay() {
     setMessages((prev) => {
       if (prev.length === 0) return prev;
       const last = prev[prev.length - 1];
       if (last.role !== 'assistant') return prev;
-      // Only drop empty placeholder — never wipe painted thinking/text/tools.
-      if (last.parts && last.parts.length > 0) return prev;
+      watchAssistantStashRef.current = last;
       return prev.slice(0, -1);
     });
   }
@@ -1117,18 +1125,51 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
       });
   }
 
+  function restoreStashedAssistantIfWatchWasLiveOnly() {
+    const stash = watchAssistantStashRef.current;
+    if (!stash || watchReplaySeenRef.current) {
+      watchAssistantStashRef.current = null;
+      return;
+    }
+    watchAssistantStashRef.current = null;
+    setMessages((prev) => {
+      const last = prev[prev.length - 1];
+      if (last && last.role === 'assistant' && last.parts && last.parts.length > 0) {
+        return prev;
+      }
+      if (last && last.role === 'assistant') {
+        return [...prev.slice(0, -1), stash];
+      }
+      return [...prev, stash];
+    });
+  }
+
   function startDetachedHistoryPoll(
     projectHash: string,
     loadId: string,
     loadGeneration: number,
+    opts?: { localReattach?: boolean },
   ) {
     stopDetachedHistoryPoll();
-    setHistoryHint(t('chat.detachedWatching'));
-    // Show running UI; send stays locked via recovery / requestId.
+    watchReplaySeenRef.current = false;
+    watchAssistantStashRef.current = null;
+    if (!opts?.localReattach) {
+      setHistoryHint(t('chat.detachedWatching'));
+    }
+    // Show running UI; send stays locked via recovery / requestId for foreign turns.
     setBusyAndClock(true);
     // Full turn will be rebuilt from watch replay (user + thinking + text + tools).
     dropTrailingAssistantForWatchReplay();
     ensureAssistantBubbleForWatch();
+    window.setTimeout(() => {
+      if (
+        activeIdRef.current !== loadId ||
+        sessionGenerationRef.current !== loadGeneration
+      ) {
+        return;
+      }
+      restoreStashedAssistantIfWatchWasLiveOnly();
+    }, 200);
 
     // Backup path: explicit pending query restores approval cards even if the
     // watch stream drops the edge event (or a mid-turn race loses the snapshot).
@@ -1153,6 +1194,17 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
             (event as { stop_reason?: string }).stop_reason === 'watch_closed')
         ) {
           return;
+        }
+        if (
+          event.type === 'user' ||
+          event.type === 'text' ||
+          event.type === 'reasoning' ||
+          event.type === 'tool_start' ||
+          event.type === 'tool_output' ||
+          event.type === 'tool_progress' ||
+          event.type === 'tool_result'
+        ) {
+          watchReplaySeenRef.current = true;
         }
         ensureAssistantBubbleForWatch();
         // Reattach after refresh / sidebar switch. Server replay includes
@@ -1352,12 +1404,33 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
           setShowJumpBtn(false);
           // Rebuild the in-flight assistant from the live stream (or full
           // replay if this connection is a mid-turn reattach).
+          watchReplaySeenRef.current = false;
           dropTrailingAssistantForWatchReplay();
+          window.setTimeout(() => {
+            if (
+              activeIdRef.current !== loadId ||
+              sessionGenerationRef.current !== loadGeneration
+            ) {
+              return;
+            }
+            restoreStashedAssistantIfWatchWasLiveOnly();
+          }, 200);
           startDetachedTick(projectHash, loadId, loadGeneration);
           // Backup: restore Build/AcceptEdits/Plan approval cards mid-turn.
           restorePendingInteractive(loadId, loadGeneration);
           // API turn 已 admit(会话已建):通知 App 刷新侧栏,让新建会话实时出现。
           onLiveTurnDone?.();
+        }
+        if (
+          event.type === 'user' ||
+          event.type === 'text' ||
+          event.type === 'reasoning' ||
+          event.type === 'tool_start' ||
+          event.type === 'tool_output' ||
+          event.type === 'tool_progress' ||
+          event.type === 'tool_result'
+        ) {
+          watchReplaySeenRef.current = true;
         }
         ensureAssistantBubbleForWatch();
         // Restore permission/user-input for every non-Auto mode that parks.
@@ -1452,12 +1525,14 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
         pendingSteersBySessionRef.current.set(prevId, [...pendingSteersRef.current]);
       }
       const detachedController = abortRef.current;
-      if (prevId && messagesRef.current.length > 0) {
+      const leavingMessages =
+        messages.length >= messagesRef.current.length ? messages : messagesRef.current;
+      if (prevId && leavingMessages.length > 0) {
         const sticky = activeTodosRef.current;
         let cached =
           sticky && sticky.length > 0
-            ? freezeTodosIntoLastAssistant(messagesRef.current, sticky)
-            : messagesRef.current;
+            ? freezeTodosIntoLastAssistant(leavingMessages, sticky)
+            : leavingMessages;
         // Stamp the leaving session's live stopwatch into its cache. The
         // following setBusyAndClock(false) must NOT write elapsed onto the
         // destination session's messages.
@@ -1490,6 +1565,8 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
         setPendingSteers([]);
       }
       loadedForRef.current = null;
+      watchAssistantStashRef.current = null;
+      watchReplaySeenRef.current = false;
       stopDetachedHistoryPoll();
       optimisticFiredRef.current = false;
       pendingSelfEchoRef.current = [];
@@ -1507,15 +1584,33 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
       if (!syncRef.current) {
         detachedController?.abort();
       }
-      liveLifecycleRef.current = createLiveLifecycleState();
+      const cached = sessionId ? messageCacheRef.current.get(sessionId) : undefined;
+      const destRunning = !!(
+        sessionId &&
+        (backgroundRunningSessionsRef.current.has(sessionId) ||
+          localTurnSessionsRef.current.has(sessionId))
+      );
+      const destElapsed = destRunning
+        ? [...(cached ?? [])].reverse().find((m) => m.role === 'assistant')?.elapsedMs
+        : undefined;
+      liveLifecycleRef.current = destRunning
+        ? { running: true, terminalConsumed: false }
+        : createLiveLifecycleState();
       finishTurnClock({ stamp: false });
-      setBusy(false);
+      if (destRunning) {
+        const started = resumeTurnStartedAt(Date.now(), destElapsed);
+        turnStartedAtRef.current = started;
+        setTurnStartedAt(started);
+        busyRef.current = true;
+        setBusy(true);
+      } else {
+        busyRef.current = false;
+        setBusy(false);
+      }
       setQueued([]);
       setLivePending(null);
       setUserInputReq(null);
       onPermissionResolved?.(null);
-
-      const cached = sessionId ? messageCacheRef.current.get(sessionId) : undefined;
       // Sticky is live-only; history restores frozen todo_list under assistants.
       setActiveTodos(null);
       activeTodosRef.current = null;
@@ -1539,9 +1634,19 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
           !stayOnNewSessionLanding({ sessionId, activeSession }),
       );
       // Sync mode only mirrors the currently viewed transcript. It does not
-      // rebind the live runtime: the in-flight task keeps running in the
-      // background, and switching back reconnects the live snapshot.
-      if (sync && sessionId && liveSessionIdRef.current === sessionId) {
+      // rebind the live runtime. Returning to the execution session reuses the
+      // open /live stream so we do not snapshot-replace in-flight bash/text.
+      if (
+        sync &&
+        sessionId &&
+        !shouldReuseLiveStream({
+          sync: true,
+          sessionId,
+          liveSessionId: liveSessionIdRef.current,
+          streamOpen: liveAbortRef.current != null && !liveAbortRef.current.signal.aborted,
+        }) &&
+        liveSessionIdRef.current === sessionId
+      ) {
         startLiveStream();
       }
     }
@@ -1611,16 +1716,25 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
             let displayMessages: Message[] = currentCached && currentCached.length > 0 ? currentCached : loaded;
 
             if (currentCached && currentCached.length > 0) {
-              // If the loaded messages from the backend are shorter than the cached messages,
-              // it means the backend task is still running or hasn't saved yet.
-              // Keep the cached messages and do not overwrite them with stale backend history.
-              if (loaded.length >= currentCached.length) {
+              const turnActive =
+                (activeResult.status === 'fulfilled' &&
+                  activeResult.value.includes(loadId)) ||
+                localTurnSessionsRef.current.has(loadId) ||
+                backgroundRunningSessionsRef.current.has(loadId) ||
+                liveSessionIdRef.current === loadId;
+              const keepCache = shouldKeepCachedTranscript({
+                cacheLen: currentCached.length,
+                diskLen: loaded.length,
+                cacheInFlight: transcriptHasInFlightAssistant(currentCached),
+                turnActive,
+              });
+              if (!keepCache && loaded.length >= currentCached.length) {
                 displayMessages = loaded;
                 setMessages(loaded);
                 messageCacheRef.current.delete(loadId);
                 pinTimelineToBottom();
               } else {
-                // Still show richer cache pinned to bottom (refresh mid-turn).
+                displayMessages = currentCached;
                 setMessages(currentCached);
                 pinTimelineToBottom();
               }
@@ -1646,23 +1760,23 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
         if (activeResult.status === 'fulfilled') {
           const active = activeResult.value.includes(loadId);
           const isLocalTurn = localTurnSessionsRef.current.has(loadId);
+          const ownsTurn = thisTabOwnsTurn({ isLiveSession, isLocalTurn });
           transitionChatRecovery({
             type: 'active_check_succeeded',
-            active: active && !isLiveSession && !isLocalTurn,
+            active: shouldLockSendAsDetached({ turnActive: active, thisTabOwnsTurn: ownsTurn }),
           });
           if (active && !isLiveSession) {
             backgroundRunningSessionsRef.current.add(loadId);
             requestIdRef.current = loadId;
-            if (!syncRef.current) setBusyAndClock(false);
+            if (!ownsTurn && !syncRef.current) setBusyAndClock(false);
             setQueued([]);
-            // Returning to a session this tab already rendered is not "another
-            // client". Keep watching if a /chat turn is live, but don't spam the
-            // OpenAI-API banner or duplicate the last user bubble.
-            if (!currentCached || currentCached.length === 0) {
+            if (!ownsTurn && (!currentCached || currentCached.length === 0)) {
               nextHint = t('chat.detachedActive');
               pushCommandNotice(t('chat.detachedActive'));
             }
-            startDetachedHistoryPoll(projectHash, loadId, loadGeneration);
+            startDetachedHistoryPoll(projectHash, loadId, loadGeneration, {
+              localReattach: ownsTurn,
+            });
           } else if (requestIdRef.current === loadId) {
             requestIdRef.current = null;
           }
@@ -2252,26 +2366,29 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
     // 否则 loadedForRef 会阻止加载，导致 historyHint 永远不被清除。
     // 重启 SSE 连接以取得新会话的 authoritative snapshot 和 replay window。
     if (e.type === 'session_switched') {
-      liveSessionIdRef.current = e.session_id;
+      // liveSessionIdRef tracks the execution session of the current /live
+      // connection (set by snapshot). A view-only switch must not overwrite it:
+      // that would paint in-flight tool/text onto the wrong canvas and force a
+      // reconnect when returning to the running session.
       const alreadyViewing = activeIdRef.current === e.session_id;
       if (!alreadyViewing && activeIdRef.current) {
         return;
       }
-      activeIdRef.current = e.session_id;
-      if (!alreadyViewing) {
-        sessionGenerationRef.current += 1;
-        onSessionId(e.session_id);
-        setMessages([]);
-        setSearch('');
-        setMatchIdx(0);
-        setSearchOpen(false);
-        setHistoryHint(null);
-        setPersistenceWarning(null);
-        applySessionTokens(e.session_id, []);
+      if (alreadyViewing) {
+        return;
       }
-      // Already viewing this session: do not restart /live. Reconnect would
-      // snapshot the hub's empty view-only projection and wipe the transcript.
-      if (sync && !alreadyViewing) {
+      liveSessionIdRef.current = e.session_id;
+      activeIdRef.current = e.session_id;
+      sessionGenerationRef.current += 1;
+      onSessionId(e.session_id);
+      setMessages([]);
+      setSearch('');
+      setMatchIdx(0);
+      setSearchOpen(false);
+      setHistoryHint(null);
+      setPersistenceWarning(null);
+      applySessionTokens(e.session_id, []);
+      if (sync) {
         stopLiveStream();
         startLiveStream();
       }
@@ -2445,8 +2562,19 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
       const parts = last.parts.slice();
       const tail = parts[parts.length - 1];
       if (tail && tail.kind === 'text') {
-        // Continue the current text run.
-        parts[parts.length - 1] = { kind: 'text', text: tail.text + content };
+        let next = tail.text + content;
+        // Status-style rounds ("正在…正在…") arrive as one text run without a
+        // newline. Keep later rounds on their own line so they don't glue.
+        if (
+          tail.text &&
+          content &&
+          !tail.text.endsWith('\n') &&
+          /(?:\.\.\.|…|。)\s*$/.test(tail.text) &&
+          /^(正在|Currently |Now )/.test(content)
+        ) {
+          next = `${tail.text}\n${content}`;
+        }
+        parts[parts.length - 1] = { kind: 'text', text: next };
       } else {
         // First text, or text after a tool → start a new text segment so the
         // chronological order (…tool → text…) is preserved.
@@ -2895,8 +3023,19 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
         // fail or the SSE transport can disappear. Mark the current canvas as
         // already loaded so the App state update cannot replace the optimistic
         // first turn with an empty history fetch.
+        {
+          const previousId = activeIdRef.current;
+          if (previousId && localTurnSessionsRef.current.has(previousId)) {
+            localTurnSessionsRef.current.add(event.session_id);
+          }
+          if (previousId && messageCacheRef.current.has(previousId) && previousId !== event.session_id) {
+            const cached = messageCacheRef.current.get(previousId);
+            if (cached) messageCacheRef.current.set(event.session_id, cached);
+          }
+        }
         activeIdRef.current = event.session_id;
         loadedForRef.current = event.session_id;
+        localTurnSessionsRef.current.add(event.session_id);
         onSessionId(event.session_id);
         break;
       case 'command_output':

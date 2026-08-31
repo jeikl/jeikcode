@@ -1346,7 +1346,7 @@ pub(crate) async fn live_stream(
     let sid = parse_session_id(q.session_id);
 
     if let Some(session_id) = sid.clone() {
-        if crate::native_live::prefer_registry_live_stream(&session_id) {
+        if crate::native_live::should_use_registry_for_session(&session_id) {
             return live_stream_from_registry(wd, session_id).into_response();
         }
     }
@@ -1860,9 +1860,7 @@ pub(crate) async fn live_message(
     // binding, submit through the registry handle so TUI-owned sessions stay
     // reachable from WebUI/--host without rebinding the hub.
     if let Some(session_id) = sid.clone() {
-        if crate::native_live::prefer_registry_live_stream(&session_id)
-            || crate::native_live::is_session_draft(&session_id)
-        {
+        if crate::native_live::should_use_registry_for_session(&session_id) {
             let wd = live_current_working_dir(&working_dir);
             if atomcode_coding::session_runtime_registry::SessionRuntimeRegistry::global()
                 .handle(&session_id)

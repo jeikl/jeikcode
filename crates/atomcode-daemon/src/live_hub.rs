@@ -110,11 +110,31 @@ struct BoundRuntime {
     control: Arc<dyn LiveRuntimeControl>,
 }
 
+/// Execution-session projection stashed while the hub VIEW is on another session.
+/// `switch_view_only` must not destroy an in-flight turn's replay window; otherwise
+/// reconnecting the execution session after a sidebar switch loses tool output
+/// and re-replays trailing text.
+#[derive(Clone)]
+struct StashedExecution {
+    session_id: String,
+    working_dir: PathBuf,
+    snapshot: Option<Arc<SessionSnapshot>>,
+    snapshot_error: Option<String>,
+    replay: Vec<LiveObservation>,
+    pending_requests: HashMap<RequestId, String>,
+    pending_web_steers: VecDeque<PendingWebSteer>,
+    turn_active: bool,
+    last_runtime_sequence: Option<u64>,
+}
+
 #[derive(Default)]
 struct HubState {
     next_binding_id: u64,
     next_cursor: u64,
     binding: Option<BoundRuntime>,
+    /// Session the bound CodingRuntime is actually executing. Never overwritten
+    /// by a view-only switch.
+    execution_session_id: Option<String>,
     snapshot: Option<Arc<SessionSnapshot>>,
     snapshot_error: Option<String>,
     replay: Vec<LiveObservation>,
@@ -122,6 +142,95 @@ struct HubState {
     turn_active: bool,
     last_runtime_sequence: Option<u64>,
     pending_web_steers: VecDeque<PendingWebSteer>,
+    /// Present when the hub VIEW is not the execution session.
+    stashed_execution: Option<StashedExecution>,
+}
+
+impl HubState {
+    fn exec_last_seq(&self) -> Option<u64> {
+        self.stashed_execution
+            .as_ref()
+            .map(|stashed| stashed.last_runtime_sequence)
+            .unwrap_or(self.last_runtime_sequence)
+    }
+
+    fn set_exec_last_seq(&mut self, sequence: Option<u64>) {
+        if let Some(stashed) = self.stashed_execution.as_mut() {
+            stashed.last_runtime_sequence = sequence;
+        } else {
+            self.last_runtime_sequence = sequence;
+        }
+    }
+
+    fn exec_turn_active(&self) -> bool {
+        self.stashed_execution
+            .as_ref()
+            .map(|stashed| stashed.turn_active)
+            .unwrap_or(self.turn_active)
+    }
+
+    fn set_exec_turn_active(&mut self, active: bool) {
+        if let Some(stashed) = self.stashed_execution.as_mut() {
+            stashed.turn_active = active;
+        } else {
+            self.turn_active = active;
+        }
+    }
+
+    fn exec_replay_mut(&mut self) -> &mut Vec<LiveObservation> {
+        match self.stashed_execution.as_mut() {
+            Some(stashed) => &mut stashed.replay,
+            None => &mut self.replay,
+        }
+    }
+
+    fn exec_pending_mut(&mut self) -> &mut HashMap<RequestId, String> {
+        match self.stashed_execution.as_mut() {
+            Some(stashed) => &mut stashed.pending_requests,
+            None => &mut self.pending_requests,
+        }
+    }
+
+    fn exec_steers_mut(&mut self) -> &mut VecDeque<PendingWebSteer> {
+        match self.stashed_execution.as_mut() {
+            Some(stashed) => &mut stashed.pending_web_steers,
+            None => &mut self.pending_web_steers,
+        }
+    }
+
+    fn exec_snapshot_mut(&mut self) -> &mut Option<Arc<SessionSnapshot>> {
+        match self.stashed_execution.as_mut() {
+            Some(stashed) => &mut stashed.snapshot,
+            None => &mut self.snapshot,
+        }
+    }
+
+    fn exec_snapshot_error_mut(&mut self) -> &mut Option<String> {
+        match self.stashed_execution.as_mut() {
+            Some(stashed) => &mut stashed.snapshot_error,
+            None => &mut self.snapshot_error,
+        }
+    }
+
+    fn execution_session_id(&self) -> Option<&str> {
+        self.stashed_execution
+            .as_ref()
+            .map(|stashed| stashed.session_id.as_str())
+            .or(self.execution_session_id.as_deref())
+            .or(self
+                .binding
+                .as_ref()
+                .map(|bound| bound.identity.session_id.as_str()))
+    }
+
+    fn execution_working_dir(&self) -> Option<PathBuf> {
+        if let Some(stashed) = &self.stashed_execution {
+            return Some(stashed.working_dir.clone());
+        }
+        self.binding
+            .as_ref()
+            .map(|bound| bound.identity.working_dir.clone())
+    }
 }
 
 #[derive(Clone)]
@@ -134,12 +243,12 @@ fn remove_pending_web_steer_locked(state: &mut HubState, client_input_id: Option
     let Some(client_input_id) = client_input_id else {
         return;
     };
-    if let Some(index) = state
-        .pending_web_steers
+    let steers = state.exec_steers_mut();
+    if let Some(index) = steers
         .iter()
         .position(|pending| pending.client_input_id == client_input_id)
     {
-        state.pending_web_steers.remove(index);
+        steers.remove(index);
     }
 }
 
@@ -147,16 +256,16 @@ fn correlate_web_steers_locked(
     state: &mut HubState,
     inputs: &[atomcode_kernel::event::SteeredInput],
 ) -> Vec<Option<String>> {
+    let steers = state.exec_steers_mut();
     inputs
         .iter()
         .map(|input| {
-            let matches_front = state.pending_web_steers.front().is_some_and(|pending| {
+            let matches_front = steers.front().is_some_and(|pending| {
                 pending.runtime_input.text == input.text
                     && pending.runtime_input.images == input.images
             });
             matches_front.then(|| {
-                state
-                    .pending_web_steers
+                steers
                     .pop_front()
                     .expect("front was checked above")
                     .client_input_id
@@ -223,7 +332,7 @@ impl LiveViewHub {
             RuntimePhase::Ready | RuntimePhase::AwaitingProvider => {}
         }
         let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
-        if state.turn_active {
+        if state.exec_turn_active() {
             return Err(HubError::ActiveTurn);
         }
         state.next_binding_id += 1;
@@ -239,6 +348,8 @@ impl LiveViewHub {
             identity: identity.clone(),
             control,
         });
+        state.execution_session_id = Some(identity.session_id.clone());
+        state.stashed_execution = None;
         state.snapshot = Some(Arc::new(snapshot));
         state.snapshot_error = None;
         state.replay.clear();
@@ -251,13 +362,34 @@ impl LiveViewHub {
 
     pub fn running_session_id(&self) -> Option<String> {
         let state = self.state.lock().unwrap_or_else(|error| error.into_inner());
-        if !state.turn_active {
+        if !state.exec_turn_active() {
             return None;
         }
-        state
-            .binding
-            .as_ref()
-            .map(|bound| bound.identity.session_id.clone())
+        state.execution_session_id().map(str::to_string)
+    }
+
+    /// Execution session of the bound runtime, independent of the current VIEW.
+    pub fn execution_session_id(&self) -> Option<String> {
+        let state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+        state.execution_session_id().map(str::to_string)
+    }
+
+    /// `(execution_session_id, snapshot_is_empty)` for live-stream routing.
+    pub fn execution_view_info(&self) -> Option<(String, bool)> {
+        let state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+        let session_id = state.execution_session_id()?.to_string();
+        let empty = if let Some(stashed) = &state.stashed_execution {
+            stashed
+                .snapshot
+                .as_ref()
+                .is_none_or(|snapshot| snapshot.messages.is_empty())
+        } else {
+            state
+                .snapshot
+                .as_ref()
+                .is_none_or(|snapshot| snapshot.messages.is_empty())
+        };
+        Some((session_id, empty))
     }
 
     pub fn join(&self) -> Result<LiveJoin, HubError> {
@@ -282,19 +414,45 @@ impl LiveViewHub {
         expected_session_id: Option<&str>,
     ) -> Result<LiveJoin, HubError> {
         let state = self.state.lock().unwrap_or_else(|error| error.into_inner());
-        let binding = state
+        let view_binding = state
             .binding
             .as_ref()
             .ok_or(HubError::Unbound)?
             .identity
             .clone();
-        if expected_session_id.is_some_and(|expected| expected != binding.session_id) {
+        let execution_id = state.execution_session_id();
+        if let Some(expected) = expected_session_id {
+            let matches_view = expected == view_binding.session_id;
+            let matches_execution = execution_id == Some(expected);
+            if !matches_view && !matches_execution {
+                return Err(HubError::StaleBinding);
+            }
+            if matches_execution {
+                if let Some(stashed) = &state.stashed_execution {
+                    if let Some(error) = &stashed.snapshot_error {
+                        return Err(HubError::SnapshotUnavailable(error.clone()));
+                    }
+                    let snapshot = stashed.snapshot.clone().ok_or(HubError::Unbound)?;
+                    let mut binding = view_binding;
+                    binding.session_id = stashed.session_id.clone();
+                    binding.working_dir = stashed.working_dir.clone();
+                    return Ok(LiveJoin {
+                        binding,
+                        snapshot,
+                        replay: stashed.replay.clone(),
+                        receiver: self.events.subscribe(),
+                    });
+                }
+            }
+        }
+        if expected_session_id.is_some_and(|expected| expected != view_binding.session_id) {
             return Err(HubError::StaleBinding);
         }
         if let Some(error) = &state.snapshot_error {
             return Err(HubError::SnapshotUnavailable(error.clone()));
         }
         let snapshot = state.snapshot.clone().ok_or(HubError::Unbound)?;
+        let binding = view_binding;
         let receiver = self.events.subscribe();
         Ok(LiveJoin {
             binding,
@@ -324,10 +482,12 @@ impl LiveViewHub {
         if current_binding_id != binding.id {
             return Err(HubError::StaleBinding);
         }
-        if state.turn_active {
+        if state.exec_turn_active() {
             return Err(HubError::ActiveTurn);
         }
         state.binding = None;
+        state.execution_session_id = None;
+        state.stashed_execution = None;
         state.snapshot = None;
         state.snapshot_error = None;
         state.replay.clear();
@@ -371,9 +531,11 @@ impl LiveViewHub {
             return Err(HubError::StaleBinding);
         }
         current.identity.generation = current.control.status().generation;
-        current.identity.session_id = session_id;
+        current.identity.session_id = session_id.clone();
         current.identity.working_dir = working_dir;
         let identity = current.identity.clone();
+        state.execution_session_id = Some(session_id);
+        state.stashed_execution = None;
         state.snapshot = Some(Arc::new(snapshot));
         state.snapshot_error = None;
         state.replay.clear();
@@ -400,12 +562,12 @@ impl LiveViewHub {
     pub fn submit(&self, input: UserInput) -> Result<(), HubError> {
         let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
         Self::dispatch_locked(&state, DriverCommand::Submit(input.clone()))?;
-        if !state.turn_active {
-            state.replay.clear();
-            state.pending_requests.clear();
-            state.pending_web_steers.clear();
+        if !state.exec_turn_active() {
+            state.exec_replay_mut().clear();
+            state.exec_pending_mut().clear();
+            state.exec_steers_mut().clear();
         }
-        state.turn_active = true;
+        state.set_exec_turn_active(true);
         self.publish_view_locked(
             &mut state,
             LiveViewEvent::InputAccepted {
@@ -567,9 +729,9 @@ impl LiveViewHub {
         handle: &CodingRuntimeHandle,
     ) {
         let ids: Vec<atomcode_kernel::event::RequestId> = {
-            let state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+            let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
             state
-                .pending_requests
+                .exec_pending_mut()
                 .iter()
                 .filter(|(_, kind)| kind.as_str() == atomcode_capabilities::tools::APPROVAL_KIND)
                 .map(|(id, _)| *id)
@@ -592,7 +754,7 @@ impl LiveViewHub {
             if current.identity.id != expected.id {
                 continue;
             }
-            if state.pending_requests.contains_key(&id) {
+            if state.exec_pending_mut().contains_key(&id) {
                 let _ = self.resolve_request_locked(&mut state, id);
             }
         }
@@ -613,7 +775,7 @@ impl LiveViewHub {
     /// [`Self::bind_with_provider`]'s active-turn set so both refuse identically.
     pub fn turn_in_progress(&self) -> bool {
         let state = self.state.lock().unwrap_or_else(|error| error.into_inner());
-        if state.turn_active {
+        if state.exec_turn_active() {
             return true;
         }
         let Some(bound) = state.binding.as_ref() else {
@@ -633,10 +795,72 @@ impl LiveViewHub {
     ) -> Result<atomcode_coding::SessionChanged, HubError> {
         // ViewBinding change only — does not touch CodingRuntime / lease / turn.
         let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
-        let binding = state.binding.as_mut().ok_or(HubError::Unbound)?;
-        binding.identity.session_id = session_id.clone();
-        binding.identity.working_dir = working_dir.clone();
-        let generation = binding.identity.generation;
+        let (current_sid, generation, current_wd) = {
+            let binding = state.binding.as_ref().ok_or(HubError::Unbound)?;
+            (
+                binding.identity.session_id.clone(),
+                binding.identity.generation,
+                binding.identity.working_dir.clone(),
+            )
+        };
+        let execution_sid = state
+            .execution_session_id
+            .clone()
+            .unwrap_or_else(|| current_sid.clone());
+
+        if session_id == current_sid {
+            return Ok(atomcode_coding::SessionChanged {
+                generation: atomcode_coding::RuntimeGeneration(generation),
+                session_id: Some(session_id),
+                working_dir,
+            });
+        }
+
+        if current_sid == execution_sid && state.stashed_execution.is_none() {
+            state.stashed_execution = Some(StashedExecution {
+                session_id: current_sid,
+                working_dir: current_wd,
+                snapshot: state.snapshot.take(),
+                snapshot_error: state.snapshot_error.take(),
+                replay: std::mem::take(&mut state.replay),
+                pending_requests: std::mem::take(&mut state.pending_requests),
+                pending_web_steers: std::mem::take(&mut state.pending_web_steers),
+                turn_active: state.turn_active,
+                last_runtime_sequence: state.last_runtime_sequence,
+            });
+            state.turn_active = false;
+            state.last_runtime_sequence = None;
+        } else if session_id == execution_sid {
+            if let Some(stashed) = state.stashed_execution.take() {
+                if let Some(binding) = state.binding.as_mut() {
+                    binding.identity.session_id = session_id.clone();
+                    binding.identity.working_dir = working_dir.clone();
+                }
+                state.snapshot = stashed.snapshot;
+                state.snapshot_error = stashed.snapshot_error;
+                state.replay = stashed.replay;
+                state.pending_requests = stashed.pending_requests;
+                state.pending_web_steers = stashed.pending_web_steers;
+                state.turn_active = stashed.turn_active;
+                state.last_runtime_sequence = stashed.last_runtime_sequence;
+                let changed = atomcode_coding::SessionChanged {
+                    generation: atomcode_coding::RuntimeGeneration(generation),
+                    session_id: Some(session_id),
+                    working_dir,
+                };
+                self.publish_view_locked(
+                    &mut state,
+                    LiveViewEvent::Runtime(CodingRuntimeEvent::SessionChanged(changed.clone())),
+                    false,
+                );
+                return Ok(changed);
+            }
+        }
+
+        if let Some(binding) = state.binding.as_mut() {
+            binding.identity.session_id = session_id.clone();
+            binding.identity.working_dir = working_dir.clone();
+        }
         let changed = atomcode_coding::SessionChanged {
             generation: atomcode_coding::RuntimeGeneration(generation),
             session_id: Some(session_id),
@@ -810,7 +1034,7 @@ impl LiveViewHub {
     ) -> Result<RequestId, HubError> {
         let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
         let id = state
-            .pending_requests
+            .exec_pending_mut()
             .iter()
             .find_map(|(id, pending_kind)| (pending_kind == kind).then_some(*id))
             .ok_or(HubError::UnknownRequest(0))?;
@@ -825,9 +1049,9 @@ impl LiveViewHub {
         value: serde_json::Value,
     ) -> Result<RequestId, HubError> {
         let id = {
-            let state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+            let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
             state
-                .pending_requests
+                .exec_pending_mut()
                 .iter()
                 .find_map(|(id, pending_kind)| (pending_kind == kind).then_some(*id))
                 .ok_or(HubError::UnknownRequest(0))?
@@ -838,7 +1062,7 @@ impl LiveViewHub {
 
     pub fn cancel(&self) -> Result<(), HubError> {
         let state = self.state.lock().unwrap_or_else(|error| error.into_inner());
-        if !state.turn_active {
+        if !state.exec_turn_active() {
             return Err(HubError::NoActiveTurn);
         }
         Self::dispatch_locked(&state, DriverCommand::Cancel)
@@ -847,7 +1071,7 @@ impl LiveViewHub {
     pub async fn cancel_confirmed(&self) -> Result<(), HubError> {
         {
             let state = self.state.lock().unwrap_or_else(|error| error.into_inner());
-            if !state.turn_active {
+            if !state.exec_turn_active() {
                 return Err(HubError::NoActiveTurn);
             }
         }
@@ -872,7 +1096,7 @@ impl LiveViewHub {
             return Err(HubError::StaleEvent);
         }
         if state
-            .last_runtime_sequence
+            .exec_last_seq()
             .is_some_and(|last| envelope.sequence <= last)
         {
             return Err(HubError::StaleEvent);
@@ -880,13 +1104,13 @@ impl LiveViewHub {
         if envelope.generation > current.identity.generation {
             let current = state.binding.as_mut().expect("binding checked above");
             current.identity.generation = envelope.generation;
-            state.replay.clear();
-            state.pending_requests.clear();
-            state.pending_web_steers.clear();
-            state.turn_active = false;
-            state.snapshot_error = None;
+            state.exec_replay_mut().clear();
+            state.exec_pending_mut().clear();
+            state.exec_steers_mut().clear();
+            state.set_exec_turn_active(false);
+            *state.exec_snapshot_error_mut() = None;
         }
-        state.last_runtime_sequence = Some(envelope.sequence);
+        state.set_exec_last_seq(Some(envelope.sequence));
 
         let event = envelope.event;
         let apply_agent_config_reload = matches!(
@@ -918,64 +1142,77 @@ impl LiveViewHub {
             )),
             _ => None,
         };
-        let mut replay = state.turn_active;
+        let mut replay = state.exec_turn_active();
         match &event {
             CodingRuntimeEvent::Agent(AgentEvent::TurnStarted) => {
-                state.turn_active = true;
+                state.set_exec_turn_active(true);
                 replay = true;
             }
             CodingRuntimeEvent::Request(request) => {
-                state.turn_active = true;
+                state.set_exec_turn_active(true);
                 state
-                    .pending_requests
+                    .exec_pending_mut()
                     .insert(request.id, request.kind.clone());
                 replay = true;
             }
             CodingRuntimeEvent::TurnFinished(TurnCompletion::Completed { snapshot, .. }) => {
-                state.snapshot = Some(snapshot.clone());
-                state.snapshot_error = None;
-                state.replay.clear();
-                state.pending_requests.clear();
-                state.pending_web_steers.clear();
-                state.turn_active = false;
+                *state.exec_snapshot_mut() = Some(snapshot.clone());
+                *state.exec_snapshot_error_mut() = None;
+                state.exec_replay_mut().clear();
+                state.exec_pending_mut().clear();
+                state.exec_steers_mut().clear();
+                state.set_exec_turn_active(false);
                 replay = false;
             }
             CodingRuntimeEvent::TurnFinished(TurnCompletion::SnapshotUnavailable {
                 error, ..
             }) => {
-                state.snapshot_error = Some(error.message.clone());
-                state.pending_requests.clear();
-                state.pending_web_steers.clear();
-                state.turn_active = false;
+                *state.exec_snapshot_error_mut() = Some(error.message.clone());
+                state.exec_pending_mut().clear();
+                state.exec_steers_mut().clear();
+                state.set_exec_turn_active(false);
                 replay = false;
             }
             CodingRuntimeEvent::RuntimeStopped(_) => {
-                state.snapshot_error = Some("runtime stopped".into());
-                state.pending_requests.clear();
-                state.pending_web_steers.clear();
-                state.turn_active = false;
+                *state.exec_snapshot_error_mut() = Some("runtime stopped".into());
+                state.exec_pending_mut().clear();
+                state.exec_steers_mut().clear();
+                state.set_exec_turn_active(false);
                 replay = false;
             }
             CodingRuntimeEvent::SessionChanged(changed) => {
-                let current = state.binding.as_mut().expect("binding checked above");
-                let identity_changed = changed
-                    .session_id
+                let execution_sid = state.execution_session_id().map(str::to_string);
+                let current_wd = state
+                    .binding
                     .as_ref()
-                    .is_some_and(|session_id| session_id != &current.identity.session_id)
-                    || changed.working_dir != current.identity.working_dir;
+                    .map(|bound| bound.identity.working_dir.clone());
+                let identity_changed = changed.session_id.as_ref().is_some_and(|session_id| {
+                    Some(session_id.as_str()) != execution_sid.as_deref()
+                }) || current_wd
+                    .as_ref()
+                    .is_some_and(|wd| changed.working_dir != *wd);
                 if let Some(session_id) = &changed.session_id {
-                    current.identity.session_id = session_id.clone();
+                    state.execution_session_id = Some(session_id.clone());
+                    if let Some(stashed) = state.stashed_execution.as_mut() {
+                        stashed.session_id = session_id.clone();
+                        stashed.working_dir = changed.working_dir.clone();
+                    }
+                    if let Some(current) = state.binding.as_mut() {
+                        current.identity.session_id = session_id.clone();
+                    }
                 }
-                current.identity.working_dir = changed.working_dir.clone();
+                if let Some(current) = state.binding.as_mut() {
+                    current.identity.working_dir = changed.working_dir.clone();
+                }
                 if identity_changed {
                     // The identity changes before the owner can asynchronously fetch
                     // the replacement snapshot. Never pair it with the previous
                     // session's snapshot during that window.
-                    state.snapshot_error = Some("session snapshot pending".into());
-                    state.replay.clear();
-                    state.pending_requests.clear();
-                    state.pending_web_steers.clear();
-                    state.turn_active = false;
+                    *state.exec_snapshot_error_mut() = Some("session snapshot pending".into());
+                    state.exec_replay_mut().clear();
+                    state.exec_pending_mut().clear();
+                    state.exec_steers_mut().clear();
+                    state.set_exec_turn_active(false);
                 }
             }
             CodingRuntimeEvent::WorkingDirectoryChanged(working_dir) => {
@@ -1110,37 +1347,43 @@ impl LiveViewHub {
         provider: Option<(String, String)>,
     ) -> Result<(), HubError> {
         let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
-        let current = state.binding.as_mut().ok_or(HubError::Unbound)?;
-        if current.identity.id != binding.id
-            || current.identity.session_id != binding.session_id
-            || current.identity.working_dir != binding.working_dir
-        {
-            return Err(HubError::StaleBinding);
-        }
-        let actual = current.control.status().generation;
-        if actual != generation.0 {
-            return Err(HubError::RuntimeGenerationChanged {
-                expected: generation.0,
-                actual,
-            });
-        }
-        if current.identity.generation > generation.0 {
-            return Err(HubError::RuntimeGenerationChanged {
-                expected: generation.0,
-                actual: current.identity.generation,
-            });
-        }
-        if let Some((provider, fingerprint)) = provider {
-            current.identity.provider = provider;
-            current.identity.provider_fingerprint = fingerprint;
-        }
-        if current.identity.generation < generation.0 {
-            current.identity.generation = generation.0;
-            state.replay.clear();
-            state.pending_requests.clear();
-            state.pending_web_steers.clear();
-            state.turn_active = false;
-            state.last_runtime_sequence = None;
+        let reset_projection = {
+            let current = state.binding.as_mut().ok_or(HubError::Unbound)?;
+            if current.identity.id != binding.id
+                || current.identity.session_id != binding.session_id
+                || current.identity.working_dir != binding.working_dir
+            {
+                return Err(HubError::StaleBinding);
+            }
+            let actual = current.control.status().generation;
+            if actual != generation.0 {
+                return Err(HubError::RuntimeGenerationChanged {
+                    expected: generation.0,
+                    actual,
+                });
+            }
+            if current.identity.generation > generation.0 {
+                return Err(HubError::RuntimeGenerationChanged {
+                    expected: generation.0,
+                    actual: current.identity.generation,
+                });
+            }
+            if let Some((provider, fingerprint)) = provider {
+                current.identity.provider = provider;
+                current.identity.provider_fingerprint = fingerprint;
+            }
+            let reset_projection = current.identity.generation < generation.0;
+            if reset_projection {
+                current.identity.generation = generation.0;
+            }
+            reset_projection
+        };
+        if reset_projection {
+            state.exec_replay_mut().clear();
+            state.exec_pending_mut().clear();
+            state.exec_steers_mut().clear();
+            state.set_exec_turn_active(false);
+            state.set_exec_last_seq(None);
         }
         Ok(())
     }
@@ -1172,8 +1415,15 @@ impl LiveViewHub {
         let Some(binding) = state.binding.as_ref() else {
             return;
         };
-        let session_id = binding.identity.session_id.clone();
-        let working_dir = binding.identity.working_dir.clone();
+        let session_id = state
+            .execution_session_id()
+            .unwrap_or(binding.identity.session_id.as_str())
+            .to_string();
+        let working_dir = state
+            .execution_working_dir()
+            .unwrap_or_else(|| binding.identity.working_dir.clone());
+        let binding_id = binding.identity.id;
+        let generation = binding.identity.generation;
         // Dual-write view coordination to the L2 registry so non-bound clients
         // (WebUI watching another session_id) see InputAccepted / Steered / etc.
         if let Some(view) = session_view_from_live(&event) {
@@ -1183,13 +1433,13 @@ impl LiveViewHub {
         }
         state.next_cursor += 1;
         let observation = LiveObservation {
-            binding_id: binding.identity.id,
-            generation: binding.identity.generation,
+            binding_id,
+            generation,
             cursor: state.next_cursor,
             event,
         };
         if replay {
-            state.replay.push(observation.clone());
+            state.exec_replay_mut().push(observation.clone());
         }
         let _ = self.events.send(observation);
     }
@@ -1199,10 +1449,10 @@ impl LiveViewHub {
     /// broadcasting the terminal so a reconnect cannot resurrect a stale prompt.
     fn resolve_request_locked(&self, state: &mut HubState, id: RequestId) -> Result<(), HubError> {
         let kind = state
-            .pending_requests
+            .exec_pending_mut()
             .remove(&id)
             .ok_or(HubError::UnknownRequest(id))?;
-        state.replay.retain(|observation| {
+        state.exec_replay_mut().retain(|observation| {
             !matches!(
                 &observation.event,
                 LiveViewEvent::Runtime(CodingRuntimeEvent::Request(request))
@@ -2154,5 +2404,91 @@ mod tests {
             hub.respond(42, serde_json::Value::Null).unwrap_err(),
             HubError::UnknownRequest(42)
         );
+    }
+
+    #[test]
+    fn view_only_switch_preserves_execution_replay_and_restores_it() {
+        let hub = LiveViewHub::new();
+        let (control, _) = control();
+        let binding = hub
+            .bind(
+                "session-a",
+                PathBuf::from("/a"),
+                snapshot("committed-a"),
+                control,
+            )
+            .unwrap();
+        hub.publish(
+            &binding,
+            SequencedRuntimeEvent {
+                generation: 1,
+                sequence: 1,
+                event: CodingRuntimeEvent::Agent(AgentEvent::TurnStarted),
+            },
+        )
+        .unwrap();
+        hub.publish(
+            &binding,
+            SequencedRuntimeEvent {
+                generation: 1,
+                sequence: 2,
+                event: CodingRuntimeEvent::Agent(AgentEvent::TextDelta("scanning…".into())),
+            },
+        )
+        .unwrap();
+        assert_eq!(hub.join().unwrap().replay.len(), 2);
+        assert_eq!(hub.running_session_id().as_deref(), Some("session-a"));
+
+        hub.switch_view_only(
+            "session-b".into(),
+            PathBuf::from("/b"),
+            snapshot("history-b"),
+        )
+        .unwrap();
+        let view = hub.join().unwrap();
+        assert_eq!(view.binding.session_id, "session-b");
+        assert_eq!(view.snapshot.messages[0].text, "history-b");
+        assert!(view.replay.is_empty(), "view projection must not keep A's replay");
+        assert_eq!(
+            hub.running_session_id().as_deref(),
+            Some("session-a"),
+            "sidebar spinner must stay on the executing session"
+        );
+
+        hub.publish(
+            &binding,
+            SequencedRuntimeEvent {
+                generation: 1,
+                sequence: 3,
+                event: CodingRuntimeEvent::Agent(AgentEvent::TextDelta(" still".into())),
+            },
+        )
+        .unwrap();
+
+        let while_away = hub
+            .join_for_provider(Some("session-a"))
+            .expect("execution join while viewing another session");
+        assert_eq!(while_away.binding.session_id, "session-a");
+        assert_eq!(while_away.replay.len(), 3);
+
+        hub.switch_view_only(
+            "session-a".into(),
+            PathBuf::from("/a"),
+            snapshot("stale-disk-a"),
+        )
+        .unwrap();
+        let restored = hub.join().unwrap();
+        assert_eq!(restored.binding.session_id, "session-a");
+        assert_eq!(restored.snapshot.messages[0].text, "committed-a");
+        assert_eq!(
+            restored.replay.len(),
+            3,
+            "returning to the executing session must restore in-flight replay, not the catalog snapshot"
+        );
+        assert!(restored.replay.iter().any(|observation| matches!(
+            &observation.event,
+            LiveViewEvent::Runtime(CodingRuntimeEvent::Agent(AgentEvent::TextDelta(text)))
+                if text == "scanning…"
+        )));
     }
 }

@@ -100,6 +100,30 @@ export function keepCanvasOnEmptyLiveSnapshot(
   return viewingThisSession && snapshotMessageCount === 0 && canvasMessageCount > 0;
 }
 
+/** Keep the existing `/live` SSE when returning to the execution session.
+ * Reconnecting would snapshot-replace the canvas (dropping in-flight bash
+ * output) and replay trailing text/user events on top of the restored cache. */
+export function shouldReuseLiveStream(input: {
+  sync: boolean;
+  sessionId: string | null;
+  liveSessionId: string | null;
+  streamOpen: boolean;
+}): boolean {
+  return Boolean(
+    input.sync &&
+      input.sessionId &&
+      input.liveSessionId === input.sessionId &&
+      input.streamOpen,
+  );
+}
+
+/** Resume the turn stopwatch from a stamped assistant duration after switching
+ * back to a still-running session. */
+export function resumeTurnStartedAt(now: number, elapsedMs: number | undefined): number {
+  const elapsed = Math.max(0, elapsedMs ?? 0);
+  return now - elapsed;
+}
+
 /** New/draft sessions and not-yet-resolved ids should stay on the landing page
  * instead of flashing the empty-chat chrome or a “continue session” hint. */
 export function stayOnNewSessionLanding(input: {
@@ -142,7 +166,69 @@ export function userMessageAlreadyOnCanvas(
       if (user?.role === 'user' && canvasUserText(user) === userText) return true;
     }
   }
+  const start = Math.max(0, messages.length - 8);
+  for (let i = messages.length - 1; i >= start; i--) {
+    const message = messages[i];
+    if (message?.role === 'user' && canvasUserText(message) === userText) return true;
+  }
   return false;
+}
+
+type InFlightPart = {
+  kind: string;
+  text?: string;
+  tool?: { status?: string };
+};
+
+/** Trailing assistant still has streaming text, reasoning, or a running tool. */
+export function transcriptHasInFlightAssistant(
+  messages: Array<{ role: string; parts: InFlightPart[] }>,
+): boolean {
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const message = messages[i];
+    if (message.role !== 'assistant') continue;
+    return message.parts.some((part) => {
+      if (
+        part.kind === 'tool' &&
+        (part.tool?.status === 'pending' || part.tool?.status === 'waiting_approval')
+      ) {
+        return true;
+      }
+      if (part.kind === 'text' && !!part.text) return true;
+      if (part.kind === 'reasoning' && !!part.text) return true;
+      return false;
+    });
+  }
+  return false;
+}
+
+/** Disk history is turn-boundary stale. Keep the tab's in-flight canvas. */
+export function shouldKeepCachedTranscript(input: {
+  cacheLen: number;
+  diskLen: number;
+  cacheInFlight: boolean;
+  turnActive: boolean;
+}): boolean {
+  if (input.cacheLen <= 0) return false;
+  if (input.turnActive && input.cacheInFlight) return true;
+  if (input.cacheLen > input.diskLen) return true;
+  return input.cacheInFlight && input.cacheLen >= input.diskLen;
+}
+
+/** This tab started the turn or is attached to its live stream. */
+export function thisTabOwnsTurn(input: {
+  isLiveSession: boolean;
+  isLocalTurn: boolean;
+}): boolean {
+  return input.isLiveSession || input.isLocalTurn;
+}
+
+/** Only a foreign `/chat` owner should lock the composer as “occupied”. */
+export function shouldLockSendAsDetached(input: {
+  turnActive: boolean;
+  thisTabOwnsTurn: boolean;
+}): boolean {
+  return input.turnActive && !input.thisTabOwnsTurn;
 }
 
 export type LiveSnapshotQueueDisposition =

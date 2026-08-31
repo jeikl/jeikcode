@@ -26,6 +26,12 @@ import {
   userMessageAlreadyOnCanvas,
   keepCanvasOnEmptyLiveSnapshot,
   stayOnNewSessionLanding,
+  shouldReuseLiveStream,
+  resumeTurnStartedAt,
+  transcriptHasInFlightAssistant,
+  shouldKeepCachedTranscript,
+  thisTabOwnsTurn,
+  shouldLockSendAsDetached,
 } from './chatTerminal.ts';
 
 test('legacy done and stopped are natural completions that preserve queued messages', () => {
@@ -115,12 +121,64 @@ test('user echo already on canvas is not appended again', () => {
   const user = { role: 'user', parts: [{ kind: 'text', text: '你好啊' }] };
   const assistant = { role: 'assistant', parts: [{ kind: 'text', text: '你好' }] };
   const notice = { role: 'system', parts: [{ kind: 'notice', text: 'sync' }] };
+  const extra = { role: 'assistant', parts: [{ kind: 'text', text: '第二段' }] };
   assert.equal(userMessageAlreadyOnCanvas([user], '你好啊'), true);
   assert.equal(userMessageAlreadyOnCanvas([user, assistant], '你好啊'), true);
   assert.equal(userMessageAlreadyOnCanvas([user, notice], '你好啊'), true);
   assert.equal(userMessageAlreadyOnCanvas([user, assistant, notice], '你好啊'), true);
+  assert.equal(userMessageAlreadyOnCanvas([user, assistant, extra], '你好啊'), true);
   assert.equal(userMessageAlreadyOnCanvas([user, assistant], '另一句'), false);
   assert.equal(userMessageAlreadyOnCanvas([], '你好啊'), false);
+});
+
+test('in-flight cache is kept over stale disk history while a turn is active', () => {
+  const cache = [
+    { role: 'user', parts: [{ kind: 'text', text: '分析 C 盘' }] },
+    {
+      role: 'assistant',
+      parts: [
+        { kind: 'text', text: '正在扫描…' },
+        { kind: 'tool', tool: { status: 'pending' } },
+      ],
+    },
+  ];
+  assert.equal(transcriptHasInFlightAssistant(cache), true);
+  assert.equal(
+    shouldKeepCachedTranscript({
+      cacheLen: 2,
+      diskLen: 1,
+      cacheInFlight: true,
+      turnActive: true,
+    }),
+    true,
+  );
+  assert.equal(
+    shouldKeepCachedTranscript({
+      cacheLen: 2,
+      diskLen: 2,
+      cacheInFlight: true,
+      turnActive: true,
+    }),
+    true,
+  );
+  assert.equal(
+    shouldKeepCachedTranscript({
+      cacheLen: 0,
+      diskLen: 2,
+      cacheInFlight: false,
+      turnActive: true,
+    }),
+    false,
+  );
+  assert.equal(thisTabOwnsTurn({ isLiveSession: false, isLocalTurn: true }), true);
+  assert.equal(
+    shouldLockSendAsDetached({ turnActive: true, thisTabOwnsTurn: true }),
+    false,
+  );
+  assert.equal(
+    shouldLockSendAsDetached({ turnActive: true, thisTabOwnsTurn: false }),
+    true,
+  );
 });
 
 test('live replay input and running state restore an active turn after an idle snapshot', () => {
@@ -344,6 +402,38 @@ test('empty live snapshot does not wipe an in-progress canvas', () => {
   assert.equal(keepCanvasOnEmptyLiveSnapshot(0, 0, true), false);
   assert.equal(keepCanvasOnEmptyLiveSnapshot(3, 2, true), false);
   assert.equal(keepCanvasOnEmptyLiveSnapshot(0, 2, false), false);
+});
+
+test('returning to the live execution session reuses the open stream', () => {
+  assert.equal(
+    shouldReuseLiveStream({
+      sync: true,
+      sessionId: 'sess-a',
+      liveSessionId: 'sess-a',
+      streamOpen: true,
+    }),
+    true,
+  );
+  assert.equal(
+    shouldReuseLiveStream({
+      sync: true,
+      sessionId: 'sess-a',
+      liveSessionId: 'sess-a',
+      streamOpen: false,
+    }),
+    false,
+  );
+  assert.equal(
+    shouldReuseLiveStream({
+      sync: true,
+      sessionId: 'sess-b',
+      liveSessionId: 'sess-a',
+      streamOpen: true,
+    }),
+    false,
+  );
+  assert.equal(resumeTurnStartedAt(1_000_000, 5_000), 995_000);
+  assert.equal(resumeTurnStartedAt(1_000_000, undefined), 1_000_000);
 });
 
 test('new/draft sessions stay on the landing page instead of continue-session chrome', () => {

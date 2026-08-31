@@ -413,6 +413,18 @@ pub trait Renderer: Send {
     /// treat this as a flush.
     fn flush_deferred(&mut self);
 
+    /// Force the newest interactive prompt frame to be painted.
+    ///
+    /// Unlike the periodic [`Renderer::flush_deferred`] heartbeat, this call
+    /// must not be coalesced with an older queued flush: blocking prompts pause
+    /// that heartbeat, so losing this trailing edge would leave an approval in
+    /// state but invisible on the terminal. Direct renderers can use their
+    /// normal deferred flush; the cross-thread renderer overrides this to
+    /// enqueue an unconditional paint after the prompt payload.
+    fn flush_interactive(&mut self) {
+        self.flush_deferred();
+    }
+
     /// Returns (and clears) whether a body overflow scrolled the whole
     /// viewport — footer included — up one row since the last call. The
     /// render worker calls this after each command and, when true, repaints

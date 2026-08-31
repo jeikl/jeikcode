@@ -8109,12 +8109,11 @@ fn redraw_interactive_footer(
     renderer: &mut dyn Renderer,
 ) {
     redraw_idle_plain(buf, state, ctx, renderer);
-    // `flush_deferred` is coalesced by TaskRenderer. If an older deferred
-    // flush is already queued, the redraw above may not enqueue another one;
-    // that older flush runs before this new InputPrompt and leaves the card
-    // unpainted after the 5ms tick is paused. A normal FIFO Flush after the
-    // prompt guarantees this blocking boundary reaches the terminal.
-    renderer.flush();
+    // This is an unconditional trailing-edge paint, not the coalesced 5ms
+    // heartbeat. It must sit *after* the InputPrompt in the render-worker FIFO
+    // or an older queued flush can paint the pre-approval frame and strand the
+    // new card forever once interactive mode pauses periodic repainting.
+    renderer.flush_interactive();
 }
 
 /// A capturing overlay owns keys only when it must (password mid-turn).

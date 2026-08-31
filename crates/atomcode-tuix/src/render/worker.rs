@@ -259,6 +259,15 @@ impl Renderer for TaskRenderer {
         }
     }
 
+    fn flush_interactive(&mut self) {
+        // Deliberately bypass `flush_pending` coalescing. There may already be
+        // an older FlushDeferred before the just-enqueued InputPrompt. If we
+        // merged with it, that old command would paint the pre-approval frame,
+        // then the prompt payload would update retained state with no later
+        // heartbeat (interactive phases pause it) to make the card visible.
+        let _ = self.cmd_tx.send(RenderCmd::FlushDeferred);
+    }
+
     fn on_resize(&mut self, cols: u16, rows: u16) {
         let _ = self.cmd_tx.send(RenderCmd::Resize(cols, rows));
     }
@@ -744,6 +753,29 @@ mod tests {
         // to observe it deterministically.
         r.reset();
         assert_eq!(counts.lock().unwrap().deferred, 1);
+    }
+
+    #[test]
+    fn interactive_flush_is_not_coalesced_with_an_older_deferred_flush() {
+        let (mut r, counts) = setup();
+
+        // Model the failing FIFO order: a periodic heartbeat was already
+        // queued, then the approval InputPrompt arrived. The interactive flush
+        // must add a second paint after that payload rather than merge away.
+        r.flush_deferred();
+        r.render(UiLine::InputPrompt {
+            buf: String::new(),
+            cursor_byte: 0,
+            menu: None,
+            status: crate::render::StatusLine::default(),
+            attachments: Vec::new(),
+        });
+        r.flush_interactive();
+        r.reset();
+
+        let counts = counts.lock().unwrap();
+        assert_eq!(counts.renders, 1);
+        assert_eq!(counts.deferred, 2);
     }
 
     #[test]

@@ -164,8 +164,8 @@ tools:
 
   - name: "bash"
     category: "system"
-    # 【中文】：在终端执行命令。timeout 是这一次堵塞秒数，到期不杀；用 bash_timeout_add 加时（每次至少 600 秒）。
-    description: "Run a shell command. timeout is this call's wait (not a kill). Compile/test: 900; short: 30. If wait expires, call bash_timeout_add with at least 600."
+    # 【中文】：在终端执行命令。必须带 timeout：编译/测试/安装 900 秒，短命令 30 秒。
+    description: "Run a shell command. ALWAYS pass timeout: 900 for compile/test/install (cargo/npm/make), 30 for short (git status, ls)."
     parameters:
       command:
         type: "string"
@@ -174,23 +174,9 @@ tools:
         description: "Command string to run."
       timeout:
         type: "integer"
-        required: false
-        # 【中文】：本次等待秒数。到期进程继续跑。编译/测试 900，短命令 30。
-        description: "Seconds to wait this call. Process keeps running if this expires."
-
-  - name: "bash_timeout_add"
-    category: "system"
-    # 【中文】：给仍在跑的 bash 加时。每次至少 600 秒。窗口内结束会立即返回。
-    description: "Keep waiting on a still-running bash command. Always add at least 600 seconds."
-    parameters:
-      bash_id:
-        type: "string"
         required: true
-        description: "Id from a still-running bash result, e.g. bash-12."
-      timeout:
-        type: "integer"
-        required: false
-        description: "Extra seconds to wait. Omit for 600. Always add at least 600."
+        # 【中文】：秒。编译/测试/安装（cargo test、npm test、make）一律 900——链接可能几分钟无输出。短命令（git status、ls）30。禁止给 git status 传 900，禁止漏掉 cargo 的 timeout。
+        description: "REQUIRED seconds. Compile/test/install: 900. Short (git status, ls): 30. Medium (git fetch): 120. GOOD: cargo test timeout=900. BAD: omit on cargo; BAD: 900 on git status."
 
   # ============================================================================
   # 二、代码智能核心 (Code Intelligence - 默认挂载)

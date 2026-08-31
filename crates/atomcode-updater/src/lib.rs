@@ -297,8 +297,9 @@ pub async fn fetch_manifest() -> Result<Manifest> {
         ));
     }
     let body = resp.text().await.context("reading latest.json body")?;
-    serde_json::from_str(&body)
-        .with_context(|| format!("parsing latest.json (body: {:?})", truncate(&body, 200)))
+    let clean_body = body.trim_start_matches('\u{feff}');
+    serde_json::from_str(clean_body)
+        .with_context(|| format!("parsing latest.json (body: {:?})", truncate(clean_body, 200)))
 }
 
 fn truncate(s: &str, max_chars: usize) -> String {

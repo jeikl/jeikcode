@@ -16,7 +16,8 @@ use atomcode_updater::{manifest_url, Manifest};
 /// `None` for same-or-older versions, malformed JSON, HTML responses, or
 /// any other noise.
 pub fn parse_and_compare(current: &str, body: &str) -> Option<String> {
-    let manifest: Manifest = serde_json::from_str(body).ok()?;
+    let clean_body = body.trim_start_matches('\u{feff}');
+    let manifest: Manifest = serde_json::from_str(clean_body).ok()?;
     let latest = parse_version_line(&manifest.version)?;
     let current = parse_version_line(current)?;
     if latest > current {

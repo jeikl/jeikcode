@@ -32,7 +32,7 @@
 
 ## 1. What is JeikCode?
 
-**JeikCode is a high-performance AI coding agent developed by deeply decomposing, re-architecting, optimizing, and enhancing the foundation of AtomCode.**
+**JeikCode is an ultra-fast, autonomous terminal AI coding agent built with native Rust, purpose-designed for large complex codebases and foreign LLM adaptive fine-tuning.**
 
 During its evolution, JeikCode synthesized the core design strengths of industry-leading open-source and commercial agents while inventing critical proprietary architectures:
 
@@ -67,11 +67,11 @@ The following comparison objectively presents the mechanisms and functional stre
 | **Multi-Project Knowledge Packs (`rules/dbwords`)** | ✅ **4-Tier Packs Strict Over System** | ⚠️ Basic Agent Role Specs | ✅ **Supports `CLAUDE.md` Project Spec** | ✅ **Context Injection & Rules** | ✅ **Project Rule Configurations** |
 | **Agent Self-Configuration Tool (`jeikcode_config_guide`)** | ✅ **8-Chapter Teaches & Self-Check** | ❌ Relies on Official Web Docs | ❌ Relies on Community Web Docs | ❌ Relies on Internal User Manual | ❌ No Self-Inspection |
 | **MCP (Model Context Protocol) & Skills Ecosystem** | ✅ **Native MCP + Dynamic Skills** | ✅ **Deep MCP & Skills/Hooks** | ✅ **Rich Plugin & MCP Ecosystem** | ✅ **Built-in Tools & MCP Support** | ⚠️ Basic Local Skills |
-| **Multi-Protocol Support (Responses / Completions / Anthropic)** | ✅ **3 Major Protocols Native** | ⚠️ Claude Protocol Focused | ✅ **Standard & Custom Protocols** | ⚠️ xAI Grok Protocol Focused | ❌ No Responses |
-| **4-Gear Reasoning Effort Switching (`low/med/high/xhigh`)** | ✅ **Realtime `/effort` & WebUI** | ✅ **Integrated Claude 3.7 Thinking** | ⚠️ Frontend Panel Manual Setting | ✅ **Integrated Grok Reasoning** | ❌ Stale Bindings |
-| **Independent First-Token Liveness Timeout (60s × 3)** | ✅ **Solves R1/Grok3 Silent Hangs** | ⚠️ Unified Stream Request Timeout | ⚠️ Unified Effect Timeout | ✅ Process Watchdog & Signals | ❌ Stream Hangs |
-| **Multi-Instance Headless Remote Serve + WebUI Gateway** | ✅ **Native Rust Serve + Web Console** | ❌ Terminal CLI Focused | ✅ **Web Console + Desktop App** | ❌ Terminal Pager TUI Mode | ⚠️ Basic WebUI |
-| **Double-Press ESC/Ctrl+C Cancel + Linux TTY Grabbing** | ✅ **Anti-Misoperation + TTY Guard** | ⚠️ Single ESC Cancels Stream | ⚠️ Basic Keyboard Interrupt | ✅ **PTY Terminal Control** | ❌ Linux TTY Lockup |
+| **Multi-Protocol Support (Responses / Completions / Anthropic)** | ✅ **3 Major Protocols Native** | ⚠️ Native OpenAI Protocol Focused | ⚠️ Claude Protocol Focused | ✅ **Standard & Custom Protocols** | ⚠️ xAI Grok Protocol Focused |
+| **4-Gear Reasoning Effort Switching (`low/med/high/xhigh`)** | ✅ **Realtime `/effort` & WebUI** | ⚠️ Fixed Config for o-Series | ✅ **Integrated Claude 3.7 Thinking** | ⚠️ Frontend Panel Manual Setting | ✅ **Integrated Grok Reasoning** |
+| **Independent First-Token Liveness Timeout (60s × 3)** | ✅ **Solves R1/Grok3 Silent Hangs** | ⚠️ Unified Stream Request Timeout | ⚠️ Unified Stream Request Timeout | ⚠️ Unified Effect Timeout | ✅ Process Watchdog & Signals |
+| **Multi-Instance Headless Remote Serve + WebUI Gateway** | ✅ **Native Rust Serve + Web Console** | ⚠️ Relies on App-Server / Daemon | ❌ Terminal CLI Focused | ✅ **Web Console + Desktop App** | ❌ Terminal Pager TUI Mode |
+| **Double-Press ESC/Ctrl+C Cancel + Linux TTY Grabbing** | ✅ **Anti-Misoperation + TTY Guard** | ⚠️ Basic Signal Interception | ⚠️ Single ESC Cancels Stream | ⚠️ Basic Keyboard Interrupt | ✅ **PTY Terminal Control** |
 
 ---
 

@@ -32,7 +32,7 @@
 
 ## 一、JeikCode 是什么？
 
-**JeikCode 是基于 AtomCode 基础进行深度拆解开发、架构重构和优化增强的高性能 AI 编程智能体。**
+**JeikCode 是一款采用 Rust 原生构建、专为大型复杂工程与多模型自适应调优而生的极速终端 AI 编程智能体。**
 
 在演进过程中，JeikCode 深度融合了业内顶级 Agent 的优秀机制，并完成了关键架构创新：
 
@@ -67,11 +67,11 @@
 | **多项目知识包体系 (`rules/dbwords`)** | ✅ **4 层知识包且严格优先于 System** | ⚠️ 基础 Agent Role 配置 | ✅ **支持 `CLAUDE.md` 项目指令** | ✅ **支持项目规则与上下文拼接** | ✅ **支持项目级规则配置** |
 | **智能体自配置与排障工具 (`jeikcode_config_guide`)** | ✅ **内置 8 模块知识库与自检工具** | ❌ 依赖官方静态在线文档 | ❌ 依赖社区在线文档站 | ❌ 依赖内部专有使用手册 | ❌ 无自查工具 |
 | **MCP (Model Context Protocol) 与 Skills 生态** | ✅ **原生 MCP + 动态 Skills 挂载** | ✅ **深度集成 MCP 与 Skills/Hooks** | ✅ **丰富的插件体系与 MCP 生态** | ✅ **内置 Tools 与 MCP 扩展** | ⚠️ 仅基础本地 Skills |
-| **多协议支持 (Responses / Completions / Anthropic)** | ✅ **三大主流协议原生支持** | ⚠️ 深度绑定 Claude 官方协议 | ✅ **支持主流协议与自定义扩展协议** | ⚠️ 深度绑定 xAI Grok 协议 | ❌ 缺少 Responses 协议 |
-| **4 档思考努力程度实时切换 (`low/med/high/xhigh`)** | ✅ **随时通过 `/effort` 或 WebUI** | ✅ **深度集成 Claude 3.7 Thinking** | ⚠️ 前端面板手动配置思考参数 | ✅ **深度集成 Grok 推理档位** | ❌ 切换易残留旧绑定 |
-| **独立首 Token 活性超时守护 (解决长推理假死)** | ✅ **60s × 3 独立计时防挂起** | ⚠️ 全局统一 Stream 请求超时 | ⚠️ Effect 统一请求超时 | ✅ 进程级看门狗与中断协同 | ❌ 易触发流超时假死 |
-| **多实例远程无头服务 (Serve) + WebUI Gateway** | ✅ **纯 Rust 高并发 Serve + Web 控制台** | ❌ 纯终端 CLI (专为 CLI 打造) | ✅ **具备 Web 控制台与桌面端应用** | ❌ 纯终端 Pager TUI 模式 | ⚠️ 仅简单本地 WebUI |
-| **终端防误触与 TTY 前台控制权保护** | ✅ **双击 ESC/Ctrl+C + 抢回 TTY** | ⚠️ 单击 ESC 取消流式回复 | ⚠️ 基础快捷键中断 | ✅ **具备成熟的 PTY 终端控制** | ❌ Linux 易挂起锁死 |
+| **多协议支持 (Responses / Completions / Anthropic)** | ✅ **三大主流协议原生支持** | ⚠️ 原生深度绑定 OpenAI 协议 | ⚠️ 深度绑定 Claude 官方协议 | ✅ **支持主流协议与自定义扩展** | ⚠️ 深度绑定 xAI Grok 协议 |
+| **4 档思考努力程度实时切换 (`low/med/high/xhigh`)** | ✅ **随时通过 `/effort` 或 WebUI** | ⚠️ 针对 o-系列模型固定配置 | ✅ **深度集成 Claude 3.7 Thinking** | ⚠️ 前端面板手动配置思考参数 | ✅ **深度集成 Grok 推理档位** |
+| **独立首 Token 活性超时守护 (解决长推理假死)** | ✅ **60s × 3 独立计时防挂起** | ⚠️ 统一 Stream 请求超时 | ⚠️ 全局统一 Stream 请求超时 | ⚠️ Effect 统一请求超时 | ✅ 进程级看门狗与中断协同 |
+| **多实例远程无头服务 (Serve) + WebUI Gateway** | ✅ **纯 Rust 高并发 Serve + Web 控制台** | ⚠️ 依赖 App-Server 与本地 Daemon | ❌ 纯终端 CLI (专为 CLI 打造) | ✅ **具备 Web 控制台与桌面端应用** | ❌ 纯终端 Pager TUI 模式 |
+| **终端防误触与 TTY 前台控制权保护** | ✅ **双击 ESC/Ctrl+C + 抢回 TTY** | ⚠️ 基础终端信号拦截 | ⚠️ 单击 ESC 取消流式回复 | ⚠️ 基础快捷键中断 | ✅ **具备成熟的 PTY 终端控制** |
 
 ---
 

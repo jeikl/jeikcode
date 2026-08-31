@@ -194,9 +194,12 @@ export async function watchChatSession(
   sessionId: string,
   onEvent: (event: SSEEvent) => void,
   signal?: AbortSignal,
+  opts?: { standbyOnly?: boolean },
 ): Promise<void> {
+  const params = new URLSearchParams({ session_id: sessionId });
+  if (opts?.standbyOnly) params.set('standby', 'true');
   const resp = await apiFetch(
-    `/chat/watch?session_id=${encodeURIComponent(sessionId)}`,
+    `/chat/watch?${params.toString()}`,
     { headers: authHeaders(), signal },
   );
   if (!resp.ok) {

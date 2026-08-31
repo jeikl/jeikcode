@@ -32,6 +32,7 @@ import {
   shouldKeepCachedTranscript,
   thisTabOwnsTurn,
   shouldLockSendAsDetached,
+  isWatchTurnActivationEvent,
 } from './chatTerminal.ts';
 
 test('legacy done and stopped are natural completions that preserve queued messages', () => {
@@ -179,6 +180,17 @@ test('in-flight cache is kept over stale disk history while a turn is active', (
     shouldLockSendAsDetached({ turnActive: true, thisTabOwnsTurn: false }),
     true,
   );
+});
+
+test('idle watch does not activate on leftover user or runtime_info events', () => {
+  assert.equal(isWatchTurnActivationEvent('text'), true);
+  assert.equal(isWatchTurnActivationEvent('tool_start'), true);
+  assert.equal(isWatchTurnActivationEvent('permission_request'), true);
+  assert.equal(isWatchTurnActivationEvent('user'), false);
+  assert.equal(isWatchTurnActivationEvent('runtime_info'), false);
+  assert.equal(isWatchTurnActivationEvent('tokens'), false);
+  assert.equal(isWatchTurnActivationEvent('done'), false);
+  assert.equal(isWatchTurnActivationEvent('watch_closed'), false);
 });
 
 test('live replay input and running state restore an active turn after an idle snapshot', () => {

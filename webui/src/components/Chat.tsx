@@ -110,6 +110,7 @@ import {
   shouldKeepCachedTranscript,
   thisTabOwnsTurn,
   shouldLockSendAsDetached,
+  isWatchTurnActivationEvent,
   resolveTokenCache,
   formatCacheHitRate,
   createTokenCacheState,
@@ -1391,6 +1392,12 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
           return;
         }
         if (!activated) {
+          if (!isWatchTurnActivationEvent(event.type)) {
+            // Leftover `user` / `runtime_info` from a finished turn must not
+            // arm the stop button or blinking cursor on an idle session.
+            if (event.type === 'user') handleEvent(event);
+            return;
+          }
           activated = true;
           idleWatchAbortRef.current = null;
           detachedWatchAbortRef.current = abort;
@@ -1452,6 +1459,7 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
         }
       },
       abort.signal,
+      { standbyOnly: true },
     ).then(() => {
       // 连接在未收到终端事件的情况下被服务端关闭(Live-dying 竞态 / daemon
       // 重启 / 网络断)。若当前还是这条连接的 controller,说明没人接手——
@@ -1486,6 +1494,10 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
   // 查看的就是这个实时会话时才把输出渲染进画布——否则用户从侧栏打开了别的历史会话，
   // 实时输出会串进错误页面、且刷新即消失（刷新会按真实会话重载）。
   const liveSessionIdRef = useRef<string | null>(null);
+  /** Snapshot of a finished transcript. Ignore a leftover `state.running=true`
+   * in the same reconnect replay so a completed session does not steal the
+   * sidebar spinner or arm the stop button. */
+  const liveIdleSnapshotRef = useRef(false);
   function attachedToLiveRuntime(): boolean {
     return (
       syncRef.current &&
@@ -2279,6 +2291,7 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
       const lifecycle = reduceLiveLifecycle(liveLifecycleRef.current, { type: 'snapshot' });
       liveLifecycleRef.current = lifecycle.state;
       const restored = restoreLiveSnapshot(loaded);
+      liveIdleSnapshotRef.current = !transcriptHasInFlightAssistant(loaded);
       onLiveRunningChange?.(e.session_id || null, restored.running);
       if (e.session_id && restored.messages.length > 0) {
         messageCacheRef.current.set(e.session_id, restored.messages);
@@ -2400,11 +2413,12 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
     // `state` 仍要上报侧栏转圈：切走后 live 任务还在跑。
     if (e.type === 'state') {
       const sid = liveSessionIdRef.current;
+      const ignoreStaleRunning = e.running && liveIdleSnapshotRef.current;
       if (sid) {
-        if (e.running) backgroundRunningSessionsRef.current.add(sid);
+        if (e.running && !ignoreStaleRunning) backgroundRunningSessionsRef.current.add(sid);
         else backgroundRunningSessionsRef.current.delete(sid);
       }
-      onLiveRunningChange?.(sid, e.running);
+      onLiveRunningChange?.(sid, ignoreStaleRunning ? false : e.running);
     }
     if (
       liveSessionIdRef.current &&
@@ -2416,6 +2430,7 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
 
     switch (e.type) {
             case 'user': {
+        liveIdleSnapshotRef.current = false;
         const lifecycle = reduceLiveLifecycle(liveLifecycleRef.current, {
           type: 'input_accepted',
         });
@@ -2450,6 +2465,10 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
       }
 
       case 'state': {
+        if (e.running && liveIdleSnapshotRef.current) {
+          break;
+        }
+        if (!e.running) liveIdleSnapshotRef.current = false;
         const lifecycle = reduceLiveLifecycle(liveLifecycleRef.current, {
           type: 'state',
           running: e.running,

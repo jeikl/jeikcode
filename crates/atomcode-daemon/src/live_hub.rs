@@ -274,6 +274,13 @@ fn correlate_web_steers_locked(
         .collect()
 }
 
+fn runtime_phase_is_busy(phase: RuntimePhase) -> bool {
+    matches!(
+        phase,
+        RuntimePhase::InTurn | RuntimePhase::WaitingApproval | RuntimePhase::Reconfiguring
+    )
+}
+
 pub struct LiveViewHub {
     state: Mutex<HubState>,
     events: broadcast::Sender<LiveObservation>,
@@ -362,7 +369,13 @@ impl LiveViewHub {
 
     pub fn running_session_id(&self) -> Option<String> {
         let state = self.state.lock().unwrap_or_else(|error| error.into_inner());
-        if !state.exec_turn_active() {
+        let Some(bound) = state.binding.as_ref() else {
+            return None;
+        };
+        // Trust the runtime phase, not a leftover hub `turn_active` flag.
+        // After WebUI restart a completed session could still have turn_active
+        // set and would otherwise keep spinning in the sidebar.
+        if !runtime_phase_is_busy(bound.control.status().phase) {
             return None;
         }
         state.execution_session_id().map(str::to_string)
@@ -775,16 +788,10 @@ impl LiveViewHub {
     /// [`Self::bind_with_provider`]'s active-turn set so both refuse identically.
     pub fn turn_in_progress(&self) -> bool {
         let state = self.state.lock().unwrap_or_else(|error| error.into_inner());
-        if state.exec_turn_active() {
-            return true;
-        }
         let Some(bound) = state.binding.as_ref() else {
-            return false;
+            return state.exec_turn_active();
         };
-        matches!(
-            bound.control.status().phase,
-            RuntimePhase::InTurn | RuntimePhase::WaitingApproval | RuntimePhase::Reconfiguring
-        )
+        runtime_phase_is_busy(bound.control.status().phase)
     }
 
     pub fn switch_view_only(
@@ -1634,6 +1641,36 @@ mod tests {
     }
 
     #[test]
+    fn running_session_id_ignores_stale_turn_active_when_runtime_is_idle() {
+        let hub = LiveViewHub::new();
+        let (control, _) = control();
+        let binding = hub
+            .bind(
+                "session-1",
+                PathBuf::from("/one"),
+                snapshot("one"),
+                control.clone(),
+            )
+            .unwrap();
+        hub.publish(
+            &binding,
+            SequencedRuntimeEvent {
+                generation: 1,
+                sequence: 1,
+                event: CodingRuntimeEvent::Agent(AgentEvent::TurnStarted),
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            hub.running_session_id(),
+            None,
+            "Ready phase must not report a spinner after a leftover TurnStarted"
+        );
+        control.status.lock().unwrap().phase = RuntimePhase::InTurn;
+        assert_eq!(hub.running_session_id().as_deref(), Some("session-1"));
+    }
+
+    #[test]
     fn unbound_controls_fail_explicitly() {
         let hub = LiveViewHub::new();
         let error = hub
@@ -2415,9 +2452,10 @@ mod tests {
                 "session-a",
                 PathBuf::from("/a"),
                 snapshot("committed-a"),
-                control,
+                control.clone(),
             )
             .unwrap();
+        control.status.lock().unwrap().phase = RuntimePhase::InTurn;
         hub.publish(
             &binding,
             SequencedRuntimeEvent {

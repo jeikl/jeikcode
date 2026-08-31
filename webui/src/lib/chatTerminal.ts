@@ -231,6 +231,25 @@ export function shouldLockSendAsDetached(input: {
   return input.turnActive && !input.thisTabOwnsTurn;
 }
 
+/** Events that prove a turn is actually streaming. Idle `/chat/watch` must not
+ * upgrade to busy on `runtime_info` / leftover `user` replay / tokens — that
+ * painted a stop button and blinking cursor on already-finished sessions. */
+export function isWatchTurnActivationEvent(type: string): boolean {
+  switch (type) {
+    case 'text':
+    case 'reasoning':
+    case 'tool_start':
+    case 'tool_output':
+    case 'tool_progress':
+    case 'tool_result':
+    case 'permission_request':
+    case 'user_input_request':
+      return true;
+    default:
+      return false;
+  }
+}
+
 export type LiveSnapshotQueueDisposition =
   | { discardQueued: false }
   | { discardQueued: true; reason: 'terminal_unknown' };

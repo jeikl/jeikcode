@@ -287,6 +287,28 @@ test('cancelDetachedChat aborts the local stream and uses the existing stop prot
   }
 });
 
+test('watchChatSession standby-only watch skips live replay', async () => {
+  const calls: string[] = [];
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = (async (url: RequestInfo | URL) => {
+    calls.push(String(url));
+    return new Response(null, { status: 200 });
+  }) as typeof fetch;
+  try {
+    const { watchChatSession } = await import('./api.ts');
+    const controller = new AbortController();
+    await watchChatSession('sess-idle', () => {}, controller.signal, {
+      standbyOnly: true,
+    }).catch(() => {});
+    assert.equal(calls.length, 1);
+    assert.ok(calls[0].includes('/chat/watch?'));
+    assert.ok(calls[0].includes('session_id=sess-idle'));
+    assert.ok(calls[0].includes('standby=true'));
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
 test('getActiveChatSessions reads the authoritative detached chat registry', async () => {
   const originalFetch = globalThis.fetch;
   globalThis.fetch = (async (url: RequestInfo | URL) => {

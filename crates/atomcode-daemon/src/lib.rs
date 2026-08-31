@@ -5707,6 +5707,11 @@ struct StopChatResponse {
 #[derive(Debug, Deserialize)]
 struct ChatWatchQuery {
     session_id: String,
+    /// Idle WebUI observers wait for the *next* admit. Do not dump a stale
+    /// in-memory replay of an already-finished (or still-aliased) turn — that
+    /// armed the stop button and blinking cursor on completed sessions.
+    #[serde(default)]
+    standby: bool,
 }
 
 /// GET /chat/watch?session_id=… — reattach to a turn owned by another client.
@@ -5734,7 +5739,9 @@ async fn chat_watch(
     let (tx, rx) = mpsc::unbounded_channel::<ChatEvent>();
     // Prefer atomic snapshot+subscribe when a turn is live so a mid-stream
     // browser refresh gets the full thinking/text/tool history, not only
-    // deltas after reconnect.
+    // deltas after reconnect. Idle standby watchers skip this so a leftover
+    // alias cannot replay a finished turn into the composer.
+    if !q.standby {
     if let Some((snapshot, mut bus_rx)) = state
         .active_chats
         .subscribe_live_with_replay(&session_id)
@@ -5804,6 +5811,48 @@ async fn chat_watch(
                         });
                     }
                 }
+                tokio::spawn(async move {
+                    loop {
+                        match bus_rx.recv().await {
+                            Ok(event) => {
+                                let terminal = matches!(
+                                    event,
+                                    ChatEvent::Done { .. }
+                                        | ChatEvent::Error { .. }
+                                        | ChatEvent::Stopped
+                                );
+                                if tx.send(event).is_err() {
+                                    break;
+                                }
+                                if terminal {
+                                    break;
+                                }
+                            }
+                            Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                            Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                        }
+                    }
+                });
+            }
+            WatchOutcome::Standby => {
+                tracing::debug!(
+                    session_id = %session_id,
+                    "chat_watch: STANDBY until next admit"
+                );
+            }
+        }
+    }
+    } else {
+        match state
+            .active_chats
+            .subscribe_or_standby(&session_id, &tx)
+            .await
+        {
+            WatchOutcome::Live(mut bus_rx) => {
+                tracing::debug!(
+                    session_id = %session_id,
+                    "chat_watch: STANDBY-ONLY attached live (no replay)"
+                );
                 tokio::spawn(async move {
                     loop {
                         match bus_rx.recv().await {

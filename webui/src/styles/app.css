@@ -987,37 +987,6 @@ body {
   color: var(--app-diff-deletion-foreground, #ef4444);
 }
 
-.turn-diff-summary {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  margin: 8px 0 4px;
-  padding: 4px 10px;
-  border-radius: var(--corner-radius-small, 6px);
-  background: color-mix(in srgb, var(--app-secondary-background), transparent 30%);
-  border: 1px solid var(--app-primary-border-color, rgba(127, 127, 127, 0.2));
-  font-size: 12px;
-  font-weight: 500;
-  color: var(--app-secondary-foreground);
-  width: fit-content;
-  user-select: none;
-}
-
-.turn-diff-summary:hover {
-  background: var(--app-list-hover-background);
-  color: var(--app-primary-foreground);
-}
-
-.turn-diff-summary-icon {
-  font-size: 11px;
-  opacity: 0.85;
-}
-
-.turn-diff-summary-label {
-  color: var(--app-primary-foreground);
-  font-size: 12px;
-}
-
 /* Each tool renders as a borderless, compact inline row (log-style): a
    leading type icon, the name, a flex-fill arg preview, and a plain-text
    status with its own icon. No card chrome — only a subtle hover background. */

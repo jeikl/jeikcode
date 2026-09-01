@@ -79,7 +79,6 @@ import {
   toolGlyph,
   toolRendersAsDiff,
   computeToolDiffStats,
-  collectTurnDiffSummary,
   type DiffPreviewLine,
 } from '../lib/toolDisplay';
 import {
@@ -191,20 +190,6 @@ function messageText(m: Message): string {
     if (p.kind === 'text' || p.kind === 'reasoning') return acc + p.text;
     return acc;
   }, '');
-}
-
-/** All assistant parts from the current user turn, so file-change summaries
- *  attach to the last bubble instead of the first write round. */
-function collectTurnAssistantParts(messages: Message[], lastIdx: number): MsgPart[] {
-  const parts: MsgPart[] = [];
-  for (let i = lastIdx; i >= 0; i--) {
-    const m = messages[i];
-    if (!m || m.role === 'user') break;
-    if (m.role === 'assistant') {
-      parts.unshift(...m.parts);
-    }
-  }
-  return parts;
 }
 
 /** Zero-pad a number to 2 digits — shared by formatMsgTime / formatMsgTimeFull. */
@@ -4916,9 +4901,6 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
             const doneTotal = isLastInTurn && !busy
               ? (fromUser && fromUser > 0 ? fromUser : msg.elapsedMs)
               : undefined;
-            const turnDiffSummary = isLastInTurn
-              ? collectTurnDiffSummary(collectTurnAssistantParts(messages, origIdx))
-              : null;
 
             return (
               <AssistantMessageView
@@ -4935,7 +4917,6 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
                 timeFull={timeFull}
                 liveElapsedMs={liveFromUser}
                 turnTotalMs={doneTotal}
-                turnDiffSummary={turnDiffSummary}
                 search={search}
                 isActiveSearchMatch={isActiveSearchMatch}
               />
@@ -5154,7 +5135,6 @@ function AssistantMessageView({
   timeFull,
   liveElapsedMs,
   turnTotalMs,
-  turnDiffSummary,
   search,
   isActiveSearchMatch,
 }: {
@@ -5171,13 +5151,11 @@ function AssistantMessageView({
   liveElapsedMs?: number;
   /** User-bubble → this final answer. Only set on the last assistant of the turn. */
   turnTotalMs?: number;
-  turnDiffSummary?: ReturnType<typeof collectTurnDiffSummary>;
   search: string;
   isActiveSearchMatch: boolean;
 }) {
   const t = useT();
   const text = messageText(msg);
-  const diffSummary = isLastInTurn ? (turnDiffSummary ?? null) : null;
   const isError =
     text.includes('[错误:') ||
     text.includes('[连接错误:') ||
@@ -5282,18 +5260,6 @@ function AssistantMessageView({
           {/* Segments in chronological order: text→tool→text→tool,
               matching the TUI. Consecutive tools share one tool-list. */}
           {renderAssistantParts(msg.parts, search)}
-          {diffSummary && (diffSummary.additions > 0 || diffSummary.deletions > 0) && (
-            <div class="turn-diff-summary">
-              <span class="turn-diff-summary-icon" aria-hidden="true">⚡</span>
-              <span class="turn-diff-summary-label">
-                {t('tool.filesChanged', { count: String(diffSummary.fileCount) })}
-              </span>
-              <DiffStatBadge
-                additions={diffSummary.additions}
-                deletions={diffSummary.deletions}
-              />
-            </div>
-          )}
           {streaming && <span class="streaming-cursor" />}
         </>
       )}

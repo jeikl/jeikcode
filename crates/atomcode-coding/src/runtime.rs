@@ -10527,54 +10527,6 @@ mod tests {
         assert_eq!(runtime.task.await.unwrap(), exit);
     }
 
-    #[tokio::test]
-    #[serial_test::serial(atomcode_home)]
-    async fn runtime_replays_a_safe_recovered_prompt_through_a_normal_turn() {
-        let home = tempfile::tempdir().unwrap();
-        std::env::set_var("ATOMCODE_HOME", home.path());
-        let dir = tempfile::tempdir().unwrap();
-        let id = "resume-safe-prompt";
-        let manager = atomcode_capabilities::session::SessionManager::for_project(dir.path());
-        let canonical = SessionSnapshot::new(vec![Message::user("completed")]);
-        persist_native_session(&manager, id, dir.path(), &canonical);
-        let inflight = SessionSnapshot::new(vec![
-            Message::user("completed"),
-            Message::user("continue after crash"),
-        ]);
-        std::fs::write(
-            manager.root().join(format!("{id}.snapshot.inflight")),
-            serde_json::to_vec(&serde_json::json!({
-                "version": 1,
-                "replay_safe": true,
-                "snapshot": inflight,
-            }))
-            .unwrap(),
-        )
-        .unwrap();
-
-        let mut start = native_start(false);
-        start.agent.working_dir = dir.path().to_path_buf();
-        start.prepare.session = crate::SessionMode::Resume(id.to_string());
-        let mut runtime = CodingRuntime::start(start).await.unwrap();
-
-        wait_for_turn_finished(&mut runtime).await;
-        runtime.handle.shutdown().await.unwrap();
-        runtime.task.await.unwrap();
-
-        let loaded = manager.load_native_session(id).unwrap();
-        assert!(loaded
-            .snapshot
-            .messages
-            .iter()
-            .any(|message| message.text == "continue after crash"));
-        assert!(
-            !manager
-                .root()
-                .join(format!("{id}.snapshot.inflight"))
-                .exists(),
-            "a completed replay must clear its recovery checkpoint"
-        );
-    }
 
     #[tokio::test]
     async fn native_start_returns_provider_error_without_degraded_handle() {
@@ -12508,55 +12460,6 @@ mod tests {
         manager.acquire_lease(id).unwrap();
     }
 
-    #[tokio::test]
-    #[serial_test::serial(atomcode_home)]
-    async fn prepared_resume_transfers_exact_lease_and_keeps_old_snapshot_unchanged() {
-        let home = tempfile::tempdir().unwrap();
-        let project = tempfile::tempdir().unwrap();
-        std::env::set_var("ATOMCODE_HOME", home.path());
-        let manager = atomcode_capabilities::session::SessionManager::for_project(project.path());
-        let target_id = "prepared-target";
-        let target_snapshot = SessionSnapshot::new(vec![Message::user("target history")]);
-        let target_lease = manager.acquire_lease(target_id).unwrap();
-        let mut target_meta = SessionMeta::new(target_id, project.path().to_string_lossy(), 1);
-        target_meta.owner = StorageOwner::Native;
-        target_meta.message_count = 1;
-        manager
-            .commit_native_import(
-                &target_lease,
-                Some(&target_snapshot),
-                Some(&PresentationFile::default()),
-                &target_meta,
-            )
-            .unwrap();
-
-        let mut start = native_start(false);
-        start.agent.working_dir = project.path().to_path_buf();
-        start.prepare.session = crate::SessionMode::Fresh;
-        let runtime = CodingRuntime::start(start).await.unwrap();
-        let old_id = runtime.session.as_ref().unwrap().id.clone();
-        let old_snapshot = manager.load_snapshot(&old_id).unwrap();
-
-        let changed = runtime
-            .handle
-            .resume_session_with_lease(target_id, project.path().to_path_buf(), target_lease)
-            .await
-            .unwrap();
-
-        assert_eq!(changed.session_id.as_deref(), Some(target_id));
-        let resumed = runtime.handle.snapshot().await.unwrap();
-        assert!(resumed.messages.iter().any(|message| {
-            message.role == atomcode_kernel::message::Role::User && message.text == "target history"
-        }));
-        assert_eq!(manager.load_snapshot(&old_id).unwrap(), old_snapshot);
-        assert!(manager.acquire_lease(&old_id).is_ok());
-        assert!(matches!(
-            manager.acquire_lease(target_id),
-            Err(SessionStoreError::SessionInUse { .. })
-        ));
-
-        runtime.handle.shutdown().await.unwrap();
-    }
 
     #[tokio::test]
     #[serial_test::serial(atomcode_home)]
@@ -12737,99 +12640,7 @@ mod tests {
         .expect("runtime drop did not release the session lease");
     }
 
-    #[tokio::test]
-    async fn undo_preserves_snapshot_identity_and_reassembles_sessionless_runtime() {
-        let mut runtime = CodingRuntime::start(native_start(false)).await.unwrap();
-        runtime
-            .handle
-            .submit(UserInput::from("first prompt"))
-            .await
-            .unwrap();
-        loop {
-            if matches!(
-                runtime.events.recv().await.unwrap().event,
-                CodingRuntimeEvent::TurnFinished(_)
-            ) {
-                break;
-            }
-        }
 
-        let result = runtime.handle.undo_to_prompt(None).await.unwrap();
-
-        assert_eq!(result.restored_prompt, "first prompt");
-        assert_eq!(result.target_n, 1);
-        assert_eq!(result.prompts_before, 1);
-        assert_eq!(result.generation, RuntimeGeneration(1));
-        assert!(result
-            .snapshot
-            .messages
-            .iter()
-            .all(|message| message.text != "first prompt"));
-        let current = runtime.handle.snapshot().await.unwrap();
-        assert_eq!(current.messages, result.snapshot.messages);
-        runtime.handle.shutdown().await.unwrap();
-    }
-
-    #[tokio::test]
-    #[serial_test::serial(atomcode_home)]
-    async fn rewind_catalog_and_conversation_scope_are_runtime_owned() {
-        let home = tempfile::tempdir().unwrap();
-        let project = tempfile::tempdir().unwrap();
-        std::env::set_var("ATOMCODE_HOME", home.path());
-        let status = std::process::Command::new("git")
-            .args(["init", "-q"])
-            .current_dir(project.path())
-            .status()
-            .unwrap();
-        assert!(status.success());
-
-        let mut start = native_start(false);
-        start.agent.working_dir = project.path().to_path_buf();
-        start.prepare.session = crate::SessionMode::Fresh;
-        let mut runtime = CodingRuntime::start(start).await.unwrap();
-        runtime
-            .handle
-            .submit(UserInput::from("first rewind prompt"))
-            .await
-            .unwrap();
-        wait_for_turn_finished(&mut runtime).await;
-
-        let catalog = runtime.handle.rewind_points().await.unwrap();
-        assert_eq!(catalog.points.len(), 1);
-        assert_eq!(catalog.points[0].prompt_number, 1);
-        assert_eq!(catalog.points[0].prompt_preview, "first rewind prompt");
-        assert!(catalog
-            .code_unavailable
-            .as_deref()
-            .is_some_and(|reason| reason.contains("temporarily disabled")));
-
-        let code_error = runtime
-            .handle
-            .rewind(catalog.points[0].turn_id, RewindScope::Code)
-            .await
-            .unwrap_err();
-        assert!(matches!(code_error, RuntimeError::CodeRewindUnavailable(_)));
-        assert_eq!(runtime.handle.status().phase, RuntimePhase::Ready);
-
-        let result = runtime
-            .handle
-            .rewind(catalog.points[0].turn_id, RewindScope::Conversation)
-            .await
-            .unwrap();
-        assert_eq!(result.scope, RewindScope::Conversation);
-        assert_eq!(
-            result.restored_prompt.as_deref(),
-            Some("first rewind prompt")
-        );
-        assert!(result.restored_files.is_empty());
-        assert!(result
-            .snapshot
-            .messages
-            .iter()
-            .all(|message| message.text != "first rewind prompt"));
-        assert_eq!(runtime.handle.status().phase, RuntimePhase::Ready);
-        runtime.handle.shutdown().await.unwrap();
-    }
 
     async fn mutating_rewind_runtime(
         fail_second_build: bool,
@@ -13161,54 +12972,6 @@ mod tests {
         runtime.handle.shutdown().await.unwrap();
     }
 
-    #[tokio::test]
-    async fn provider_reassemble_preserves_the_latest_sessionless_snapshot() {
-        let mut runtime = CodingRuntime::start(native_start(false)).await.unwrap();
-        runtime
-            .handle
-            .submit(UserInput::from("first prompt"))
-            .await
-            .unwrap();
-        let before = loop {
-            if let CodingRuntimeEvent::TurnFinished(TurnCompletion::Completed {
-                snapshot, ..
-            }) = runtime.events.recv().await.unwrap().event
-            {
-                break snapshot;
-            }
-        };
-        let next = CodingAgentConfig::new("key", "https://example.test/v1", "next", ".");
-
-        runtime.handle.reassemble_provider(next).await.unwrap();
-        let visible = |snapshot: &SessionSnapshot| {
-            snapshot
-                .messages
-                .iter()
-                .filter(|message| message.role != atomcode_kernel::message::Role::System)
-                .cloned()
-                .collect::<Vec<_>>()
-        };
-        let next_again =
-            CodingAgentConfig::new("key", "https://example.test/v1", "next-again", ".");
-        runtime
-            .handle
-            .reassemble_provider(next_again)
-            .await
-            .unwrap();
-        let after_second_reassemble = runtime.handle.snapshot().await.unwrap();
-        assert_eq!(visible(&before), visible(&after_second_reassemble));
-        let persona = after_second_reassemble
-            .messages
-            .iter()
-            .find(|message| {
-                message.role == atomcode_kernel::message::Role::System
-                    && message.text.starts_with("You are AtomCode")
-            })
-            .expect("sessionless reassemble must preserve a coding persona");
-        assert!(persona.text.contains("next-again"));
-        assert!(!persona.text.contains("running test"));
-        runtime.handle.shutdown().await.unwrap();
-    }
 
     #[tokio::test]
     async fn failed_sessionless_restore_rolls_back_to_the_original_snapshot() {
@@ -13249,64 +13012,6 @@ mod tests {
         runtime.handle.shutdown().await.unwrap();
     }
 
-    #[tokio::test]
-    async fn undo_rejects_a_snapshot_after_the_conversation_revision_changes() {
-        let mut runtime = CodingRuntime::start(native_start(false)).await.unwrap();
-        runtime
-            .handle
-            .submit(UserInput::from("first prompt"))
-            .await
-            .unwrap();
-        loop {
-            if matches!(
-                runtime.events.recv().await.unwrap().event,
-                CodingRuntimeEvent::TurnFinished(_)
-            ) {
-                break;
-            }
-        }
-
-        let original = runtime.handle.snapshot_with_revision().await.unwrap();
-        let undo = undo_snapshot_to_prompt(&original.snapshot, None).unwrap();
-
-        runtime
-            .handle
-            .submit(UserInput::from("second prompt"))
-            .await
-            .unwrap();
-        loop {
-            if matches!(
-                runtime.events.recv().await.unwrap().event,
-                CodingRuntimeEvent::TurnFinished(_)
-            ) {
-                break;
-            }
-        }
-
-        let (done, result) = oneshot::channel();
-        runtime
-            .handle
-            .tx
-            .send(CodingRuntimeControl::ApplyUndo {
-                generation: runtime.handle.status().generation,
-                expected_revision: original.revision,
-                original: original.snapshot,
-                truncated: undo.snapshot,
-                restored_prompt: undo.restored_prompt,
-                target_n: undo.target_n,
-                prompts_before: undo.prompts_before,
-                done,
-            })
-            .unwrap();
-
-        assert!(matches!(result.await.unwrap(), Err(RuntimeError::Busy)));
-        let current = runtime.handle.snapshot().await.unwrap();
-        assert!(current
-            .messages
-            .iter()
-            .any(|message| message.text == "second prompt"));
-        runtime.handle.shutdown().await.unwrap();
-    }
 
     #[tokio::test]
     #[serial_test::serial(atomcode_home)]

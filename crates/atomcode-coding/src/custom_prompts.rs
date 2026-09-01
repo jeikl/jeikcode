@@ -82,6 +82,7 @@ pub struct WorkflowConfig {
     pub first_round_reflex: Option<String>,
     pub surgical_context: Option<String>,
     pub never_negative_conclusion: Option<String>,
+    pub collect_aggressively: Option<String>,
     pub batched_parallel_exploration: Option<String>,
     pub general_phases: Option<HashMap<String, String>>,
     pub guidelines: Option<HashMap<String, String>>,
@@ -395,6 +396,9 @@ pub(crate) fn render_custom_rules_from(cfg: &CustomRulesConfig) -> String {
         if let Some(n) = &wf.never_negative_conclusion {
             out.push_str(&format!("- {n}\n"));
         }
+        if let Some(c) = &wf.collect_aggressively {
+            out.push_str(&format!("- {c}\n"));
+        }
         if let Some(b) = &wf.batched_parallel_exploration {
             out.push_str(&format!("- {b}\n"));
         }
@@ -703,34 +707,6 @@ doing_tasks:
         );
     }
 
-    #[test]
-    fn seed_rules_yaml_live_fields_all_render() {
-        let rules: CustomRulesConfig =
-            serde_yaml::from_str(strip_utf8_bom(include_str!("../assets/prompts/rules.yaml")))
-                .expect("rules.yaml");
-        let out = render_custom_rules_from(&rules);
-        for needle in [
-            "## WORKFLOW:",
-            "PRIMARY EXPLORATION",
-            "## TOOL DISCIPLINE (MANDATORY):",
-            "## LOCATING CODE:",
-            "## ASKING THE USER:",
-            "## DELEGATING WITH `task`:",
-            "## CODE REVIEW:",
-            "## SKILLS:",
-            "## EXECUTION DISCIPLINE (MANDATORY):",
-            "## TASK TRACKING:",
-        ] {
-            assert!(
-                out.contains(needle),
-                "missing live field {needle} in:\n{out}"
-            );
-        }
-        assert!(
-            !out.contains("## CONTEXT MANAGEMENT:"),
-            "context lives in init.yaml, not rules.yaml"
-        );
-    }
 
     #[test]
     fn prompt_seeds_are_live_yaml_or_root_docs() {

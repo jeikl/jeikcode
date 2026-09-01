@@ -33,9 +33,8 @@ tools:
       limit:
         type: "integer"
         required: false
-        default: 2000
         # 【中文】：最大读取行数
-        description: "Max lines to read."
+        description: "The number of lines to read. Only provide if the file is too large to read at once."
     guidance: "Use read_file instead of `bash cat`."
 
   - name: "write_file"

@@ -56,12 +56,12 @@ fn continuation_footer(file_path: &str, start: usize, end: usize, total: usize) 
     let detailed = if remaining <= DEFAULT_READ_LIMIT {
         format!(
             "\n[Showing lines {start}-{end} of {total}. {remaining} lines remaining. \
-             Omit `limit` and use offset={next} to read the rest: read_file({continuation})]"
+             Continue reading: read_file({continuation})]"
         )
     } else {
         format!(
             "\n[Showing lines {start}-{end} of {total}. {remaining} lines remaining. \
-             Continue with offset={next} and omit `limit` (do not repeat a small page): read_file({continuation})]"
+             Continue reading: read_file({continuation})]"
         )
     };
     // Reserve enough room for the one line we always return, even when it is a
@@ -175,14 +175,12 @@ impl Tool for ReadFileTool {
         "read_file"
     }
     fn description(&self) -> &str {
-        "Read a file from the filesystem. Returns the contents prefixed with 1-based \
-         line numbers (`<n>\\t<content>`). Omit `offset` and `limit` unless the file is too \
-         large to read at once — the default page is 1500 lines (a 65 KiB budget may return \
-         fewer). Do not request tiny windows (20–70 lines). If a footer reports remaining \
-         lines, call again with that `offset` and omit `limit` to continue — that is how you \
-         finish a truncated file (do not repeat a small page). Prefer `code_explore` for \
-         feature/design/logic before reading many files. If the path is a directory its \
-         entries are listed instead. Relative paths resolve against the working directory."
+        "Read a file from the filesystem. Returns the contents with 1-based \
+         line numbers (`<n>\\t<content>`). Omit `offset` and `limit` to read the full \
+         default page. If a footer reports remaining lines, call again with that `offset` \
+         and omit `limit` to continue. Prefer `code_explore` for feature/design/logic \
+         before reading many files. If the path is a directory its entries are listed \
+         instead. Relative paths resolve against the working directory."
     }
     fn parameters_schema(&self) -> serde_json::Value {
         json!({
@@ -192,13 +190,12 @@ impl Tool for ReadFileTool {
                 "offset": {
                     "type": "integer",
                     "minimum": 1,
-                    "description": "Start line, 1-based. Only provide if the file is too large to read at once. After a partial result, use the next offset shown and omit `limit`."
+                    "description": "Start line, 1-based. Only provide if the file is too large to read at once."
                 },
                 "limit": {
                     "type": "integer",
                     "minimum": 1,
-                    "default": DEFAULT_READ_LIMIT,
-                    "description": "Maximum lines to read. Omit unless you need a specific window. Defaults to 1500; the output byte budget may return fewer. After a partial page, omit `limit` and use the footer offset to read the rest. Do not use 20–70 line slices."
+                    "description": "The number of lines to read. Only provide if the file is too large to read at once."
                 }
             },
             "required": ["file_path"]
@@ -622,12 +619,12 @@ mod tests {
         assert!(!r.content.contains("\tl1"), "{}", r.content);
         assert!(!r.content.contains("\tl4"), "{}", r.content);
         assert!(
-            r.content.contains("Showing lines 2-3 of 5") && r.content.contains("offset=4"),
+            r.content.contains("Showing lines 2-3 of 5") && r.content.contains("\"offset\":4"),
             "{}",
             r.content
         );
         assert!(
-            r.content.contains("Omit `limit`") && !r.content.contains("\"limit\":"),
+            r.content.contains("Continue reading") && !r.content.contains("\"limit\":"),
             "continuation must not echo the small requested limit: {}",
             r.content
         );
@@ -651,8 +648,8 @@ mod tests {
         assert!(!r.content.contains("1501\tline 1501"), "{}", r.content);
         assert!(
             r.content.contains("Showing lines 1-1500 of 3505")
-                && r.content.contains("offset=1501")
-                && r.content.to_ascii_lowercase().contains("omit `limit`")
+                && r.content.contains("\"offset\":1501")
+                && r.content.contains("Continue reading")
                 && !r.content.contains("\"limit\":"),
             "{}",
             r.content
@@ -667,7 +664,7 @@ mod tests {
             "{}",
             page2.content
         );
-        assert!(page2.content.contains("offset=3001"), "{}", page2.content);
+        assert!(page2.content.contains("\"offset\":3001"), "{}", page2.content);
 
         let page3 = ReadFileTool::default()
             .execute(r#"{"file_path":"notes.txt","offset":3001}"#, &ctx(d.path()))
@@ -684,7 +681,7 @@ mod tests {
             page3.content
         );
         assert!(
-            page3.content.contains("(end)") || !page3.content.contains("offset="),
+            page3.content.contains("(end)") || !page3.content.contains("\"offset\":"),
             "last page finishes the file: {}",
             page3.content
         );
@@ -776,7 +773,7 @@ mod tests {
         assert!(!r.is_error, "{}", r.content);
         assert!(r.content.contains("350\tl350"), "{}", r.content);
         assert!(
-            !r.content.contains("Continue with read_file("),
+            !r.content.contains("Continue reading"),
             "{}",
             r.content
         );

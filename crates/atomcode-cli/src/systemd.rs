@@ -12,7 +12,7 @@
 
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
-use anyhow::{anyhow, Result};
+use anyhow::{anyhow, Context, Result};
 use is_terminal::IsTerminal;
 
 /// Options required to render a systemd service unit.

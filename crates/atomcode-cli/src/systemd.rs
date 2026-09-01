@@ -6,17 +6,13 @@
 //!
 //! Fully cross-platform compatible (Windows / macOS / Linux / HarmonyOS):
 //! - Only activates the systemd wizard on Linux with an active systemd runtime and interactive TTY.
-//! - Uses robust crossterm raw-mode input handling, draining leftover keystroke buffers and filtering
-//!   key-release events to prevent accidental auto-confirmations.
+//! - The wizard runs **before** the foreground listener binds, using line-buffered
+//!   stdin (no crossterm raw mode). Prompting after bind+banner races job-control
+//!   (`SIGTTOU`/`SIGTTIN` → shell `[Stopped]`) and leaves the port occupied.
 
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
-use std::time::Duration;
-#[cfg(unix)]
-use anyhow::Context;
 use anyhow::{anyhow, Result};
-use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
-use crossterm::terminal::{disable_raw_mode, enable_raw_mode};
 use is_terminal::IsTerminal;
 
 /// Options required to render a systemd service unit.
@@ -369,149 +365,100 @@ pub fn is_service_active(service_name: &str) -> bool {
     }
 }
 
-/// Interactive wizard in `--host` serve mode.
+fn ignore_tty_job_control_stops() {
+    #[cfg(unix)]
+    unsafe {
+        // tcsetattr / stdin read from a process that is not the foreground
+        // group otherwise delivers SIGTTOU/SIGTTIN and the shell reports
+        // `[Stopped]`, leaving the listen port occupied.
+        libc::signal(libc::SIGTTOU, libc::SIG_IGN);
+        libc::signal(libc::SIGTTIN, libc::SIG_IGN);
+    }
+}
+
+fn drain_pending_stdin() {
+    #[cfg(unix)]
+    {
+        use std::os::fd::AsRawFd;
+        let fd = io::stdin().as_raw_fd();
+        unsafe {
+            let flags = libc::fcntl(fd, libc::F_GETFL);
+            if flags < 0 {
+                return;
+            }
+            libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK);
+            let mut buf = [0u8; 256];
+            while libc::read(fd, buf.as_mut_ptr() as *mut libc::c_void, buf.len()) > 0 {}
+            libc::fcntl(fd, libc::F_SETFL, flags);
+        }
+    }
+}
+
+fn read_tty_line(prompt: &str) -> Result<String> {
+    eprint!("{prompt}");
+    io::stderr().flush().ok();
+    let mut line = String::new();
+    io::stdin()
+        .read_line(&mut line)
+        .map_err(|e| anyhow!("read tty: {e}"))?;
+    Ok(line.trim().to_string())
+}
+
+/// Interactive wizard in `--host` serve mode. Call **before** binding the
+/// foreground listener so raw-mode / job-control never races the server.
 ///
-/// Prompts the user:
+/// Prompts:
 /// 1. "是否配置为 Linux 系统服务并开机自启？ [y/N]"
-/// 2. If yes: "请输入系统服务名 (直接回车默认: jeikcode-{port}): "
-/// 3. Executes `on_handoff` closure to gracefully shut down the temporary foreground listener.
-/// 4. Installs and starts the systemd service.
-/// 5. Prints the complete connection summary banner and management commands.
-/// 6. Returns `Ok(true)` to indicate successful service creation and exit back to shell prompt.
-pub async fn prompt_systemd_setup<F>(
+/// 2. If yes: service name (empty → `jeikcode-{port}`)
+/// 3. Installs and starts the systemd unit, prints `banner`, returns `Ok(true)`
+///    so the caller exits instead of serving in the foreground.
+pub fn prompt_systemd_setup(
     host: &str,
     port: u16,
     workdir: &Path,
     no_token: bool,
     fixed_token: Option<&str>,
-    _display_token: Option<&str>,
+    display_token: Option<&str>,
     yolo: bool,
     no_telemetry: bool,
     banner: &str,
-    on_handoff: F,
-) -> Result<bool>
-where
-    F: FnOnce(),
-{
-    // Only available on Linux when running interactively in a TTY terminal with systemd
+) -> Result<bool> {
     if !cfg!(target_os = "linux") || !io::stdin().is_terminal() || !is_systemd_available() {
         return Ok(false);
     }
 
+    ignore_tty_job_control_stops();
+    drain_pending_stdin();
+
     let default_service_name = format!("jeikcode-{}", port);
-
-    // 启用 raw mode 保证按键精确交互，并清空启动命令时的残留回车/按键缓冲
-    enable_raw_mode()?;
-    let mut stdout = io::stdout();
-
-    // 核心防御 1: 彻底清空进入交互前控制台残留的按键事件（如输入启动命令时的回车残余）
-    while event::poll(Duration::from_millis(50)).unwrap_or(false) {
-        let _ = event::read();
-    }
-
-    print!("\r\n──────────────────────────────────────────────────────────────────────────\r\n");
-    print!("❓ 是否配置为 Linux 系统服务并开机自启？ [y/N]: \x1b[K");
-    stdout.flush().ok();
-
-    let mut user_agreed = false;
-
-    // 阶段 1: 等待用户明确选择 y / n
-    loop {
-        if event::poll(Duration::from_millis(100)).unwrap_or(false) {
-            if let Ok(Event::Key(key)) = event::read() {
-                // 核心防御 2: 过滤 Release 事件，避免 Windows/Linux 终端释放键瞬间误触发
-                if key.kind == KeyEventKind::Release {
-                    continue;
-                }
-                if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
-                    disable_raw_mode().ok();
-                    println!("\r\n✓ 保持前台运行模式 (按 Ctrl+C 可停止服务)\r\n");
-                    return Ok(false);
-                }
-                match key.code {
-                    KeyCode::Char('y') | KeyCode::Char('Y') => {
-                        print!("y\r\n");
-                        stdout.flush().ok();
-                        user_agreed = true;
-                        break;
-                    }
-                    KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Enter | KeyCode::Esc | KeyCode::Char('q') | KeyCode::Char('Q') => {
-                        print!("n\r\n");
-                        stdout.flush().ok();
-                        user_agreed = false;
-                        break;
-                    }
-                    _ => {}
-                }
-            }
-        }
-    }
-
+    eprintln!();
+    eprintln!("JeikCode 即将在 {host}:{port} 启动。");
+    let answer = read_tty_line("是否配置为 Linux 系统服务并开机自启？ [y/N]: ")?;
+    let user_agreed = matches!(answer.to_ascii_lowercase().as_str(), "y" | "yes");
     if !user_agreed {
-        disable_raw_mode().ok();
-        println!("✓ 保持前台运行模式 (按 Ctrl+C 可停止服务)\n");
+        eprintln!("✓ 保持前台运行模式 (按 Ctrl+C 可停止服务)\n");
         return Ok(false);
     }
 
-    // 阶段 2: 交互式输入系统服务名称（支持输入、退格删除、直接回车默认）
-    print!("请输入系统服务名 (直接回车默认: {}): \x1b[K", default_service_name);
-    stdout.flush().ok();
-
-    let mut service_input = String::new();
-    loop {
-        if event::poll(Duration::from_millis(100)).unwrap_or(false) {
-            if let Ok(Event::Key(key)) = event::read() {
-                if key.kind == KeyEventKind::Release {
-                    continue;
-                }
-                if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
-                    disable_raw_mode().ok();
-                    println!("\r\n✓ 保持前台运行模式 (按 Ctrl+C 可停止服务)\r\n");
-                    return Ok(false);
-                }
-                match key.code {
-                    KeyCode::Enter => {
-                        print!("\r\n");
-                        stdout.flush().ok();
-                        break;
-                    }
-                    KeyCode::Esc => {
-                        disable_raw_mode().ok();
-                        println!("\r\n✓ 保持前台运行模式 (按 Ctrl+C 可停止服务)\n");
-                        return Ok(false);
-                    }
-                    KeyCode::Backspace => {
-                        if !service_input.is_empty() {
-                            service_input.pop();
-                            print!("\x08 \x08");
-                            stdout.flush().ok();
-                        }
-                    }
-                    KeyCode::Char(c) => {
-                        if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
-                            service_input.push(c);
-                            print!("{}", c);
-                            stdout.flush().ok();
-                        }
-                    }
-                    _ => {}
-                }
-            }
-        }
-    }
-
-    // 交互输入结束，安全恢复终端正常模式
-    disable_raw_mode().ok();
-
-    let chosen_name = service_input.trim();
-    let service_name = if chosen_name.is_empty() {
+    let service_input = read_tty_line(&format!(
+        "请输入系统服务名 (直接回车默认: {default_service_name}): "
+    ))?;
+    let service_name = if service_input.is_empty() {
         default_service_name
     } else {
-        chosen_name.to_string()
+        service_input
     };
 
-    println!("==> 正在捕获当前 SSH 环境变量并生成服务配置...");
+    println!("==> 正在捕获当前环境并生成服务配置...");
     let env = capture_current_environment();
+    let unit_token = if no_token {
+        None
+    } else {
+        fixed_token
+            .filter(|s| !s.is_empty())
+            .or_else(|| display_token.filter(|s| !s.is_empty()))
+            .map(str::to_string)
+    };
 
     let opts = SystemdServiceOpts {
         service_name: service_name.clone(),
@@ -519,18 +466,14 @@ where
         port,
         workdir: workdir.to_path_buf(),
         no_token,
-        fixed_token: fixed_token.map(|s| s.to_string()),
+        fixed_token: unit_token,
         yolo,
         no_telemetry,
     };
 
     let unit_content = render_systemd_unit(&opts, &env);
 
-    println!("==> 正在释放前台端口并启动系统服务 [{}]...", service_name);
-    // Gracefully shut down the temporary foreground listener before systemd binds
-    on_handoff();
-    // Brief sleep to ensure socket is fully released
-    tokio::time::sleep(Duration::from_millis(200)).await;
+    println!("==> 正在安装并启动系统服务 [{}]...", service_name);
 
     if let Err(e) = install_and_start_systemd_service(&service_name, &unit_content) {
         eprintln!("\n❌ 安装系统服务失败: {e:#}");

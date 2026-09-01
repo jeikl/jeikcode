@@ -2,6 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert';
 import {
   buildTurnNavItems,
+  buildTurnNavItemsFromOutline,
   filterTurnNavItems,
   resolveActiveTurnId,
   truncateTurnNavLabel,
@@ -32,6 +33,20 @@ test('buildTurnNavItems keeps user questions in order and skips empty/system', (
     [
       { id: 'turn-nav-0', index: 0, label: '你好 今天天气', text: '你好 今天天气' },
       { id: 'turn-nav-4', index: 4, label: '第二问', text: '第二问' },
+    ],
+  );
+});
+
+test('buildTurnNavItemsFromOutline uses absolute transcript indexes', () => {
+  const items = buildTurnNavItemsFromOutline([
+    { index: 0, text: '第一问' },
+    { index: 80, text: '很后面的提问' },
+  ]);
+  assert.deepEqual(
+    items.map((i) => ({ id: i.id, index: i.index, label: i.label })),
+    [
+      { id: 'turn-nav-0', index: 0, label: '第一问' },
+      { id: 'turn-nav-80', index: 80, label: '很后面的提问' },
     ],
   );
 });

@@ -126,6 +126,8 @@ const zh = {
   // Chat
   'chat.startHint': '发送消息开始对话…',
   'chat.continueHint': '发送消息继续此会话',
+  'chat.loadOlder': '加载更早的消息（还剩 {n} 条）',
+  'chat.loadingOlder': '正在加载更早的消息…',
   'chat.greeting': '今天想构建点什么？',
   'chat.chipReview': '/review 审查改动',
   'chat.chipExplain': '解释这段代码',
@@ -525,6 +527,8 @@ const en: Record<MsgKey, string> = {
 
   'chat.startHint': 'Send a message to start a conversation…',
   'chat.continueHint': 'Send a message to continue this session',
+  'chat.loadOlder': 'Load earlier messages ({n} remaining)',
+  'chat.loadingOlder': 'Loading earlier messages…',
   'chat.greeting': 'What would you like to build today?',
   'chat.chipReview': '/review the changes',
   'chat.chipExplain': 'Explain this code',

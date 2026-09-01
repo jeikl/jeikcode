@@ -307,6 +307,183 @@ pub struct AppendSessionMessagesResponse {
     pub project_hash: String,
 }
 
+/// Optional window on `GET /projects/:hash/sessions/:id`.
+/// `tail=N` returns the last N messages (webui first paint). `offset`/`limit`
+/// page older history. Omitted query → full transcript (export / older clients).
+#[derive(Debug, Default, Deserialize)]
+struct SessionDetailQuery {
+    tail: Option<usize>,
+    offset: Option<usize>,
+    limit: Option<usize>,
+}
+
+fn apply_session_message_window<T>(
+    messages: Vec<T>,
+    query: &SessionDetailQuery,
+) -> (usize, usize, Vec<T>) {
+    let total = messages.len();
+    if let Some(n) = query.tail.filter(|n| *n > 0) {
+        let offset = total.saturating_sub(n);
+        return (
+            total,
+            offset,
+            messages.into_iter().skip(offset).collect(),
+        );
+    }
+    let offset = query.offset.unwrap_or(0).min(total);
+    let limit = query.limit.unwrap_or(usize::MAX);
+    (
+        total,
+        offset,
+        messages.into_iter().skip(offset).take(limit).collect(),
+    )
+}
+
+#[cfg(test)]
+mod session_window_tests {
+    use super::*;
+
+    #[test]
+    fn tail_returns_last_n() {
+        let q = SessionDetailQuery {
+            tail: Some(2),
+            offset: None,
+            limit: None,
+        };
+        let (total, offset, msgs) = apply_session_message_window(vec![1, 2, 3, 4, 5], &q);
+        assert_eq!(total, 5);
+        assert_eq!(offset, 3);
+        assert_eq!(msgs, vec![4, 5]);
+    }
+
+    #[test]
+    fn offset_limit_pages_older() {
+        let q = SessionDetailQuery {
+            tail: None,
+            offset: Some(1),
+            limit: Some(2),
+        };
+        let (total, offset, msgs) = apply_session_message_window(vec![10, 20, 30, 40], &q);
+        assert_eq!(total, 4);
+        assert_eq!(offset, 1);
+        assert_eq!(msgs, vec![20, 30]);
+    }
+
+    #[test]
+    fn omitted_query_returns_all() {
+        let (total, offset, msgs) =
+            apply_session_message_window(vec!['a', 'b'], &SessionDetailQuery::default());
+        assert_eq!((total, offset, msgs), (2, 0, vec!['a', 'b']));
+    }
+
+    #[test]
+    fn outline_lists_all_user_questions_with_absolute_index() {
+        let msgs = vec![
+            MessageInfo {
+                role: "user".into(),
+                content: "第一问".into(),
+                reasoning: None,
+                synthetic: false,
+                internal_origin: None,
+                tool_calls: None,
+                tool_result: None,
+                artifacts: None,
+                images: None,
+                created_at: None,
+                elapsed_ms: None,
+            },
+            MessageInfo {
+                role: "assistant".into(),
+                content: "ok".into(),
+                reasoning: None,
+                synthetic: false,
+                internal_origin: None,
+                tool_calls: None,
+                tool_result: None,
+                artifacts: None,
+                images: None,
+                created_at: None,
+                elapsed_ms: None,
+            },
+            MessageInfo {
+                role: "user".into(),
+                content: "第二问".into(),
+                reasoning: None,
+                synthetic: false,
+                internal_origin: None,
+                tool_calls: None,
+                tool_result: None,
+                artifacts: None,
+                images: None,
+                created_at: None,
+                elapsed_ms: None,
+            },
+        ];
+        let turns = session_user_outline(&msgs);
+        assert_eq!(turns.len(), 2);
+        assert_eq!(turns[0].index, 0);
+        assert_eq!(turns[0].text, "第一问");
+        assert_eq!(turns[1].index, 2);
+        assert_eq!(turns[1].text, "第二问");
+    }
+}
+
+const DISPLAY_FIELD_CAP: usize = 24 * 1024;
+
+/// Compact user-question row for the session outline (right-rail). Not the
+/// model context — just labels.
+#[derive(Debug, Clone, Serialize)]
+pub struct SessionTurnOutline {
+    pub index: usize,
+    pub text: String,
+}
+
+const OUTLINE_TEXT_CAP: usize = 240;
+
+fn session_user_outline(messages: &[MessageInfo]) -> Vec<SessionTurnOutline> {
+    messages
+        .iter()
+        .enumerate()
+        .filter_map(|(index, msg)| {
+            if !msg.role.eq_ignore_ascii_case("user") || msg.synthetic {
+                return None;
+            }
+            let text = msg
+                .content
+                .split_whitespace()
+                .collect::<Vec<_>>()
+                .join(" ");
+            if text.is_empty() {
+                return None;
+            }
+            let text = if text.chars().count() > OUTLINE_TEXT_CAP {
+                format!(
+                    "{}…",
+                    text.chars()
+                        .take(OUTLINE_TEXT_CAP.saturating_sub(1))
+                        .collect::<String>()
+                )
+            } else {
+                text
+            };
+            Some(SessionTurnOutline { index, text })
+        })
+        .collect()
+}
+
+fn cap_display_field(s: String) -> String {
+    if s.len() <= DISPLAY_FIELD_CAP {
+        return s;
+    }
+    let mut end = DISPLAY_FIELD_CAP;
+    while end > 0 && !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    let mut out = s[..end].to_string();
+    out.push_str("\n… [truncated for display]");
+    out
+}
+
 /// Session detail response
 #[derive(Debug, Serialize)]
 pub struct SessionDetail {
@@ -317,7 +494,15 @@ pub struct SessionDetail {
     pub created_at: u64,
     /// Epoch milliseconds (同上)。
     pub updated_at: u64,
+    /// Total messages in the transcript (not the returned window size).
     pub message_count: usize,
+    /// Index of `messages[0]` in the full transcript.
+    #[serde(default)]
+    pub offset: usize,
+    /// All user questions (short text) in transcript order. Independent of the
+    /// `messages` window so the WebUI turn rail can list the full session.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub turns: Vec<SessionTurnOutline>,
     pub messages: Vec<MessageInfo>,
     /// Per-session model selection. Absent on older sessions.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1509,7 +1694,7 @@ impl MessageInfo {
                 .map(|call| ToolCallInfo {
                     id: call.id.clone(),
                     name: call.name.clone(),
-                    arguments: call.arguments.clone(),
+                    arguments: cap_display_field(call.arguments.clone()),
                     display: format_tool_args(&call.name, &call.arguments),
                 })
                 .collect()
@@ -1529,7 +1714,7 @@ impl MessageInfo {
                 .iter()
                 .map(|call| (call.name.as_str(), call.arguments.as_str())),
         );
-        let mut content = msg.text.clone();
+        let mut content = cap_display_field(msg.text.clone());
         let mut images = (!msg.images.is_empty()).then(|| {
             msg.images
                 .iter()
@@ -1554,7 +1739,7 @@ impl MessageInfo {
         Self {
             role: role.into(),
             content,
-            reasoning: msg.reasoning.clone(),
+            reasoning: msg.reasoning.clone().map(cap_display_field),
             synthetic: msg.synthetic,
             internal_origin: msg.internal_origin.clone(),
             tool_calls,
@@ -2784,7 +2969,10 @@ async fn get_sessions_by_working_dir(
 }
 
 /// GET /projects/:hash/sessions/:id - Get session detail
-async fn get_session_detail(Path((hash, id)): Path<(String, String)>) -> impl IntoResponse {
+async fn get_session_detail(
+    Path((hash, id)): Path<(String, String)>,
+    Query(query): Query<SessionDetailQuery>,
+) -> impl IntoResponse {
     match crate::legacy_convert::load_catalog_session_view_in_project(&hash, &id) {
         Ok(Some(session)) => {
             let _ = crate::native_live::take_session_draft(&id);
@@ -2795,6 +2983,9 @@ async fn get_session_detail(Path((hash, id)): Path<(String, String)>) -> impl In
                     return (StatusCode::NOT_FOUND, Json(msg)).into_response();
                 }
             };
+            let turns = session_user_outline(&messages);
+            let (message_count, offset, messages) =
+                apply_session_message_window(messages, &query);
             let token_usage = session_token_usage_from_session(&session.meta, &session.snapshot);
             let detail = SessionDetail {
                 id: session.meta.id,
@@ -2802,7 +2993,9 @@ async fn get_session_detail(Path((hash, id)): Path<(String, String)>) -> impl In
                 working_dir: PathBuf::from(session.meta.working_dir),
                 created_at: u64::try_from(session.meta.created_at.max(0)).unwrap_or(0),
                 updated_at: u64::try_from(session.meta.updated_at.max(0)).unwrap_or(0),
-                message_count: messages.len(),
+                message_count,
+                offset,
+                turns,
                 messages,
                 preferred_model: session.meta.preferred_model.clone(),
                 token_usage,
@@ -2820,6 +3013,8 @@ async fn get_session_detail(Path((hash, id)): Path<(String, String)>) -> impl In
                 created_at: 0,
                 updated_at: 0,
                 message_count: 0,
+                offset: 0,
+                turns: Vec::new(),
                 messages: Vec::new(),
                 preferred_model: None,
                 token_usage: None,

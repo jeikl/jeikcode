@@ -475,6 +475,33 @@ async fn run_serve_mode(
         });
     }
 
+    // Systemd wizard BEFORE bind: raw-mode / stdin after the listen banner
+    // stops the process (shell `[Stopped]`) and leaves the port in use.
+    #[cfg(target_os = "linux")]
+    {
+        use is_terminal::IsTerminal;
+        if std::io::stdin().is_terminal() && atomcode::systemd::is_systemd_available() {
+            match atomcode::systemd::prompt_systemd_setup(
+                &host,
+                port,
+                &workdir,
+                no_token,
+                fixed_token.as_deref(),
+                display_token.as_deref(),
+                yolo,
+                no_telemetry,
+                &startup_footer,
+            ) {
+                Ok(true) => return 0,
+                Ok(false) => {}
+                Err(e) => {
+                    eprintln!("systemd setup: {e:#}");
+                    eprintln!("改为前台运行。");
+                }
+            }
+        }
+    }
+
     let server_task = tokio::spawn(atomcode_daemon::run_server(atomcode_daemon::ServerOpts {
         host: host.clone(),
         port,
@@ -491,63 +518,6 @@ async fn run_serve_mode(
         startup_footer: Some(startup_footer.clone()),
         yolo,
     }));
-
-    // Give the server task a brief moment to bind the listener and print the banner
-    tokio::time::sleep(std::time::Duration::from_millis(150)).await;
-
-    if server_task.is_finished() {
-        // If server failed during initial bind/startup, return its error immediately
-        match server_task.await {
-            Ok(Err(e)) => {
-                eprintln!("Fatal: serve error: {e:#}");
-                return 1;
-            }
-            Err(e) => {
-                eprintln!("Fatal: server task error: {e:#}");
-                return 1;
-            }
-            _ => return 0,
-        }
-    }
-
-    #[cfg(target_os = "linux")]
-    {
-        use is_terminal::IsTerminal;
-        if std::io::stdin().is_terminal() && atomcode::systemd::is_systemd_available() {
-            let server_handle = server_task.abort_handle();
-            let banner_clone = startup_footer.clone();
-            let prompt_res = atomcode::systemd::prompt_systemd_setup(
-                &host,
-                port,
-                &workdir,
-                no_token,
-                fixed_token.as_deref(),
-                display_token.as_deref(),
-                yolo,
-                no_telemetry,
-                &banner_clone,
-                move || {
-                    // Abort foreground server to release port for systemd daemon
-                    server_handle.abort();
-                },
-            )
-            .await;
-
-            match prompt_res {
-                Ok(true) => {
-                    // Successfully configured systemd service and handed off
-                    let _ = server_task.await;
-                    return 0;
-                }
-                Ok(false) => {
-                    // User chose to continue in foreground
-                }
-                Err(_) => {
-                    // Systemd setup encountered error, user was alerted; continue in foreground
-                }
-            }
-        }
-    }
 
     // Wait for foreground server task to exit (e.g. on Ctrl+C or fatal error)
     match server_task.await {

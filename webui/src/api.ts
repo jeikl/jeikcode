@@ -440,13 +440,24 @@ export interface SessionMessage {
   elapsed_ms?: number;
 }
 
+export interface SessionTurnOutline {
+  /** Absolute index in the full transcript (not the returned window). */
+  index: number;
+  text: string;
+}
+
 export interface SessionDetail {
   id: string;
   name: string;
   working_dir: string;
   created_at: number;
   updated_at: number;
+  /** Total messages on disk (not the returned window size). */
   message_count: number;
+  /** Index of `messages[0]` in the full transcript. Absent on older daemons. */
+  offset?: number;
+  /** All user questions for the right-rail outline. Independent of the message window. */
+  turns?: SessionTurnOutline[];
   messages: SessionMessage[];
   /** Per-session model selection. Absent on older sessions. */
   preferred_model?: string | null;
@@ -913,8 +924,15 @@ export async function deleteProject(hash: string): Promise<void> {
 export async function getSession(
   projectHash: string,
   sessionId: string,
+  opts?: { tail?: number; offset?: number; limit?: number },
 ): Promise<SessionDetail> {
-  const resp = await apiFetch(`/projects/${projectHash}/sessions/${sessionId}`, {
+  const q = new URLSearchParams();
+  if (opts?.tail != null) q.set('tail', String(opts.tail));
+  if (opts?.offset != null) q.set('offset', String(opts.offset));
+  if (opts?.limit != null) q.set('limit', String(opts.limit));
+  const qs = q.toString();
+  const path = `/projects/${projectHash}/sessions/${sessionId}`;
+  const resp = await apiFetch(qs ? `${path}?${qs}` : path, {
     headers: authHeaders(),
   });
   if (!resp.ok) {

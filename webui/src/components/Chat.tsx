@@ -27,7 +27,10 @@
 
 import { VNode } from 'preact';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'preact/hooks';
-import { streamChat, stopChat, getActiveChatSessions, getChatPending, watchChatSession, SSEEvent, getSession, SessionMetaWithProject, getModels, ModelInfo, ImageData, streamLive, postLiveMessage, postLiveStop, postLivePermission, postLiveProvider, postLiveMode, getApprovalMode, ApprovalMode, LiveWireEvent, SessionMessage, SessionTokenUsage, getSkills, SkillInfo, listDir, changeDir, postConfigReload, postMcpReload, getMcpStatus, postLiveMcpTrust, postCommand, postLiveCompact, postLiveUserInput, postChatUserInput, setDefaultProvider, type CommandResult, UserInputRequestEvent } from '../api';
+
+/** First paint / page size for long transcripts. Older messages load on demand. */
+const HISTORY_PAGE = 48;
+import { streamChat, stopChat, getActiveChatSessions, getChatPending, watchChatSession, SSEEvent, getSession, SessionMetaWithProject, getModels, ModelInfo, ImageData, streamLive, postLiveMessage, postLiveStop, postLivePermission, postLiveProvider, postLiveMode, getApprovalMode, ApprovalMode, LiveWireEvent, SessionMessage, SessionTokenUsage, SessionTurnOutline, getSkills, SkillInfo, listDir, changeDir, postConfigReload, postMcpReload, getMcpStatus, postLiveMcpTrust, postCommand, postLiveCompact, postLiveUserInput, postChatUserInput, setDefaultProvider, type CommandResult, UserInputRequestEvent } from '../api';
 import {
   parseSlashCommand,
   buildCommandMap,
@@ -37,7 +40,7 @@ import {
   FRONTEND_COMMANDS,
   type SlashHandlers,
 } from '../lib/slashCommands';
-import { buildTurnNavItems, filterTurnNavItems, resolveActiveTurnId } from '../lib/turnNav';
+import { buildTurnNavItems, buildTurnNavItemsFromOutline, compactTurnNavText, filterTurnNavItems, resolveActiveTurnId, turnNavId } from '../lib/turnNav';
 import { resolvePendingAfterDecision } from '../lib/pendingPermission';
 import { beginModeSwitch, completeModeSwitch, failModeSwitch, initModeState } from '../lib/modeSwitch';
 import { randomUUID } from '../lib/randomId';
@@ -1053,6 +1056,11 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
   // 已为哪个 sessionId 触发过历史加载（或它是本 Chat 自建的会话）。用于避免
   // project_hash 迟到（刷新后由 App 异步回填）导致的重复加载 / 覆盖当前对话。
   const loadedForRef = useRef<string | null>(null);
+  const historyOffsetRef = useRef(0);
+  const historyTotalRef = useRef(0);
+  const [hasOlder, setHasOlder] = useState(false);
+  const [loadingOlder, setLoadingOlder] = useState(false);
+  const [turnOutline, setTurnOutline] = useState<SessionTurnOutline[]>([]);
   // While another client (OpenAI API) owns `/chat/active`:
   // 1) `GET /chat/watch` reattaches to the live event bus (real-time progress)
   // 2) light history poll as a fallback for events missed before join
@@ -1259,7 +1267,7 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
       }
       try {
         const [session, activeIds] = await Promise.all([
-          getSession(projectHash, loadId),
+          getSession(projectHash, loadId, { offset: historyOffsetRef.current }),
           getActiveChatSessions(),
         ]);
         if (
@@ -1689,7 +1697,7 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
     }
     const loadId = sessionId;
     const loadGeneration = sessionGenerationRef.current;
-    Promise.allSettled([getSession(projectHash, loadId), getActiveChatSessions()])
+    Promise.allSettled([getSession(projectHash, loadId, { tail: HISTORY_PAGE }), getActiveChatSessions()])
       .then(([sessionResult, activeResult]) => {
         // Generation also covers A -> B -> A; id equality alone is insufficient.
         if (
@@ -1725,6 +1733,14 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
             !(currentCached && currentCached.length > 0);
           if (!isLiveSession || canvasEmpty) {
             const loaded = sessionMessagesToDisplay(sessionResult.value.messages);
+            const totalOnDisk = sessionResult.value.message_count ?? loaded.length;
+            const diskOffset = sessionResult.value.offset ?? 0;
+            historyTotalRef.current = totalOnDisk;
+            historyOffsetRef.current = diskOffset;
+            setHasOlder(diskOffset > 0);
+            if (sessionResult.value.turns && sessionResult.value.turns.length > 0) {
+              setTurnOutline(sessionResult.value.turns);
+            }
             let displayMessages: Message[] = currentCached && currentCached.length > 0 ? currentCached : loaded;
 
             if (currentCached && currentCached.length > 0) {
@@ -1748,6 +1764,10 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
               } else {
                 displayMessages = currentCached;
                 setMessages(currentCached);
+                if (currentCached.length >= totalOnDisk) {
+                  historyOffsetRef.current = 0;
+                  setHasOlder(false);
+                }
                 pinTimelineToBottom();
               }
             } else if (loaded.length > 0) {
@@ -2459,6 +2479,7 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
             }
             return prev;
           }
+          rememberTurnOutline(e.text, historyOffsetRef.current + prev.length);
           return [
             ...prev,
             { role: 'user', parts: [{ kind: 'text', text: e.text }], images: e.images && e.images.length ? e.images : undefined, ts: now },
@@ -2625,8 +2646,11 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
 
   const slashCommandMap = useMemo(() => buildCommandMap(FRONTEND_COMMANDS), []);
   const turnNavItems = useMemo(
-    () => buildTurnNavItems(messages.map((m) => ({ role: m.role, text: messageText(m) }))),
-    [messages],
+    () => {
+      if (turnOutline.length > 0) return buildTurnNavItemsFromOutline(turnOutline);
+      return buildTurnNavItems(messages.map((m) => ({ role: m.role, text: messageText(m) })));
+    },
+    [turnOutline, messages],
   );
   const [turnNavQuery, setTurnNavQuery] = useState('');
   const filteredTurnNavItems = useMemo(
@@ -2659,7 +2683,47 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
     );
     if (next && next !== activeTurnIdRef.current) setActiveTurnId(next);
   }
-  function jumpToTurn(id: string) {
+  function rememberTurnOutline(text: string, index: number) {
+    const compact = compactTurnNavText(text);
+    if (!compact) return;
+    setTurnOutline((prev) => {
+      if (prev.some((item) => item.index === index)) return prev;
+      return [...prev, { index, text: compact }].sort((a, b) => a.index - b.index);
+    });
+  }
+
+  async function ensureHistoryIncludes(index: number) {
+    const projectHash = activeSession?.project_hash;
+    const sid = sessionId;
+    if (!projectHash || !sid) return;
+    const prevOffset = historyOffsetRef.current;
+    if (index >= prevOffset) return;
+    setLoadingOlder(true);
+    try {
+      const detail = await getSession(projectHash, sid, {
+        offset: index,
+        limit: prevOffset - index,
+      });
+      if (activeIdRef.current !== sid) return;
+      const older = sessionMessagesToDisplay(detail.messages);
+      historyOffsetRef.current = detail.offset ?? index;
+      historyTotalRef.current = detail.message_count ?? historyTotalRef.current;
+      setHasOlder((detail.offset ?? index) > 0);
+      if (detail.turns && detail.turns.length > 0) setTurnOutline(detail.turns);
+      setMessages((prev) => [...older, ...prev]);
+      await new Promise<void>((resolve) => {
+        requestAnimationFrame(() => resolve());
+      });
+    } finally {
+      setLoadingOlder(false);
+    }
+  }
+
+  async function jumpToTurn(id: string) {
+    const index = Number(id.slice('turn-nav-'.length));
+    if (Number.isFinite(index) && index < historyOffsetRef.current) {
+      await ensureHistoryIncludes(index);
+    }
     const el = document.getElementById(id);
     if (!el) return;
     setActiveTurnId(id);
@@ -2677,6 +2741,11 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
     setTurnNavQuery('');
     setActiveTurnId(null);
     turnNavPinUntilRef.current = 0;
+    setHasOlder(false);
+    setLoadingOlder(false);
+    historyOffsetRef.current = 0;
+    historyTotalRef.current = 0;
+    setTurnOutline([]);
   }, [sessionId]);
   useEffect(() => {
     const id = requestAnimationFrame(() => syncTurnNavFromScroll());
@@ -2685,12 +2754,49 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
 
   // Reload one session's transcript from disk into the view, guarded against a
   // session switch racing the async fetch. Mirrors the session-load effect's activeIdRef guard.
+  async function loadOlderMessages() {
+    const projectHash = activeSession?.project_hash;
+    const id = sessionId;
+    if (!projectHash || !id || loadingOlder || historyOffsetRef.current <= 0) return;
+    const prevOffset = historyOffsetRef.current;
+    const page = Math.min(HISTORY_PAGE, prevOffset);
+    const nextOffset = prevOffset - page;
+    setLoadingOlder(true);
+    const root = scrollRef.current;
+    const prevHeight = root?.scrollHeight ?? 0;
+    const prevTop = root?.scrollTop ?? 0;
+    try {
+      const detail = await getSession(projectHash, id, { offset: nextOffset, limit: page });
+      if (activeIdRef.current !== id) return;
+      const older = sessionMessagesToDisplay(detail.messages);
+      historyOffsetRef.current = detail.offset ?? nextOffset;
+      historyTotalRef.current = detail.message_count ?? historyTotalRef.current;
+      setHasOlder((detail.offset ?? nextOffset) > 0);
+      if (detail.turns && detail.turns.length > 0) setTurnOutline(detail.turns);
+      setMessages((prev) => [...older, ...prev]);
+      requestAnimationFrame(() => {
+        const el = scrollRef.current;
+        if (!el) return;
+        el.scrollTop = prevTop + (el.scrollHeight - prevHeight);
+      });
+    } catch {
+      historyOffsetRef.current = prevOffset;
+    } finally {
+      setLoadingOlder(false);
+    }
+  }
+
   async function reloadSessionTranscript(id: string) {
     const projectHash = activeSession?.project_hash;
     if (!projectHash) return;
     try {
-      const detail = await getSession(projectHash, id);
+      const detail = await getSession(projectHash, id, {
+        offset: historyOffsetRef.current,
+      });
       if (activeIdRef.current === id) {
+        historyTotalRef.current = detail.message_count ?? detail.messages.length;
+        historyOffsetRef.current = detail.offset ?? historyOffsetRef.current;
+        setHasOlder((detail.offset ?? 0) > 0);
         setMessages(sessionMessagesToDisplay(detail.messages));
         // History freezes todos under each assistant; sticky is live-only.
         setActiveTodos(null);
@@ -3457,6 +3563,7 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
         confirmed: false,
       };
       pendingSelfEchoRef.current.push({ id: pendingSteer.id, text });
+      rememberTurnOutline(text, historyOffsetRef.current + messagesRef.current.length);
       setMessages((prev) => [
         ...prev,
         {
@@ -3524,6 +3631,7 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
 
     // Push user message + empty assistant placeholder
     const now = Date.now();
+    rememberTurnOutline(text, historyOffsetRef.current + messagesRef.current.length);
     setMessages((prev) => [
       ...prev,
       { role: 'user', parts: [{ kind: 'text', text }], images: images.length ? images : undefined, ts: now },
@@ -4635,6 +4743,21 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
           </div>
         )}
 
+        {hasOlder && (
+          <div class="history-load-older">
+            <button
+              type="button"
+              class="history-load-older-btn"
+              disabled={loadingOlder}
+              onClick={() => void loadOlderMessages()}
+            >
+              {loadingOlder
+                ? t('chat.loadingOlder')
+                : t('chat.loadOlder', { n: String(historyOffsetRef.current) })}
+            </button>
+          </div>
+        )}
+
         {(() => {
           // Pre-compute per-turn text for assistant messages: collect all text
           // from consecutive assistant messages between two user messages, so
@@ -4707,9 +4830,9 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
             if (msg.role === 'user') {
               return (
                 <UserMessageView
-                  key={origIdx}
+                  key={historyOffsetRef.current + origIdx}
                   msg={msg}
-                  anchorId={`turn-nav-${origIdx}`}
+                  anchorId={turnNavId(historyOffsetRef.current + origIdx)}
                   searchRef={setMatchRef}
                   timeLabel={timeLabel}
                   timeFull={timeFull}

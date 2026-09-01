@@ -30,6 +30,19 @@ export function truncateTurnNavLabel(text: string, max = DEFAULT_MAX_LABEL): str
   return compact.slice(0, Math.max(1, max - 1)) + '…';
 }
 
+export function buildTurnNavItemsFromOutline(
+  turns: { index: number; text: string }[],
+): TurnNavItem[] {
+  const items: TurnNavItem[] = [];
+  for (const turn of turns) {
+    const text = compactTurnNavText(stripInjectedRemindersForDisplay(turn.text));
+    const label = truncateTurnNavLabel(text);
+    if (!label) continue;
+    items.push({ id: turnNavId(turn.index), index: turn.index, label, text });
+  }
+  return items;
+}
+
 export function buildTurnNavItems(
   messages: { role: string; text: string }[],
 ): TurnNavItem[] {

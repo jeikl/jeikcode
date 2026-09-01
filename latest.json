@@ -3,12 +3,12 @@
   "released_at": "2026-09-01",
   "binaries": {
     "linux-x64": {
-      "sha256": "b416663bef48cd9d7ae009e579e02a658a9c83842b8f1ced4e996ce825ab3b5a",
+      "sha256": "3626667e726c0e093b0677cd753a40449e8ecbecf9d0dcc05d4b5c0ffb734a16",
       "size": 54232072
     },
     "windows-x64": {
-      "sha256": "7287d906df037a13b86de5eab5b8e6c5fca8e9682426eabe3f7fc58d1ec5a376",
-      "size": 63796736
+      "sha256": "0608f240fdfeacc919100e8ab87150b85abe60d23d498d82aabf6a1a0a4aa05f",
+      "size": 63797248
     }
   }
 }

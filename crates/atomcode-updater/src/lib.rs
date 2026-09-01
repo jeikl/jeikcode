@@ -546,40 +546,62 @@ fn is_cross_device_error(e: &std::io::Error) -> bool {
     e.raw_os_error() == Some(code)
 }
 
-/// Move a file across volumes by copying its bytes and then dropping the
-/// source. Used as the fallback when `rename` reports a cross-device error.
-/// Removing the source is best-effort: once the copy lands, the move has
-/// effectively succeeded, and a lingering staged file is harmless (it is
-/// superseded/cleaned by the next upgrade) — so a locked source must not
-/// fail the upgrade.
+/// Safely and atomically replace `to` with content copied from `from`,
+/// even if `to` is currently being executed as a running Linux/Windows process.
+///
+/// Steps:
+/// 1. Copy `from` to a temporary sibling file in `to`'s directory (`.atomcode.tmp-<pid>-<nanos>`).
+/// 2. On Unix, ensure the temporary file has 0o755 executable permissions.
+/// 3. Atomically rename the temporary file over `to` using `robust_rename`.
+///    On Unix, `rename(2)` replaces the directory entry (dentry) while existing
+///    running processes hold onto the old inode, avoiding ETXTBSY (errno 26).
+///    On Windows, `robust_rename` handles transient AV/indexer holds.
+/// 4. If renaming fails, clean up the temporary file and return the error.
+pub fn atomic_copy_replace(from: &Path, to: &Path) -> std::io::Result<()> {
+    let parent = to.parent().unwrap_or_else(|| Path::new("."));
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.subsec_nanos())
+        .unwrap_or(0);
+    let tmp_dest = parent.join(format!(".atomcode.tmp-{}-{}", std::process::id(), nanos));
+
+    // Ensure clean state before copy
+    let _ = std::fs::remove_file(&tmp_dest);
+
+    std::fs::copy(from, &tmp_dest)?;
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if let Ok(meta) = std::fs::metadata(&tmp_dest) {
+            let mut perm = meta.permissions();
+            perm.set_mode(0o755);
+            let _ = std::fs::set_permissions(&tmp_dest, perm);
+        }
+    }
+
+    match robust_rename(&tmp_dest, to) {
+        Ok(()) => Ok(()),
+        Err(e) => {
+            let _ = std::fs::remove_file(&tmp_dest);
+            Err(e)
+        }
+    }
+}
+
+/// Move a file across volumes by copying its bytes via atomic replacement and
+/// then dropping the source. Used as the fallback when `rename` reports a
+/// cross-device error.
 fn copy_across_devices(from: &Path, to: &Path) -> std::io::Result<()> {
-    std::fs::copy(from, to)?;
+    atomic_copy_replace(from, to)?;
     let _ = std::fs::remove_file(from);
     Ok(())
 }
 
-/// Put `new_bin` in place of `exe`, keeping the previous `exe` as `.bak`.
-///
-/// Uses a **three-way swap** to avoid ever needing to delete `.bak` as a
-/// prerequisite — the old approach of "delete .bak, then rename exe→.bak"
-/// could fail on Windows when `.bak` is locked (AV scanner, read-only
-/// attribute, still-running process). The swap sequence is:
-///
-///   1. `exe` → `.rolling`      (Windows allows renaming a running exe)
-///   2. `new_bin` → `exe`        (install new version)
-///   3. best-effort: delete old `.bak`
-///   4. `.rolling` → `.bak`      (preserve old version for rollback)
-///
-/// Steps 1–2 are the critical path; steps 3–4 are best-effort cleanup.
-/// If step 4 fails (e.g. old `.bak` is still locked), the upgrade still
-/// succeeds — the `.rolling` file is left behind and will be cleaned up
-/// on the next upgrade attempt.
-///
-/// On Unix, `rename(2)` within a directory is atomic; on Windows, an
-/// exe currently being executed can be renamed (but not deleted), so
-/// the same sequence works.
 /// Keep `atomcode` and `jeikcode` as the same binary. After replacing one,
-/// copy it to the sibling name in the same directory (best-effort).
+/// atomically replace the sibling name in the same directory (best-effort).
+/// Uses `atomic_copy_replace` so that if the sibling alias is currently
+/// running as a background service/process, it won't fail with ETXTBSY.
 fn sync_cli_alias(exe: &Path) {
     let Some(stem) = exe.file_stem().and_then(|s| s.to_str()) else {
         return;
@@ -598,7 +620,7 @@ fn sync_cli_alias(exe: &Path) {
     if let Some(ext) = exe.extension() {
         dest.set_extension(ext);
     }
-    let _ = std::fs::copy(exe, &dest);
+    let _ = atomic_copy_replace(exe, &dest);
 }
 
 fn replace_binary(new_bin: &Path, exe: &Path) -> Result<()> {

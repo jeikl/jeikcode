@@ -137,6 +137,10 @@ impl StdioClient {
             .stderr(Stdio::null())
             .kill_on_drop(true);
 
+        crate::process_utils::apply_enriched_path_env(&mut cmd);
+        #[cfg(unix)]
+        crate::process_utils::apply_utf8_locale_env(&mut cmd);
+
         for (key, value) in &self.env {
             cmd.env(key, value);
         }

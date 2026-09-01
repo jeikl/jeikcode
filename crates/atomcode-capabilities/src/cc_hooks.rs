@@ -294,6 +294,7 @@ async fn run_command_hook(
     use tokio::io::AsyncWriteExt;
 
     let mut cmd = shell_command(&hook.command);
+    crate::process_utils::apply_enriched_path_env(&mut cmd);
     #[cfg(unix)]
     crate::process_utils::apply_utf8_locale_env(&mut cmd);
     cmd.stdin(Stdio::piped())

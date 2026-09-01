@@ -436,7 +436,7 @@ async fn run_serve_mode(
         (None, None)
     } else {
         let store = atomcode_daemon::auth_token::WebuiTokenStore::new();
-        let display = if let Some(fixed) = fixed_token {
+        let display = if let Some(ref fixed) = fixed_token {
             let fixed = fixed.trim().to_string();
             if fixed.is_empty() {
                 eprintln!("serve: --token must not be empty");
@@ -460,8 +460,9 @@ async fn run_serve_mode(
             "serve: --yolo: auto-approve all tools; request_user_input tool hidden; no modal stalls"
         );
     }
-    let res = atomcode_daemon::run_server(atomcode_daemon::ServerOpts {
-        host,
+
+    let server_task = tokio::spawn(atomcode_daemon::run_server(atomcode_daemon::ServerOpts {
+        host: host.clone(),
         port,
         cli_override: CliOverride {
             disabled: no_telemetry,
@@ -470,18 +471,86 @@ async fn run_serve_mode(
         startup_mode: atomcode_telemetry::SessionMode::Webui,
         webui_tokens: tokens,
         quiet: false,
-        working_dir_override: Some(workdir),
+        working_dir_override: Some(workdir.clone()),
         prebound_listener: None,
         app_user_id: None,
-        startup_footer: Some(startup_footer),
+        startup_footer: Some(startup_footer.clone()),
         yolo,
-    })
-    .await;
-    if let Err(e) = res {
-        eprintln!("Fatal: serve error: {e:#}");
-        return 1;
+    }));
+
+    // Give the server task a brief moment to bind the listener and print the banner
+    tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+
+    if server_task.is_finished() {
+        // If server failed during initial bind/startup, return its error immediately
+        match server_task.await {
+            Ok(Err(e)) => {
+                eprintln!("Fatal: serve error: {e:#}");
+                return 1;
+            }
+            Err(e) => {
+                eprintln!("Fatal: server task error: {e:#}");
+                return 1;
+            }
+            _ => return 0,
+        }
     }
-    0
+
+    #[cfg(target_os = "linux")]
+    {
+        use is_terminal::IsTerminal;
+        if std::io::stdin().is_terminal() && atomcode::systemd::is_systemd_available() {
+            let server_handle = server_task.abort_handle();
+            let banner_clone = startup_footer.clone();
+            let prompt_res = atomcode::systemd::prompt_systemd_setup(
+                &host,
+                port,
+                &workdir,
+                no_token,
+                fixed_token.as_deref(),
+                display_token.as_deref(),
+                yolo,
+                no_telemetry,
+                &banner_clone,
+                move || {
+                    // Abort foreground server to release port for systemd daemon
+                    server_handle.abort();
+                },
+            )
+            .await;
+
+            match prompt_res {
+                Ok(true) => {
+                    // Successfully configured systemd service and handed off
+                    let _ = server_task.await;
+                    return 0;
+                }
+                Ok(false) => {
+                    // User chose to continue in foreground
+                }
+                Err(_) => {
+                    // Systemd setup encountered error, user was alerted; continue in foreground
+                }
+            }
+        }
+    }
+
+    // Wait for foreground server task to exit (e.g. on Ctrl+C or fatal error)
+    match server_task.await {
+        Ok(Ok(())) => 0,
+        Ok(Err(e)) => {
+            eprintln!("Fatal: serve error: {e:#}");
+            1
+        }
+        Err(e) => {
+            if e.is_cancelled() {
+                0
+            } else {
+                eprintln!("Fatal: server task joined with error: {e:#}");
+                1
+            }
+        }
+    }
 }
 
 /// Truncate a string to at most `max_chars` *characters* (not bytes), replacing

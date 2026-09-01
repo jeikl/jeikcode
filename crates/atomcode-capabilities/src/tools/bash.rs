@@ -12,8 +12,9 @@
 //! destructive git, remote-script-piped-to-shell, …); everything else is `Safe`.
 
 use super::bash_runtime::{
-    decision_prompt, new_bashid, register_live_bash, unregister_live_bash, LiveBash,
-    KILLED_BY_TOOL_MARK,
+    add_live_long_keyword, classify_idle, decision_prompt, is_generic_long_keyword, new_bashid,
+    register_live_bash, tree_is_busy, unregister_live_bash, IdleAction, LiveBash,
+    KILLED_BY_TOOL_MARK, PROMOTED_MARK,
 };
 use super::{err, ok};
 use async_trait::async_trait;
@@ -279,11 +280,14 @@ impl Tool for BashTool {
         let last_byte = std::sync::Arc::new(std::sync::Mutex::new(Instant::now()));
         let idle = agent_bash_idle_timeout(&effective_command, bash_cfg.silent_kill_secs);
         let idle_note_secs = idle.map(|d| d.as_secs()).unwrap_or(0);
+        let started_short = idle.is_some();
         let bashid = new_bashid();
+        let second_levell_secs = agent_second_level_secs(bash_cfg.second_levell_secs);
         let live = Arc::new(LiveBash {
             bashid: bashid.clone(),
             command: effective_command.clone(),
             promoted: AtomicBool::new(idle.is_none()),
+            second_level: AtomicBool::new(false),
             kill: tokio_util::sync::CancellationToken::new(),
             progress: progress.clone(),
         });
@@ -314,13 +318,24 @@ impl Tool for BashTool {
         }
 
         let driven: Drive = loop {
-            let idle_enabled = idle.is_some() && !live.promoted.load(Ordering::SeqCst);
-            let until_idle = if idle_enabled {
+            let promoted_now = live.promoted.load(Ordering::SeqCst);
+            let second_now = live.second_level.load(Ordering::SeqCst);
+            let idle_window = if !started_short {
+                None
+            } else if (promoted_now || second_now) && second_levell_secs > 0 {
+                Some(Duration::from_secs(second_levell_secs))
+            } else if promoted_now || second_now {
+                None
+            } else {
+                idle
+            };
+            let idle_enabled = idle_window.is_some();
+            let until_idle = if let Some(win) = idle_window {
                 let elapsed = last_byte
                     .lock()
                     .unwrap_or_else(|e| e.into_inner())
                     .elapsed();
-                idle.unwrap().saturating_sub(elapsed)
+                win.saturating_sub(elapsed)
             } else {
                 Duration::from_secs(86400)
             };
@@ -392,26 +407,81 @@ impl Tool for BashTool {
                     });
                 }
                 _ = tokio::time::sleep(until_idle), if idle_enabled => {
-                    if !has_output() {
-                        #[cfg(windows)]
-                        crate::process_utils::kill_windows_tree(&job_guard, child_pid);
-                        #[cfg(not(target_os = "windows"))]
-                        if let Some(pgid) = child_pid {
-                            unsafe { killpg(pgid as i32, SIGKILL) };
+                    #[cfg(windows)]
+                    let busy = tree_is_busy(child_pid, &job_guard).await;
+                    #[cfg(not(windows))]
+                    let busy = tree_is_busy(child_pid).await;
+                    let resident = looks_like_resident_service(&effective_command);
+                    match classify_idle(has_output(), busy, resident) {
+                        IdleAction::AutoPromote => {
+                            live.promoted.store(true, Ordering::SeqCst);
+                            let kw = suggested_long_keyword(&effective_command);
+                            if !is_generic_long_keyword(&kw) {
+                                add_live_long_keyword(&kw);
+                            }
+                            *last_byte.lock().unwrap_or_else(|e| e.into_inner()) = Instant::now();
+                            progress.emit(format!("{PROMOTED_MARK} keyword={kw} (cpu busy)\n"));
                         }
-                        unregister_live_bash(&bashid);
-                        let (out, errb) = snapshot();
-                        break Drive::Result(err(with_note(
-                            &out,
-                            &errb,
-                            &format!(
-                                "bash: no new output for {idle_note_secs}s (config silent_kill_secs); \
-                                 treated as stuck (pager, follow/watch, REPL, or waiting for a key). \
-                                 Captured output is above. Do not retry the same blocking command."
-                            ),
-                        )));
+                        IdleAction::KillStuck => {
+                            let already_second = live.second_level.swap(true, Ordering::SeqCst);
+                            if has_output()
+                                && second_levell_secs > 0
+                                && !already_second
+                                && !live.promoted.load(Ordering::SeqCst)
+                            {
+                                *last_byte.lock().unwrap_or_else(|e| e.into_inner()) =
+                                    Instant::now();
+                                progress.emit(format!(
+                                    "[bash second-level idle {second_levell_secs}s] \
+                                     output already seen; giving a silent compile a chance to start.\n"
+                                ));
+                            } else if has_output()
+                                && !live.promoted.load(Ordering::SeqCst)
+                            {
+                                break Drive::Yield;
+                            } else {
+                            #[cfg(windows)]
+                            crate::process_utils::kill_windows_tree(&job_guard, child_pid);
+                            #[cfg(not(target_os = "windows"))]
+                            if let Some(pgid) = child_pid {
+                                unsafe { killpg(pgid as i32, SIGKILL) };
+                            }
+                            unregister_live_bash(&bashid);
+                            let (out, errb) = snapshot();
+                            break Drive::Result(err(with_note(
+                                &out,
+                                &errb,
+                                &format!(
+                                    "bash: no new output for {idle_note_secs}s and the process is idle \
+                                     (pager, follow/watch, REPL, or waiting for a key). \
+                                     Captured output is above. Do not retry the same blocking command. \
+                                     Resident services must be started detached (nohup/systemd/docker -d)."
+                                ),
+                            )));
+                            }
+                        }
+                        IdleAction::KillResident => {
+                            #[cfg(windows)]
+                            crate::process_utils::kill_windows_tree(&job_guard, child_pid);
+                            #[cfg(not(target_os = "windows"))]
+                            if let Some(pgid) = child_pid {
+                                unsafe { killpg(pgid as i32, SIGKILL) };
+                            }
+                            unregister_live_bash(&bashid);
+                            let (out, errb) = snapshot();
+                            break Drive::Result(err(with_note(
+                                &out,
+                                &errb,
+                                "bash: this looks like a resident service (web server / proxy / compose without -d). \
+                                 Do not run it in the foreground and do not long_bash_keyword_actions. \
+                                 Start it detached (`nohup … &`, `systemctl start`, `docker run -d`) \
+                                 then probe with ss/curl/systemctl is-active.",
+                            )));
+                        }
+                        IdleAction::AwaitDecision => {
+                            break Drive::Yield;
+                        }
                     }
-                    break Drive::Yield;
                 }
                 _ = tokio::time::sleep(until_hard) => {
                     #[cfg(windows)]
@@ -437,7 +507,12 @@ impl Tool for BashTool {
             Drive::Result(r) => r,
             Drive::Yield => {
                 let suggested = suggested_long_keyword(&effective_command);
-                let prompt = decision_prompt(&bashid, idle_note_secs, &suggested);
+                let prompt = decision_prompt(
+                    &bashid,
+                    idle_note_secs,
+                    second_levell_secs,
+                    &suggested,
+                );
                 progress.emit(format!("{prompt}\n"));
                 let (out, errb) = snapshot();
                 let body = with_note(&out, &errb, &prompt);
@@ -608,10 +683,12 @@ fn shell_tool_description(
              key or Ctrl+C — they hang the tool even after the useful output is printed. \
              Use one-shot flags (`--no-pager`, `-n`, `-c`, `--batch`) and \
              `systemctl is-active`/`show` or `ss`/`lsof` for ports. Never chain a \
-             blocking command with later steps in one call. Short commands that go \
-             silent after printing yield `[bash-await-decision]` with a bashid — \
-             promote with `long_bash_keyword_add` or stop with `bash_kill_by_id`. \
-             No output at all is idle-killed after config `silent_kill_secs`. \
+             blocking command with later steps in one call. Short commands idle after \
+             config `silent_kill_secs`: CPU-busy work is auto-promoted to a batch job; \
+             disk/network IO is NOT auto-promoted and takes the `second_levell_secs` \
+             grace, then `[bash-await-decision]` so you can kill or temporarily upgrade. \
+             A silent idle with no output is killed (pager/REPL). \
+             Resident servers (uvicorn/nginx/npm run dev) must be started detached. \
              Compile/test families wait on `max_timeout_secs`."
         };
     }
@@ -2995,7 +3072,7 @@ pub(crate) fn looks_like_long_job(command: &str) -> bool {
     })
 }
 
-/// First non-probe token the model should pass to `long_bash_keyword_add`.
+/// First non-probe token the model should pass to `long_bash_keyword_actions`.
 pub(crate) fn suggested_long_keyword(command: &str) -> String {
     if let Some(invs) = bash_invocations(command) {
         for inv in invs {
@@ -3015,6 +3092,87 @@ pub(crate) fn suggested_long_keyword(command: &str) -> String {
         .unwrap_or_else(|| "unknown".to_string())
 }
 
+const RESIDENT_BINS: &[&str] = &[
+    "uvicorn",
+    "gunicorn",
+    "hypercorn",
+    "daphne",
+    "nginx",
+    "caddy",
+    "haproxy",
+    "httpd",
+    "apache2",
+    "openresty",
+    "frps",
+    "frpc",
+    "ngrok",
+    "cloudflared",
+];
+
+fn has_detach_flag(args: &[String]) -> bool {
+    args.iter()
+        .any(|a| matches!(arg_word(a), "-d" | "--detach" | "--detached"))
+}
+
+fn invocation_is_resident(inv: &BashInvocation) -> bool {
+    let bin = command_basename(&inv.command);
+    if RESIDENT_BINS.contains(&bin.as_str()) {
+        return true;
+    }
+    match bin.as_str() {
+        "python" | "python3" | "py" => inv.arguments.windows(2).any(|w| {
+            arg_word(&w[0]) == "-m"
+                && matches!(
+                    arg_word(&w[1]),
+                    "http.server" | "uvicorn" | "gunicorn" | "hypercorn" | "daphne"
+                )
+        }),
+        "npm" | "pnpm" | "yarn" | "bun" => {
+            let words = non_flag_words(&inv.arguments);
+            if words.first().copied() == Some("start") {
+                return true;
+            }
+            if let Some(i) = words.iter().position(|w| matches!(*w, "run" | "run-script"))
+            {
+                return is_dev_server_script(words.get(i + 1).copied().unwrap_or(""));
+            }
+            words.first().is_some_and(|w| is_dev_server_script(w))
+        }
+        "vite" => non_flag_words(&inv.arguments).first().copied() != Some("build"),
+        "docker" | "podman" => {
+            if has_detach_flag(&inv.arguments) {
+                return false;
+            }
+            let words = non_flag_words(&inv.arguments);
+            let cmd = if words.first().copied() == Some("compose") {
+                words.get(1).copied()
+            } else {
+                words.first().copied()
+            };
+            matches!(cmd, Some("up" | "run"))
+        }
+        "docker-compose" => {
+            !has_detach_flag(&inv.arguments)
+                && matches!(
+                    non_flag_words(&inv.arguments).first().copied(),
+                    Some("up" | "run")
+                )
+        }
+        "php" => inv.arguments.iter().any(|a| arg_word(a) == "-S"),
+        _ => false,
+    }
+}
+
+/// Foreground servers / watchers that must not occupy the bash tool.
+pub(crate) fn looks_like_resident_service(command: &str) -> bool {
+    if let Some(invs) = bash_invocations(command) {
+        return invs.iter().any(invocation_is_resident);
+    }
+    command.split_whitespace().any(|tok| {
+        RESIDENT_BINS.contains(&command_basename(tok).as_str())
+    })
+}
+
 /// Idle budget for agent `bash` / `!cmd` short commands from
 /// `[tools.bash] silent_kill_secs`. Long compile/install subcommands skip it.
 /// Unknown binaries are short. `silent_kill_secs = 0` disables.
@@ -3032,6 +3190,14 @@ fn idle_for_command(command: &str, silent_kill_secs: u64) -> Option<Duration> {
     } else {
         Some(Duration::from_secs(silent_kill_secs))
     }
+}
+
+fn agent_second_level_secs(configured: u64) -> u64 {
+    #[cfg(test)]
+    if let Some(over) = test_agent_idle_secs() {
+        return over;
+    }
+    configured
 }
 
 #[cfg(test)]
@@ -3993,6 +4159,20 @@ mod tests {
         assert!(!super::looks_like_long_job("python3 -m http.server"));
         assert!(!super::looks_like_long_job("git log -1 --oneline"));
         assert!(!super::looks_like_long_job("sudo docker ps"));
+    }
+
+    #[test]
+    fn resident_service_signatures() {
+        assert!(super::looks_like_resident_service(
+            "uvicorn app.main:app --host 0.0.0.0 --port 8000"
+        ));
+        assert!(super::looks_like_resident_service("nginx -g 'daemon off;'"));
+        assert!(super::looks_like_resident_service("npm run dev"));
+        assert!(super::looks_like_resident_service("docker compose up"));
+        assert!(!super::looks_like_resident_service("docker compose up -d"));
+        assert!(super::looks_like_resident_service("python -m http.server 8000"));
+        assert!(!super::looks_like_resident_service("docker ps"));
+        assert!(!super::looks_like_resident_service("cargo test"));
     }
 
     #[test]
@@ -5004,14 +5184,14 @@ mod tests {
         );
         assert!(r.is_error, "{}", r.content);
         assert!(
-            r.content.contains("silent_kill_secs") && r.content.contains("stuck"),
+            r.content.contains("process is idle") || r.content.contains("stuck"),
             "idle-kill note missing: {}",
             r.content
         );
     }
 
     #[tokio::test]
-    async fn execute_idle_after_output_yields_decision_instead_of_kill() {
+    async fn execute_idle_after_output_kills_when_cpu_idle() {
         let _guard = super::TestIdleGuard::set(1);
         let d = tempfile::tempdir().unwrap();
         let started = Instant::now();
@@ -5020,33 +5200,34 @@ mod tests {
             .await;
         assert!(
             started.elapsed() < Duration::from_secs(8),
-            "yield should return in ~1s, took {:.1}s",
+            "idle path should return in ~1s, took {:.1}s",
             started.elapsed().as_secs_f64()
         );
-        assert!(!r.is_error, "{}", r.content);
         assert!(
             r.content.contains("ready"),
             "captured output must be kept: {}",
             r.content
         );
+        let killed = r.is_error
+            && (r.content.contains("process is idle")
+                || r.content.contains("stuck")
+                || r.content.contains("resident service"));
+        let asked = r.content.contains(crate::tools::bash_runtime::AWAIT_DECISION_MARK);
         assert!(
-            r.content.contains(crate::tools::bash_runtime::AWAIT_DECISION_MARK)
-                && r.content.contains("bashid:"),
-            "await-decision prompt missing: {}",
+            killed || asked,
+            "0-CPU after output must kill (or await if CPU sample unknown): {}",
             r.content
         );
-        let id = r
-            .content
-            .lines()
-            .find_map(|l| l.strip_prefix("bashid: "))
-            .unwrap_or("")
-            .trim()
-            .to_string();
-        assert!(id.starts_with("b-"), "bashid={id}");
-        assert!(
-            crate::tools::bash_runtime::kill_by_id(&id),
-            "live bash {id} should still be registered"
-        );
+        if asked {
+            let id = r
+                .content
+                .lines()
+                .find_map(|l| l.strip_prefix("bashid: "))
+                .unwrap_or("")
+                .trim()
+                .to_string();
+            let _ = crate::tools::bash_runtime::kill_by_id(&id);
+        }
     }
 
     #[test]

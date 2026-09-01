@@ -8,7 +8,11 @@
 //! Cache-safety: appended once per user turn in [`LifecycleHooks::turn_start`] to the
 //! **BOTTOM of the current real user message**. This keeps one wire-level user block,
 //! avoids role confusion from a separate synthetic user instruction, and remains
-//! append-only across tool-loop rounds.
+//! append-only across tool-loop rounds. An existing date reminder is never rewritten
+//! (keyword list changes land on the *next* user turn only). Session-temp long-bash
+//! keywords are included only when that overlay is non-empty — same empty-hides
+//! lifecycle as the WebUI todo panel. Global `long_bash_command_keyword` is never
+//! injected here.
 //!
 //! The body is wrapped in `<system-reminder>…</system-reminder>` so the model reads it as
 //! INJECTED CONTEXT, not the user's own words (matching `PlanModeReminderHook`'s convention).
@@ -60,16 +64,41 @@ impl StatusReminderHook {
         // (`ctx.max_rounds` stays available to other hooks — e.g. cc-hooks in
         // hooks.rs — it is simply no longer surfaced to the model here.)
         lines.push(format!("Turn round: {}", ctx.round));
+        #[cfg(feature = "tools")]
+        append_session_long_keyword_lines(&mut lines);
         crate::reminder::system_reminder(&lines.join("\n"))
     }
 
     fn render_turn_start(now: DateTime<Local>) -> String {
-        crate::reminder::system_reminder(&format!(
+        crate::reminder::system_reminder(&Self::date_and_session_keywords(now))
+    }
+
+    /// One reminder body: date, then the session long-bash list only when
+    /// that overlay has entries. Never a second `<system-reminder>` wrap.
+    fn date_and_session_keywords(now: DateTime<Local>) -> String {
+        let mut lines = vec![format!(
             "Current date: {} ({})",
             now.format("%Y-%m-%d"),
             now.format("%a")
-        ))
+        )];
+        #[cfg(feature = "tools")]
+        append_session_long_keyword_lines(&mut lines);
+        lines.join("\n")
     }
+}
+
+#[cfg(feature = "tools")]
+fn append_session_long_keyword_lines(lines: &mut Vec<String>) {
+    // Session overlay only. Config.toml `long_bash_command_keyword` is global
+    // and must not appear here. Empty list → omit (same lifecycle as WebUI todos).
+    let kws = crate::tools::bash_runtime::session_long_keywords();
+    if kws.is_empty() {
+        return;
+    }
+    lines.push(format!(
+        "暂存长bash列表：{}（如果长bash运行效果不达预期，可通过 long_bash_keyword_actions action=delete 取消）",
+        kws.join("、")
+    ));
 }
 
 impl Default for StatusReminderHook {
@@ -169,6 +198,92 @@ mod tests {
         assert!(s.contains("Current date"), "date is still carried: {s}");
         assert!(s.contains("Turn round: 2"), "{s}");
         assert!(!s.contains("(max)"), "no countdown ceiling: {s}");
+    }
+
+    #[test]
+    #[cfg(feature = "tools")]
+    fn render_injects_session_long_keywords_when_present() {
+        let prev = crate::tools::bash_runtime::session_long_keywords();
+        crate::tools::bash_runtime::set_live_long_keywords(vec![
+            "ninja".into(),
+            "webpack".into(),
+        ]);
+        let dt = Local
+            .with_ymd_and_hms(2026, 6, 15, 9, 0, 0)
+            .single()
+            .unwrap();
+        let s = StatusReminderHook::render(dt, &ctx(2, 128_000, 1_000));
+        crate::tools::bash_runtime::set_live_long_keywords(prev);
+        assert_eq!(
+            s.matches("<system-reminder>").count(),
+            1,
+            "date and long-bash list must share one reminder: {s}"
+        );
+        assert!(
+            s.contains("Current date: 2026-06-15 (Mon)"),
+            "date stays in the same reminder: {s}"
+        );
+        assert!(
+            s.contains("暂存长bash列表：ninja、webpack")
+                && s.contains("long_bash_keyword_actions")
+                && s.contains("action=delete"),
+            "{s}"
+        );
+    }
+
+    #[test]
+    #[cfg(feature = "tools")]
+    fn render_omits_session_keywords_when_overlay_is_empty() {
+        let prev = crate::tools::bash_runtime::session_long_keywords();
+        crate::tools::bash_runtime::set_live_long_keywords(Vec::new());
+        let dt = Local
+            .with_ymd_and_hms(2026, 6, 15, 9, 0, 0)
+            .single()
+            .unwrap();
+        let s = StatusReminderHook::render(dt, &ctx(2, 128_000, 1_000));
+        crate::tools::bash_runtime::set_live_long_keywords(prev);
+        assert!(s.contains("Current date"), "{s}");
+        assert!(
+            !s.contains("暂存长bash列表"),
+            "empty session overlay must not inject: {s}"
+        );
+    }
+
+    #[tokio::test]
+    #[cfg(feature = "tools")]
+    async fn turn_start_keeps_prefix_stable_when_keywords_appear_later() {
+        let prev = crate::tools::bash_runtime::session_long_keywords();
+        crate::tools::bash_runtime::set_live_long_keywords(Vec::new());
+        let hook = StatusReminderHook::new();
+        let mut convo = Conversation::default();
+        convo.messages = vec![Message::user("你好")];
+        hook.turn_start(&mut convo).await;
+        let first = convo.messages[0].text.clone();
+        assert!(
+            first.starts_with("你好\n\n<system-reminder>\nCurrent date:")
+                && first.matches("<system-reminder>").count() == 1
+                && !first.contains("暂存长bash列表"),
+            "first injection is date-only in one reminder: {first}"
+        );
+
+        crate::tools::bash_runtime::set_live_long_keywords(vec!["ninja".into()]);
+        hook.turn_start(&mut convo).await;
+        assert_eq!(
+            convo.messages[0].text, first,
+            "already-written reminder must not be rewritten (prefix stability)"
+        );
+
+        convo.messages.push(Message::user("下一句"));
+        hook.turn_start(&mut convo).await;
+        let second = &convo.messages[1].text;
+        assert!(
+            second.starts_with("下一句\n\n<system-reminder>\nCurrent date:")
+                && second.contains("暂存长bash列表：ninja")
+                && second.matches("<system-reminder>").count() == 1,
+            "next user turn gets date + list in the same reminder: {second}"
+        );
+        assert_eq!(convo.messages[0].text, first);
+        crate::tools::bash_runtime::set_live_long_keywords(prev);
     }
 
     #[tokio::test]

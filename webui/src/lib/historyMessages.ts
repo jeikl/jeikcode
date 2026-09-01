@@ -20,6 +20,29 @@ export function isInternalHistoryUserMessage(text: string, synthetic?: boolean):
   return INTERNAL_USER_PREFIXES.some((prefix) => trimmed.startsWith(prefix));
 }
 
+/** UI-only: drop appended `<system-reminder>` tails. Protocol context keeps them. */
+export function stripInjectedRemindersForDisplay(text: string): string {
+  const open = '<system-reminder>';
+  const close = '</system-reminder>';
+  let rest = text;
+  let out = '';
+  while (true) {
+    const start = rest.indexOf(open);
+    if (start < 0) {
+      out += rest;
+      break;
+    }
+    out += rest.slice(0, start);
+    const end = rest.indexOf(close, start + open.length);
+    if (end < 0) {
+      out += rest.slice(start);
+      break;
+    }
+    rest = rest.slice(end + close.length);
+  }
+  return out.replace(/\n{3,}/g, '\n\n').trim();
+}
+
 export function isInternalHistoryAssistantMessage(msg: SessionMessage): boolean {
   const internalOrigin = msg.internal_origin ?? msg.internalOrigin;
   return msg.role === 'assistant'
@@ -36,7 +59,9 @@ export function sessionMessagesToMarkdownLines(
     if (msg.role === 'system') continue;
     if (msg.role === 'user') {
       if (isInternalHistoryUserMessage(msg.content || '', msg.synthetic)) continue;
-      lines.push('## User', '', msg.content || '', '');
+      const visible = stripInjectedRemindersForDisplay(msg.content || '');
+      if (!visible) continue;
+      lines.push('## User', '', visible, '');
     } else if (msg.role === 'assistant') {
       if (isInternalHistoryAssistantMessage(msg)) continue;
       lines.push('## Assistant', '');

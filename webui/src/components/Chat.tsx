@@ -90,7 +90,7 @@ import {
   type TodoItem,
 } from '../lib/todos';
 import { displayPath, pathBasename } from '../lib/displayPath';
-import { isInternalHistoryAssistantMessage, isInternalHistoryUserMessage } from '../lib/historyMessages';
+import { isInternalHistoryAssistantMessage, isInternalHistoryUserMessage, stripInjectedRemindersForDisplay } from '../lib/historyMessages';
 import {
   chatRecoveryPolicy,
   classifyChatDone,
@@ -2172,9 +2172,13 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
       if (msg.role === 'user') {
         flushTurnTodos();
         if (isInternalHistoryUserMessage(msg.content ?? '', msg.synthetic)) continue;
+        const visible = stripInjectedRemindersForDisplay(
+          stripVisionAnnotation(msg.content ?? ''),
+        );
+        if (!visible) continue;
         loaded.push({
           role: 'user',
-          parts: [{ kind: 'text', text: stripVisionAnnotation(msg.content ?? '') }],
+          parts: [{ kind: 'text', text: visible }],
           images: msg.images && msg.images.length ? msg.images : undefined,
           ts: msg.created_at,
         });

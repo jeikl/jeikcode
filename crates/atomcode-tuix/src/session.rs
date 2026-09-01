@@ -182,7 +182,7 @@ impl TuiSession {
                 PresentationRole::Assistant => Role::Assistant,
             };
             let text = if role == Role::User {
-                atomcode_capabilities::session::UserWrapHook::unwrap_input_for(
+                atomcode_capabilities::session::user_text_for_display(
                     std::path::Path::new(&view.meta.working_dir),
                     &entry.text,
                 )
@@ -376,6 +376,55 @@ mod tests {
                 .map(|d| d.message.text.as_str())
                 .collect::<Vec<_>>(),
             vec!["已修复"]
+        );
+    }
+
+    #[test]
+    fn catalog_display_messages_strip_reminder_tails_from_user_input() {
+        use atomcode_capabilities::session::presentation::PRESENTATION_VERSION;
+        use atomcode_capabilities::session::{
+            DisplayAnchor, PresentationEntry, PresentationFile, PresentationRole,
+        };
+        let view = atomcode_daemon::legacy_convert::CatalogSessionView {
+            snapshot: SessionSnapshot::new(vec![Message::user(format!(
+                "帮我看下端口\n\n{}",
+                atomcode_capabilities::reminder::system_reminder(
+                    "Current date: 2026-09-01 (Tue)"
+                )
+            ))]),
+            meta: atomcode_capabilities::session::SessionMeta::new(
+                "reminder-tail-session",
+                "/project",
+                1,
+            ),
+            presentation: PresentationFile {
+                v: PRESENTATION_VERSION,
+                entries: vec![PresentationEntry {
+                    anchor: DisplayAnchor::AtStart,
+                    role: PresentationRole::User,
+                    text: format!(
+                        "帮我看下端口\n\n{}",
+                        atomcode_capabilities::reminder::system_reminder(
+                            "Current date: 2026-09-01 (Tue)"
+                        )
+                    ),
+                }],
+            },
+        };
+
+        let session = Session::from_catalog_view(view).unwrap();
+        assert_eq!(
+            session
+                .display_messages
+                .iter()
+                .map(|d| d.message.text.as_str())
+                .collect::<Vec<_>>(),
+            vec!["帮我看下端口"]
+        );
+        assert!(
+            session.messages[0].text.contains("<system-reminder>"),
+            "protocol snapshot must keep the assembled reminder: {}",
+            session.messages[0].text
         );
     }
 

@@ -251,4 +251,14 @@ mod tests {
             "original\n\n<system-reminder>\nCurrent date: 2026-08-27 (Thu)\n</system-reminder>";
         assert_eq!(hook.unwrap_input(stored), "original");
     }
+
+    #[test]
+    fn unwrap_strips_date_and_long_bash_list_in_the_same_reminder() {
+        let temp = TempDir::new().unwrap();
+        let hook = UserWrapHook::new(temp.path());
+        let stored = "你好\n\n<system-reminder>\nCurrent date: 2026-09-01 (Tue)\n\
+暂存长bash列表：ninja（如果长bash运行效果不达预期，可通过 long_bash_keyword_actions action=delete 取消）\n\
+</system-reminder>";
+        assert_eq!(hook.unwrap_input(stored), "你好");
+    }
 }

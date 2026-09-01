@@ -102,7 +102,7 @@ pub fn first_exchange_text_in(messages: &[Message], working_dir: &Path) -> Optio
                 && !atomcode_capabilities::reminder::is_system_reminder(&message.text)
         })
         .map(|message| {
-            atomcode_capabilities::session::UserWrapHook::unwrap_input_for(
+            atomcode_capabilities::session::user_text_for_display(
                 working_dir,
                 &message.text,
             )

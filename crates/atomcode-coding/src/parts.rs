@@ -637,6 +637,10 @@ async fn prepare_with_plugin_hooks_reusing_lease(
     };
 
     if let Some(b) = &session {
+        let keywords = b.manager.load_bash_keywords(&b.id).unwrap_or_default();
+        if let Ok(path) = b.manager.bashkw_path(&b.id) {
+            atomcode_capabilities::tools::bind_session_long_keywords(path, keywords);
+        }
         registry.register(Arc::new(
             RecallTool::new().with_sessions_dir(b.manager.root()),
         ));

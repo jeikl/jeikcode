@@ -1085,6 +1085,12 @@ impl SessionManager {
         self.path_for(id, "ui.json")
     }
 
+    /// Session-scoped temporary long-bash keywords (`persist`/`global=false`).
+    /// Sibling of the snapshot: `<root>/<id>.bashkw.json`.
+    pub fn bashkw_path(&self, id: &str) -> SessionResult<PathBuf> {
+        self.path_for(id, "bashkw.json")
+    }
+
     fn rewind_path(&self, id: &str) -> SessionResult<PathBuf> {
         self.path_for(id, "rewind.json")
     }
@@ -1927,6 +1933,14 @@ impl SessionManager {
             Some(&forked.presentation),
             &forked.meta,
         )?;
+        if let (Ok(src), Ok(dst)) = (
+            self.bashkw_path(source_id),
+            self.bashkw_path(destination_id),
+        ) {
+            if src.is_file() {
+                let _ = fs::copy(&src, &dst);
+            }
+        }
         Ok((forked, destination_lease))
     }
 
@@ -2883,6 +2897,7 @@ impl SessionManager {
             self.jsonl_path(id)?,
             self.presentation_path(id)?,
             self.legacy_path(id)?,
+            self.bashkw_path(id)?,
         ];
         for path in &targets {
             validate_delete_target(path)?;
@@ -2955,6 +2970,40 @@ impl SessionManager {
             Err(SessionStoreError::Corrupt { .. }) => Ok(()),
             Err(error) => Err(error),
         }
+    }
+
+    pub fn load_bash_keywords(&self, id: &str) -> SessionResult<Vec<String>> {
+        let path = self.bashkw_path(id)?;
+        match read_regular_file_bounded(&path, "bash keywords", 64 * 1024) {
+            Ok(bytes) => {
+                #[derive(Deserialize)]
+                struct File {
+                    #[serde(default)]
+                    keywords: Vec<String>,
+                }
+                let file: File = deserialize(&bytes, "bash keywords")?;
+                Ok(file.keywords)
+            }
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(Vec::new()),
+            Err(error) => Err(error),
+        }
+    }
+
+    pub fn save_bash_keywords(&self, id: &str, keywords: &[String]) -> SessionResult<()> {
+        #[derive(Serialize)]
+        struct File<'a> {
+            v: u32,
+            keywords: &'a [String],
+        }
+        let bytes = serde_json::to_vec(&File {
+            v: 1,
+            keywords,
+        })
+        .map_err(|e| SessionStoreError::Corrupt {
+            kind: "bash keywords",
+            message: e.to_string(),
+        })?;
+        atomic_write(&self.bashkw_path(id)?, &bytes)
     }
 }
 
@@ -4205,6 +4254,20 @@ mod tests {
         let loaded = mgr.load_snapshot("s1").unwrap();
         assert_eq!(loaded.messages.len(), 2);
         assert_eq!(loaded.messages[0].text, "hello");
+    }
+
+    #[test]
+    fn bash_keywords_sidecar_round_trips_and_missing_is_empty() {
+        let dir = tempfile::tempdir().unwrap();
+        let mgr = SessionManager::with_root(dir.path());
+        assert!(mgr.load_bash_keywords("s1").unwrap().is_empty());
+        mgr.save_bash_keywords("s1", &["ninja".into(), "webpack".into()])
+            .unwrap();
+        assert_eq!(
+            mgr.load_bash_keywords("s1").unwrap(),
+            vec!["ninja".to_string(), "webpack".to_string()]
+        );
+        assert!(mgr.bashkw_path("s1").unwrap().is_file());
     }
 
     /// Windows 回归测试：transcript 追加必须真实完成 open → lock → append → unlock。

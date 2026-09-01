@@ -126,15 +126,25 @@ pub struct BashToolConfig {
     /// for user `!cmd` / `run_shell`. Agent `bash` has no per-call timeout arg.
     pub max_timeout_secs: u64,
     /// Idle kill for short commands on agent `bash` and user `!cmd`: no new
-    /// stdout/stderr for this many seconds, then kill the tree and return what
-    /// was already printed. Compile/test/install families skip this
-    /// (`looks_like_long_job`) and wait on `max_timeout_secs`. `0` disables.
+    /// stdout/stderr for this many seconds, then sample CPU. Compile/test
+    /// families skip this (`looks_like_long_job`) and wait on `max_timeout_secs`.
+    /// `0` disables first-level idle.
     pub silent_kill_secs: u64,
+    /// Second-level idle (seconds). Used after a short command had output but
+    /// CPU was idle (grace for a following silent compile), and after
+    /// auto-promote. Disk/network IO is not auto-promoted and uses this grace
+    /// then asks the model. `0` skips the grace (output+idle → model decision).
+    #[serde(default = "default_second_levell_secs")]
+    pub second_levell_secs: u64,
     /// Extra command tokens treated as long jobs. Overrides a built-in short
     /// classification (whole-word match on the command line). Hot-reloaded from
-    /// disk; `long_bash_keyword_add` also updates a live overlay immediately.
+    /// disk; `long_bash_keyword_actions` with `global=true` writes here.
     #[serde(default)]
     pub long_bash_command_keyword: Vec<String>,
+}
+
+fn default_second_levell_secs() -> u64 {
+    120
 }
 
 impl Default for BashToolConfig {
@@ -143,6 +153,7 @@ impl Default for BashToolConfig {
             default_timeout_secs: 120,
             max_timeout_secs: 1800,
             silent_kill_secs: 60,
+            second_levell_secs: 120,
             long_bash_command_keyword: Vec::new(),
         }
     }
@@ -206,6 +217,54 @@ pub fn append_long_bash_command_keyword_at(path: &Path, keyword: &str) -> Result
 /// Append to the user `~/.atomcode/config.toml`.
 pub fn append_long_bash_command_keyword(keyword: &str) -> Result<bool> {
     append_long_bash_command_keyword_at(&Config::default_path(), keyword)
+}
+
+/// Remove `keyword` from `[tools.bash] long_bash_command_keyword` in `path`.
+/// Returns `Ok(true)` if something was removed.
+pub fn remove_long_bash_command_keyword_at(path: &Path, keyword: &str) -> Result<bool> {
+    let keyword = keyword.trim();
+    if keyword.is_empty() {
+        anyhow::bail!("bash keyword must not be empty");
+    }
+    if !path.is_file() {
+        return Ok(false);
+    }
+    let contents = std::fs::read_to_string(path)
+        .with_context(|| format!("read {}", path.display()))?;
+    let mut doc = contents
+        .parse::<toml_edit::DocumentMut>()
+        .with_context(|| format!("parse {}", path.display()))?;
+    let Some(arr) = doc
+        .get_mut("tools")
+        .and_then(|t| t.get_mut("bash"))
+        .and_then(|b| b.get_mut("long_bash_command_keyword"))
+        .and_then(|v| v.as_array_mut())
+    else {
+        return Ok(false);
+    };
+    let before = arr.len();
+    let mut i = 0;
+    while i < arr.len() {
+        if arr
+            .get(i)
+            .and_then(|v| v.as_str())
+            .is_some_and(|s| s.eq_ignore_ascii_case(keyword))
+        {
+            arr.remove(i);
+        } else {
+            i += 1;
+        }
+    }
+    if arr.len() == before {
+        return Ok(false);
+    }
+    std::fs::write(path, doc.to_string())
+        .with_context(|| format!("write {}", path.display()))?;
+    Ok(true)
+}
+
+pub fn remove_long_bash_command_keyword(keyword: &str) -> Result<bool> {
+    remove_long_bash_command_keyword_at(&Config::default_path(), keyword)
 }
 
 /// `[tools.timeouts]` — short wall-clock budgets for tools that are NOT spawned-command
@@ -3658,14 +3717,16 @@ context_window = 131072
         assert_eq!(defaulted.tools.bash.default_timeout_secs, 120);
         assert_eq!(defaulted.tools.bash.max_timeout_secs, 1800);
         assert_eq!(defaulted.tools.bash.silent_kill_secs, 60);
+        assert_eq!(defaulted.tools.bash.second_levell_secs, 120);
 
         let configured: Config = toml::from_str(
-            "[tools.bash]\ndefault_timeout_secs = 300\nmax_timeout_secs = 3600\nsilent_kill_secs = 600\n",
+            "[tools.bash]\ndefault_timeout_secs = 300\nmax_timeout_secs = 3600\nsilent_kill_secs = 600\nsecond_levell_secs = 90\n",
         )
         .unwrap();
         assert_eq!(configured.tools.bash.default_timeout_secs, 300);
         assert_eq!(configured.tools.bash.max_timeout_secs, 3600);
         assert_eq!(configured.tools.bash.silent_kill_secs, 600);
+        assert_eq!(configured.tools.bash.second_levell_secs, 90);
         assert!(configured.tools.bash.long_bash_command_keyword.is_empty());
 
         let with_kw: Config = toml::from_str(
@@ -3698,6 +3759,26 @@ context_window = 131072
             cfg.tools.bash.long_bash_command_keyword,
             vec!["ninja".to_string(), "status".to_string()]
         );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn remove_long_bash_keyword_from_file() {
+        let dir = std::env::temp_dir().join(format!(
+            "atomcode-kw-rm-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("config.toml");
+        assert!(append_long_bash_command_keyword_at(&path, "ninja").unwrap());
+        assert!(remove_long_bash_command_keyword_at(&path, "Ninja").unwrap());
+        assert!(!remove_long_bash_command_keyword_at(&path, "ninja").unwrap());
+        let cfg: Config = toml::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert!(cfg.tools.bash.long_bash_command_keyword.is_empty());
         let _ = std::fs::remove_dir_all(&dir);
     }
 

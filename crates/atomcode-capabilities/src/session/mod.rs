@@ -57,6 +57,15 @@ pub use transcript::{ToolRecord, TranscriptHook, TurnRecord, UsageRecord};
 pub use usage_provider::UsageRecordingProvider;
 pub use user_wrap::UserWrapHook;
 
+/// User-facing transcript text: unwrap `user-wrap.md` and drop injected
+/// `<system-reminder>` tails. Provider snapshots keep the assembled form.
+pub fn user_text_for_display(working_dir: &std::path::Path, text: &str) -> String {
+    crate::reminder::strip_injected_reminders_for_display(&UserWrapHook::unwrap_input_for(
+        working_dir,
+        text,
+    ))
+}
+
 /// Current wall-clock as epoch MILLISECONDS, UTC. The single L1 time source the
 /// persistence hooks stamp records with (the kernel stays clock-free).
 pub fn now_ms() -> i64 {

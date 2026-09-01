@@ -1542,7 +1542,7 @@ impl MessageInfo {
         });
         if msg.role == Role::User {
             let cwd = working_dir.unwrap_or_else(|| std::path::Path::new("."));
-            content = atomcode_capabilities::session::UserWrapHook::unwrap_input_for(cwd, &content);
+            content = atomcode_capabilities::session::user_text_for_display(cwd, &content);
             let (display, had_vision_marker) = strip_vision_marker(&content);
             if had_vision_marker {
                 content = display;
@@ -2954,7 +2954,7 @@ fn merge_catalog_session_messages_for_display(
         Vec::with_capacity(runtime_messages.len() + session.presentation.entries.len());
     let unwrap_presentation_text = |role: PresentationRole, text: &str| -> String {
         if role == PresentationRole::User {
-            atomcode_capabilities::session::UserWrapHook::unwrap_input_for(working_dir, text)
+            atomcode_capabilities::session::user_text_for_display(working_dir, text)
         } else {
             text.to_string()
         }

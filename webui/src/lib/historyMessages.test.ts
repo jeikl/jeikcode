@@ -1,7 +1,13 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { isInternalHistoryUserMessage, sessionMessagesToMarkdownLines } from './historyMessages.ts';
+import { isInternalHistoryUserMessage, sessionMessagesToMarkdownLines, stripInjectedRemindersForDisplay } from './historyMessages.ts';
 import type { SessionMessage } from '../api.ts';
+
+test('stripInjectedRemindersForDisplay keeps only the user question', () => {
+  const raw = '帮我看下端口\n\n<system-reminder>\nCurrent date: 2026-09-01 (Tue)\n</system-reminder>';
+  assert.equal(stripInjectedRemindersForDisplay(raw), '帮我看下端口');
+  assert.equal(stripInjectedRemindersForDisplay('plain'), 'plain');
+});
 
 test('isInternalHistoryUserMessage hides synthetic and legacy internal users', () => {
   assert.equal(isInternalHistoryUserMessage('real prompt'), false);

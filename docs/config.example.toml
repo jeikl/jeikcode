@@ -244,7 +244,8 @@ eager = "auto"
 default_timeout_secs = 120
 max_timeout_secs = 1800
 silent_kill_secs = 60
-long_bash_command_keyword = []  # 额外长任务关键字；覆盖内置短分类；add 工具会写入并热更新
+second_levell_secs = 120        # 有输出后的第二档空闲 / 自动升档后的空闲
+long_bash_command_keyword = []  # 额外长任务关键字；覆盖内置短分类；actions 默认会话 sidecar，global=true 才写盘
 
 # 短超时：进程内搜索 / HTTP / skill !cmd / hooks / 权限门文件系统。
 # 不是上面的命令硬寿命。缺省即下列推荐值。

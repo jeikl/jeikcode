@@ -111,6 +111,28 @@ function isInternalHistoryUserMessage(text: string, synthetic?: boolean): boolea
   return INTERNAL_USER_PREFIXES.some((prefix) => trimmed.startsWith(prefix));
 }
 
+function stripInjectedRemindersForDisplay(text: string): string {
+  const open = '<system-reminder>';
+  const close = '</system-reminder>';
+  let rest = text;
+  let out = '';
+  while (true) {
+    const start = rest.indexOf(open);
+    if (start < 0) {
+      out += rest;
+      break;
+    }
+    out += rest.slice(0, start);
+    const end = rest.indexOf(close, start + open.length);
+    if (end < 0) {
+      out += rest.slice(start);
+      break;
+    }
+    rest = rest.slice(end + close.length);
+  }
+  return out.replace(/\n{3,}/g, '\n\n').trim();
+}
+
 function internalOriginOf(message: { internal_origin?: string; internalOrigin?: string }): string | undefined {
   return message.internal_origin ?? message.internalOrigin;
 }
@@ -1072,8 +1094,11 @@ function chatReducerInner(state: ChatState, action: ChatAction): ChatState {
           continue;
         }
         const { displayText: userVisibleText, hadVisionMarker } = role === 'user'
-          ? stripVisionPreprocessText(rawText)
+          ? stripVisionPreprocessText(stripInjectedRemindersForDisplay(rawText))
           : { displayText: rawText, hadVisionMarker: false };
+        if (role === 'user' && !userVisibleText) {
+          continue;
+        }
 
         // User messages may contain inline file content from the send path.
         // Parse it out into contextFiles so the UI shows attachment pills

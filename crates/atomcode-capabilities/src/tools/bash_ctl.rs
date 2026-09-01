@@ -1,9 +1,12 @@
-//! `long_bash_keyword_add` and `bash_kill_by_id` — model-facing controls for a
-//! short bash that printed then went silent. Both are parallel-safe so they
-//! complete independently of the original (still-running) bash pane.
+//! `long_bash_keyword_actions` / `bash_kill_by_id`.
+//!
+//! `action=add` with `global=false` (default) writes the session sidecar
+//! (`<id>.bashkw.json`) so a JeikCode restart + `/resume` still sees it.
+//! `global=true` also appends `[tools.bash] long_bash_command_keyword`.
 
 use super::bash_runtime::{
-    add_live_long_keyword, kill_by_id, live_long_keywords, promote_matching, set_live_long_keywords,
+    add_live_long_keyword, kill_by_id, live_long_keywords, promote_matching,
+    remove_live_long_keyword, session_long_keywords,
 };
 use super::{err, ok};
 use async_trait::async_trait;
@@ -12,37 +15,54 @@ use serde::Deserialize;
 use serde_json::json;
 
 #[derive(Default)]
-pub struct LongBashKeywordAddTool;
+pub struct LongBashKeywordActionsTool;
 
 #[derive(Deserialize)]
-struct AddArgs {
-    bashkeyword: String,
+struct ActionsArgs {
+    action: String,
+    #[serde(alias = "bashkeyword")]
+    keyword: String,
+    #[serde(default, alias = "persist")]
+    global: bool,
 }
 
 #[async_trait]
-impl Tool for LongBashKeywordAddTool {
+impl Tool for LongBashKeywordActionsTool {
     fn name(&self) -> &str {
-        "long_bash_keyword_add"
+        "long_bash_keyword_actions"
     }
     fn description(&self) -> &str {
-        "Add one bash command keyword to `[tools.bash] long_bash_command_keyword` \
-         (deduped, case-insensitive) and hot-reload it so matching live bash tasks \
-         are promoted to long jobs immediately — even if they are already running. \
-         Use this when a short bash printed output then went silent and you received \
-         `[bash-await-decision]` with a bashid. Pass the unknown long-job token \
-         (compiler, bundler, script name), not the bashid. Output stays on the \
-         original bash pane."
+        "Add or delete a bash long-job keyword. action=add treats one command token \
+         as a batch compile/install/test job and immediately promotes matching live \
+         bash tasks. action=delete removes it. Default global=false writes this \
+         session only (survives JeikCode restart when you resume the same session; \
+         does NOT edit config.toml). global=true also updates \
+         `[tools.bash] long_bash_command_keyword` for every future session. \
+         Pass the token (ninja, webpack, mvn), NOT the bashid. Do NOT use this \
+         for resident services (uvicorn, nginx, npm run dev) — start those detached. \
+         Prefer bash_kill_by_id after a network/disk IO timeout. Output of add/delete \
+         stays on the original bash pane."
     }
     fn parameters_schema(&self) -> serde_json::Value {
         json!({
             "type": "object",
             "properties": {
-                "bashkeyword": {
+                "action": {
                     "type": "string",
-                    "description": "One command token to treat as a long job (e.g. ninja, webpack, mvn). Whole-word match; overrides a built-in short classification."
+                    "enum": ["add", "delete"],
+                    "description": "add: treat keyword as a long job. delete: stop treating it as one."
+                },
+                "keyword": {
+                    "type": "string",
+                    "description": "One command token (e.g. ninja, webpack, mvn). Whole-word match."
+                },
+                "global": {
+                    "type": "boolean",
+                    "default": false,
+                    "description": "If true, also write/delete the keyword in config.toml. Default false (this session only)."
                 }
             },
-            "required": ["bashkeyword"]
+            "required": ["action", "keyword"]
         })
     }
     fn risk(&self, _args: &str) -> RiskLevel {
@@ -52,41 +72,88 @@ impl Tool for LongBashKeywordAddTool {
         true
     }
     async fn execute(&self, args: &str, _ctx: &ToolContext) -> ToolResult {
-        let a: AddArgs = match serde_json::from_str(args) {
+        let a: ActionsArgs = match serde_json::from_str(args) {
             Ok(a) => a,
             Err(e) => {
                 return err(format!(
-                    "long_bash_keyword_add: invalid arguments: {e}. Expected {{\"bashkeyword\":\"<token>\"}}."
+                    "long_bash_keyword_actions: invalid arguments: {e}. \
+                     Expected {{\"action\":\"add|delete\",\"keyword\":\"<token>\"}}."
                 ))
             }
         };
-        let keyword = a.bashkeyword.trim();
+        let action = a.action.trim().to_ascii_lowercase();
+        let keyword = a.keyword.trim();
         if keyword.is_empty() {
-            return err("long_bash_keyword_add: bashkeyword must not be empty");
+            return err("long_bash_keyword_actions: keyword must not be empty");
         }
+        match action.as_str() {
+            "add" => execute_add(keyword, a.global),
+            "delete" | "remove" => execute_delete(keyword, a.global),
+            other => err(format!(
+                "long_bash_keyword_actions: unknown action `{other}`. Use add or delete."
+            )),
+        }
+    }
+}
+
+fn execute_add(keyword: &str, global: bool) -> ToolResult {
+    add_live_long_keyword(keyword);
+    let promoted = promote_matching(keyword);
+    if global {
         match atomcode_config::config::append_long_bash_command_keyword(keyword) {
-            Ok(inserted) => {
-                add_live_long_keyword(keyword);
-                let mut merged = live_long_keywords();
-                if !merged.iter().any(|k| k.eq_ignore_ascii_case(keyword)) {
-                    merged.push(keyword.to_string());
-                }
-                set_live_long_keywords(merged);
-                let promoted = promote_matching(keyword);
+            Ok(inserted) => ok(format!(
+                "session keyword `{keyword}` on; global={} (new on disk); \
+                 promoted {promoted} live bash task(s). Original pane keeps streaming. \
+                 Session list: {}",
                 if inserted {
-                    ok(format!(
-                        "added keyword `{keyword}` to long_bash_command_keyword; \
-                         promoted {promoted} live bash task(s). Original pane keeps streaming."
-                    ))
+                    "written"
                 } else {
-                    ok(format!(
-                        "keyword `{keyword}` already in long_bash_command_keyword; \
-                         promoted {promoted} live bash task(s)."
-                    ))
-                }
-            }
-            Err(e) => err(format!("long_bash_keyword_add: failed to write config: {e}")),
+                    "already in config"
+                },
+                session_list_preview()
+            )),
+            Err(e) => err(format!(
+                "session keyword `{keyword}` on and promoted {promoted} task(s), \
+                 but failed to persist config: {e}"
+            )),
         }
+    } else {
+        ok(format!(
+            "session keyword `{keyword}` on (not written to config.toml; \
+             kept with this session across JeikCode restart). \
+             promoted {promoted} live bash task(s). Pass global=true to keep it for every session. \
+             Original pane keeps streaming. Keywords now: {}",
+            live_long_keywords().join(", ")
+        ))
+    }
+}
+
+fn execute_delete(keyword: &str, global: bool) -> ToolResult {
+    let session = remove_live_long_keyword(keyword);
+    if global {
+        match atomcode_config::config::remove_long_bash_command_keyword(keyword) {
+            Ok(disk) => ok(format!(
+                "removed `{keyword}` from session={session} config={disk}."
+            )),
+            Err(e) => err(format!(
+                "removed `{keyword}` from session={session}, but config write failed: {e}"
+            )),
+        }
+    } else {
+        ok(format!(
+            "removed `{keyword}` from session overlay={session}. \
+             Pass global=true to also edit config.toml. Session list: {}",
+            session_list_preview()
+        ))
+    }
+}
+
+fn session_list_preview() -> String {
+    let v = session_long_keywords();
+    if v.is_empty() {
+        "(empty)".to_string()
+    } else {
+        v.join("、")
     }
 }
 
@@ -104,10 +171,11 @@ impl Tool for BashKillByIdTool {
         "bash_kill_by_id"
     }
     fn description(&self) -> &str {
-        "Stop a still-running bash task by its bashid (from `[bash-await-decision]`). \
-         The original bash pane prints `[task was canceled by bash kill tool]`. \
-         Do not start a new bash for the same command; this is the cancel path \
-         after a short command went silent with output."
+        "Stop a still-running bash task by its bashid (from `[bash-await-decision]` \
+         or a live pane). The original bash pane prints \
+         `[task was canceled by bash kill tool]`. Do not start a replacement bash. \
+         Not for stopping detached resident services — use kill/systemctl/docker stop. \
+         Prefer this after a network/disk IO idle timeout."
     }
     fn parameters_schema(&self) -> serde_json::Value {
         json!({

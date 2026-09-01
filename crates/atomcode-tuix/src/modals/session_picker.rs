@@ -755,7 +755,13 @@ pub(crate) fn replay_session(
         }
         match m.role {
             Role::User if is_real_user_message(m) => {
-                renderer.render(UiLine::User(m.text.clone()));
+                let shown = atomcode_capabilities::session::user_text_for_display(
+                    &session.working_dir,
+                    &m.text,
+                );
+                if !shown.is_empty() {
+                    renderer.render(UiLine::User(shown));
+                }
             }
             // A kernel assistant message carries flat `text` + `tool_calls`
             // (empty for a pure text reply). Render the prose first, then each

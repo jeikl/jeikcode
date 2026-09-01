@@ -230,7 +230,8 @@ eager = "auto"                  # auto | preferred | always
 [tools.bash]
 default_timeout_secs = 120      # 仅 !cmd 默认墙钟
 max_timeout_secs = 1800         # 所有 spawn 命令的工具共用硬寿命（秒）
-silent_kill_secs = 60           # 仅 !cmd 短命令空闲杀
+silent_kill_secs = 60           # 第一档探测空闲
+second_levell_secs = 120        # 第二档：有输出后的宽限 / 升档后空闲。磁盘/网络 IO 不自动升长任务，二轮后交给模型杀或临时升级
 
 [tools.timeouts]
 search_secs = 72                # grep / glob（Grok WSL 60s +20%）

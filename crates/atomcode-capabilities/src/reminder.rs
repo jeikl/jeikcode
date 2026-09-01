@@ -35,6 +35,57 @@ pub fn is_system_reminder(text: &str) -> bool {
     text.trim_start().starts_with(&opening)
 }
 
+/// Strip assembly-layer `<system-reminder>…</system-reminder>` blocks from a
+/// user message for **UI display only**.
+///
+/// The date / session-keyword reminder is appended to the real user block so
+/// provider context stays one wire-level user turn (prefix-stable). Snapshot
+/// and the three protocol adapters keep that assembled text. TUI / WebUI
+/// replay must show only the user's own input.
+pub fn strip_injected_reminders_for_display(text: &str) -> String {
+    let open = format!("<{SYSTEM_REMINDER_TAG}>");
+    let close = format!("</{SYSTEM_REMINDER_TAG}>");
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(start) = rest.find(&open) {
+        out.push_str(&rest[..start]);
+        let after_open = start + open.len();
+        match rest[after_open..].find(&close) {
+            Some(rel_end) => {
+                rest = &rest[after_open + rel_end + close.len()..];
+            }
+            None => {
+                out.push_str(&rest[start..]);
+                rest = "";
+                break;
+            }
+        }
+    }
+    out.push_str(rest);
+    collapse_display_whitespace(&out)
+}
+
+fn collapse_display_whitespace(text: &str) -> String {
+    let trimmed = text.trim();
+    let mut out = String::with_capacity(trimmed.len());
+    let mut blank = false;
+    for line in trimmed.lines() {
+        if line.trim().is_empty() {
+            if !out.is_empty() && !blank {
+                out.push('\n');
+                blank = true;
+            }
+        } else {
+            if !out.is_empty() {
+                out.push('\n');
+            }
+            out.push_str(line.trim_end());
+            blank = false;
+        }
+    }
+    out
+}
+
 /// Insert `item` immediately before the last real (non-synthetic) user message.
 ///
 /// Grok Build sends ambient user blocks first and the `<user_query>` last. Putting
@@ -95,6 +146,31 @@ mod tests {
         assert!(!is_system_reminder("我提到了 <system-reminder> 这个词"));
         assert!(!is_system_reminder("修复登录错误"));
         assert!(!is_system_reminder(""));
+    }
+
+    #[test]
+    fn strip_injected_reminders_keeps_user_input_only() {
+        let raw = format!(
+            "帮我看下端口\n\n{}\n\n{}",
+            system_reminder("Current date: 2026-09-01 (Tue)"),
+            system_reminder("暂存长bash列表：ninja")
+        );
+        assert_eq!(
+            strip_injected_reminders_for_display(&raw),
+            "帮我看下端口"
+        );
+        assert_eq!(
+            strip_injected_reminders_for_display("just the question"),
+            "just the question"
+        );
+        assert_eq!(
+            strip_injected_reminders_for_display(&system_reminder("Current date: x")),
+            ""
+        );
+        assert_eq!(
+            strip_injected_reminders_for_display("我提到了 <system-reminder> 这个词"),
+            "我提到了 <system-reminder> 这个词"
+        );
     }
 
     #[test]

@@ -22921,7 +22921,7 @@ pub(crate) fn apply_session_snapshot(
             .map(|m| m.text.as_str())
             .find(|t| !is_synthetic_user_text(t));
         if let Some(text) = first_real_user {
-            let unwrapped = atomcode_capabilities::session::UserWrapHook::unwrap_input_for(
+            let unwrapped = atomcode_capabilities::session::user_text_for_display(
                 &session.working_dir,
                 text,
             );

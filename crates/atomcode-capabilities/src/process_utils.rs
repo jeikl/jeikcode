@@ -128,6 +128,64 @@ pub fn assign_child_to_kill_on_close_job(child: &tokio::process::Child) -> Optio
     }
 }
 
+/// Sum of user+kernel time in 100ns units for every process in the job, or
+/// `None` if the query fails (caller treats that as unknown busy).
+#[cfg(target_os = "windows")]
+impl JobHandle {
+    pub fn cpu_100ns(&self) -> Option<u64> {
+        use windows_sys::Win32::System::JobObjects::{
+            JobObjectBasicAccountingInformation, QueryInformationJobObject,
+            JOBOBJECT_BASIC_ACCOUNTING_INFORMATION,
+        };
+        let mut info: JOBOBJECT_BASIC_ACCOUNTING_INFORMATION = unsafe { std::mem::zeroed() };
+        let mut ret = 0u32;
+        let ok = unsafe {
+            QueryInformationJobObject(
+                self.0,
+                JobObjectBasicAccountingInformation,
+                &mut info as *mut _ as *mut core::ffi::c_void,
+                std::mem::size_of::<JOBOBJECT_BASIC_ACCOUNTING_INFORMATION>() as u32,
+                &mut ret,
+            )
+        };
+        if ok == 0 {
+            return None;
+        }
+        Some((info.TotalUserTime as u64).saturating_add(info.TotalKernelTime as u64))
+    }
+
+    /// `(cpu_100ns, read+write transfer bytes)` for the whole job.
+    pub fn cpu_and_io(&self) -> Option<(u64, u64)> {
+        use windows_sys::Win32::System::JobObjects::{
+            JobObjectBasicAndIoAccountingInformation, QueryInformationJobObject,
+            JOBOBJECT_BASIC_AND_IO_ACCOUNTING_INFORMATION,
+        };
+        let mut info: JOBOBJECT_BASIC_AND_IO_ACCOUNTING_INFORMATION =
+            unsafe { std::mem::zeroed() };
+        let mut ret = 0u32;
+        let ok = unsafe {
+            QueryInformationJobObject(
+                self.0,
+                JobObjectBasicAndIoAccountingInformation,
+                &mut info as *mut _ as *mut core::ffi::c_void,
+                std::mem::size_of::<JOBOBJECT_BASIC_AND_IO_ACCOUNTING_INFORMATION>() as u32,
+                &mut ret,
+            )
+        };
+        if ok == 0 {
+            return self.cpu_100ns().map(|c| (c, 0));
+        }
+        let cpu = (info.BasicInfo.TotalUserTime as u64)
+            .saturating_add(info.BasicInfo.TotalKernelTime as u64);
+        let io = info
+            .IoInfo
+            .ReadTransferCount
+            .saturating_add(info.IoInfo.WriteTransferCount)
+            .saturating_add(info.IoInfo.OtherTransferCount);
+        Some((cpu, io))
+    }
+}
+
 /// Best-effort fallback tree-kill for the rare case the Job Object couldn't be
 /// created/assigned (so [`assign_child_to_kill_on_close_job`] returned `None`).
 /// `taskkill /T` walks the live parent→child tree and force-kills all of it —

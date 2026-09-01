@@ -1,3 +1,5 @@
+import { stripInjectedRemindersForDisplay } from './historyMessages';
+
 /** One user question in the session outline (DeepSeek-style right rail). */
 export interface TurnNavItem {
   /** Stable DOM id on the user message wrapper. */
@@ -35,7 +37,7 @@ export function buildTurnNavItems(
   for (let i = 0; i < messages.length; i++) {
     const msg = messages[i];
     if (msg.role !== 'user') continue;
-    const text = compactTurnNavText(msg.text);
+    const text = compactTurnNavText(stripInjectedRemindersForDisplay(msg.text));
     const label = truncateTurnNavLabel(text);
     if (!label) continue;
     items.push({ id: turnNavId(i), index: i, label, text });

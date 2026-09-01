@@ -30,14 +30,19 @@ eager = "auto"
 # Shared hard lifetime for every tool that waits on a spawned command
 # (bash, ast_grep, git clone, web_fetch curl fallback, parallel_edit build probe).
 # Agent bash has no timeout argument. default_timeout is !cmd only.
-# silent_kill_secs: short-command idle kill for agent bash AND !cmd
-# (no new stdout/stderr for this long → kill tree, keep captured output).
-# Compile/test/install families skip idle and wait on max_timeout_secs. 0 disables.
+# silent_kill_secs: first-level probe idle (default 60).
+# second_levell_secs: after output+CPU idle, grace for a silent compile to start;
+# also the idle after auto-promote. 0 = skip grace; output+idle asks the model.
+# CPU-busy auto-promotes this invocation to a batch job.
+# Disk/network IO is NOT auto-promoted: first idle + second_levell_secs, then
+# the model decides (kill, or temporary long bash for this session).
+# Compile/test/install families skip idle and wait on max_timeout_secs.
 default_timeout_secs = 120
 max_timeout_secs = 1800
 silent_kill_secs = 60
-# Extra tokens treated as long jobs (whole-word). Overrides a built-in short
-# classification. long_bash_keyword_add appends here and hot-reloads live tasks.
+second_levell_secs = 120
+# Persisted extra long-job tokens (whole-word). Overrides builtin short.
+# long_bash_keyword_actions defaults to session-only; global=true writes here.
 long_bash_command_keyword = []
 
 [tools.timeouts]

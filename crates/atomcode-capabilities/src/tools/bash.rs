@@ -11,6 +11,10 @@
 //! privilege escalation, recursive force deletes, `find -delete`, `dd`, fork bombs,
 //! destructive git, remote-script-piped-to-shell, …); everything else is `Safe`.
 
+use super::bash_runtime::{
+    decision_prompt, new_bashid, register_live_bash, unregister_live_bash, LiveBash,
+    KILLED_BY_TOOL_MARK,
+};
 use super::{err, ok};
 use async_trait::async_trait;
 use atomcode_kernel::tool::{ProgressSink, RiskLevel, Tool, ToolContext, ToolResult};
@@ -18,6 +22,8 @@ use base64::Engine;
 use serde::Deserialize;
 use serde_json::json;
 use std::borrow::Cow;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::io::AsyncReadExt;
 use tokio::process::Command;
@@ -266,15 +272,6 @@ impl Tool for BashTool {
             None => return err("bash: failed to capture stderr".to_string()),
         };
 
-        let kill_tree = || {
-            #[cfg(windows)]
-            crate::process_utils::kill_windows_tree(&job_guard, child_pid);
-            #[cfg(not(target_os = "windows"))]
-            if let Some(pgid) = child_pid {
-                unsafe { killpg(pgid as i32, SIGKILL) };
-            }
-        };
-
         let progress = ctx.progress.clone();
         let live_sent = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let stdout_cap = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
@@ -282,98 +279,253 @@ impl Tool for BashTool {
         let last_byte = std::sync::Arc::new(std::sync::Mutex::new(Instant::now()));
         let idle = agent_bash_idle_timeout(&effective_command, bash_cfg.silent_kill_secs);
         let idle_note_secs = idle.map(|d| d.as_secs()).unwrap_or(0);
-        let run = async {
-            let live_out = live_sent.clone();
-            let live_err = live_sent.clone();
-            let progress_out = progress.clone();
-            let progress_err = progress.clone();
-            let stdout_buf = stdout_cap.clone();
-            let stderr_buf = stderr_cap.clone();
-            let last_out = last_byte.clone();
-            let last_err = last_byte.clone();
-            let (_, _, status) = tokio::join!(
-                read_pipe_and_stream(&mut stdout, progress_out, live_out, stdout_buf, last_out),
-                read_pipe_and_stream(&mut stderr, progress_err, live_err, stderr_buf, last_err),
-                async { child.wait().await },
-            );
-            #[cfg(not(target_os = "windows"))]
-            {
-                child.terminated = true;
-            }
-            status
-        };
+        let bashid = new_bashid();
+        let live = Arc::new(LiveBash {
+            bashid: bashid.clone(),
+            command: effective_command.clone(),
+            promoted: AtomicBool::new(idle.is_none()),
+            kill: tokio_util::sync::CancellationToken::new(),
+            progress: progress.clone(),
+        });
+        register_live_bash(live.clone());
+
+        let mut stdout_done = false;
+        let mut stderr_done = false;
+        let mut stdout_decode = Vec::new();
+        let mut stderr_decode = Vec::new();
+        let mut out_buf = vec![0u8; 65536];
+        let mut err_buf = vec![0u8; 65536];
+        let started = Instant::now();
+        let hard_deadline = started + Duration::from_secs(max_timeout);
 
         let snapshot = || {
             let out = stdout_cap.lock().unwrap_or_else(|e| e.into_inner()).clone();
             let errb = stderr_cap.lock().unwrap_or_else(|e| e.into_inner()).clone();
             (out, errb)
         };
+        let has_output = || {
+            !stdout_cap.lock().unwrap_or_else(|e| e.into_inner()).is_empty()
+                || !stderr_cap.lock().unwrap_or_else(|e| e.into_inner()).is_empty()
+        };
 
-        let last_byte_watch = last_byte.clone();
-        let idle_watch = async move {
-            let Some(idle) = idle else {
-                std::future::pending::<()>().await;
-                return;
-            };
-            loop {
-                let elapsed = last_byte_watch
+        enum Drive {
+            Result(ToolResult),
+            Yield,
+        }
+
+        let driven: Drive = loop {
+            let idle_enabled = idle.is_some() && !live.promoted.load(Ordering::SeqCst);
+            let until_idle = if idle_enabled {
+                let elapsed = last_byte
                     .lock()
                     .unwrap_or_else(|e| e.into_inner())
                     .elapsed();
-                if elapsed >= idle {
-                    return;
+                idle.unwrap().saturating_sub(elapsed)
+            } else {
+                Duration::from_secs(86400)
+            };
+            let until_hard = hard_deadline.saturating_duration_since(Instant::now());
+
+            tokio::select! {
+                biased;
+                _ = ctx.cancel.cancelled() => {
+                    #[cfg(windows)]
+                    crate::process_utils::kill_windows_tree(&job_guard, child_pid);
+                    #[cfg(not(target_os = "windows"))]
+                    if let Some(pgid) = child_pid {
+                        unsafe { killpg(pgid as i32, SIGKILL) };
+                    }
+                    unregister_live_bash(&bashid);
+                    let (out, errb) = snapshot();
+                    break Drive::Result(err(with_note(&out, &errb, "bash: cancelled before completion.")));
                 }
-                tokio::time::sleep(idle - elapsed).await;
+                _ = live.kill.cancelled() => {
+                    #[cfg(windows)]
+                    crate::process_utils::kill_windows_tree(&job_guard, child_pid);
+                    #[cfg(not(target_os = "windows"))]
+                    if let Some(pgid) = child_pid {
+                        unsafe { killpg(pgid as i32, SIGKILL) };
+                    }
+                    unregister_live_bash(&bashid);
+                    progress.emit(format!("{KILLED_BY_TOOL_MARK}\n"));
+                    let (out, errb) = snapshot();
+                    break Drive::Result(err(with_note(&out, &errb, KILLED_BY_TOOL_MARK)));
+                }
+                n = stdout.read(&mut out_buf), if !stdout_done => {
+                    match n {
+                        Ok(0) => stdout_done = true,
+                        Ok(n) => {
+                            *last_byte.lock().unwrap_or_else(|e| e.into_inner()) = Instant::now();
+                            stdout_cap.lock().unwrap_or_else(|e| e.into_inner()).extend_from_slice(&out_buf[..n]);
+                            if let Some(chunk) = decode_stream_chunk(&mut stdout_decode, &out_buf[..n], false) {
+                                emit_live_chunk(&progress, live_sent.as_ref(), &chunk);
+                            }
+                        }
+                        Err(_) => stdout_done = true,
+                    }
+                }
+                n = stderr.read(&mut err_buf), if !stderr_done => {
+                    match n {
+                        Ok(0) => stderr_done = true,
+                        Ok(n) => {
+                            *last_byte.lock().unwrap_or_else(|e| e.into_inner()) = Instant::now();
+                            stderr_cap.lock().unwrap_or_else(|e| e.into_inner()).extend_from_slice(&err_buf[..n]);
+                            if let Some(chunk) = decode_stream_chunk(&mut stderr_decode, &err_buf[..n], false) {
+                                emit_live_chunk(&progress, live_sent.as_ref(), &chunk);
+                            }
+                        }
+                        Err(_) => stderr_done = true,
+                    }
+                }
+                status = child.wait() => {
+                    #[cfg(not(target_os = "windows"))]
+                    {
+                        child.terminated = true;
+                    }
+                    unregister_live_bash(&bashid);
+                    break Drive::Result(match status {
+                        Ok(st) => {
+                            let (out, errb) = snapshot();
+                            ok(format_streams(&out, &errb, Some((st.success(), st.code())), false))
+                        }
+                        Err(e) => err(format!("bash: error running command: {e}")),
+                    });
+                }
+                _ = tokio::time::sleep(until_idle), if idle_enabled => {
+                    if !has_output() {
+                        #[cfg(windows)]
+                        crate::process_utils::kill_windows_tree(&job_guard, child_pid);
+                        #[cfg(not(target_os = "windows"))]
+                        if let Some(pgid) = child_pid {
+                            unsafe { killpg(pgid as i32, SIGKILL) };
+                        }
+                        unregister_live_bash(&bashid);
+                        let (out, errb) = snapshot();
+                        break Drive::Result(err(with_note(
+                            &out,
+                            &errb,
+                            &format!(
+                                "bash: no new output for {idle_note_secs}s (config silent_kill_secs); \
+                                 treated as stuck (pager, follow/watch, REPL, or waiting for a key). \
+                                 Captured output is above. Do not retry the same blocking command."
+                            ),
+                        )));
+                    }
+                    break Drive::Yield;
+                }
+                _ = tokio::time::sleep(until_hard) => {
+                    #[cfg(windows)]
+                    crate::process_utils::kill_windows_tree(&job_guard, child_pid);
+                    #[cfg(not(target_os = "windows"))]
+                    if let Some(pgid) = child_pid {
+                        unsafe { killpg(pgid as i32, SIGKILL) };
+                    }
+                    unregister_live_bash(&bashid);
+                    let (out, errb) = snapshot();
+                    break Drive::Result(err(with_note(
+                        &out,
+                        &errb,
+                        &format!(
+                            "bash: reached configured max_timeout_secs ({max_timeout}s); the process was stopped."
+                        ),
+                    )));
+                }
             }
         };
 
-        tokio::select! {
-            biased;
-            _ = ctx.cancel.cancelled() => {
-                kill_tree();
+        match driven {
+            Drive::Result(r) => r,
+            Drive::Yield => {
+                let suggested = suggested_long_keyword(&effective_command);
+                let prompt = decision_prompt(&bashid, idle_note_secs, &suggested);
+                progress.emit(format!("{prompt}\n"));
                 let (out, errb) = snapshot();
-                err(with_note(&out, &errb, "bash: cancelled before completion."))
-            }
-            status = run => {
-                match status {
-                    Ok(st) => {
-                        let (out, errb) = snapshot();
-                        ok(format_streams(
-                            &out,
-                            &errb,
-                            Some((st.success(), st.code())),
-                            false,
-                        ))
+                let body = with_note(&out, &errb, &prompt);
+                let progress_bg = progress.clone();
+                let live_sent_bg = live_sent.clone();
+                let stdout_cap_bg = stdout_cap.clone();
+                let stderr_cap_bg = stderr_cap.clone();
+                let last_byte_bg = last_byte.clone();
+                let live_bg = live.clone();
+                let bashid_bg = bashid.clone();
+                #[cfg(windows)]
+                let job_guard_bg = job_guard;
+                let child_pid_bg = child_pid;
+                tokio::spawn(async move {
+                    let mut stdout_done = stdout_done;
+                    let mut stderr_done = stderr_done;
+                    let mut stdout_decode = stdout_decode;
+                    let mut stderr_decode = stderr_decode;
+                    let mut out_buf = vec![0u8; 65536];
+                    let mut err_buf = vec![0u8; 65536];
+                    loop {
+                        let until_hard = hard_deadline.saturating_duration_since(Instant::now());
+                        tokio::select! {
+                            biased;
+                            _ = live_bg.kill.cancelled() => {
+                                #[cfg(windows)]
+                                crate::process_utils::kill_windows_tree(&job_guard_bg, child_pid_bg);
+                                #[cfg(not(target_os = "windows"))]
+                                if let Some(pgid) = child_pid_bg {
+                                    unsafe { killpg(pgid as i32, SIGKILL) };
+                                }
+                                progress_bg.emit(format!("{KILLED_BY_TOOL_MARK}\n"));
+                                unregister_live_bash(&bashid_bg);
+                                return;
+                            }
+                            n = stdout.read(&mut out_buf), if !stdout_done => {
+                                match n {
+                                    Ok(0) => stdout_done = true,
+                                    Ok(n) => {
+                                        *last_byte_bg.lock().unwrap_or_else(|e| e.into_inner()) = Instant::now();
+                                        stdout_cap_bg.lock().unwrap_or_else(|e| e.into_inner()).extend_from_slice(&out_buf[..n]);
+                                        if let Some(chunk) = decode_stream_chunk(&mut stdout_decode, &out_buf[..n], false) {
+                                            emit_live_chunk(&progress_bg, live_sent_bg.as_ref(), &chunk);
+                                        }
+                                    }
+                                    Err(_) => stdout_done = true,
+                                }
+                            }
+                            n = stderr.read(&mut err_buf), if !stderr_done => {
+                                match n {
+                                    Ok(0) => stderr_done = true,
+                                    Ok(n) => {
+                                        *last_byte_bg.lock().unwrap_or_else(|e| e.into_inner()) = Instant::now();
+                                        stderr_cap_bg.lock().unwrap_or_else(|e| e.into_inner()).extend_from_slice(&err_buf[..n]);
+                                        if let Some(chunk) = decode_stream_chunk(&mut stderr_decode, &err_buf[..n], false) {
+                                            emit_live_chunk(&progress_bg, live_sent_bg.as_ref(), &chunk);
+                                        }
+                                    }
+                                    Err(_) => stderr_done = true,
+                                }
+                            }
+                            status = child.wait() => {
+                                #[cfg(not(target_os = "windows"))]
+                                {
+                                    child.terminated = true;
+                                }
+                                let code = status.ok().and_then(|s| s.code()).unwrap_or(-1);
+                                progress_bg.emit(format!("[exit code {code}]\n"));
+                                unregister_live_bash(&bashid_bg);
+                                return;
+                            }
+                            _ = tokio::time::sleep(until_hard) => {
+                                #[cfg(windows)]
+                                crate::process_utils::kill_windows_tree(&job_guard_bg, child_pid_bg);
+                                #[cfg(not(target_os = "windows"))]
+                                if let Some(pgid) = child_pid_bg {
+                                    unsafe { killpg(pgid as i32, SIGKILL) };
+                                }
+                                progress_bg.emit(format!(
+                                    "bash: reached configured max_timeout_secs ({max_timeout}s); the process was stopped.\n"
+                                ));
+                                unregister_live_bash(&bashid_bg);
+                                return;
+                            }
+                        }
                     }
-                    Err(e) => err(format!("bash: error running command: {e}")),
-                }
-            }
-            _ = idle_watch => {
-                kill_tree();
-                let (out, errb) = snapshot();
-                err(with_note(
-                    &out,
-                    &errb,
-                    &format!(
-                        "bash: no new output for {idle_note_secs}s (config silent_kill_secs); \
-                         treated as stuck (pager, follow/watch, REPL, or waiting for a key). \
-                         Captured output is above. Do not retry the same blocking command. \
-                         Use a one-shot flag (--no-pager, -n, -c, --batch) or a non-interactive \
-                         equivalent (systemctl is-active/show, ss/lsof), and do not chain it \
-                         with later steps in one call."
-                    ),
-                ))
-            }
-            _ = tokio::time::sleep(Duration::from_secs(max_timeout)) => {
-                kill_tree();
-                let (out, errb) = snapshot();
-                err(with_note(
-                    &out,
-                    &errb,
-                    &format!(
-                        "bash: reached configured max_timeout_secs ({max_timeout}s); the process was stopped."
-                    ),
-                ))
+                });
+                ok(body)
             }
         }
     }
@@ -457,8 +609,10 @@ fn shell_tool_description(
              Use one-shot flags (`--no-pager`, `-n`, `-c`, `--batch`) and \
              `systemctl is-active`/`show` or `ss`/`lsof` for ports. Never chain a \
              blocking command with later steps in one call. Short commands that go \
-             silent are idle-killed after config `silent_kill_secs` (compile/test \
-             families wait on `max_timeout_secs` instead); captured output is returned."
+             silent after printing yield `[bash-await-decision]` with a bashid — \
+             promote with `long_bash_keyword_add` or stop with `bash_kill_by_id`. \
+             No output at all is idle-killed after config `silent_kill_secs`. \
+             Compile/test families wait on `max_timeout_secs`."
         };
     }
     macro_rules! cmd_suffix {
@@ -1381,6 +1535,7 @@ fn with_note(stdout: &[u8], stderr: &[u8], note: &str) -> String {
     s
 }
 
+#[allow(dead_code)]
 async fn read_pipe_and_stream(
     reader: &mut (impl tokio::io::AsyncRead + Unpin),
     progress: ProgressSink,
@@ -2308,53 +2463,191 @@ pub fn bash_invocations(source: &str) -> Option<Vec<BashInvocation>> {
     Some(invocations)
 }
 
-/// Binaries that routinely run for minutes with little or no stdout (link, LLVM, package
-/// download). Idle-kill is skipped so a silent link is not mistaken for a hung short command.
-const LONG_JOB_BINS: &[&str] = &[
-    "cargo",
+/// Binaries whose *default* invocation is a compile / link / typecheck / test
+/// run that may print nothing for minutes. Unknown binaries are NOT listed here:
+/// they default to short (idle-kill). See [`looks_like_long_job`].
+const ALWAYS_LONG_BINS: &[&str] = &[
     "rustc",
     "rustdoc",
+    "gcc",
+    "g++",
+    "cc",
+    "c++",
+    "clang",
+    "clang++",
+    "cl",
+    "cmake",
+    "ninja",
+    "meson",
+    "make",
+    "gmake",
+    "autoconf",
+    "automake",
+    "mvn",
+    "mvnw",
+    "gradle",
+    "gradlew",
+    "ant",
+    "sbt",
+    "mill",
+    "lein",
+    "bazel",
+    "buck",
+    "buck2",
+    "msbuild",
+    "nuget",
+    "javac",
+    "kotlinc",
+    "scalac",
+    "webpack",
+    "tsc",
+    "esbuild",
+    "rollup",
+    "parcel",
+    "swc",
+    "pytest",
+    "ctest",
+    "xcodebuild",
+    "ansible-playbook",
+    "csc",
+    "vbc",
+    "fsc",
+    "fsharpc",
+    "ghc",
+    "ocamlc",
+    "ocamlopt",
+    "gfortran",
+    "ifort",
+    "swiftc",
+    "nim",
+    "nasm",
+    "yasm",
+    "ld",
+    "as",
+    "libtool",
+    "phpunit",
+    "groovyc",
+    "erlc",
+    "rebar3",
+    "ldc2",
+    "dmd",
+    "gdc",
+    "rake",
+    "cabal",
+    "stack",
+    "dune",
+];
+
+/// Family CLIs that are long only for *some* subcommands (`docker build` vs
+/// `docker ps`). Parse-failure fallback treats these names as long so a broken
+/// parse of `npm install` is not idle-killed mid-download.
+const LONG_JOB_FAMILIES: &[&str] = &[
+    "cargo",
+    "rustup",
     "npm",
     "npx",
     "pnpm",
     "yarn",
     "bun",
     "bunx",
-    "mvn",
-    "mvnw",
-    "gradle",
-    "gradlew",
-    "make",
-    "gmake",
-    "cmake",
-    "ninja",
-    "meson",
     "go",
     "dotnet",
-    "msbuild",
-    "gcc",
-    "g++",
-    "clang",
-    "clang++",
-    "cl",
     "pip",
     "pip3",
     "poetry",
     "uv",
     "pipenv",
+    "pdm",
+    "conda",
+    "mamba",
     "composer",
     "docker",
     "docker-compose",
     "podman",
-    "webpack",
+    "git",
+    "python",
+    "python3",
+    "py",
     "vite",
-    "tsc",
-    "esbuild",
-    "pytest",
-    "ctest",
-    "xcodebuild",
-    "javac",
-    "ant",
+    "zig",
+    "apt",
+    "apt-get",
+    "yum",
+    "dnf",
+    "pacman",
+    "apk",
+    "zypper",
+    "choco",
+    "winget",
+    "scoop",
+    "helm",
+    "terraform",
+    "pulumi",
+    "sudo",
+    "ssh",
+    "scp",
+    "rsync",
+    "bundle",
+    "gem",
+    "mix",
+    "swift",
+    "flutter",
+    "dart",
+    "nimble",
+    "cabal",
+    "stack",
+    "dune",
+];
+
+/// Probe / inspect / one-shot CLIs. Public, always-emitting commands that do
+/// not enter a silent long phase. Unknown binaries still default to short;
+/// this list is the documented short set and the keyword-suggestion skip list.
+const SHORT_PROBE_BINS: &[&str] = &[
+    "ls",
+    "ps",
+    "ss",
+    "lsof",
+    "pgrep",
+    "pidof",
+    "which",
+    "where",
+    "whereis",
+    "type",
+    "id",
+    "whoami",
+    "uname",
+    "hostname",
+    "date",
+    "echo",
+    "true",
+    "false",
+    "cat",
+    "head",
+    "tail",
+    "wc",
+    "stat",
+    "file",
+    "df",
+    "du",
+    "free",
+    "uptime",
+    "env",
+    "printenv",
+    "systemctl",
+    "journalctl",
+    "service",
+    "sc",
+    "tasklist",
+    "netstat",
+    "ip",
+    "ifconfig",
+    "curl",
+    "wget",
+    "dig",
+    "nslookup",
+    "ping",
+    "kubectl",
+    "git",
 ];
 
 fn command_basename(name: &str) -> String {
@@ -2369,41 +2662,362 @@ fn command_basename(name: &str) -> String {
     lower
 }
 
-fn invocation_is_long_job(inv: &BashInvocation) -> bool {
-    let bin = command_basename(&inv.command);
-    if LONG_JOB_BINS.contains(&bin.as_str()) {
-        return true;
-    }
-    if bin == "git" {
-        return inv.arguments.iter().any(|a| {
-            matches!(
-                a.as_str(),
-                "clone" | "fetch" | "pull" | "push" | "submodule"
-            )
-        });
-    }
-    if matches!(bin.as_str(), "python" | "python3" | "py") {
-        let args: Vec<&str> = inv.arguments.iter().map(|s| s.as_str()).collect();
-        return args.windows(2).any(|w| {
-            w[0] == "-m" && matches!(w[1], "pytest" | "pip" | "http.server" | "unittest")
-        });
-    }
-    false
+fn arg_word(s: &str) -> &str {
+    s.trim_matches(|c| c == '"' || c == '\'' || c == '`')
 }
 
-/// Compile / test / package-install families that may produce no output for a long time.
+/// Non-flag argv words. Skips `-x`, `--foo`, and cargo toolchains (`+nightly`).
+fn non_flag_words(args: &[String]) -> Vec<&str> {
+    args.iter()
+        .map(|s| arg_word(s))
+        .filter(|a| !a.is_empty() && !a.starts_with('-') && !a.starts_with('+'))
+        .collect()
+}
+
+fn is_dev_server_script(name: &str) -> bool {
+    matches!(
+        name,
+        "dev" | "start" | "serve" | "watch" | "preview" | "develop"
+    ) || name.starts_with("dev:")
+        || name.ends_with(":dev")
+        || name.contains("watch")
+}
+
+fn git_is_long(args: &[String]) -> bool {
+    args.iter().any(|a| {
+        matches!(
+            arg_word(a),
+            "clone" | "fetch" | "pull" | "push" | "submodule"
+        )
+    })
+}
+
+fn cargo_is_long(args: &[String]) -> bool {
+    let words = non_flag_words(args);
+    let Some(cmd) = words.first().copied() else {
+        return false;
+    };
+    matches!(
+        cmd,
+        "build"
+            | "test"
+            | "check"
+            | "clippy"
+            | "bench"
+            | "install"
+            | "update"
+            | "publish"
+            | "doc"
+            | "rustc"
+            | "nextest"
+            | "package"
+            | "pkg"
+    )
+}
+
+fn go_is_long(args: &[String]) -> bool {
+    let words = non_flag_words(args);
+    match words.first().copied() {
+        Some("build" | "test" | "install" | "get" | "generate") => true,
+        Some("mod") => words.get(1).is_some_and(|s| {
+            matches!(*s, "download" | "tidy" | "vendor" | "verify")
+        }),
+        _ => false,
+    }
+}
+
+fn npm_family_is_long(bin: &str, args: &[String]) -> bool {
+    if args.iter().any(|a| {
+        matches!(
+            arg_word(a),
+            "-v" | "-V" | "--version" | "-h" | "--help"
+        )
+    }) && non_flag_words(args).is_empty()
+    {
+        return false;
+    }
+    let words = non_flag_words(args);
+    if words.is_empty() {
+        // bare `yarn` / `pnpm` / `bun` ⇒ install; bare `npm` prints help.
+        return matches!(bin, "yarn" | "pnpm" | "bun");
+    }
+    if let Some(i) = words
+        .iter()
+        .position(|w| matches!(*w, "run" | "run-script"))
+    {
+        return !is_dev_server_script(words.get(i + 1).copied().unwrap_or(""));
+    }
+    let cmd = words[0];
+    if is_dev_server_script(cmd) || cmd == "start" {
+        return false;
+    }
+    matches!(
+        cmd,
+        "install"
+            | "i"
+            | "ci"
+            | "add"
+            | "update"
+            | "upgrade"
+            | "uninstall"
+            | "remove"
+            | "rebuild"
+            | "pack"
+            | "publish"
+            | "test"
+            | "t"
+            | "build"
+            | "compile"
+    )
+}
+
+fn npx_is_long(args: &[String]) -> bool {
+    let words = non_flag_words(args);
+    let Some(pkg) = words.first().copied() else {
+        return false;
+    };
+    pkg.starts_with("create-") || matches!(pkg, "create-react-app" | "degit")
+}
+
+fn python_is_long(args: &[String]) -> bool {
+    args.windows(2).any(|w| {
+        arg_word(&w[0]) == "-m"
+            && matches!(arg_word(&w[1]), "pytest" | "pip" | "unittest" | "build")
+    })
+}
+
+fn pip_family_is_long(args: &[String]) -> bool {
+    let words = non_flag_words(args);
+    matches!(
+        words.first().copied(),
+        Some("install" | "download" | "wheel" | "sync" | "add" | "update" | "lock" | "remove")
+    )
+}
+
+fn docker_is_long(args: &[String]) -> bool {
+    let words = non_flag_words(args);
+    let cmd = if words.first().copied() == Some("compose") {
+        words.get(1).copied()
+    } else {
+        words.first().copied()
+    };
+    matches!(
+        cmd,
+        Some("build" | "pull" | "push" | "load" | "save" | "import")
+    )
+}
+
+fn docker_compose_bin_is_long(args: &[String]) -> bool {
+    let words = non_flag_words(args);
+    matches!(
+        words.first().copied(),
+        Some("build" | "pull" | "push")
+    )
+}
+
+fn dotnet_is_long(args: &[String]) -> bool {
+    let words = non_flag_words(args);
+    matches!(
+        words.first().copied(),
+        Some("build" | "test" | "restore" | "publish" | "pack" | "nuget")
+    )
+}
+
+fn pkg_mgr_is_long(args: &[String]) -> bool {
+    let words = non_flag_words(args);
+    matches!(
+        words.first().copied(),
+        Some(
+            "install"
+                | "upgrade"
+                | "dist-upgrade"
+                | "full-upgrade"
+                | "build-dep"
+                | "update"
+                | "sync"
+                | "remove"
+                | "autoremove"
+        )
+    )
+}
+
+fn helm_is_long(args: &[String]) -> bool {
+    let words = non_flag_words(args);
+    matches!(
+        words.first().copied(),
+        Some("install" | "upgrade" | "dependency" | "pull" | "push")
+    )
+}
+
+fn terraform_is_long(args: &[String]) -> bool {
+    let words = non_flag_words(args);
+    matches!(
+        words.first().copied(),
+        Some("init" | "plan" | "apply" | "destroy" | "import" | "providers")
+    )
+}
+
+fn zig_is_long(args: &[String]) -> bool {
+    let words = non_flag_words(args);
+    matches!(
+        words.first().copied(),
+        Some("build" | "test" | "install")
+    )
+}
+
+fn vite_is_long(args: &[String]) -> bool {
+    non_flag_words(args).first().copied() == Some("build")
+}
+
+fn pulumi_is_long(args: &[String]) -> bool {
+    matches!(
+        non_flag_words(args).first().copied(),
+        Some("up" | "destroy" | "preview" | "update")
+    )
+}
+
+/// Strip `sudo` flags (`-n`, `-A`, `-u user`, …) and classify the inner command.
+/// Bare `sudo` (no command) stays long so a password prompt is not idle-killed.
+fn peel_sudo_command(args: &[String]) -> Option<BashInvocation> {
+    const TAKING: &[&str] = &[
+        "-u",
+        "-g",
+        "-C",
+        "-D",
+        "-h",
+        "--user",
+        "--group",
+        "--chdir",
+        "--host",
+        "--prompt",
+    ];
+    let mut i = 0;
+    while i < args.len() {
+        let a = arg_word(&args[i]);
+        if a == "--" {
+            i += 1;
+            break;
+        }
+        if a.starts_with('-') {
+            let takes_value = TAKING.iter().any(|t| a == *t)
+                || TAKING
+                    .iter()
+                    .any(|t| a.starts_with(t) && a.len() > t.len() && !a.contains('='));
+            i += 1;
+            if takes_value && !a.contains('=') && i < args.len() {
+                i += 1;
+            }
+            continue;
+        }
+        break;
+    }
+    let cmd = args.get(i)?;
+    Some(BashInvocation {
+        command: arg_word(cmd).to_string(),
+        arguments: args[i + 1..].to_vec(),
+    })
+}
+
+fn invocation_is_long_job(inv: &BashInvocation) -> bool {
+    let bin = command_basename(&inv.command);
+    if ALWAYS_LONG_BINS.contains(&bin.as_str()) {
+        return true;
+    }
+    match bin.as_str() {
+        "git" => git_is_long(&inv.arguments),
+        "cargo" => cargo_is_long(&inv.arguments),
+        "go" => go_is_long(&inv.arguments),
+        "npm" | "pnpm" | "yarn" | "bun" => npm_family_is_long(&bin, &inv.arguments),
+        "npx" | "bunx" => npx_is_long(&inv.arguments),
+        "python" | "python3" | "py" => python_is_long(&inv.arguments),
+        "pip" | "pip3" | "poetry" | "uv" | "pipenv" | "pdm" | "conda" | "mamba" | "composer" => {
+            pip_family_is_long(&inv.arguments)
+        }
+        "docker" | "podman" => docker_is_long(&inv.arguments),
+        "docker-compose" => docker_compose_bin_is_long(&inv.arguments),
+        "dotnet" => dotnet_is_long(&inv.arguments),
+        "vite" => vite_is_long(&inv.arguments),
+        "zig" => zig_is_long(&inv.arguments),
+        "apt" | "apt-get" | "yum" | "dnf" | "pacman" | "apk" | "zypper" | "choco" | "winget"
+        | "scoop" => pkg_mgr_is_long(&inv.arguments),
+        "helm" => helm_is_long(&inv.arguments),
+        "terraform" => terraform_is_long(&inv.arguments),
+        "pulumi" => pulumi_is_long(&inv.arguments),
+        "sudo" => peel_sudo_command(&inv.arguments)
+            .map(|inner| invocation_is_long_job(&inner))
+            .unwrap_or(true),
+        "rustup" => matches!(
+            non_flag_words(&inv.arguments).first().copied(),
+            Some("update" | "toolchain" | "target" | "component" | "install")
+        ),
+        "ssh" | "scp" | "rsync" => true,
+        "bundle" | "gem" | "nimble" => pip_family_is_long(&inv.arguments),
+        "mix" => matches!(
+            non_flag_words(&inv.arguments).first().copied(),
+            Some("compile" | "deps" | "test" | "release" | "hex")
+        ),
+        "swift" => matches!(
+            non_flag_words(&inv.arguments).first().copied(),
+            Some("build" | "test" | "package")
+        ),
+        "flutter" => matches!(
+            non_flag_words(&inv.arguments).first().copied(),
+            Some("build" | "test" | "pub")
+        ),
+        "dart" => matches!(
+            non_flag_words(&inv.arguments).first().copied(),
+            Some("compile" | "test" | "pub")
+        ),
+        _ => false,
+    }
+}
+
+/// Whether this bash call should skip idle-kill and wait on `max_timeout_secs`.
+///
+/// **Unknown binaries default to SHORT** (idle-kill / await-decision). Hang
+/// recovery is the higher-priority failure. Config
+/// `[tools.bash] long_bash_command_keyword` (and the live overlay) overrides a
+/// built-in short classification via whole-word match.
+///
+/// A chain is classified **per invocation**: `docker ps` is short, `docker build`
+/// is long. The whole call is long if *any* invocation is long.
 pub(crate) fn looks_like_long_job(command: &str) -> bool {
+    let keywords = crate::tools::bash_runtime::live_long_keywords();
+    if crate::tools::bash_runtime::command_matches_any_keyword(command, &keywords) {
+        return true;
+    }
     if let Some(invs) = bash_invocations(command) {
         return invs.iter().any(invocation_is_long_job);
     }
+    command.split_whitespace().any(|tok| {
+        let bin = command_basename(tok);
+        ALWAYS_LONG_BINS.contains(&bin.as_str()) || LONG_JOB_FAMILIES.contains(&bin.as_str())
+    })
+}
+
+/// First non-probe token the model should pass to `long_bash_keyword_add`.
+pub(crate) fn suggested_long_keyword(command: &str) -> String {
+    if let Some(invs) = bash_invocations(command) {
+        for inv in invs {
+            let bin = command_basename(&inv.command);
+            if bin == "sudo" {
+                continue;
+            }
+            if !SHORT_PROBE_BINS.contains(&bin.as_str()) {
+                return bin;
+            }
+        }
+    }
     command
         .split_whitespace()
-        .any(|tok| LONG_JOB_BINS.contains(&command_basename(tok).as_str()))
+        .map(command_basename)
+        .find(|b| !b.is_empty() && b != "sudo" && !SHORT_PROBE_BINS.contains(&b.as_str()))
+        .unwrap_or_else(|| "unknown".to_string())
 }
 
 /// Idle budget for agent `bash` / `!cmd` short commands from
-/// `[tools.bash] silent_kill_secs`. Compile families skip idle-kill.
-/// `silent_kill_secs = 0` disables.
+/// `[tools.bash] silent_kill_secs`. Long compile/install subcommands skip it.
+/// Unknown binaries are short. `silent_kill_secs = 0` disables.
 fn agent_bash_idle_timeout(command: &str, silent_kill_secs: u64) -> Option<Duration> {
     #[cfg(test)]
     if let Some(over) = test_agent_idle_secs() {
@@ -3297,6 +3911,91 @@ mod tests {
     }
 
     #[test]
+    fn unknown_commands_default_to_short_idle() {
+        for cmd in [
+            "my-unknown-wrapper --wait",
+            "./build.sh",
+            "just test",
+            "docker ps",
+            "docker images",
+            "docker compose up",
+            "kubectl get pods",
+            "npm -v",
+            "npm start",
+            "npm run dev",
+            "go env",
+            "go version",
+            "go run .",
+            "cargo run",
+            "cargo --version",
+            "python -m http.server 8000",
+            "vite",
+            "curl -sf http://127.0.0.1:4097/health",
+            "sudo systemctl status foo --no-pager",
+            "systemctl is-active foo",
+            "lsof -i :4097",
+        ] {
+            assert!(
+                !super::looks_like_long_job(cmd),
+                "unknown/probe must default short (idle-kill): {cmd}"
+            );
+        }
+        for bin in super::SHORT_PROBE_BINS {
+            let probe = format!("{bin} --help");
+            if *bin == "git" {
+                continue;
+            }
+            assert!(
+                !super::looks_like_long_job(&probe),
+                "short probe bin must not be long: {probe}"
+            );
+        }
+    }
+
+    #[test]
+    fn long_job_is_subcommand_aware() {
+        for cmd in [
+            "cargo test",
+            "cargo check",
+            "cargo +nightly test",
+            "npm ci",
+            "npm run build",
+            "pnpm install",
+            "yarn",
+            "go test ./...",
+            "go build ./cmd/foo",
+            "go mod download",
+            "docker build .",
+            "docker pull alpine",
+            "docker compose build",
+            "python -m pytest",
+            "python -m pip install foo",
+            "make -j8",
+            "pip install -e .",
+            "uv sync",
+            "composer install",
+            "tsc --noEmit",
+            "dotnet build",
+            "apt-get install -y foo",
+            "terraform apply",
+            "ssh user@host",
+            "sudo cargo test",
+            "sudo -n apt-get install -y foo",
+        ] {
+            assert!(
+                super::looks_like_long_job(cmd),
+                "expected long job: {cmd}"
+            );
+        }
+        assert!(!super::looks_like_long_job("docker ps -a"));
+        assert!(!super::looks_like_long_job("npm run start"));
+        assert!(!super::looks_like_long_job("yarn dev"));
+        assert!(!super::looks_like_long_job("python3 -m http.server"));
+        assert!(!super::looks_like_long_job("git log -1 --oneline"));
+        assert!(!super::looks_like_long_job("sudo docker ps"));
+    }
+
+    #[test]
     fn agent_bash_idle_timeout_skips_long_jobs_and_zero() {
         assert_eq!(
             super::agent_bash_idle_timeout("ls -la", 60),
@@ -3311,6 +4010,14 @@ mod tests {
         );
         assert_eq!(super::agent_bash_idle_timeout("cargo build", 60), None);
         assert_eq!(super::agent_bash_idle_timeout("npm install", 60), None);
+        assert_eq!(
+            super::agent_bash_idle_timeout("docker ps", 60),
+            Some(Duration::from_secs(60))
+        );
+        assert_eq!(
+            super::agent_bash_idle_timeout("cargo run", 60),
+            Some(Duration::from_secs(60))
+        );
         assert_eq!(super::agent_bash_idle_timeout("ls", 0), None);
     }
 
@@ -4283,12 +4990,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn execute_idle_kills_short_command_stuck_after_output() {
+    async fn execute_idle_kills_short_command_with_no_output() {
         let _guard = super::TestIdleGuard::set(1);
         let d = tempfile::tempdir().unwrap();
         let started = Instant::now();
         let r = BashTool
-            .execute(r#"{"command":"echo ready && sleep 30"}"#, &ctx(d.path()))
+            .execute(r#"{"command":"sleep 30"}"#, &ctx(d.path()))
             .await;
         assert!(
             started.elapsed() < Duration::from_secs(8),
@@ -4297,15 +5004,60 @@ mod tests {
         );
         assert!(r.is_error, "{}", r.content);
         assert!(
+            r.content.contains("silent_kill_secs") && r.content.contains("stuck"),
+            "idle-kill note missing: {}",
+            r.content
+        );
+    }
+
+    #[tokio::test]
+    async fn execute_idle_after_output_yields_decision_instead_of_kill() {
+        let _guard = super::TestIdleGuard::set(1);
+        let d = tempfile::tempdir().unwrap();
+        let started = Instant::now();
+        let r = BashTool
+            .execute(r#"{"command":"echo ready && sleep 30"}"#, &ctx(d.path()))
+            .await;
+        assert!(
+            started.elapsed() < Duration::from_secs(8),
+            "yield should return in ~1s, took {:.1}s",
+            started.elapsed().as_secs_f64()
+        );
+        assert!(!r.is_error, "{}", r.content);
+        assert!(
             r.content.contains("ready"),
             "captured output must be kept: {}",
             r.content
         );
         assert!(
-            r.content.contains("silent_kill_secs") && r.content.contains("stuck"),
-            "idle-kill note missing: {}",
+            r.content.contains(crate::tools::bash_runtime::AWAIT_DECISION_MARK)
+                && r.content.contains("bashid:"),
+            "await-decision prompt missing: {}",
             r.content
         );
+        let id = r
+            .content
+            .lines()
+            .find_map(|l| l.strip_prefix("bashid: "))
+            .unwrap_or("")
+            .trim()
+            .to_string();
+        assert!(id.starts_with("b-"), "bashid={id}");
+        assert!(
+            crate::tools::bash_runtime::kill_by_id(&id),
+            "live bash {id} should still be registered"
+        );
+    }
+
+    #[test]
+    fn config_keyword_overrides_builtin_short() {
+        crate::tools::bash_runtime::set_live_long_keywords(vec!["zzq-unique-long-kw".into()]);
+        assert!(
+            super::looks_like_long_job("zzq-unique-long-kw --wait"),
+            "config keyword must force long"
+        );
+        crate::tools::bash_runtime::set_live_long_keywords(vec![]);
+        assert!(!super::looks_like_long_job("zzq-unique-long-kw --wait"));
     }
 
     #[tokio::test]

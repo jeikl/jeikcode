@@ -36,6 +36,8 @@ const DEFAULT_CHILD_MAX_ROUNDS: u32 = 200;
 pub mod approval;
 pub mod ast_grep;
 pub mod bash;
+pub mod bash_ctl;
+pub(crate) mod bash_runtime;
 pub mod bash_workspace_gate;
 pub mod cd;
 pub mod edit;
@@ -84,6 +86,7 @@ pub use bash::{
     bash_invocations, normalize_command_for_grant, run_shell, BashInvocation, BashTool, ShellExit,
     ShellOutcome,
 };
+pub use bash_ctl::{BashKillByIdTool, LongBashKeywordAddTool};
 pub use bash_workspace_gate::BashWorkspaceGate;
 pub use cd::ChangeDirTool;
 pub use edit::EditFileTool;
@@ -132,6 +135,8 @@ pub fn coding_tool_names() -> &'static [&'static str] {
             "list_directory",
             "open_file",
             "bash",
+            "long_bash_keyword_add",
+            "bash_kill_by_id",
             "grep",
             "glob",
             "search_replace",
@@ -153,6 +158,8 @@ pub fn coding_tool_names() -> &'static [&'static str] {
             "list_directory",
             "open_file",
             "bash",
+            "long_bash_keyword_add",
+            "bash_kill_by_id",
             "grep",
             "glob",
             "search_replace",
@@ -185,6 +192,8 @@ pub fn register_coding_tools_with_vision(reg: &mut ToolRegistry, vision: bool) {
     reg.register(Arc::new(ListDirTool));
     reg.register(Arc::new(OpenFileTool));
     reg.register(Arc::new(BashTool));
+    reg.register(Arc::new(LongBashKeywordAddTool));
+    reg.register(Arc::new(BashKillByIdTool));
     reg.register(Arc::new(GrepTool));
     reg.register(Arc::new(GlobTool));
     reg.register(Arc::new(SearchReplaceTool));
@@ -808,6 +817,8 @@ mod tests {
         "list_directory",
         "open_file",
         "bash",
+        "long_bash_keyword_add",
+        "bash_kill_by_id",
         "grep",
         "glob",
         "search_replace",

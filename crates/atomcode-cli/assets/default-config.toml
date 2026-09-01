@@ -36,6 +36,9 @@ eager = "auto"
 default_timeout_secs = 120
 max_timeout_secs = 1800
 silent_kill_secs = 60
+# Extra tokens treated as long jobs (whole-word). Overrides a built-in short
+# classification. long_bash_keyword_add appends here and hot-reloads live tasks.
+long_bash_command_keyword = []
 
 [tools.timeouts]
 # Short budgets — not the spawned-command hard lifetime above.

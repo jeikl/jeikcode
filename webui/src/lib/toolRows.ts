@@ -117,7 +117,7 @@ export function appendToolOutput(
     output = output.slice(output.length - MAX_LIVE_TOOL_OUTPUT);
   }
   const next = parts.slice();
-  const finished = /\[exit code |\[bash cancelled\]|\[bash reached max_timeout_secs\]/.test(
+  const finished = /\[exit code |\[bash cancelled\]|\[bash reached max_timeout_secs\]|\[task was canceled by bash kill tool\]/.test(
     output,
   );
   next[idx] = {
@@ -144,6 +144,7 @@ export function appendReasoningPart(parts: MsgPart[], delta: string): MsgPart[] 
 }
 
 export function toolResultStatus(success: boolean, output: string): ToolRow['status'] {
+  if (output.includes('[bash-await-decision]')) return 'pending';
   if (success) return 'done';
   return output.startsWith('Code review incomplete') ? 'incomplete' : 'error';
 }

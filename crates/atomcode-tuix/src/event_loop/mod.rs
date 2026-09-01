@@ -21284,6 +21284,15 @@ fn handle_agent_event(
                 );
                 reclaim_tty_input(ctx, renderer, "bash_tool_result");
             }
+            // Short bash that printed then went silent: process is still live.
+            // Keep the inflight pane so later stdout / kill / promote lines
+            // land on the same window. add/kill tools have their own rows.
+            if name.eq_ignore_ascii_case("bash")
+                && output.contains("[bash-await-decision]")
+            {
+                renderer.flush();
+                return;
+            }
             // A result for this call arrived while an approval prompt is still up ⇒ the
             // approval was resolved WITHOUT the user answering (headless timeout fail-close,
             // a displaced second approval, or a cancel). Retract the orphaned "Waiting for

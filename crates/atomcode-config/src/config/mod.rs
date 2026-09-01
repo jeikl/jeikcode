@@ -130,6 +130,11 @@ pub struct BashToolConfig {
     /// was already printed. Compile/test/install families skip this
     /// (`looks_like_long_job`) and wait on `max_timeout_secs`. `0` disables.
     pub silent_kill_secs: u64,
+    /// Extra command tokens treated as long jobs. Overrides a built-in short
+    /// classification (whole-word match on the command line). Hot-reloaded from
+    /// disk; `long_bash_keyword_add` also updates a live overlay immediately.
+    #[serde(default)]
+    pub long_bash_command_keyword: Vec<String>,
 }
 
 impl Default for BashToolConfig {
@@ -138,8 +143,69 @@ impl Default for BashToolConfig {
             default_timeout_secs: 120,
             max_timeout_secs: 1800,
             silent_kill_secs: 60,
+            long_bash_command_keyword: Vec::new(),
         }
     }
+}
+
+/// Append `keyword` to `[tools.bash] long_bash_command_keyword` in `path`.
+/// Returns `Ok(true)` if it was inserted, `Ok(false)` if it was already present
+/// (case-insensitive). Preserves the rest of the file via `toml_edit`.
+pub fn append_long_bash_command_keyword_at(path: &Path, keyword: &str) -> Result<bool> {
+    let keyword = keyword.trim();
+    if keyword.is_empty() {
+        anyhow::bail!("bash keyword must not be empty");
+    }
+    let contents = if path.is_file() {
+        std::fs::read_to_string(path)
+            .with_context(|| format!("read {}", path.display()))?
+    } else {
+        String::new()
+    };
+    let mut doc = contents
+        .parse::<toml_edit::DocumentMut>()
+        .with_context(|| format!("parse {}", path.display()))?;
+    if !doc.contains_key("tools") || !doc["tools"].is_table() {
+        doc["tools"] = toml_edit::Item::Table(toml_edit::Table::new());
+    }
+    let tools = doc["tools"]
+        .as_table_mut()
+        .expect("tools table");
+    if !tools.contains_key("bash") || !tools["bash"].is_table() {
+        tools.insert("bash", toml_edit::Item::Table(toml_edit::Table::new()));
+    }
+    let bash = tools["bash"].as_table_mut().expect("bash table");
+    if !bash.contains_key("long_bash_command_keyword") || !bash["long_bash_command_keyword"].is_array() {
+        let mut arr = toml_edit::Array::new();
+        arr.set_trailing_comma(false);
+        bash.insert(
+            "long_bash_command_keyword",
+            toml_edit::value(arr),
+        );
+    }
+    let arr = bash["long_bash_command_keyword"]
+        .as_array_mut()
+        .expect("keyword array");
+    let already = arr.iter().any(|v| {
+        v.as_str()
+            .is_some_and(|s| s.eq_ignore_ascii_case(keyword))
+    });
+    if already {
+        return Ok(false);
+    }
+    arr.push(keyword);
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("create {}", parent.display()))?;
+    }
+    std::fs::write(path, doc.to_string())
+        .with_context(|| format!("write {}", path.display()))?;
+    Ok(true)
+}
+
+/// Append to the user `~/.atomcode/config.toml`.
+pub fn append_long_bash_command_keyword(keyword: &str) -> Result<bool> {
+    append_long_bash_command_keyword_at(&Config::default_path(), keyword)
 }
 
 /// `[tools.timeouts]` — short wall-clock budgets for tools that are NOT spawned-command
@@ -3600,6 +3666,39 @@ context_window = 131072
         assert_eq!(configured.tools.bash.default_timeout_secs, 300);
         assert_eq!(configured.tools.bash.max_timeout_secs, 3600);
         assert_eq!(configured.tools.bash.silent_kill_secs, 600);
+        assert!(configured.tools.bash.long_bash_command_keyword.is_empty());
+
+        let with_kw: Config = toml::from_str(
+            "[tools.bash]\nlong_bash_command_keyword = [\"ninja\", \"status\"]\n",
+        )
+        .unwrap();
+        assert_eq!(
+            with_kw.tools.bash.long_bash_command_keyword,
+            vec!["ninja".to_string(), "status".to_string()]
+        );
+    }
+
+    #[test]
+    fn append_long_bash_keyword_dedups_and_creates() {
+        let dir = std::env::temp_dir().join(format!(
+            "atomcode-kw-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("config.toml");
+        assert!(append_long_bash_command_keyword_at(&path, "ninja").unwrap());
+        assert!(!append_long_bash_command_keyword_at(&path, "Ninja").unwrap());
+        assert!(append_long_bash_command_keyword_at(&path, "status").unwrap());
+        let cfg: Config = toml::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(
+            cfg.tools.bash.long_bash_command_keyword,
+            vec!["ninja".to_string(), "status".to_string()]
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

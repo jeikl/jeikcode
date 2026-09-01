@@ -103,6 +103,13 @@ test('partial review result is incomplete rather than a clean success or generic
   assert.equal(toolResultStatus(false, 'Code review incomplete (MaxRounds)'), 'incomplete');
 });
 
+test('bash await-decision keeps the original row pending', () => {
+  assert.equal(
+    toolResultStatus(true, '[bash-await-decision]\nbashid: b-00000001\n'),
+    'pending',
+  );
+});
+
 
 
 test('withTrailingTodoList appends or replaces a trailing todo_list part', () => {

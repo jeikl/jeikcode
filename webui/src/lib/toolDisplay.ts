@@ -179,6 +179,105 @@ export function resolveToolDiffPreview(
   return { lines, raw: formatEditArgsDiffRaw(oldStr, newStr), source: 'args' };
 }
 
+export type ToolDiffStats = {
+  additions: number;
+  deletions: number;
+};
+
+/** Compute additions and deletions (+N -M) for a tool call. */
+export function computeToolDiffStats(
+  name: string,
+  output?: string,
+  args?: string,
+): ToolDiffStats | null {
+  const diff = resolveToolDiffPreview(name, output, args);
+  if (diff && diff.lines.length > 0) {
+    let additions = 0;
+    let deletions = 0;
+    for (const line of diff.lines) {
+      if (line.kind === 'add') additions++;
+      else if (line.kind === 'del') deletions++;
+    }
+    if (additions > 0 || deletions > 0) {
+      return { additions, deletions };
+    }
+  }
+
+  if (output) {
+    const addMatch = /(\d+)\s+(?:insertions?|additions?|\(\+\))/i.exec(output);
+    const delMatch = /(\d+)\s+(?:deletions?|\(-\))/i.exec(output);
+    if (addMatch || delMatch) {
+      const additions = addMatch ? Number.parseInt(addMatch[1]!, 10) : 0;
+      const deletions = delMatch ? Number.parseInt(delMatch[1]!, 10) : 0;
+      if (additions > 0 || deletions > 0) {
+        return { additions, deletions };
+      }
+    }
+  }
+
+  if (name === 'write_file' || name === 'create_file') {
+    if (args) {
+      const content = jsonArgString(args, 'content') || jsonArgString(args, 'code_content');
+      if (content) {
+        const lineCount = content.replace(/\r\n/g, '\n').split('\n').length;
+        return { additions: lineCount, deletions: 0 };
+      }
+    }
+  }
+
+  return null;
+}
+
+export type TurnDiffSummary = {
+  fileCount: number;
+  additions: number;
+  deletions: number;
+  toolCount: number;
+};
+
+/** Collect aggregated diff metrics (total files changed, +N -M) across turn message parts. */
+export function collectTurnDiffSummary(
+  parts: Array<{ kind: string; tool?: { name: string; output?: string; args?: string; id?: string } }>,
+): TurnDiffSummary | null {
+  const toolParts = parts.filter((p) => p.kind === 'tool' && p.tool);
+  if (toolParts.length === 0) return null;
+
+  let totalAdditions = 0;
+  let totalDeletions = 0;
+  let hasDiff = false;
+  const editedFiles = new Set<string>();
+
+  for (const p of toolParts) {
+    const tool = p.tool!;
+    const stats = computeToolDiffStats(tool.name, tool.output, tool.args);
+    if (stats && (stats.additions > 0 || stats.deletions > 0)) {
+      totalAdditions += stats.additions;
+      totalDeletions += stats.deletions;
+      hasDiff = true;
+    }
+    if (toolRendersAsDiff(tool.name) || toolCategory(tool.name) === 'edit') {
+      const filePath = tool.args
+        ? jsonArgString(tool.args, 'file_path') || jsonArgString(tool.args, 'path')
+        : '';
+      if (filePath) {
+        editedFiles.add(filePath);
+      } else if (tool.id) {
+        editedFiles.add(tool.id);
+      }
+    }
+  }
+
+  const fileCount = editedFiles.size > 0 ? editedFiles.size : toolParts.length;
+  if (!hasDiff && editedFiles.size === 0) return null;
+
+  return {
+    fileCount,
+    additions: totalAdditions,
+    deletions: totalDeletions,
+    toolCount: toolParts.length,
+  };
+}
+
 /** Best-effort unified-diff preview with per-line numbers from `@@` hunks.
  *  `+/-` lines are only colored after a real diff header — never on first sight. */
 export function parseDiffPreview(output: string, maxLines = 2000): DiffPreviewLine[] {

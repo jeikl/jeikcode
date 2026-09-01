@@ -71,12 +71,15 @@ import {
   type MsgPart,
 } from '../lib/toolRows';
 import {
+  jsonArgString,
   resolveToolDiffPreview,
   formatToolPayload,
   prettyToolText,
   toolCategory,
   toolGlyph,
   toolRendersAsDiff,
+  computeToolDiffStats,
+  collectTurnDiffSummary,
   type DiffPreviewLine,
 } from '../lib/toolDisplay';
 import {
@@ -5141,6 +5144,7 @@ function AssistantMessageView({
 }) {
   const t = useT();
   const text = messageText(msg);
+  const diffSummary = collectTurnDiffSummary(msg.parts);
   const isError =
     text.includes('[错误:') ||
     text.includes('[连接错误:') ||
@@ -5245,6 +5249,18 @@ function AssistantMessageView({
           {/* Segments in chronological order: text→tool→text→tool,
               matching the TUI. Consecutive tools share one tool-list. */}
           {renderAssistantParts(msg.parts, search)}
+          {diffSummary && (diffSummary.additions > 0 || diffSummary.deletions > 0) && (
+            <div class="turn-diff-summary">
+              <span class="turn-diff-summary-icon" aria-hidden="true">⚡</span>
+              <span class="turn-diff-summary-label">
+                {t('tool.filesChanged', { count: String(diffSummary.fileCount) })}
+              </span>
+              <DiffStatBadge
+                additions={diffSummary.additions}
+                deletions={diffSummary.deletions}
+              />
+            </div>
+          )}
           {streaming && <span class="streaming-cursor" />}
         </>
       )}
@@ -5299,11 +5315,7 @@ function renderAssistantParts(parts: MsgPart[], search: string): VNode[] {
         i++;
       }
       out.push(
-        <div class="tool-list" key={`tg-${groupKey}`}>
-          {tools.map((tool) => (
-            <ToolRowView key={tool.id} tool={tool} />
-          ))}
-        </div>,
+        <ToolGroupView key={`tg-${groupKey}`} tools={tools} />
       );
     } else if (p.kind === 'reasoning') {
       out.push(<ReasoningBlock key={`rs-${i}`} text={p.text} search={search} />);
@@ -5591,27 +5603,148 @@ function ToolStatusIcon({ cls }: { cls: string }) {
   );
 }
 
-function ToolRowView({ tool }: { tool: ToolRow }) {
+function DiffStatBadge({
+  additions,
+  deletions,
+}: {
+  additions: number;
+  deletions: number;
+}) {
+  if (additions === 0 && deletions === 0) return null;
+  return (
+    <span class="diff-stat-badge" aria-label={`+${additions} -${deletions}`}>
+      {additions > 0 && <span class="diff-stat-add">+{additions}</span>}
+      {deletions > 0 && <span class="diff-stat-del">-{deletions}</span>}
+    </span>
+  );
+}
+
+function ToolGroupView({ tools }: { tools: ToolRow[] }) {
+  const t = useT();
+  const [batchExpanded, setBatchExpanded] = useState<boolean | null>(null);
+  const [batchVersion, setBatchVersion] = useState(0);
+
+  const doneCount = tools.filter((tool) => tool.status === 'done').length;
+  const errorCount = tools.filter((tool) => tool.status === 'error' || tool.status === 'incomplete').length;
+  const runningCount = tools.filter((tool) => tool.status === 'pending' || tool.status === 'waiting_approval').length;
+
+  const allDiffStats = tools.map((tool) => computeToolDiffStats(tool.name, tool.output, tool.args));
+  const totalAdditions = allDiffStats.reduce((sum, s) => sum + (s?.additions ?? 0), 0);
+  const totalDeletions = allDiffStats.reduce((sum, s) => sum + (s?.deletions ?? 0), 0);
+  const hasDiffStats = totalAdditions > 0 || totalDeletions > 0;
+  const editTools = tools.filter(
+    (tool) => toolRendersAsDiff(tool.name) || toolCategory(tool.name) === 'edit',
+  );
+
+  return (
+    <div class="tool-list">
+      {tools.length > 1 && (
+        <div class="tool-group-header">
+          <span class="tool-group-summary">
+            <span class="tool-group-icon" aria-hidden="true">⚡</span>
+            <span>
+              {editTools.length === tools.length
+                ? t('tool.filesChanged', { count: String(tools.length) })
+                : t('tool.groupSummary', {
+                    total: String(tools.length),
+                    done: String(doneCount),
+                  })}
+            </span>
+            {hasDiffStats && (
+              <DiffStatBadge additions={totalAdditions} deletions={totalDeletions} />
+            )}
+            {runningCount > 0 && (
+              <span class="tool-group-badge running">
+                {runningCount} {t('tool.running')}
+              </span>
+            )}
+            {errorCount > 0 && (
+              <span class="tool-group-badge error">
+                {errorCount} {t('tool.failed')}
+              </span>
+            )}
+          </span>
+          <div class="tool-group-actions">
+            <button
+              type="button"
+              class="tool-group-btn"
+              onClick={() => {
+                setBatchExpanded(true);
+                setBatchVersion((v) => v + 1);
+              }}
+            >
+              {t('tool.expandAll')}
+            </button>
+            <span class="tool-group-sep">·</span>
+            <button
+              type="button"
+              class="tool-group-btn"
+              onClick={() => {
+                setBatchExpanded(false);
+                setBatchVersion((v) => v + 1);
+              }}
+            >
+              {t('tool.collapseAll')}
+            </button>
+          </div>
+        </div>
+      )}
+      {tools.map((tool) => (
+        <ToolRowView
+          key={tool.id}
+          tool={tool}
+          forceExpanded={batchExpanded}
+          forceVersion={batchVersion}
+        />
+      ))}
+    </div>
+  );
+}
+
+function ToolRowView({
+  tool,
+  forceExpanded = null,
+  forceVersion = 0,
+}: {
+  tool: ToolRow;
+  forceExpanded?: boolean | null;
+  forceVersion?: number;
+}) {
   const t = useT();
   const userCollapsedRef = useRef(false);
+  const userManuallyExpandedRef = useRef(false);
   const outputRef = useRef<HTMLPreElement>(null);
   const hasSubtasks = !!(tool.subtasks && tool.subtasks.length > 0);
   const category = toolCategory(tool.name);
   const glyph = toolGlyph(tool.name);
-  // Open on first paint when output/CLI body is already present so follow-scroll
-  // sees the real height instead of expanding after the messages effect ran.
+  const diffStats = computeToolDiffStats(tool.name, tool.output, tool.args);
+
+  // Default: collapsed! Only auto-expand if status is error/incomplete so problems are immediately visible.
   const [expanded, setExpanded] = useState(
-    () => category === 'terminal' || category === 'edit' || !!tool.output,
+    () => tool.status === 'error' || tool.status === 'incomplete',
   );
 
-  // Shell/edit tools open like a CLI while running (and stay open after)
-  // unless the user collapsed them. Other tools open once output arrives.
+  // Batch expand/collapse support from parent ToolGroupView
+  const prevBatchVersionRef = useRef(forceVersion);
   useEffect(() => {
-    if (tool.status !== 'pending' || userCollapsedRef.current) return;
-    if (category === 'terminal' || category === 'edit' || tool.output) {
+    if (forceVersion !== prevBatchVersionRef.current) {
+      prevBatchVersionRef.current = forceVersion;
+      if (forceExpanded !== null) {
+        setExpanded(forceExpanded);
+        userCollapsedRef.current = !forceExpanded;
+        userManuallyExpandedRef.current = forceExpanded;
+      }
+    }
+  }, [forceExpanded, forceVersion]);
+
+  // When a tool transitions to error/incomplete during live execution,
+  // auto-expand it to alert the user (unless they explicitly collapsed it).
+  useEffect(() => {
+    if (userCollapsedRef.current) return;
+    if (tool.status === 'error' || tool.status === 'incomplete') {
       setExpanded(true);
     }
-  }, [tool.status, tool.output, category]);
+  }, [tool.status]);
 
   useEffect(() => {
     if (!expanded || !tool.output || !outputRef.current) return;
@@ -5655,13 +5788,17 @@ function ToolRowView({ tool }: { tool: ToolRow }) {
           setExpanded((e) => {
             const next = !e;
             userCollapsedRef.current = !next;
+            userManuallyExpandedRef.current = next;
             return next;
           });
         }}
       >
         <span class="tool-glyph" aria-hidden="true">{glyph}</span>
         <span class="tool-name">{displayToolName(tool.name)}</span>
-        <span class="tool-name-secondary">{headerDetail}</span>
+        <span class="tool-name-secondary" title={headerDetail}>{headerDetail}</span>
+        {diffStats && (
+          <DiffStatBadge additions={diffStats.additions} deletions={diffStats.deletions} />
+        )}
         {annotation && (
           <span class={'tool-annotation ' + annotation.cls}>
             <ToolStatusIcon cls={annotation.cls} />
@@ -5781,6 +5918,57 @@ function DiffBody({
   );
 }
 
+function ToolTerminalBody({
+  tool,
+  outputRef,
+}: {
+  tool: ToolRow;
+  outputRef: { current: HTMLPreElement | null };
+}) {
+  const t = useT();
+  const live = tool.status === 'pending';
+  const cmd = jsonArgString(tool.args, 'command') || tool.args;
+  const [copied, setCopied] = useState(false);
+
+  const handleCopy = (e: MouseEvent) => {
+    e.stopPropagation();
+    const contentToCopy = tool.output || cmd || '';
+    if (!contentToCopy) return;
+    void copyTextToClipboard(contentToCopy).then((ok) => {
+      if (!ok) {
+        window.alert(t('copy.failed'));
+        return;
+      }
+      setCopied(true);
+      window.setTimeout(() => setCopied(false), 1200);
+    });
+  };
+
+  return (
+    <div class={'tool-terminal' + (live ? ' is-live' : '')}>
+      {cmd && <div class="tool-terminal-cmd">$ {cmd}</div>}
+      {tool.output ? (
+        <div class="code-block-wrapper tool-code-block">
+          <pre ref={outputRef} class={'tool-terminal-out' + (live ? ' is-live' : '')}>
+            <code>{tool.output}</code>
+          </pre>
+          <button
+            type="button"
+            class="copy-button"
+            onClick={handleCopy}
+            title={copied ? t('copy.copied') : t('copy.copy')}
+            aria-label={copied ? t('copy.copied') : t('copy.copy')}
+          >
+            {copied ? t('copy.copied') : t('copy.copy')}
+          </button>
+        </div>
+      ) : live ? (
+        <div class="tool-terminal-out is-empty is-live"></div>
+      ) : null}
+    </div>
+  );
+}
+
 function ToolExpandedBody({
   tool,
   outputRef,
@@ -5790,6 +5978,13 @@ function ToolExpandedBody({
 }) {
   const t = useT();
   const live = tool.status === 'pending';
+  const category = toolCategory(tool.name);
+
+  // 1. Bash / terminal tool: render a unified terminal console ($ command + output)
+  if (category === 'terminal') {
+    return <ToolTerminalBody tool={tool} outputRef={outputRef} />;
+  }
+
   const argsPretty = tool.args ? prettyToolText(tool.args) : null;
   const outputPretty = tool.output ? prettyToolText(tool.output) : null;
   const diffPreview = resolveToolDiffPreview(tool.name, tool.output, tool.args);

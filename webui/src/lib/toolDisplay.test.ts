@@ -12,6 +12,8 @@ import {
   toolCategory,
   toolGlyph,
   toolRendersAsDiff,
+  computeToolDiffStats,
+  collectTurnDiffSummary,
 } from './toolDisplay.ts';
 
 test('tool glyphs match OpenCode classes', () => {
@@ -127,4 +129,64 @@ test('formatToolPayload pretty-prints JSON for copyable code blocks', () => {
   assert.equal(fields?.[0]?.key, 'file_path');
   assert.ok(fields?.some((f) => f.key === 'content' && f.multiline));
   assert.equal(prettyToolText('- F3 memory/foo').lang, 'text');
+});
+
+test('computeToolDiffStats calculates additions and deletions from diff and write_file', () => {
+  const diffOutput = [
+    'diff --git a/foo.rs b/foo.rs',
+    '--- a/foo.rs',
+    '+++ b/foo.rs',
+    '@@ -1,3 +1,4 @@',
+    ' unchanged',
+    '-deleted line 1',
+    '-deleted line 2',
+    '+added line 1',
+    '+added line 2',
+    '+added line 3',
+  ].join('\n');
+  const stats = computeToolDiffStats('edit_file', diffOutput, undefined);
+  assert.deepEqual(stats, { additions: 3, deletions: 2 });
+
+  const writeStats = computeToolDiffStats(
+    'write_file',
+    'Wrote 2 lines',
+    JSON.stringify({ file_path: 'foo.txt', content: 'line 1\nline 2\nline 3' }),
+  );
+  assert.deepEqual(writeStats, { additions: 3, deletions: 0 });
+
+  const noDiff = computeToolDiffStats('read_file', 'some text', JSON.stringify({ file_path: 'foo.txt' }));
+  assert.equal(noDiff, null);
+});
+
+test('collectTurnDiffSummary aggregates files and lines across turn parts', () => {
+  const parts = [
+    { kind: 'text', text: 'starting edits' },
+    {
+      kind: 'tool',
+      tool: {
+        id: 'c1',
+        name: 'edit_file',
+        args: JSON.stringify({ file_path: 'a.rs' }),
+        output: '@@ -1,2 +1,3 @@\n ctx\n-del\n+add1\n+add2',
+      },
+    },
+    {
+      kind: 'tool',
+      tool: {
+        id: 'c2',
+        name: 'write_file',
+        args: JSON.stringify({ file_path: 'b.rs', content: 'x\ny\nz' }),
+        output: 'created b.rs',
+      },
+    },
+    { kind: 'text', text: 'finished' },
+  ];
+
+  const summary = collectTurnDiffSummary(parts as any);
+  assert.deepEqual(summary, {
+    fileCount: 2,
+    additions: 5, // 2 from a.rs + 3 from b.rs
+    deletions: 1, // 1 from a.rs
+    toolCount: 2,
+  });
 });

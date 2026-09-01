@@ -887,6 +887,130 @@ body {
   width: 100%;
 }
 
+.tool-group-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 3px 8px;
+  margin: 0 0 4px;
+  font-size: 11.5px;
+  color: var(--app-secondary-foreground);
+  border-radius: var(--corner-radius-small);
+  background: color-mix(in srgb, var(--app-list-hover-background), transparent 30%);
+  user-select: none;
+}
+
+.tool-group-summary {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-weight: 500;
+}
+
+.tool-group-icon {
+  font-size: 11px;
+  opacity: 0.85;
+}
+
+.tool-group-badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 1px 6px;
+  border-radius: 8px;
+  font-size: 10px;
+  font-weight: 600;
+  line-height: 1.2;
+}
+
+.tool-group-badge.running {
+  background: color-mix(in srgb, var(--app-link-color), transparent 82%);
+  color: var(--app-link-color);
+}
+
+.tool-group-badge.error {
+  background: color-mix(in srgb, var(--app-error-foreground), transparent 82%);
+  color: var(--app-error-foreground);
+}
+
+.tool-group-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.tool-group-btn {
+  background: transparent;
+  border: none;
+  padding: 2px 5px;
+  color: var(--app-secondary-foreground);
+  font-size: 11px;
+  cursor: pointer;
+  border-radius: 4px;
+  transition: color 0.15s, background 0.15s;
+}
+
+.tool-group-btn:hover {
+  color: var(--app-primary-foreground);
+  background: var(--app-list-hover-background);
+}
+
+.tool-group-sep {
+  opacity: 0.35;
+  font-size: 10px;
+}
+
+.diff-stat-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-family: var(--app-monospace-font-family);
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 1;
+  flex-shrink: 0;
+  margin: 0 4px;
+  user-select: none;
+}
+
+.diff-stat-add {
+  color: var(--app-diff-addition-foreground, #22c55e);
+}
+
+.diff-stat-del {
+  color: var(--app-diff-deletion-foreground, #ef4444);
+}
+
+.turn-diff-summary {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin: 8px 0 4px;
+  padding: 4px 10px;
+  border-radius: var(--corner-radius-small, 6px);
+  background: color-mix(in srgb, var(--app-secondary-background), transparent 30%);
+  border: 1px solid var(--app-primary-border-color, rgba(127, 127, 127, 0.2));
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--app-secondary-foreground);
+  width: fit-content;
+  user-select: none;
+}
+
+.turn-diff-summary:hover {
+  background: var(--app-list-hover-background);
+  color: var(--app-primary-foreground);
+}
+
+.turn-diff-summary-icon {
+  font-size: 11px;
+  opacity: 0.85;
+}
+
+.turn-diff-summary-label {
+  color: var(--app-primary-foreground);
+  font-size: 12px;
+}
+
 /* Each tool renders as a borderless, compact inline row (log-style): a
    leading type icon, the name, a flex-fill arg preview, and a plain-text
    status with its own icon. No card chrome — only a subtle hover background. */
@@ -1141,7 +1265,7 @@ body {
   margin: 0 0 4px;
 }
 .tool-code-block pre {
-  max-height: min(70vh, 640px);
+  max-height: min(50vh, 360px);
   overflow: auto;
   white-space: pre-wrap;
   word-break: break-word;
@@ -3131,6 +3255,9 @@ body {
   word-break: break-word;
   margin-bottom: 6px;
 }
+.tool-terminal .code-block-wrapper {
+  margin: 0;
+}
 .tool-terminal-out {
   margin: 0;
   max-height: 280px;
@@ -3138,6 +3265,9 @@ body {
   white-space: pre-wrap;
   word-break: break-word;
   color: var(--app-terminal-fg, #c8c6bf);
+  background: transparent;
+  border: none;
+  padding: 0;
 }
 .tool-terminal-out.is-empty { min-height: 1.2em; }
 .tool-terminal.is-live .tool-terminal-out::after,

@@ -1,4 +1,4 @@
-import { stripInjectedRemindersForDisplay } from './historyMessages';
+import { stripInjectedRemindersForDisplay } from './historyMessages.ts';
 
 /** One user question in the session outline (DeepSeek-style right rail). */
 export interface TurnNavItem {

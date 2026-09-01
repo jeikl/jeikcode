@@ -203,6 +203,10 @@ const zh = {
   'tool.output': '输出',
   'tool.diffApplied': '已写入文件的变更',
   'tool.diffPlanned': '预期替换（未写入，仅供参考）',
+  'tool.groupSummary': '执行了 {total} 个工具 · {done} 个完成',
+  'tool.filesChanged': '{count} 个文件已修改',
+  'tool.expandAll': '展开全部',
+  'tool.collapseAll': '收起全部',
   'chat.thinking': '思考过程',
   'subtask.summary': '子代理 · {done}/{total} 完成 · {running} 运行中 · {pending} 等待 · {failed} 失败',
 
@@ -601,6 +605,10 @@ const en: Record<MsgKey, string> = {
   'tool.output': 'Output',
   'tool.diffApplied': 'Changes written to file',
   'tool.diffPlanned': 'Planned replacement (not applied)',
+  'tool.groupSummary': '{total} tools executed · {done} done',
+  'tool.filesChanged': '{count} files changed',
+  'tool.expandAll': 'Expand all',
+  'tool.collapseAll': 'Collapse all',
   'chat.thinking': 'Thinking',
   'subtask.summary': 'Subtasks · {done}/{total} done · {running} running · {pending} pending · {failed} failed',
 

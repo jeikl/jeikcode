@@ -656,16 +656,23 @@ body {
    Note: 不设 pointer-events:none —— 那会阻断原生 title tooltip 触发
    (bot review P2)。user-select:none 仍保留以防止误选时间文字。 */
 .msg-time {
-  margin-top: 4px;
+  margin-top: 6px;
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: 10px 14px;
   font-size: 11px;
   line-height: 1.4;
   color: var(--app-secondary-foreground);
-  opacity: 0.7;
   user-select: none;
+}
+.msg-clock {
+  opacity: 0.7;
 }
 .msg-time-user {
   align-self: flex-end;
   margin-right: 2px;
+  opacity: 0.7;
 }
 
 /* 排队中的用户消息：弱化显示，附「排队中」标签与撤回按钮。 */
@@ -1897,9 +1904,13 @@ body {
 }
 .msg-turn-elapsed {
   font-variant-numeric: tabular-nums;
+  color: var(--app-brand);
+  font-weight: 500;
+  opacity: 1;
 }
-.msg-turn-elapsed.is-live {
-  opacity: 0.85;
+.msg-turn-elapsed.is-live,
+.msg-time.is-live .msg-turn-elapsed {
+  opacity: 0.95;
 }
 
 .btn-send {

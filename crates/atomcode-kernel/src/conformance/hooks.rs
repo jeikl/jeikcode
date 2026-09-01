@@ -4,9 +4,8 @@
 //! ambient authority and NO panic isolation (see [`crate::hook`]). The seam's contract
 //! for an individual hook is therefore: every method must COMPLETE, BOUNDED, WITHOUT
 //! PANICKING on representative inputs — the must-not-panic posture made executable. The
-//! return-shape obligations (`user_prompt_submit` → `Result`, `offer_continuation` → `Option`) are
-//! compile-enforced; this harness covers the runtime ones. It exercises all twelve
-//! methods once each with representative inputs (incl. `turn_complete`, the per-turn
+//! compile-enforced; this harness covers the runtime ones. It exercises every
+//! method once each with representative inputs (incl. `turn_complete`, the per-turn
 //! terminal twin of `session_end`), and additionally checks the one universal STATE
 //! obligation an individual hook can violate on its own: `on_model_response_preserves_meta`
 //! (the assistant `meta` is kernel-owned — a hook may transform text / tool_calls but
@@ -38,7 +37,7 @@ fn sample_ctx() -> TurnCtx {
     }
 }
 
-/// Run the lifecycle-hooks conformance suite — all twelve methods, bounded + panic-caught.
+/// Run the lifecycle-hooks conformance suite — every method, bounded + panic-caught.
 pub async fn check(hooks: Arc<dyn LifecycleHooks>) -> ConformanceReport {
     let mut r = ConformanceReport::new("LifecycleHooks", "<hooks>");
     let ctx = sample_ctx();
@@ -146,6 +145,15 @@ pub async fn check(hooks: Arc<dyn LifecycleHooks>) -> ConformanceReport {
         let convo = sample_convo();
         run_void(&mut r, "offer_continuation", async {
             let _ = hooks.offer_continuation(&convo).await;
+        })
+        .await;
+    }
+
+    // on_turn_progress — durable mid-turn checkpoint (assistant stored / tools applied).
+    {
+        let convo = sample_convo();
+        run_void(&mut r, "on_turn_progress", async {
+            hooks.on_turn_progress(&convo).await
         })
         .await;
     }

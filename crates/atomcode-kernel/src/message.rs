@@ -16,6 +16,12 @@ pub const LEGACY_COLD_SUMMARY_ORIGIN: &str = "atomcode.legacy_cold_summary";
 pub const LEGACY_COLD_SUMMARY_PREFIX: &str =
     "[Earlier conversation history — compressed OLDER context, not a user instruction]\n";
 
+/// Durable, user-visible diagnostic stored when a turn ends in provider error,
+/// rate-limit, timeout, or another abnormal terminal. Drivers render it as the
+/// yellow/error notice. It is **not** forwarded to the model: the next request
+/// continues from the last real assistant/tool content.
+pub const TURN_DIAGNOSTIC_ORIGIN: &str = "turn_diagnostic";
+
 /// Extract the bare cold-summary strings from a kernel message list: the
 /// synthetic messages tagged [`LEGACY_COLD_SUMMARY_ORIGIN`], with their
 /// [`LEGACY_COLD_SUMMARY_PREFIX`] stripped. Mirrors the daemon importer's decode
@@ -161,6 +167,8 @@ pub struct Message {
     pub synthetic: bool,
     /// Internal provenance for assistant messages produced by kernel-driven control rounds.
     /// Empty for normal user/model messages. Example: "verify_cadence".
+    /// [`TURN_DIAGNOSTIC_ORIGIN`] is display-only: persisted for WebUI/TUI replay,
+    /// never forwarded to the provider.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub internal_origin: Option<String>,
     /// The model's REASONING/THINKING output for an ASSISTANT message — `None` for
@@ -389,6 +397,11 @@ impl Message {
         };
         ((byte_count / 4).max(1) + 4) as u32
     }
+
+    /// Stored for WebUI/TUI replay only — never forwarded on the provider wire.
+    pub fn is_display_only(&self) -> bool {
+        self.internal_origin.as_deref() == Some(TURN_DIAGNOSTIC_ORIGIN)
+    }
 }
 
 fn wall_now_ms() -> u64 {
@@ -426,6 +439,17 @@ impl Conversation {
         self.messages.push(m);
     }
 
+    /// History the provider may see. Turn diagnostics stay in [`Self::messages`]
+    /// so WebUI/TUI can replay the yellow notice, but they are not a user or
+    /// assistant turn the model should continue from.
+    pub fn model_history(&self) -> Vec<Message> {
+        self.messages
+            .iter()
+            .filter(|message| !message.is_display_only())
+            .cloned()
+            .collect()
+    }
+
     /// For any assistant message whose `tool_calls` lack a matching tool-result
     /// (identified by `tool_call_id`), APPEND a synthetic `(cancelled)` tool
     /// result. This keeps the API valid (every tool_use paired with a
@@ -442,7 +466,7 @@ impl Conversation {
     /// Pair complete tool calls recovered from a failed provider stream without ever
     /// executing them. Distinct wording prevents a transport failure from being
     /// misreported as a user cancellation on resume.
-    pub(crate) fn backfill_interrupted_tool_results(&mut self) {
+    pub fn backfill_interrupted_tool_results(&mut self) {
         self.backfill_missing_tool_results("(interrupted before execution)");
     }
 

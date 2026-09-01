@@ -158,6 +158,35 @@ test('computeToolDiffStats calculates additions and deletions from diff and writ
   assert.equal(noDiff, null);
 });
 
+test('collectTurnDiffSummary aggregates files across separate assistant rounds', () => {
+  const firstRound = [
+    {
+      kind: 'tool',
+      tool: {
+        id: 'c1',
+        name: 'edit_file',
+        args: JSON.stringify({ file_path: 'a.rs' }),
+        output: '@@ -1,1 +1,2 @@\n ctx\n+add',
+      },
+    },
+  ];
+  const secondRound = [
+    { kind: 'text', text: 'done' },
+    {
+      kind: 'tool',
+      tool: {
+        id: 'c2',
+        name: 'write_file',
+        args: JSON.stringify({ file_path: 'b.rs', content: 'x' }),
+        output: 'created b.rs',
+      },
+    },
+  ];
+  const summary = collectTurnDiffSummary([...firstRound, ...secondRound] as any);
+  assert.equal(summary?.fileCount, 2);
+  assert.ok((summary?.additions ?? 0) > 0);
+});
+
 test('collectTurnDiffSummary aggregates files and lines across turn parts', () => {
   const parts = [
     { kind: 'text', text: 'starting edits' },

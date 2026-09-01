@@ -768,16 +768,43 @@ pub(crate) fn replay_session(
             // requested tool call — identical to the old `Text` /
             // `AssistantWithToolCalls` split.
             Role::Assistant => {
-                if !m.text.is_empty() {
-                    renderer.render(UiLine::AssistantText(m.text.clone()));
-                    renderer.render(UiLine::AssistantLineBreak);
-                }
-                // Group iff this step actually ran as a batch live. The kernel
-                // emits a batch only when ≥2 calls are DISTINCT by identity
-                // (name + canonicalized args); a step whose duplicate calls it
-                // collapsed showed no batch header, so gating on raw
-                // `tool_calls.len()` would over-group and diverge from live.
-                if atomcode_kernel::agent::distinct_tool_call_count(&m.tool_calls) > 1 {
+                if m.internal_origin.as_deref()
+                    == Some(atomcode_kernel::message::TURN_DIAGNOSTIC_ORIGIN)
+                {
+                    if !m.text.is_empty() {
+                        renderer.render(UiLine::Error(m.text.clone()));
+                    }
+                } else {
+                    if let Some(reasoning) =
+                        m.reasoning.as_deref().map(str::trim).filter(|s| !s.is_empty())
+                    {
+                        let (title, body) = crate::think::reasoning_summary(reasoning);
+                        let header = title.unwrap_or_else(|| {
+                            body.lines()
+                                .next()
+                                .unwrap_or("")
+                                .trim()
+                                .chars()
+                                .take(72)
+                                .collect()
+                        });
+                        if !header.is_empty() {
+                            renderer.render(UiLine::ReasoningHeader(header));
+                        }
+                        if state.show_reasoning && !body.is_empty() {
+                            renderer.render(UiLine::ReasoningText(body));
+                        }
+                    }
+                    if !m.text.is_empty() {
+                        renderer.render(UiLine::AssistantText(m.text.clone()));
+                        renderer.render(UiLine::AssistantLineBreak);
+                    }
+                    // Group iff this step actually ran as a batch live. The kernel
+                    // emits a batch only when ≥2 calls are DISTINCT by identity
+                    // (name + canonicalized args); a step whose duplicate calls it
+                    // collapsed showed no batch header, so gating on raw
+                    // `tool_calls.len()` would over-group and diverge from live.
+                    if atomcode_kernel::agent::distinct_tool_call_count(&m.tool_calls) > 1 {
                     // A multi-call assistant step ran as one parallel batch live.
                     // Rebuild the grouped "Running N calls" header + child rows
                     // (with folded result suffixes) instead of N standalone tool
@@ -819,6 +846,7 @@ pub(crate) fn replay_session(
                             name: crate::event_loop::display_tool_name(&tc.name),
                             detail: format_tool_detail(&tc.name, &tc.arguments),
                         });
+                    }
                     }
                 }
             }
@@ -1808,6 +1836,82 @@ mod tests {
         let context = state.last_context.as_ref().expect("valid context restored");
         assert_eq!(context.sent_tokens, 77);
         assert_eq!(context.ctx_window, 100);
+    }
+
+    #[test]
+    fn replay_renders_reasoning_tools_and_turn_diagnostic() {
+        use atomcode_kernel::message::{Message, TURN_DIAGNOSTIC_ORIGIN};
+        use atomcode_kernel::tool::ToolCall;
+
+        #[derive(Default)]
+        struct Rec {
+            lines: Vec<UiLine>,
+        }
+        impl Renderer for Rec {
+            fn render(&mut self, line: UiLine) {
+                self.lines.push(line);
+            }
+            fn flush(&mut self) {}
+            fn shutdown(&mut self) {}
+            fn reset(&mut self) {}
+            fn clear_screen(&mut self) {}
+            fn suspend_for_external(&mut self) {}
+            fn resume_from_external(&mut self) {}
+            fn flush_deferred(&mut self) {}
+        }
+
+        let mut assistant = Message::assistant(
+            "partial answer",
+            vec![ToolCall {
+                id: "c1".into(),
+                name: "read_file".into(),
+                arguments: r#"{"path":"a.rs"}"#.into(),
+            }],
+        );
+        assistant.reasoning = Some("**Inspecting**\nlooking at a.rs".into());
+        let mut diagnostic = Message::assistant("rate limited", vec![]);
+        diagnostic.internal_origin = Some(TURN_DIAGNOSTIC_ORIGIN.to_string());
+
+        let mut session = Session::new(PathBuf::from("/tmp/x"));
+        session.messages = vec![
+            Message::user("fix it"),
+            assistant,
+            Message::tool_result("c1", "fn main()", false),
+            diagnostic,
+        ];
+
+        let mut state = UiState::with_unicode(true);
+        state.show_reasoning = true;
+        let mut rec = Rec::default();
+        replay_session(&mut rec, &mut state, &session, false);
+
+        assert!(
+            rec.lines
+                .iter()
+                .any(|line| matches!(line, UiLine::ReasoningHeader(h) if h.contains("Inspecting"))),
+            "thinking header missing: {:?}",
+            rec.lines
+        );
+        assert!(
+            rec.lines.iter().any(|line| matches!(
+                line,
+                UiLine::ReasoningText(body) if body.contains("looking at a.rs")
+            )),
+            "thinking body missing: {:?}",
+            rec.lines
+        );
+        assert!(
+            rec.lines
+                .iter()
+                .any(|line| matches!(line, UiLine::AssistantText(t) if t == "partial answer"))
+        );
+        assert!(rec.lines.iter().any(|line| matches!(line, UiLine::ToolCall { .. })));
+        assert!(rec.lines.iter().any(|line| matches!(line, UiLine::ToolResult { .. })));
+        assert!(
+            rec.lines
+                .iter()
+                .any(|line| matches!(line, UiLine::Error(t) if t.contains("rate limited")))
+        );
     }
 }
 #[tokio::test]

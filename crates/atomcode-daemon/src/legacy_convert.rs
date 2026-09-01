@@ -1234,6 +1234,7 @@ fn load_catalog_session_view_in_root(
     let meta = optional_store(manager.read_meta(&entry.id))?;
     if meta.as_ref().map(|meta| &meta.owner) == Some(&StorageOwner::Native) {
         let mut loaded = manager.load_native_session(&entry.id)?;
+        manager.overlay_inflight_for_display(&entry.id, &mut loaded);
         let old_name = loaded.meta.name.clone();
         loaded
             .meta

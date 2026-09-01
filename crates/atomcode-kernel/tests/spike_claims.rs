@@ -308,6 +308,7 @@ async fn lifecycle_hooks_complete_surface_all_fire() {
         "on_text_delta",
         "on_reasoning_delta",
         "on_model_response",
+        "on_turn_progress",
         "on_error",
         "offer_continuation",
         "turn_complete",

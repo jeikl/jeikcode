@@ -627,6 +627,9 @@ impl LifecycleHooks for RecorderHook {
         self.record("offer_continuation");
         None
     }
+    async fn on_turn_progress(&self, _convo: &Conversation) {
+        self.record("on_turn_progress");
+    }
     async fn turn_complete(&self, _convo: &Conversation, _reason: &StopReason, _ctx: &TurnCtx) {
         self.record("turn_complete");
     }

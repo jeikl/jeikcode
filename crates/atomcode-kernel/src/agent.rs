@@ -6,7 +6,7 @@ use crate::hook::{
 };
 use crate::message::{
     CompactTrigger, CompactionStrategy, CompactionView, Conversation, ImageContent, Message,
-    MessageMeta, NoCompaction, SessionSnapshot, SNAPSHOT_VERSION,
+    MessageMeta, NoCompaction, SessionSnapshot, SNAPSHOT_VERSION, TURN_DIAGNOSTIC_ORIGIN,
 };
 use crate::middleware::{AfterOutcome, BeforeOutcome, ToolMiddleware};
 use crate::provider::{ChatOptions, LlmProvider};
@@ -1840,6 +1840,50 @@ impl RunningAgent {
         convo.backfill_interrupted_tool_results();
     }
 
+    /// Store a user-visible diagnostic so error / rate-limit / timeout terminals
+    /// survive refresh, session switch, and resume. Distinct from the last model
+    /// bubble so tools and text stay renderable. Display-only: stripped from the
+    /// provider wire so the next turn continues from the last real agent content.
+    fn persist_turn_diagnostic(convo: &mut Conversation, text: &str) {
+        let text = text.trim();
+        if text.is_empty() {
+            return;
+        }
+        if convo.messages.last().is_some_and(|message| {
+            message.internal_origin.as_deref() == Some(TURN_DIAGNOSTIC_ORIGIN)
+                && message.text == text
+        }) {
+            return;
+        }
+        let mut notice = Message::assistant(text, Vec::new());
+        notice.internal_origin = Some(TURN_DIAGNOSTIC_ORIGIN.to_string());
+        convo.push(notice);
+    }
+
+    /// Materialize the in-progress round (if any) plus a durable diagnostic, then
+    /// the caller `finish_turn`s so SnapshotHook writes once — not per token.
+    fn persist_interrupted_turn(
+        convo: &mut Conversation,
+        assistant_text: &str,
+        reasoning: &str,
+        reasoning_blocks: &[crate::message::ReasoningBlock],
+        pending_calls: &[ToolCall],
+        suppress_internal_stream: bool,
+        diagnostic: Option<&str>,
+    ) {
+        Self::persist_partial_assistant(
+            convo,
+            assistant_text,
+            reasoning,
+            reasoning_blocks,
+            pending_calls,
+            suppress_internal_stream,
+        );
+        if let Some(text) = diagnostic {
+            Self::persist_turn_diagnostic(convo, text);
+        }
+    }
+
     /// Terminal for a CANCELLED turn under "cancel = undo" semantics: roll the
     /// conversation back to `rollback_len` (its length before this turn's user
     /// message was pushed) so the cancelled prompt + any partial assistant/tool
@@ -2034,20 +2078,28 @@ impl RunningAgent {
                         } else {
                             // Explicit stop (Esc / picker) OR fail-closed default
                             // (no requester / timeout): the round cap is the reason.
+                            Self::persist_turn_diagnostic(
+                                convo,
+                                &format!("max rounds ({cap}) reached"),
+                            );
                             self.finish_turn(convo, StopReason::MaxRounds, &turn_ctx)
                                 .await;
                             return;
                         }
-                    } else {
-                        self.rt.emit(AgentEvent::Error {
-                            message: format!("max rounds ({cap}) reached"),
-                            http_status: None,
-                            code: None,
-                        });
-                        self.finish_turn(convo, StopReason::MaxRounds, &turn_ctx)
-                            .await;
-                        return;
-                    }
+                        } else {
+                            self.rt.emit(AgentEvent::Error {
+                                message: format!("max rounds ({cap}) reached"),
+                                http_status: None,
+                                code: None,
+                            });
+                            Self::persist_turn_diagnostic(
+                                convo,
+                                &format!("max rounds ({cap}) reached"),
+                            );
+                            self.finish_turn(convo, StopReason::MaxRounds, &turn_ctx)
+                                .await;
+                            return;
+                        }
                 }
             }
             let start = self.clock.now_millis();
@@ -2085,13 +2137,14 @@ impl RunningAgent {
                 }
                 self.rt.emit(AgentEvent::Steered { count: n, inputs });
             }
-            let mut messages = convo.messages.clone();
+            let mut messages = convo.model_history();
             self.hooks.pre_request(&mut messages, &turn_ctx).await;
             // Record hook-contract violations BEFORE normalization changes the
             // ephemeral projection. The warning must blame the hook output, not
             // the kernel's provider-safety repair below.
-            let mut appended_only = messages.len() >= convo.messages.len()
-                && messages[..convo.messages.len()] == convo.messages[..];
+            let stored_wire = convo.model_history();
+            let mut appended_only = messages.len() >= stored_wire.len()
+                && messages[..stored_wire.len()] == stored_wire[..];
             // Normalize every projection before it participates in token-window
             // decisions. Otherwise an orphan result that will never reach the
             // provider can spuriously compact persistent conversation state, while
@@ -2133,10 +2186,11 @@ impl RunningAgent {
                     if est(&convo.messages) >= before {
                         break; // nothing drained (sacred floor / single huge input) — warn below
                     }
-                    messages = convo.messages.clone();
+                    messages = convo.model_history();
                     self.hooks.pre_request(&mut messages, &turn_ctx).await;
-                    appended_only &= messages.len() >= convo.messages.len()
-                        && messages[..convo.messages.len()] == convo.messages[..];
+                    let stored_wire = convo.model_history();
+                    appended_only &= messages.len() >= stored_wire.len()
+                        && messages[..stored_wire.len()] == stored_wire[..];
                     Conversation::repair_pairing(&mut messages);
                 }
             }
@@ -2162,14 +2216,15 @@ impl RunningAgent {
             // still makes THIS round's outgoing wire prefix diverge from prior rounds, so
             // the provider's prefix cache MISSES (the project's recurring poison). Storage
             // tests can't see that for a third-party hook; surface it at runtime as a
-            // Warning. Cheap: compares the post-hook prefix against the untouched stored
-            // `convo.messages` (no extra clone); short-circuits on a shrink (no panic).
+            // Warning. Cheap: compares the post-hook prefix against the stored
+            // model-visible history (display-only diagnostics excluded); short-circuits
+            // on a shrink (no panic).
             if !appended_only {
                 self.rt.emit(AgentEvent::Warning(format!(
                     "pre_request is not append-only: the outgoing prefix diverges from the \
                      {} stored message(s) — this poisons the provider prefix cache for this \
                      request (a pre_request hook may only APPEND tail reminders)",
-                    convo.messages.len()
+                    convo.model_history().len()
                 )));
             }
             // READ-ONLY wire observation of the FINAL outgoing request (post
@@ -2267,6 +2322,10 @@ impl RunningAgent {
                                 // MAX_RATE_LIMIT_WAITS times without the window reopening.
                                 // Force a clean Pause stop to prevent spinning indefinitely
                                 // (e.g. a broken hook that always returns WaitAndRetry).
+                                Self::persist_turn_diagnostic(
+                                    convo,
+                                    server_message.as_deref().unwrap_or("rate limited"),
+                                );
                                 self.rt.emit(AgentEvent::RateLimited {
                                     reset_at_display: String::new(),
                                     reset_label: String::new(),
@@ -2310,6 +2369,10 @@ impl RunningAgent {
                             reset_label,
                             secs_until_reset,
                         } => {
+                            Self::persist_turn_diagnostic(
+                                convo,
+                                server_message.as_deref().unwrap_or("rate limited"),
+                            );
                             self.rt.emit(AgentEvent::RateLimited {
                                 reset_at_display,
                                 reset_label,
@@ -2357,10 +2420,11 @@ impl RunningAgent {
                 Err(e) => {
                     self.hooks.on_error(&e.message).await;
                     self.rt.emit(AgentEvent::Error {
-                        message: e.message,
+                        message: e.message.clone(),
                         http_status: e.http_status,
                         code: e.code,
                     });
+                    Self::persist_turn_diagnostic(convo, &e.message);
                     self.finish_turn(convo, StopReason::ProviderError, &turn_ctx)
                         .await;
                     return;
@@ -2427,6 +2491,16 @@ impl RunningAgent {
                 let ev = tokio::select! {
                     biased;
                     _ = cancel.cancelled() => {
+                        if self.keep_interrupted_context && saw_stream_content {
+                            Self::persist_partial_assistant(
+                                convo,
+                                &assistant_text,
+                                &reasoning,
+                                &reasoning_blocks,
+                                &pending_calls,
+                                suppress_internal_stream,
+                            );
+                        }
                         self.finish_cancelled(convo, rollback_len, &turn_ctx).await;
                         return;
                     }
@@ -2467,7 +2541,8 @@ impl RunningAgent {
                             retry_budget, first_token_secs
                         );
                         self.hooks.on_error(&msg).await;
-                        self.rt.emit(AgentEvent::Error { message: msg, http_status: None, code: None });
+                        self.rt.emit(AgentEvent::Error { message: msg.clone(), http_status: None, code: None });
+                        Self::persist_turn_diagnostic(convo, &msg);
                         self.finish_turn(convo, StopReason::Timeout, &turn_ctx).await;
                         return;
                     }
@@ -2517,7 +2592,8 @@ impl RunningAgent {
                             "stream timeout after automatic reconnects"
                         }.to_string();
                         self.hooks.on_error(&msg).await;
-                        self.rt.emit(AgentEvent::Error { message: msg, http_status: None, code: None });
+                        self.rt.emit(AgentEvent::Error { message: msg.clone(), http_status: None, code: None });
+                        Self::persist_turn_diagnostic(convo, &msg);
                         self.finish_turn(convo, StopReason::Timeout, &turn_ctx).await;
                         return;
                     }
@@ -2695,8 +2771,12 @@ impl RunningAgent {
                                 reset_label,
                                 secs_until_reset,
                                 auto_resuming: false,
-                                server_message,
+                                server_message: server_message.clone(),
                             });
+                            Self::persist_turn_diagnostic(
+                                convo,
+                                server_message.as_deref().unwrap_or("rate limited"),
+                            );
                             self.finish_turn(convo, StopReason::RateLimited, &turn_ctx)
                                 .await;
                             return;
@@ -2712,8 +2792,12 @@ impl RunningAgent {
                                         reset_label: String::new(),
                                         secs_until_reset: None,
                                         auto_resuming: false,
-                                        server_message,
+                                        server_message: server_message.clone(),
                                     });
+                                    Self::persist_turn_diagnostic(
+                                        convo,
+                                        server_message.as_deref().unwrap_or("rate limited"),
+                                    );
                                     self.finish_turn(convo, StopReason::RateLimited, &turn_ctx)
                                         .await;
                                     return;
@@ -2755,8 +2839,12 @@ impl RunningAgent {
                                     reset_label,
                                     secs_until_reset,
                                     auto_resuming: false,
-                                    server_message,
+                                    server_message: server_message.clone(),
                                 });
+                                Self::persist_turn_diagnostic(
+                                    convo,
+                                    server_message.as_deref().unwrap_or("rate limited"),
+                                );
                                 self.finish_turn(convo, StopReason::RateLimited, &turn_ctx)
                                     .await;
                                 return;
@@ -2764,16 +2852,15 @@ impl RunningAgent {
                         }
                     }
                     StreamEvent::Error(e) => {
-                        if saw_stream_content {
-                            Self::persist_partial_assistant(
-                                convo,
-                                &assistant_text,
-                                &reasoning,
-                                &reasoning_blocks,
-                                &pending_calls,
-                                suppress_internal_stream,
-                            );
-                        }
+                        Self::persist_interrupted_turn(
+                            convo,
+                            &assistant_text,
+                            &reasoning,
+                            &reasoning_blocks,
+                            &pending_calls,
+                            suppress_internal_stream,
+                            Some(e.message.as_str()),
+                        );
                         self.hooks.on_error(&e.message).await;
                         self.rt.emit(AgentEvent::Error {
                             message: e.message,
@@ -2888,10 +2975,11 @@ impl RunningAgent {
                 );
                 self.hooks.on_error(&msg).await;
                 self.rt.emit(AgentEvent::Error {
-                    message: msg,
+                    message: msg.clone(),
                     http_status: None,
                     code: None,
                 });
+                Self::persist_turn_diagnostic(convo, &msg);
                 self.finish_turn(convo, StopReason::ProviderError, &turn_ctx)
                     .await;
                 return;
@@ -2988,6 +3076,7 @@ impl RunningAgent {
                 &pending_calls,
             );
             convo.push(assistant_msg);
+            self.hooks.on_turn_progress(convo).await;
             if pending_calls.is_empty() {
                 // Exact-loop evidence is consecutive across tool rounds only. A
                 // no-tool assistant reply is an observable break in that sequence,
@@ -3036,6 +3125,12 @@ impl RunningAgent {
                                 http_status: None,
                                 code: None,
                             });
+                            Self::persist_turn_diagnostic(
+                                convo,
+                                &format!(
+                                    "max offer_continuation continuations ({max}) reached"
+                                ),
+                            );
                             self.finish_turn(convo, StopReason::MaxContinuations, &turn_ctx)
                                 .await;
                             return;
@@ -3638,6 +3733,7 @@ impl RunningAgent {
                 loop_calls.sort();
                 ToolLoopFingerprint { calls: loop_calls }
             });
+            self.hooks.on_turn_progress(convo).await;
             // ── Cancel during the batch: close batch + roll back the turn ──
             // Reached only when Phase ② observed a cancel. The results that DID
             // complete were applied above so their ToolResult events fired; the
@@ -3666,6 +3762,7 @@ impl RunningAgent {
                 });
             }
             if policy_denied {
+                Self::persist_turn_diagnostic(convo, "policy denied");
                 self.finish_turn(convo, StopReason::PolicyDenied, &turn_ctx)
                     .await;
                 return;
@@ -3718,14 +3815,16 @@ impl RunningAgent {
                 echo_nudged = false;
             }
             if echo_rounds >= ECHO_STOP_AT {
-                self.rt.emit(AgentEvent::Error {
-                    message: format!(
-                        "stopped: the model replayed the same reasoning/text and tool-call \
+                let message = format!(
+                    "stopped: the model replayed the same reasoning/text and tool-call \
                          pattern for {echo_rounds} consecutive rounds"
-                    ),
+                );
+                self.rt.emit(AgentEvent::Error {
+                    message: message.clone(),
                     http_status: None,
                     code: None,
                 });
+                Self::persist_turn_diagnostic(convo, &message);
                 self.finish_turn(convo, StopReason::RepeatLoop, &turn_ctx)
                     .await;
                 return;
@@ -3763,8 +3862,9 @@ impl RunningAgent {
                         convo.push(Message::synthetic_user(tool_loop_course_correction(policy)));
                     }
                     ToolLoopDecision::Stop => {
-                        self.rt
-                            .emit(AgentEvent::Warning(tool_loop_terminal_warning(policy)));
+                        let warning = tool_loop_terminal_warning(policy);
+                        self.rt.emit(AgentEvent::Warning(warning.clone()));
+                        Self::persist_turn_diagnostic(convo, &warning);
                         self.finish_turn(convo, StopReason::ToolLoopDetected, &turn_ctx)
                             .await;
                         return;
@@ -3786,14 +3886,16 @@ impl RunningAgent {
             // results, ineligible batches, or no exact policy). The echo fuse
             // similarly owns a replay of the model's own narrative.
             if !exact_streak_active && !echo_streak_active && repeat_rounds >= MAX_REPEAT_ROUNDS {
-                self.rt.emit(AgentEvent::Error {
-                    message: format!(
-                        "stopped: the model repeated the same tool-call pattern for \
+                let message = format!(
+                    "stopped: the model repeated the same tool-call pattern for \
                          {repeat_rounds} consecutive rounds"
-                    ),
+                );
+                self.rt.emit(AgentEvent::Error {
+                    message: message.clone(),
                     http_status: None,
                     code: None,
                 });
+                Self::persist_turn_diagnostic(convo, &message);
                 self.finish_turn(convo, StopReason::RepeatLoop, &turn_ctx)
                     .await;
                 return;
@@ -5059,6 +5161,45 @@ mod partial_stream_persistence_tests {
         RunningAgent::persist_partial_assistant(&mut convo, "", "", &[], &[], false);
         assert!(convo.messages.is_empty());
     }
+
+    #[test]
+    fn turn_diagnostic_is_appended_once_with_origin() {
+        let mut convo = Conversation::new();
+        convo.push(Message::user("go"));
+        RunningAgent::persist_turn_diagnostic(&mut convo, "auth failed (401)");
+        RunningAgent::persist_turn_diagnostic(&mut convo, "auth failed (401)");
+        assert_eq!(convo.messages.len(), 2);
+        assert_eq!(convo.messages[1].text, "auth failed (401)");
+        assert_eq!(
+            convo.messages[1].internal_origin.as_deref(),
+            Some(TURN_DIAGNOSTIC_ORIGIN)
+        );
+    }
+
+    #[test]
+    fn interrupted_turn_keeps_partial_assistant_and_diagnostic() {
+        let mut convo = Conversation::new();
+        convo.push(Message::user("go"));
+        RunningAgent::persist_interrupted_turn(
+            &mut convo,
+            "partial",
+            "",
+            &[],
+            &[],
+            false,
+            Some("upstream 503"),
+        );
+        assert_eq!(convo.messages[1].role, Role::Assistant);
+        assert_eq!(convo.messages[1].text, "partial");
+        assert_eq!(
+            convo.messages[2].internal_origin.as_deref(),
+            Some(TURN_DIAGNOSTIC_ORIGIN)
+        );
+        assert_eq!(convo.messages[2].text, "upstream 503");
+        let wire = convo.model_history();
+        assert_eq!(wire.len(), 2, "diagnostic is storage-only");
+        assert_eq!(wire[1].text, "partial");
+    }
 }
 
 #[cfg(test)]
@@ -5392,6 +5533,56 @@ mod provider_message_pairing_tests {
         async fn pre_request(&self, messages: &mut Vec<Message>, _ctx: &TurnCtx) {
             messages.retain(|message| message.tool_calls.is_empty());
         }
+    }
+
+    #[tokio::test]
+    async fn turn_diagnostic_is_not_forwarded_to_the_provider() {
+        let mut convo = Conversation::new();
+        convo.push(Message::user("go"));
+        convo.push(Message::assistant("partial", Vec::new()));
+        RunningAgent::persist_turn_diagnostic(&mut convo, "upstream 503");
+        let snapshot = SessionSnapshot::from_conversation(&convo);
+
+        let provider = Arc::new(RecordingProvider::new(vec![vec![
+            StreamEvent::TextDelta("ok".into()),
+            StreamEvent::Done { truncated: false },
+        ]]));
+        let mut handle = Agent::builder()
+            .provider(provider.clone())
+            .tools(ToolRegistry::new().mount(&[] as &[&str]))
+            .resume(snapshot)
+            .build()
+            .spawn();
+        handle
+            .commands
+            .send(AgentCommand::SendMessage {
+                text: "next".into(),
+                images: vec![],
+            })
+            .unwrap();
+        while let Some(ev) = handle.events.recv().await {
+            if matches!(ev, AgentEvent::TurnComplete { .. }) {
+                break;
+            }
+        }
+
+        let recorded = provider.recorded();
+        let outgoing = &recorded[0].0;
+        assert!(
+            outgoing.iter().any(|m| m.text == "partial"),
+            "real assistant content stays on the wire: {outgoing:?}"
+        );
+        assert!(
+            outgoing.iter().any(|m| m.text == "next"),
+            "follow-up user prompt stays on the wire: {outgoing:?}"
+        );
+        assert!(
+            outgoing
+                .iter()
+                .all(|m| m.internal_origin.as_deref() != Some(TURN_DIAGNOSTIC_ORIGIN)
+                    && m.text != "upstream 503"),
+            "turn diagnostic must not reach the provider: {outgoing:?}"
+        );
     }
 
     #[tokio::test]

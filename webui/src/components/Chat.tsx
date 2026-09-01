@@ -193,6 +193,20 @@ function messageText(m: Message): string {
   }, '');
 }
 
+/** All assistant parts from the current user turn, so file-change summaries
+ *  attach to the last bubble instead of the first write round. */
+function collectTurnAssistantParts(messages: Message[], lastIdx: number): MsgPart[] {
+  const parts: MsgPart[] = [];
+  for (let i = lastIdx; i >= 0; i--) {
+    const m = messages[i];
+    if (!m || m.role === 'user') break;
+    if (m.role === 'assistant') {
+      parts.unshift(...m.parts);
+    }
+  }
+  return parts;
+}
+
 /** Zero-pad a number to 2 digits — shared by formatMsgTime / formatMsgTimeFull. */
 const pad2 = (n: number) => (n < 10 ? '0' + n : '' + n);
 
@@ -2208,6 +2222,19 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
         });
       } else if (msg.role === 'assistant') {
         if (isInternalHistoryAssistantMessage(msg)) continue;
+        const origin = msg.internal_origin ?? msg.internalOrigin;
+        if (origin === 'turn_diagnostic') {
+          const text = (msg.content ?? '').trim();
+          if (text) {
+            loaded.push({
+              role: 'assistant',
+              parts: [{ kind: 'notice', text }],
+              ts: msg.created_at,
+              elapsedMs: msg.elapsed_ms,
+            });
+          }
+          continue;
+        }
         // Text comes first (the LLM speaks, then calls tools), so the part
         // order for a persisted round is [reasoning?, text, tool, tool, …].
         const parts: MsgPart[] = [];
@@ -4889,6 +4916,9 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
             const doneTotal = isLastInTurn && !busy
               ? (fromUser && fromUser > 0 ? fromUser : msg.elapsedMs)
               : undefined;
+            const turnDiffSummary = isLastInTurn
+              ? collectTurnDiffSummary(collectTurnAssistantParts(messages, origIdx))
+              : null;
 
             return (
               <AssistantMessageView
@@ -4905,6 +4935,7 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
                 timeFull={timeFull}
                 liveElapsedMs={liveFromUser}
                 turnTotalMs={doneTotal}
+                turnDiffSummary={turnDiffSummary}
                 search={search}
                 isActiveSearchMatch={isActiveSearchMatch}
               />
@@ -5123,6 +5154,7 @@ function AssistantMessageView({
   timeFull,
   liveElapsedMs,
   turnTotalMs,
+  turnDiffSummary,
   search,
   isActiveSearchMatch,
 }: {
@@ -5139,12 +5171,13 @@ function AssistantMessageView({
   liveElapsedMs?: number;
   /** User-bubble → this final answer. Only set on the last assistant of the turn. */
   turnTotalMs?: number;
+  turnDiffSummary?: ReturnType<typeof collectTurnDiffSummary>;
   search: string;
   isActiveSearchMatch: boolean;
 }) {
   const t = useT();
   const text = messageText(msg);
-  const diffSummary = collectTurnDiffSummary(msg.parts);
+  const diffSummary = isLastInTurn ? (turnDiffSummary ?? null) : null;
   const isError =
     text.includes('[错误:') ||
     text.includes('[连接错误:') ||
@@ -5266,22 +5299,20 @@ function AssistantMessageView({
       )}
       {copyBtn}
       {isLastInTurn && streaming && liveElapsedMs != null && (
-        <div class="msg-time msg-turn-elapsed is-live" aria-live="polite">
-          {t('chat.turnClockLive', { current: formatTurnElapsed(liveElapsedMs) })}
+        <div class="msg-time is-live" aria-live="polite">
+          <span class="msg-turn-elapsed">
+            {t('chat.turnElapsedLive', { time: formatTurnElapsed(liveElapsedMs) })}
+          </span>
         </div>
       )}
       {/* Clock = reply time. Duration = user bubble → this final answer, not
           per-round kernel elapsed. Only the last assistant of the turn. */}
       {timeLabel && !streaming && (text || turnTotalMs != null) && !isError && (
         <div class="msg-time" title={timeFull}>
-          {timeLabel}
+          <span class="msg-clock">{timeLabel}</span>
           {isLastInTurn && turnTotalMs != null && (
             <span class="msg-turn-elapsed">
-              {' · '}
-              {t('chat.turnClockDone', {
-                current: formatTurnElapsed(turnTotalMs),
-                total: formatTurnElapsed(turnTotalMs),
-              })}
+              {t('chat.turnElapsedDone', { time: formatTurnElapsed(turnTotalMs) })}
             </span>
           )}
         </div>
@@ -5289,10 +5320,7 @@ function AssistantMessageView({
       {!timeLabel && !streaming && isLastInTurn && turnTotalMs != null && !isError && (
         <div class="msg-time">
           <span class="msg-turn-elapsed">
-            {t('chat.turnClockDone', {
-              current: formatTurnElapsed(turnTotalMs),
-              total: formatTurnElapsed(turnTotalMs),
-            })}
+            {t('chat.turnElapsedDone', { time: formatTurnElapsed(turnTotalMs) })}
           </span>
         </div>
       )}

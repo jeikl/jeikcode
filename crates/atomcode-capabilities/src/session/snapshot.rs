@@ -724,9 +724,11 @@ impl LifecycleHooks for SnapshotHook {
 
     /// Save the accepted user prompt after it has entered the conversation.
     ///
-    /// Model responses are intentionally excluded: this hook runs before
-    /// requested tools execute, so persisting them could restore dangling tool
-    /// calls without their results.
+    /// Canonical `<id>.snapshot` is still committed only in `turn_complete`.
+    /// Mid-turn growth (assistant stored, tool results applied, approval hang)
+    /// is checkpointed separately by [`Self::on_turn_progress`] into inflight
+    /// with `replay_safe=false`, so a refresh / session switch / crash does not
+    /// drop the in-progress round.
     async fn turn_start(&self, convo: &mut Conversation) {
         let prompt_number = convo
             .messages
@@ -814,6 +816,23 @@ impl LifecycleHooks for SnapshotHook {
         drop(a);
         if let Err(error) = self.mgr.mark_inflight_not_replayable(&self.session_id) {
             eprintln!("[SnapshotHook] inflight phase update failed: {error}");
+        }
+    }
+
+    /// Checkpoint the live conversation while the turn is parked (approval card)
+    /// or after a durable round is stored. Never per token.
+    async fn on_turn_progress(&self, convo: &Conversation) {
+        let snapshot = SessionSnapshot::from_conversation(convo);
+        let result = match &self.lease {
+            Some(lease) => self
+                .mgr
+                .save_inflight_snapshot_with_lease(lease, &snapshot, false),
+            None => self
+                .mgr
+                .save_inflight_snapshot(&self.session_id, &snapshot, false),
+        };
+        if let Err(error) = result {
+            eprintln!("[SnapshotHook] inflight save at turn_progress failed: {error}");
         }
     }
 
@@ -1846,6 +1865,26 @@ mod tests {
                 .unwrap()
                 .unwrap()
                 .snapshot,
+            SessionSnapshot::from_conversation(&conversation)
+        );
+    }
+
+    #[tokio::test]
+    async fn turn_progress_checkpoints_assistant_inflight_as_not_replayable() {
+        let (hook, manager, _dir) = hook("inflight-progress");
+        let mut conversation = convo_with(1);
+        hook.turn_start(&mut conversation).await;
+        conversation.push(Message::assistant("waiting on approval", Vec::new()));
+
+        hook.on_turn_progress(&conversation).await;
+
+        let checkpoint = manager
+            .load_inflight_snapshot("inflight-progress")
+            .unwrap()
+            .unwrap();
+        assert!(!checkpoint.replay_safe);
+        assert_eq!(
+            checkpoint.snapshot,
             SessionSnapshot::from_conversation(&conversation)
         );
     }

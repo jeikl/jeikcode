@@ -16,7 +16,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Barrier;
 use std::sync::{Arc, Mutex, OnceLock};
 
-use atomcode_kernel::message::{Message, Role, SessionSnapshot, SNAPSHOT_VERSION};
+use atomcode_kernel::message::{Conversation, Message, Role, SessionSnapshot, SNAPSHOT_VERSION};
 use serde::{de::IgnoredAny, Deserialize, Serialize};
 
 use super::presentation::{
@@ -578,7 +578,7 @@ pub enum NativeSessionRepairOutcome {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub(crate) struct InflightSnapshot {
     version: u32,
-    replay_safe: bool,
+    pub(crate) replay_safe: bool,
     pub(super) snapshot: SessionSnapshot,
 }
 
@@ -1311,20 +1311,42 @@ impl SessionManager {
         matches!(self.load_inflight_snapshot(id), Ok(Some(_)))
     }
 
+    /// Overlay a prefix-extending inflight checkpoint onto a catalog/display load.
+    ///
+    /// Canonical on-disk aggregate is unchanged. Used when a turn is parked
+    /// (approval card) or has not yet reached `turn_complete` (error diagnostic
+    /// is committed through that path; this covers the in-progress round).
+    pub fn overlay_inflight_for_display(&self, id: &str, loaded: &mut LoadedSession) {
+        let Ok(Some(checkpoint)) = self.load_inflight_snapshot(id) else {
+            return;
+        };
+        if !snapshot_extends_prefix(&loaded.snapshot, &checkpoint.snapshot) {
+            return;
+        }
+        if checkpoint.snapshot.messages.len() > loaded.snapshot.messages.len() {
+            loaded.snapshot = checkpoint.snapshot;
+        }
+    }
+
     /// Test-only raw existence check used by cleanup/failure-path assertions.
     #[cfg(test)]
     pub(crate) fn has_inflight_snapshot(&self, id: &str) -> bool {
         self.inflight_path(id).map(|p| p.exists()).unwrap_or(false)
     }
 
-    /// Load a native session for runtime resume and recover one accepted user
-    /// prompt when a prior process died before reaching `turn_complete`.
+    /// Load a native session for runtime resume and recover an in-progress round
+    /// when a prior process died before reaching `turn_complete`.
     ///
     /// Recovery requires the active runtime lease and only accepts an inflight
-    /// snapshot that is exactly the canonical message prefix plus one final user
-    /// message. This rejects stale checkpoints and incomplete assistant/tool
-    /// rounds. General readers continue to use [`Self::load_native_session`] and
-    /// always receive the committed native aggregate.
+    /// snapshot that is a prefix extension of the canonical messages:
+    /// - replay-safe + exactly one extra real user message → return that prompt
+    ///   to replay (canonical history unchanged);
+    /// - any other prefix extension (assistant text, dangling tool calls from an
+    ///   approval card, diagnostics) → overlay inflight, backfill unpaired tools,
+    ///   and do not replay.
+    /// Stale / diverging checkpoints are discarded. General readers continue to
+    /// use [`Self::load_native_session`] for the committed aggregate, and
+    /// [`Self::overlay_inflight_for_display`] for catalog/history views.
     pub fn load_native_session_for_resume(
         &self,
         lease: &SessionLease,
@@ -1343,28 +1365,39 @@ impl SessionManager {
                 return Ok((loaded, None));
             }
         };
-        let canonical_len = loaded.snapshot.messages.len();
-        let recoverable = inflight.snapshot.messages.len() == canonical_len.saturating_add(1)
-            && inflight.snapshot.messages[..canonical_len] == loaded.snapshot.messages
+        if !snapshot_extends_prefix(&loaded.snapshot, &inflight.snapshot) {
+            self.clear_inflight_snapshot(lease.id());
+            return Ok((loaded, None));
+        }
+        let extra = inflight
+            .snapshot
+            .messages
+            .len()
+            .saturating_sub(loaded.snapshot.messages.len());
+        if extra == 0 {
+            return Ok((loaded, None));
+        }
+        let replay_user = inflight.replay_safe
+            && extra == 1
             && inflight.snapshot.messages.last().is_some_and(|message| {
                 message.role == atomcode_kernel::message::Role::User
                     && !message.synthetic
                     && message.internal_origin.is_none()
                     && message.tool_calls.is_empty()
             });
-        if recoverable {
-            if inflight.replay_safe {
-                Ok((loaded, inflight.snapshot.messages.last().cloned()))
-            } else {
-                loaded.snapshot = inflight.snapshot;
-                Ok((loaded, None))
-            }
-        } else {
-            // A stale or unsafe auxiliary checkpoint must not shadow committed
-            // state on future resumes.
-            self.clear_inflight_snapshot(lease.id());
-            Ok((loaded, None))
+        if replay_user {
+            return Ok((loaded, inflight.snapshot.messages.last().cloned()));
         }
+        let mut convo = Conversation {
+            messages: inflight.snapshot.messages,
+            cache_epoch: inflight.snapshot.cache_epoch,
+        };
+        convo.backfill_interrupted_tool_results();
+        loaded.snapshot.messages = convo.messages;
+        loaded.snapshot.cache_epoch = convo.cache_epoch;
+        loaded.snapshot.turn_counter = inflight.snapshot.turn_counter;
+        loaded.snapshot.request_counter = inflight.snapshot.request_counter;
+        Ok((loaded, None))
     }
 
     /// Read a historical core session under the same no-follow and size bounds as
@@ -3728,6 +3761,12 @@ fn ensure_meta_id(expected: &str, meta: &SessionMeta) -> SessionResult<()> {
             ),
         })
     }
+}
+
+/// True when `full` starts with every message in `prefix` (equal length is ok).
+fn snapshot_extends_prefix(prefix: &SessionSnapshot, full: &SessionSnapshot) -> bool {
+    let n = prefix.messages.len();
+    full.messages.len() >= n && full.messages[..n] == prefix.messages[..]
 }
 
 fn validate_snapshot(snapshot: &SessionSnapshot) -> SessionResult<()> {
@@ -6843,10 +6882,10 @@ mod tests {
     }
 
     #[test]
-    fn resume_rejects_inflight_assistant_state() {
+    fn resume_recovers_inflight_assistant_state() {
         let dir = tempfile::tempdir().unwrap();
         let mgr = SessionManager::with_root(dir.path());
-        let id = "reject-unsafe-inflight";
+        let id = "recover-assistant-inflight";
         let lease = mgr.acquire_lease(id).unwrap();
         let canonical = snap(&["completed"]);
         let mut meta = SessionMeta::new(id, "/project", 1);
@@ -6858,28 +6897,32 @@ mod tests {
             &meta,
         )
         .unwrap();
-        let unsafe_inflight = SessionSnapshot::new(vec![
+        let inflight = SessionSnapshot::new(vec![
             Message::user("completed"),
-            Message::assistant("tool round not committed", Vec::new()),
+            Message::assistant("waiting on approval", vec![atomcode_kernel::tool::ToolCall {
+                id: "c1".into(),
+                name: "write_file".into(),
+                arguments: "{}".into(),
+            }]),
         ]);
-        mgr.save_inflight_snapshot(id, &unsafe_inflight, true)
-            .unwrap();
+        mgr.save_inflight_snapshot(id, &inflight, false).unwrap();
 
+        let (loaded, pending) = mgr.load_native_session_for_resume(&lease).unwrap();
+        assert_eq!(pending, None);
+        assert_eq!(loaded.snapshot.messages.len(), 3, "dangling tool is backfilled");
+        assert_eq!(loaded.snapshot.messages[1].text, "waiting on approval");
         assert_eq!(
-            mgr.load_native_session_for_resume(&lease).unwrap(),
-            (
-                LoadedSession {
-                    meta: mgr.read_meta(id).unwrap(),
-                    snapshot: canonical,
-                    presentation: PresentationFile::default(),
-                },
-                None,
-            )
+            loaded.snapshot.messages[2].tool_call_id.as_deref(),
+            Some("c1")
         );
         assert!(
-            !mgr.has_inflight_snapshot(id),
-            "unsafe checkpoints are cleared so they cannot shadow later resumes"
+            mgr.has_inflight_snapshot(id),
+            "in-progress checkpoints stay until turn_complete"
         );
+        let mut displayed = mgr.load_native_session(id).unwrap();
+        assert_eq!(displayed.snapshot, canonical);
+        mgr.overlay_inflight_for_display(id, &mut displayed);
+        assert_eq!(displayed.snapshot.messages[1].text, "waiting on approval");
     }
 
     #[test]
@@ -6907,6 +6950,38 @@ mod tests {
 
         assert_eq!(loaded.snapshot, inflight);
         assert_eq!(pending, None);
+    }
+
+    #[test]
+    fn overlay_inflight_ignores_diverging_checkpoint() {
+        let dir = tempfile::tempdir().unwrap();
+        let mgr = SessionManager::with_root(dir.path());
+        let id = "diverging-inflight";
+        let lease = mgr.acquire_lease(id).unwrap();
+        let canonical = snap(&["completed"]);
+        let mut meta = SessionMeta::new(id, "/project", 1);
+        meta.owner = StorageOwner::Native;
+        mgr.commit_native_import(
+            &lease,
+            Some(&canonical),
+            Some(&PresentationFile::default()),
+            &meta,
+        )
+        .unwrap();
+        let diverging = snap(&["different history", "extra"]);
+        mgr.save_inflight_snapshot(id, &diverging, false).unwrap();
+
+        let mut displayed = mgr.load_native_session(id).unwrap();
+        mgr.overlay_inflight_for_display(id, &mut displayed);
+        assert_eq!(displayed.snapshot, canonical);
+
+        let (loaded, pending) = mgr.load_native_session_for_resume(&lease).unwrap();
+        assert_eq!(loaded.snapshot, canonical);
+        assert_eq!(pending, None);
+        assert!(
+            !mgr.has_inflight_snapshot(id),
+            "diverging checkpoints are cleared on resume"
+        );
     }
 
     #[test]

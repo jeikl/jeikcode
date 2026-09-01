@@ -288,6 +288,12 @@ pub trait LifecycleHooks: Send + Sync {
             .map(Continuation::generic)
     }
 
+    /// Conversation grew by a durable round (assistant stored, or tool results
+    /// applied). Fired sparingly — never per token — so L1 can checkpoint an
+    /// inflight snapshot while a turn is parked (approval card, mid-batch) without
+    /// hammering disk. PURE OBSERVATION.
+    async fn on_turn_progress(&self, _convo: &Conversation) {}
+
     /// A turn has TERMINATED — fired EXACTLY ONCE per turn on EVERY terminal path
     /// (normal stop, `max_rounds` / `max_continuations` fuse, provider
     /// error, stream timeout, cancel), AFTER any `offer_continuation` continuations are
@@ -360,7 +366,7 @@ impl LifecycleHooks for NoopHooks {}
 ///   the FIRST hook (in order) that returns `Some(text)` provides the continuation.
 ///   Later `Some(_)` values are IGNORED this round (the loop injects exactly one
 ///   follow-up). Returns that first `Some`, else `None`.
-/// - `turn_complete`, `on_error`, `session_end`: run ALL in registration order (pure
+/// - `turn_complete`, `on_error`, `on_turn_progress`, `session_end`: run ALL in registration order (pure
 ///   observation).
 ///
 /// An EMPTY `HookChain` behaves exactly like `NoopHooks`: every method is a no-op,
@@ -466,6 +472,12 @@ impl LifecycleHooks for HookChain {
             }
         }
         continuation
+    }
+
+    async fn on_turn_progress(&self, convo: &Conversation) {
+        for h in &self.hooks {
+            h.on_turn_progress(convo).await;
+        }
     }
 
     async fn turn_complete(&self, convo: &Conversation, reason: &StopReason, ctx: &TurnCtx) {

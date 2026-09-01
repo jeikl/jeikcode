@@ -1064,6 +1064,8 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
   const [hasOlder, setHasOlder] = useState(false);
   const [loadingOlder, setLoadingOlder] = useState(false);
   const [turnOutline, setTurnOutline] = useState<SessionTurnOutline[]>([]);
+  /** Absolute message index pending a scroll-jump after older history loads. */
+  const pendingJumpIdxRef = useRef<number | null>(null);
   // While another client (OpenAI API) owns `/chat/active`:
   // 1) `GET /chat/watch` reattaches to the live event bus (real-time progress)
   // 2) light history poll as a fallback for events missed before join
@@ -2694,7 +2696,12 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
     const next = resolveActiveTurnId(
       items,
       (id) => {
-        const el = document.getElementById(id);
+        // Use data-attribute lookup instead of getElementById to avoid
+        // ID mismatch when historyOffsetRef changes after loading older messages.
+        const idx = id.startsWith('turn-nav-') ? id.slice('turn-nav-'.length) : null;
+        const el = idx != null
+          ? document.querySelector(`[data-turn-nav-idx="${idx}"]`)
+          : document.getElementById(id);
         if (!el) return undefined;
         return el.getBoundingClientRect().top - rootRect.top + root.scrollTop;
       },
@@ -2740,21 +2747,42 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
 
   async function jumpToTurn(id: string) {
     const index = Number(id.slice('turn-nav-'.length));
-    if (Number.isFinite(index) && index < historyOffsetRef.current) {
+    if (!Number.isFinite(index)) return;
+    if (index < historyOffsetRef.current) {
       await ensureHistoryIncludes(index);
     }
-    const el = document.getElementById(id);
-    if (!el) return;
+    // Store the target so the messages-effect can pick it up after React commits.
+    pendingJumpIdxRef.current = index;
     setActiveTurnId(id);
     turnNavPinUntilRef.current = Date.now() + 1200;
-    el.scrollIntoView({ behavior: 'smooth', block: 'start' });
-    const root = scrollRef.current;
-    if (!root) return;
-    const onEnd = () => {
-      turnNavPinUntilRef.current = 0;
-      root.removeEventListener('scrollend', onEnd);
-    };
-    root.addEventListener('scrollend', onEnd, { once: true });
+    // Try immediate scroll — works when element is already in DOM.
+    const el = document.querySelector(`[data-turn-nav-idx="${index}"]`);
+    if (el) {
+      el.scrollIntoView({ behavior: 'smooth', block: 'start' });
+      const root = scrollRef.current;
+      if (root) {
+        const onEnd = () => {
+          turnNavPinUntilRef.current = 0;
+          root.removeEventListener('scrollend', onEnd);
+        };
+        root.addEventListener('scrollend', onEnd, { once: true });
+      }
+      pendingJumpIdxRef.current = null;
+    }
+    // Fallback: if element wasn't found yet (React hasn't committed),
+    // retry with increasing delays. The messages-effect is the primary
+    // path; this covers edge cases where messages didn't change.
+    if (pendingJumpIdxRef.current != null) {
+      for (const ms of [50, 150, 300]) {
+        await new Promise<void>((r) => setTimeout(r, ms));
+        const retry = document.querySelector(`[data-turn-nav-idx="${index}"]`);
+        if (retry) {
+          retry.scrollIntoView({ behavior: 'smooth', block: 'start' });
+          pendingJumpIdxRef.current = null;
+          break;
+        }
+      }
+    }
   }
   useEffect(() => {
     setTurnNavQuery('');
@@ -2764,12 +2792,32 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
     setLoadingOlder(false);
     historyOffsetRef.current = 0;
     historyTotalRef.current = 0;
+    pendingJumpIdxRef.current = null;
     setTurnOutline([]);
   }, [sessionId]);
   useEffect(() => {
     const id = requestAnimationFrame(() => syncTurnNavFromScroll());
     return () => cancelAnimationFrame(id);
   }, [turnNavItems]);
+
+  // After older messages load (or any messages change), scroll to the pending
+  // turn-jump target that couldn't be resolved immediately.
+  useEffect(() => {
+    const idx = pendingJumpIdxRef.current;
+    if (idx == null) return;
+    const el = document.querySelector(`[data-turn-nav-idx="${idx}"]`);
+    if (!el) return;
+    pendingJumpIdxRef.current = null;
+    el.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    const root = scrollRef.current;
+    if (root) {
+      const onEnd = () => {
+        turnNavPinUntilRef.current = 0;
+        root.removeEventListener('scrollend', onEnd);
+      };
+      root.addEventListener('scrollend', onEnd, { once: true });
+    }
+  }, [messages]);
 
   // Reload one session's transcript from disk into the view, guarded against a
   // session switch racing the async fetch. Mirrors the session-load effect's activeIdRef guard.
@@ -4863,6 +4911,7 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
                   key={historyOffsetRef.current + origIdx}
                   msg={msg}
                   anchorId={turnNavId(historyOffsetRef.current + origIdx)}
+                  turnNavIdx={historyOffsetRef.current + origIdx}
                   searchRef={setMatchRef}
                   timeLabel={timeLabel}
                   timeFull={timeFull}
@@ -5464,6 +5513,7 @@ function highlightText(text: string, search: string) {
 function UserMessageView({
   msg,
   anchorId,
+  turnNavIdx,
   searchRef,
   timeLabel,
   timeFull,
@@ -5472,6 +5522,7 @@ function UserMessageView({
 }: {
   msg: Message;
   anchorId?: string;
+  turnNavIdx?: number;
   searchRef?: (el: HTMLElement | null) => void;
   timeLabel?: string;
   timeFull?: string;
@@ -5528,7 +5579,7 @@ function UserMessageView({
 
   if (skillTitle && !expanded) {
     return (
-      <div class={wrapperClass} id={anchorId} data-turn-nav={anchorId || undefined} ref={searchRef}>
+      <div class={wrapperClass} id={anchorId} data-turn-nav={anchorId || undefined} data-turn-nav-idx={turnNavIdx} ref={searchRef}>
         {images}
         <button
           class="skill-badge"
@@ -5545,7 +5596,7 @@ function UserMessageView({
   }
 
   return (
-    <div class={wrapperClass} id={anchorId} data-turn-nav={anchorId || undefined} ref={searchRef}>
+    <div class={wrapperClass} id={anchorId} data-turn-nav={anchorId || undefined} data-turn-nav-idx={turnNavIdx} ref={searchRef}>
       <div class={'user-message-bubble' + (skillTitle ? ' is-markdown' : '')}>
         {images}
         {skillTitle && (

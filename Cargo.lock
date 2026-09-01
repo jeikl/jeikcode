@@ -323,7 +323,7 @@ dependencies = [
 
 [[package]]
 name = "atomcode"
-version = "6.0.70"
+version = "6.0.71"
 dependencies = [
  "agent-client-protocol",
  "anyhow",
@@ -369,7 +369,7 @@ dependencies = [
 
 [[package]]
 name = "atomcode-auth"
-version = "6.0.70"
+version = "6.0.71"
 dependencies = [
  "anyhow",
  "atomcode-codingplan-crypto",
@@ -391,7 +391,7 @@ dependencies = [
 
 [[package]]
 name = "atomcode-capabilities"
-version = "6.0.70"
+version = "6.0.71"
 dependencies = [
  "anyhow",
  "async-stream",
@@ -459,7 +459,7 @@ dependencies = [
 
 [[package]]
 name = "atomcode-clix"
-version = "6.0.70"
+version = "6.0.71"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -480,7 +480,7 @@ dependencies = [
 
 [[package]]
 name = "atomcode-coding"
-version = "6.0.70"
+version = "6.0.71"
 dependencies = [
  "async-trait",
  "atomcode-capabilities",
@@ -505,7 +505,7 @@ dependencies = [
 
 [[package]]
 name = "atomcode-codingplan"
-version = "6.0.70"
+version = "6.0.71"
 dependencies = [
  "anyhow",
  "atomcode-auth",
@@ -523,7 +523,7 @@ version = "0.1.0"
 
 [[package]]
 name = "atomcode-config"
-version = "6.0.70"
+version = "6.0.71"
 dependencies = [
  "anyhow",
  "atomcode-telemetry",
@@ -541,7 +541,7 @@ dependencies = [
 
 [[package]]
 name = "atomcode-daemon"
-version = "6.0.70"
+version = "6.0.71"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -577,7 +577,7 @@ dependencies = [
 
 [[package]]
 name = "atomcode-kernel"
-version = "6.0.70"
+version = "6.0.71"
 dependencies = [
  "async-trait",
  "futures",
@@ -589,7 +589,7 @@ dependencies = [
 
 [[package]]
 name = "atomcode-review"
-version = "6.0.70"
+version = "6.0.71"
 dependencies = [
  "async-trait",
  "atomcode-capabilities",
@@ -604,7 +604,7 @@ dependencies = [
 
 [[package]]
 name = "atomcode-telemetry"
-version = "6.0.70"
+version = "6.0.71"
 dependencies = [
  "anyhow",
  "chrono",
@@ -626,7 +626,7 @@ dependencies = [
 
 [[package]]
 name = "atomcode-tuix"
-version = "6.0.70"
+version = "6.0.71"
 dependencies = [
  "anyhow",
  "arboard",
@@ -673,7 +673,7 @@ dependencies = [
 
 [[package]]
 name = "atomcode-updater"
-version = "6.0.70"
+version = "6.0.71"
 dependencies = [
  "anyhow",
  "atomcode-config",

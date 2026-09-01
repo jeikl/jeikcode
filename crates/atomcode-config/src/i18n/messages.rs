@@ -1763,6 +1763,8 @@ pub enum Msg<'a> {
     CliAboutLogout,
     CliAboutStatus,
     CliAboutUpgrade,
+    CliHelpUpgradeForce,
+    CliHelpUpgradeYes,
     CliAboutRollback,
     CliAboutMcp,
     CliAboutDaemon,

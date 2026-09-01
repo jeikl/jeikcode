@@ -210,6 +210,7 @@ context_window = 32768
 # =============================================================================
 language = "zh-CN"              # 界面语言："zh-CN" | "en"
 auto_update = false             # 自动无感后台更新（true=开启, false=关闭）
+auto_update_mins = 30           # 自动更新轮询间隔（单位：分钟，默认 30 分钟）
 auto_commit = false             # 每轮任务完成后自动 git commit
 keep_interrupted_context = true # 中断时保留模型已输出的部分上下文
 offline_mode = "off"            # 离线环境："off" (联网), "on" (纯离线), "auto" (自动降级)

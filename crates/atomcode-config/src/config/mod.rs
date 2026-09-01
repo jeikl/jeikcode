@@ -248,6 +248,10 @@ fn default_no_fold_tools() -> Vec<String> {
     .collect()
 }
 
+fn default_auto_update_interval_mins() -> u64 {
+    30
+}
+
 impl Default for ToolOutputConfig {
     fn default() -> Self {
         Self {
@@ -380,6 +384,19 @@ pub struct Config {
     /// → defaults to `false` (safe).
     #[serde(default)]
     pub auto_update: bool,
+    /// Background auto-update check interval in minutes (default: 30 minutes).
+    /// Supports `auto_update_interval_mins`, `auto_update_mins`, `auto-update-mins`,
+    /// `auto_update_sec`, `auto-update-sec`, `auto_update_interval`, `auto-update-interval`.
+    #[serde(
+        default = "default_auto_update_interval_mins",
+        alias = "auto_update_mins",
+        alias = "auto-update-mins",
+        alias = "auto_update_sec",
+        alias = "auto-update-sec",
+        alias = "auto_update_interval",
+        alias = "auto-update-interval"
+    )]
+    pub auto_update_interval_mins: u64,
     /// Self-update source overrides (fork channel). When set, these take
     /// precedence over the built-in default release channel (this fork's
     /// `local-dev` branch) but LOSE to the env vars
@@ -721,6 +738,7 @@ impl Default for Config {
             notifications: Default::default(),
             network: Default::default(),
             auto_update: false,
+            auto_update_interval_mins: 30,
             update_manifest_url: None,
             update_download_base: None,
             telemetry: Default::default(),
@@ -1972,11 +1990,16 @@ mod tests {
             !Config::default().auto_update,
             "Default::default must not auto-upgrade"
         );
+        assert_eq!(Config::default().auto_update_interval_mins, 30);
         // Missing key in TOML must also stay off (serde default for bool).
         let cfg: Config = toml::from_str("default_provider = \"x\"").unwrap();
         assert!(!cfg.auto_update);
-        let cfg_on: Config = toml::from_str("auto_update = true").unwrap();
+        assert_eq!(cfg.auto_update_interval_mins, 30);
+        let cfg_on: Config = toml::from_str("auto_update = true\nauto_update_mins = 15").unwrap();
         assert!(cfg_on.auto_update);
+        assert_eq!(cfg_on.auto_update_interval_mins, 15);
+        let cfg_alias: Config = toml::from_str("auto-update-sec = 45").unwrap();
+        assert_eq!(cfg_alias.auto_update_interval_mins, 45);
     }
 
     #[test]
@@ -2419,6 +2442,7 @@ model = "missing-type"
             notifications: NotificationConfig::default(),
             network: NetworkConfig::default(),
             auto_update: true,
+            auto_update_interval_mins: 30,
             update_manifest_url: None,
             update_download_base: None,
             telemetry: Default::default(),

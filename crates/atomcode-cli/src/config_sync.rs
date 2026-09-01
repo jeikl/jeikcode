@@ -441,6 +441,16 @@ pub fn prompt_interactive_config_sync(mut items: Vec<ConfigDiffItem>) -> Result<
         return Ok(());
     }
 
+    let applied_count = apply_selected_diffs(items);
+    if applied_count == 0 {
+        println!("ℹ️ 未选择任何更新项，配置保持不变。");
+    }
+
+    Ok(())
+}
+
+/// 自动应用已选中的差异项（供 `upgrade -y` / `--auto` 使用，自动保护 MCP / skills 与用户模型）
+pub fn apply_selected_diffs(items: Vec<ConfigDiffItem>) -> usize {
     let mut applied_count = 0;
     for item in items.into_iter().filter(|it| it.selected) {
         match item.kind {
@@ -464,12 +474,9 @@ pub fn prompt_interactive_config_sync(mut items: Vec<ConfigDiffItem>) -> Result<
     }
 
     if applied_count > 0 {
-        println!("✨ 成功同步了 {} 个配置文件！", applied_count);
-    } else {
-        println!("ℹ️ 未选择任何更新项，配置保持不变。");
+        println!("✨ 成功同步了 {} 个配置文件（已自动保护用户模型配置与 MCP/Skills）！", applied_count);
     }
-
-    Ok(())
+    applied_count
 }
 
 /// 非交互式直接写入/更新全量内置资产（供 `atomcode setup --defaults` / `atomcode setup -y` 及自动化脚本使用）

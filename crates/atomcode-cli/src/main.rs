@@ -461,6 +461,20 @@ async fn run_serve_mode(
         );
     }
 
+    if config_auto_update_enabled() && !is_running_as_backup() && !atomcode_updater::is_package_managed() {
+        spawn_detached_upgrade_prep();
+        let cfg = Config::load(&Config::default_path()).unwrap_or_default();
+        let interval_secs = cfg.auto_update_interval_mins.max(1) * 60;
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(std::time::Duration::from_secs(interval_secs));
+            interval.tick().await;
+            loop {
+                interval.tick().await;
+                spawn_detached_upgrade_prep();
+            }
+        });
+    }
+
     let server_task = tokio::spawn(atomcode_daemon::run_server(atomcode_daemon::ServerOpts {
         host: host.clone(),
         port,
@@ -764,7 +778,11 @@ fn build_i18n_command() -> clap::Command {
         .mut_subcommand("login", |s| s.about(t(Msg::CliAboutLogin).into_owned()))
         .mut_subcommand("logout", |s| s.about(t(Msg::CliAboutLogout).into_owned()))
         .mut_subcommand("status", |s| s.about(t(Msg::CliAboutStatus).into_owned()))
-        .mut_subcommand("upgrade", |s| s.about(t(Msg::CliAboutUpgrade).into_owned()))
+        .mut_subcommand("upgrade", |s| {
+            s.about(t(Msg::CliAboutUpgrade).into_owned())
+                .mut_arg("force", |a| a.help(t(Msg::CliHelpUpgradeForce).into_owned()))
+                .mut_arg("yes", |a| a.help(t(Msg::CliHelpUpgradeYes).into_owned()))
+        })
         .mut_subcommand("rollback", |s| {
             s.about(t(Msg::CliAboutRollback).into_owned())
         })
@@ -1007,6 +1025,9 @@ enum Commands {
         /// Reinstall even when already on the latest version
         #[arg(long)]
         force: bool,
+        /// Automatically apply default config changes without interactive prompts
+        #[arg(short = 'y', long = "yes")]
+        yes: bool,
     },
     /// Hidden internal command to run interactive or automatic config sync after binary upgrade
     #[command(hide = true, name = "__sync_config")]
@@ -1987,13 +2008,11 @@ async fn run() -> Result<i32> {
             }
             Commands::SyncConfig { auto } => {
                 if let Some(home) = dirs::home_dir().map(|h| h.join(".atomcode")) {
+                    let diffs = atomcode::config_sync::scan_atomcode_config_diffs(&home);
                     if auto {
-                        let _ = atomcode::config_sync::apply_all_bundled_assets(&home, false);
-                    } else {
-                        let diffs = atomcode::config_sync::scan_atomcode_config_diffs(&home);
-                        if !diffs.is_empty() {
-                            let _ = atomcode::config_sync::prompt_interactive_config_sync(diffs);
-                        }
+                        let _ = atomcode::config_sync::apply_selected_diffs(diffs);
+                    } else if !diffs.is_empty() {
+                        let _ = atomcode::config_sync::prompt_interactive_config_sync(diffs);
                     }
                 }
                 return Ok(0);
@@ -2392,6 +2411,16 @@ async fn run() -> Result<i32> {
                 // env/config override. No signer gate — the fork's releases are
                 // plain binaries with manifest sha256 verification.
                 spawn_detached_upgrade_prep();
+
+                let poll_interval_secs = config.auto_update_interval_mins.max(1) * 60;
+                tokio::spawn(async move {
+                    let mut interval = tokio::time::interval(std::time::Duration::from_secs(poll_interval_secs));
+                    interval.tick().await;
+                    loop {
+                        interval.tick().await;
+                        spawn_detached_upgrade_prep();
+                    }
+                });
             }
 
             // Redirect fd 2 → $ATOMCODE_HOME/stderr.log before the TUI takes
@@ -3324,7 +3353,7 @@ async fn handle_command(cmd: Commands, telemetry: &std::sync::Arc<Telemetry>) ->
             }
             Ok(())
         }
-        Commands::Upgrade { force } => run_upgrade_cli(force).await,
+        Commands::Upgrade { force, yes } => run_upgrade_cli(force, yes).await,
         Commands::Rollback => run_rollback_cli(),
         Commands::Uninstall {
             yes,
@@ -3950,7 +3979,7 @@ fn parse_plugin_spec(s: &str) -> Result<PluginSpec> {
 
 /// CLI (non-TUI) upgrade driver — prints progress to stdout and
 /// success/error messages the same way `install.sh` does.
-async fn run_upgrade_cli(force: bool) -> Result<()> {
+async fn run_upgrade_cli(force: bool, yes: bool) -> Result<()> {
     use atomcode_updater::{self as self_update, UpgradeEvent, ALREADY_LATEST};
 
     let current = format!("v{}", env!("CARGO_PKG_VERSION"));
@@ -4003,15 +4032,20 @@ async fn run_upgrade_cli(force: bool) -> Result<()> {
                 println!("  Run `jeikcode` (or `atomcode`) to start the new version.");
 
                 // 🔍 由替换后的新版本二进制拉起差异扫描与交互多选（加载新二进制的内置资产）
-                let spawned = std::process::Command::new(&exe)
-                    .arg("__sync_config")
-                    .status();
+                let mut sync_cmd = std::process::Command::new(&exe);
+                sync_cmd.arg("__sync_config");
+                if yes {
+                    sync_cmd.arg("--auto");
+                }
+                let spawned = sync_cmd.status();
 
                 if spawned.is_err() {
                     // Fallback to in-process sync if spawning new binary fails
                     if let Some(home) = dirs::home_dir().map(|h| h.join(".atomcode")) {
                         let diffs = atomcode::config_sync::scan_atomcode_config_diffs(&home);
-                        if !diffs.is_empty() {
+                        if yes {
+                            let _ = atomcode::config_sync::apply_selected_diffs(diffs);
+                        } else if !diffs.is_empty() {
                             let _ = atomcode::config_sync::prompt_interactive_config_sync(diffs);
                         }
                     }

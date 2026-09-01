@@ -1146,6 +1146,9 @@ enum Commands {
     /// Manage local scheduled tasks (add/list/remove/enable/disable).
     #[command(subcommand)]
     Schedule(schedule_cmd::ScheduleCli),
+    /// Manage host services installed by `--host` (list/uninstall).
+    #[command(subcommand)]
+    Server(server_cmd::ServerCli),
     /// Generate a shell completion script on stdout.
     Completion(CompletionCommand),
     /// Internal: askpass helper invoked by sudo/ssh via SUDO_ASKPASS / SSH_ASKPASS.
@@ -1975,6 +1978,14 @@ async fn run() -> Result<i32> {
                     .shutdown(std::time::Duration::from_millis(500))
                     .await;
                 return Ok(code);
+            }
+            Commands::Server(sub) => {
+                HEADLESS_MODE.store(true, Ordering::Relaxed);
+                atomcode::server_cmd::handle_server(&sub)?;
+                telemetry
+                    .shutdown(std::time::Duration::from_millis(500))
+                    .await;
+                return Ok(0);
             }
             Commands::SyncConfig { auto } => {
                 if let Some(home) = dirs::home_dir().map(|h| h.join(".atomcode")) {
@@ -3473,6 +3484,9 @@ async fn handle_command(cmd: Commands, telemetry: &std::sync::Arc<Telemetry>) ->
         Commands::Hooks(subcmd) => handle_hooks(subcmd).await,
         Commands::Schedule(_) => {
             unreachable!("Schedule is handled inline in run() so its exit code survives")
+        }
+        Commands::Server(_) => {
+            unreachable!("Server is handled inline in run() so its exit code survives")
         }
         Commands::Askpass { .. } => {
             unreachable!("__askpass is handled early in run() before handle_command")

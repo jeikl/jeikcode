@@ -29,7 +29,10 @@ eager = "auto"
 [tools.bash]
 # Shared hard lifetime for every tool that waits on a spawned command
 # (bash, ast_grep, git clone, web_fetch curl fallback, parallel_edit build probe).
-# Agent bash has no timeout argument. silent_kill / default_timeout are !cmd only.
+# Agent bash has no timeout argument. default_timeout is !cmd only.
+# silent_kill_secs: short-command idle kill for agent bash AND !cmd
+# (no new stdout/stderr for this long → kill tree, keep captured output).
+# Compile/test/install families skip idle and wait on max_timeout_secs. 0 disables.
 default_timeout_secs = 120
 max_timeout_secs = 1800
 silent_kill_secs = 60

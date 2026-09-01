@@ -1,9 +1,10 @@
 //! `bash` — run a shell command in the working directory until it exits, the
-//! configured `[tools.bash] max_timeout_secs` hard cap, or cancel (cancel ⇒ the
-//! child is killed via `kill_on_drop`). Live stdout/stderr is forwarded through
-//! [`ToolContext::progress`]. There is no per-call `timeout` argument: the model
-//! does not choose a wait budget. Captured output is kept even when the hard cap
-//! kills the process.
+//! configured `[tools.bash] max_timeout_secs` hard cap, a short-command idle
+//! kill (`[tools.bash] silent_kill_secs`, skipped for compile/test families),
+//! or cancel (cancel ⇒ the child is killed via `kill_on_drop`). Live
+//! stdout/stderr is forwarded through [`ToolContext::progress`]. There is no
+//! per-call `timeout` argument: the model does not choose a wait budget.
+//! Captured output is kept even when the hard cap or idle kill stops the process.
 //!
 //! `risk()` is ARG-AWARE: a command is `Risky` only when [`check_destructive_command`]
 //! flags it (a faithful port of the production destructive-command classifier —
@@ -171,6 +172,7 @@ impl Tool for BashTool {
         #[cfg(unix)]
         crate::process_utils::apply_utf8_locale_env(&mut cmd);
         crate::process_utils::apply_enriched_path_env(&mut cmd);
+        crate::process_utils::apply_noninteractive_cli_env(&mut cmd);
         // Windows GBK locale (CP936): a Python child the model runs (python -c, scripts)
         // defaults its `subprocess` text pipes AND stdio to the console code page, so reading
         // UTF-8 output with the GBK codec dies with UnicodeDecodeError (#876). `PYTHONUTF8=1`
@@ -212,19 +214,31 @@ impl Tool for BashTool {
             if let Some(env) = crate::askpass::current_env() {
                 apply_askpass_env(&mut cmd, env);
             }
-            // Mirror exactly how atomcode-core/src/tool/bash.rs attaches setsid:
-            // call the setsid(2) syscall in a pre_exec hook so every bash child gets a
-            // new session/pgroup and loses the controlling tty. Failure (already a
-            // pgroup leader) is harmless — ignore the return value.
+            // setsid() + TIOCNOTTY: drop the controlling tty so a pager / `read`
+            // / `systemctl status` cannot wait on /dev/tty of the TUI when setsid
+            // fails (already a session leader). Failure of either call is harmless.
             unsafe {
                 cmd.pre_exec(|| {
                     // SAFETY(pre_exec): runs in the forked child before exec —
                     // async-signal-safe libc ONLY. No allocation, locks, panics,
-                    // or non-reentrant calls, or the child can deadlock. setsid() is safe.
+                    // or non-reentrant calls, or the child can deadlock.
                     extern "C" {
                         fn setsid() -> i32;
+                        fn open(path: *const i8, oflag: i32, ...) -> i32;
+                        fn close(fd: i32) -> i32;
+                        fn ioctl(fd: i32, request: u64, ...) -> i32;
                     }
                     setsid();
+                    const O_RDWR: i32 = 2;
+                    #[cfg(target_os = "macos")]
+                    const TIOCNOTTY: u64 = 0x20007471;
+                    #[cfg(not(target_os = "macos"))]
+                    const TIOCNOTTY: u64 = 0x5422;
+                    let tty_fd = open(b"/dev/tty\0".as_ptr() as *const i8, O_RDWR);
+                    if tty_fd >= 0 {
+                        ioctl(tty_fd, TIOCNOTTY);
+                        close(tty_fd);
+                    }
                     Ok(())
                 });
             }
@@ -265,6 +279,9 @@ impl Tool for BashTool {
         let live_sent = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let stdout_cap = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
         let stderr_cap = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let last_byte = std::sync::Arc::new(std::sync::Mutex::new(Instant::now()));
+        let idle = agent_bash_idle_timeout(&effective_command, bash_cfg.silent_kill_secs);
+        let idle_note_secs = idle.map(|d| d.as_secs()).unwrap_or(0);
         let run = async {
             let live_out = live_sent.clone();
             let live_err = live_sent.clone();
@@ -272,9 +289,11 @@ impl Tool for BashTool {
             let progress_err = progress.clone();
             let stdout_buf = stdout_cap.clone();
             let stderr_buf = stderr_cap.clone();
+            let last_out = last_byte.clone();
+            let last_err = last_byte.clone();
             let (_, _, status) = tokio::join!(
-                read_pipe_and_stream(&mut stdout, progress_out, live_out, stdout_buf),
-                read_pipe_and_stream(&mut stderr, progress_err, live_err, stderr_buf),
+                read_pipe_and_stream(&mut stdout, progress_out, live_out, stdout_buf, last_out),
+                read_pipe_and_stream(&mut stderr, progress_err, live_err, stderr_buf, last_err),
                 async { child.wait().await },
             );
             #[cfg(not(target_os = "windows"))]
@@ -288,6 +307,24 @@ impl Tool for BashTool {
             let out = stdout_cap.lock().unwrap_or_else(|e| e.into_inner()).clone();
             let errb = stderr_cap.lock().unwrap_or_else(|e| e.into_inner()).clone();
             (out, errb)
+        };
+
+        let last_byte_watch = last_byte.clone();
+        let idle_watch = async move {
+            let Some(idle) = idle else {
+                std::future::pending::<()>().await;
+                return;
+            };
+            loop {
+                let elapsed = last_byte_watch
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .elapsed();
+                if elapsed >= idle {
+                    return;
+                }
+                tokio::time::sleep(idle - elapsed).await;
+            }
         };
 
         tokio::select! {
@@ -310,6 +347,22 @@ impl Tool for BashTool {
                     }
                     Err(e) => err(format!("bash: error running command: {e}")),
                 }
+            }
+            _ = idle_watch => {
+                kill_tree();
+                let (out, errb) = snapshot();
+                err(with_note(
+                    &out,
+                    &errb,
+                    &format!(
+                        "bash: no new output for {idle_note_secs}s (config silent_kill_secs); \
+                         treated as stuck (pager, follow/watch, REPL, or waiting for a key). \
+                         Captured output is above. Do not retry the same blocking command. \
+                         Use a one-shot flag (--no-pager, -n, -c, --batch) or a non-interactive \
+                         equivalent (systemctl is-active/show, ss/lsof), and do not chain it \
+                         with later steps in one call."
+                    ),
+                ))
             }
             _ = tokio::time::sleep(Duration::from_secs(max_timeout)) => {
                 kill_tree();
@@ -394,6 +447,20 @@ fn shell_tool_description(
              the dedicated tools can't do."
         };
     }
+    macro_rules! hang_suffix {
+        () => {
+            "\n\
+             This shell has no keyboard. Do NOT run pagers, REPLs, follow/watch \
+             (`tail -f`, `journalctl -f`, `watch`, `ping` without `-c`), \
+             `systemctl status` of large units/slices, or anything that waits for a \
+             key or Ctrl+C — they hang the tool even after the useful output is printed. \
+             Use one-shot flags (`--no-pager`, `-n`, `-c`, `--batch`) and \
+             `systemctl is-active`/`show` or `ss`/`lsof` for ports. Never chain a \
+             blocking command with later steps in one call. Short commands that go \
+             silent are idle-killed after config `silent_kill_secs` (compile/test \
+             families wait on `max_timeout_secs` instead); captured output is returned."
+        };
+    }
     macro_rules! cmd_suffix {
         () => {
             "\n\
@@ -455,14 +522,14 @@ fn shell_tool_description(
     }
     if is_windows {
         if bash_present {
-            concat!(base!(), bash_suffix!())
+            concat!(base!(), hang_suffix!(), bash_suffix!())
         } else {
-            concat!(base!(), cmd_suffix!())
+            concat!(base!(), hang_suffix!(), cmd_suffix!())
         }
     } else if askpass_active {
-        concat!(base!(), askpass_suffix!())
+        concat!(base!(), hang_suffix!(), askpass_suffix!())
     } else {
-        base!()
+        concat!(base!(), hang_suffix!())
     }
 }
 
@@ -1319,6 +1386,7 @@ async fn read_pipe_and_stream(
     progress: ProgressSink,
     live_sent: std::sync::Arc<std::sync::atomic::AtomicUsize>,
     captured: std::sync::Arc<std::sync::Mutex<Vec<u8>>>,
+    last_byte: std::sync::Arc<std::sync::Mutex<Instant>>,
 ) {
     let mut buf = vec![0u8; 65536];
     let mut decode_pending = Vec::new();
@@ -1326,6 +1394,7 @@ async fn read_pipe_and_stream(
         match reader.read(&mut buf).await {
             Ok(0) => break,
             Ok(n) => {
+                *last_byte.lock().unwrap_or_else(|e| e.into_inner()) = Instant::now();
                 captured
                     .lock()
                     .unwrap_or_else(|e| e.into_inner())
@@ -2332,6 +2401,60 @@ pub(crate) fn looks_like_long_job(command: &str) -> bool {
         .any(|tok| LONG_JOB_BINS.contains(&command_basename(tok).as_str()))
 }
 
+/// Idle budget for agent `bash` / `!cmd` short commands from
+/// `[tools.bash] silent_kill_secs`. Compile families skip idle-kill.
+/// `silent_kill_secs = 0` disables.
+fn agent_bash_idle_timeout(command: &str, silent_kill_secs: u64) -> Option<Duration> {
+    #[cfg(test)]
+    if let Some(over) = test_agent_idle_secs() {
+        return idle_for_command(command, over);
+    }
+    idle_for_command(command, silent_kill_secs)
+}
+
+fn idle_for_command(command: &str, silent_kill_secs: u64) -> Option<Duration> {
+    if silent_kill_secs == 0 || looks_like_long_job(command) {
+        None
+    } else {
+        Some(Duration::from_secs(silent_kill_secs))
+    }
+}
+
+#[cfg(test)]
+thread_local! {
+    static TEST_AGENT_IDLE_SECS: std::cell::Cell<Option<u64>> =
+        std::cell::Cell::new(None);
+}
+
+#[cfg(test)]
+fn test_agent_idle_secs() -> Option<u64> {
+    TEST_AGENT_IDLE_SECS.with(|c| c.get())
+}
+
+#[cfg(test)]
+struct TestIdleGuard {
+    prev: Option<u64>,
+}
+
+#[cfg(test)]
+impl TestIdleGuard {
+    fn set(secs: u64) -> Self {
+        let prev = TEST_AGENT_IDLE_SECS.with(|c| {
+            let p = c.get();
+            c.set(Some(secs));
+            p
+        });
+        Self { prev }
+    }
+}
+
+#[cfg(test)]
+impl Drop for TestIdleGuard {
+    fn drop(&mut self) {
+        TEST_AGENT_IDLE_SECS.with(|c| c.set(self.prev));
+    }
+}
+
 /// Whether `command` is PROVABLY read-only, so it may run CONCURRENTLY without a
 /// sandbox. AST-based (tree-sitter-bash): only a fixed set of STRUCTURAL node kinds is
 /// allowed; any other NAMED kind (command substitution, subshell, expansion, …) means
@@ -2696,6 +2819,7 @@ pub async fn run_shell(
             .kill_on_drop(true);
         crate::process_utils::apply_utf8_locale_env(&mut cmd);
         crate::process_utils::apply_enriched_path_env(&mut cmd);
+        crate::process_utils::apply_noninteractive_cli_env(&mut cmd);
         // Detach child from the controlling terminal so neither it nor any
         // grandchild (ssh, git credential helpers, server-side hook output
         // rendered by git) can write directly to /dev/tty.  Without this,
@@ -3164,6 +3288,30 @@ mod tests {
         assert!(!super::looks_like_long_job("git status"));
         assert!(!super::looks_like_long_job("echo cargo"));
         assert!(!super::looks_like_long_job("grep cargo src/main.rs"));
+        assert!(!super::looks_like_long_job(
+            "systemctl status atomcode-root.service --no-pager"
+        ));
+        assert!(!super::looks_like_long_job(
+            "ss -tulpn | grep -E ':(4097|4098|5000)\\b'"
+        ));
+    }
+
+    #[test]
+    fn agent_bash_idle_timeout_skips_long_jobs_and_zero() {
+        assert_eq!(
+            super::agent_bash_idle_timeout("ls -la", 60),
+            Some(Duration::from_secs(60))
+        );
+        assert_eq!(
+            super::agent_bash_idle_timeout(
+                "systemctl status foo.service --no-pager",
+                60
+            ),
+            Some(Duration::from_secs(60))
+        );
+        assert_eq!(super::agent_bash_idle_timeout("cargo build", 60), None);
+        assert_eq!(super::agent_bash_idle_timeout("npm install", 60), None);
+        assert_eq!(super::agent_bash_idle_timeout("ls", 0), None);
     }
 
     #[test]
@@ -3183,6 +3331,12 @@ mod tests {
         assert!(
             desc.contains("max_timeout_secs") && !desc.contains("bash_timeout_add"),
             "tool description must point at config max_timeout_secs only: {desc}"
+        );
+        assert!(
+            desc.contains("silent_kill_secs")
+                && desc.contains("--no-pager")
+                && desc.contains("no keyboard"),
+            "tool description must warn against pagers/follow and name silent_kill_secs: {desc}"
         );
     }
 
@@ -4126,6 +4280,50 @@ mod tests {
         let r = BashTool.execute(r#"{"command":"sleep 30"}"#, &cx).await;
         assert!(r.is_error, "{}", r.content);
         assert!(r.content.contains("cancelled"), "{}", r.content);
+    }
+
+    #[tokio::test]
+    async fn execute_idle_kills_short_command_stuck_after_output() {
+        let _guard = super::TestIdleGuard::set(1);
+        let d = tempfile::tempdir().unwrap();
+        let started = Instant::now();
+        let r = BashTool
+            .execute(r#"{"command":"echo ready && sleep 30"}"#, &ctx(d.path()))
+            .await;
+        assert!(
+            started.elapsed() < Duration::from_secs(8),
+            "idle kill should return in ~1s, took {:.1}s",
+            started.elapsed().as_secs_f64()
+        );
+        assert!(r.is_error, "{}", r.content);
+        assert!(
+            r.content.contains("ready"),
+            "captured output must be kept: {}",
+            r.content
+        );
+        assert!(
+            r.content.contains("silent_kill_secs") && r.content.contains("stuck"),
+            "idle-kill note missing: {}",
+            r.content
+        );
+    }
+
+    #[tokio::test]
+    #[cfg(unix)]
+    async fn execute_overrides_pager_to_cat() {
+        let d = tempfile::tempdir().unwrap();
+        let r = BashTool
+            .execute(
+                r#"{"command":"printf %s \"$PAGER|$SYSTEMD_PAGER|$GIT_PAGER\""}"#,
+                &ctx(d.path()),
+            )
+            .await;
+        assert!(!r.is_error, "{}", r.content);
+        assert!(
+            r.content.contains("cat|cat|cat"),
+            "pager env must be cat: {}",
+            r.content
+        );
     }
 
     #[test]

@@ -167,7 +167,7 @@ no_fold_tools = ["fetch_output", "repo_map", "code_explore", "web_fetch", "web_s
 [tools.bash]
 default_timeout_secs = 120   # 仅 !cmd 省略超时时的默认墙钟
 max_timeout_secs = 1800      # 所有 spawn 命令的工具共用硬寿命；到点杀树（bash 保留已有输出）
-silent_kill_secs = 60        # 仅 !cmd 短命令空闲杀
+silent_kill_secs = 60        # 短命令空闲杀（agent bash 与 !cmd；编译/测试族跳过；0 关闭）
 
 [tools.timeouts]
 search_secs = 72             # grep / glob（Grok WSL 60s +20%）

@@ -238,7 +238,8 @@ eager = "auto"
 # 环境变量 ATOMCODE_TOOL_OUTPUT_THRESHOLD_BYTES 可覆盖本项（env 优先）。
 # 命令类工具共用硬寿命：bash / ast_grep / git clone / web_fetch curl 回退 / parallel_edit 构建探测。
 # 模型 bash 不传 timeout。max_timeout_secs = 从启动算子进程最长活多久，到点才杀（bash 保留已有输出）。
-# silent_kill / default_timeout 只给用户 !cmd。
+# default_timeout 只给用户 !cmd。silent_kill_secs 给 agent bash 与 !cmd 的短命令空闲杀
+# （一直没新输出则杀树并保留已有输出；编译/测试族跳过，等到 max_timeout_secs；0 关闭）。
 [tools.bash]
 default_timeout_secs = 120
 max_timeout_secs = 1800

@@ -515,6 +515,30 @@ pub(crate) fn apply_enriched_path_env_sync(cmd: &mut std::process::Command) {
     }
 }
 
+/// Force non-interactive CLI defaults so pagers and credential prompts cannot
+/// steal the TUI. Applied AFTER [`apply_enriched_path_env`] so a login-shell
+/// `PAGER=less` / `SYSTEMD_PAGER` snapshot cannot win.
+///
+/// Do NOT set `CI=1`: that changes build/test behavior. Askpass env is applied
+/// later and still wins for `sudo`/`ssh` password prompts.
+pub(crate) fn apply_noninteractive_cli_env(cmd: &mut tokio::process::Command) {
+    for (k, v) in NONINTERACTIVE_CLI_ENV {
+        cmd.env(k, v);
+    }
+}
+
+const NONINTERACTIVE_CLI_ENV: &[(&str, &str)] = &[
+    ("PAGER", "cat"),
+    ("GIT_PAGER", "cat"),
+    ("GH_PAGER", "cat"),
+    ("SYSTEMD_PAGER", "cat"),
+    ("LESS", "FRX"),
+    ("GIT_TERMINAL_PROMPT", "0"),
+    ("DEBIAN_FRONTEND", "noninteractive"),
+    ("AWS_PAGER", ""),
+    ("COMPOSER_NO_INTERACTION", "1"),
+];
+
 /// Apply a UTF-8-capable locale to async subprocesses spawned from v2 capabilities.
 #[cfg(unix)]
 pub(crate) fn apply_utf8_locale_env(cmd: &mut tokio::process::Command) {

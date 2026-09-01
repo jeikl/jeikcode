@@ -125,8 +125,10 @@ pub struct BashToolConfig {
     /// `web_fetch` curl fallback, `parallel_edit` build probe). Also the ceiling
     /// for user `!cmd` / `run_shell`. Agent `bash` has no per-call timeout arg.
     pub max_timeout_secs: u64,
-    /// Idle kill for user `!cmd` SHORT commands: no new stdout/stderr for this long.
-    /// Agent `bash` does not use this. Compile families ignore it.
+    /// Idle kill for short commands on agent `bash` and user `!cmd`: no new
+    /// stdout/stderr for this many seconds, then kill the tree and return what
+    /// was already printed. Compile/test/install families skip this
+    /// (`looks_like_long_job`) and wait on `max_timeout_secs`. `0` disables.
     pub silent_kill_secs: u64,
 }
 

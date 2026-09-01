@@ -265,7 +265,11 @@ Do NOT shell out for file work:\n\
 - Search file contents → grep (NOT `bash grep` / `rg`).\n\
 - Read a file → read_file (NOT `bash cat`).\n\
 Use bash ONLY for git, builds, package managers, running commands, and pipelines / \
-aggregation (wc, sort, uniq, awk, git log) the dedicated tools cannot do.";
+aggregation (wc, sort, uniq, awk, git log) the dedicated tools cannot do.\n\
+Never run a pager, follow/watch (`tail -f`, `journalctl -f`, `watch`), REPL, or \
+`systemctl status` of a large unit — those wait for a key/Ctrl+C and hang. Use \
+`--no-pager` and one-shot flags (`systemctl is-active`/`show`, `ss`/`lsof`). Do not \
+chain a blocking command with later steps in one bash call.";
 
 /// Blunt, point-of-decision restatement of the EXECUTION guardrails, appended only for the
 /// model flagged by [`model_needs_firm_execution`] (DeepSeek only — GLM excluded). The soft rules in
@@ -526,7 +530,7 @@ Sequential is OK ONLY when step N+1's command strictly DEPENDS on step N's outpu
 Inside one `bash` call, chain dependent shell steps with `&&` / `;` / `||` instead of splitting them across turns.
 To read a file, always use `read_file` — not `bash cat`. Omit `offset`/`limit` unless the file is too large to read at once (default page is 1500 lines; a 65 KiB budget may return fewer). Do not request 20–70 line slices; if a footer reports remaining lines, omit `limit` and continue from the given offset until the file is finished.
 To list directories, default to `list_directory` instead of `bash ls` / `bash find` — it is gitignore-aware and skips build/cache directories. Use it like `ls` on ONE directory you already know (default depth 1); do not pair it with `repo_map` (workspace overview is `repo_map` only). Fall back to `bash ls -la` ONLY when you specifically need file sizes, permissions, or timestamps.
-For bash, do NOT pass `timeout`. The command runs until it exits or hits the configured `max_timeout_secs`. Output streams live. NEVER use bash for file reads/writes (`cat`/`sed`); use the dedicated tools.
+For bash, do NOT pass `timeout`. The command runs until it exits, a short command goes idle (`silent_kill_secs`), or it hits `max_timeout_secs`. Output streams live. NEVER use bash for file reads/writes (`cat`/`sed`); use the dedicated tools. This shell has no keyboard: do NOT run pagers, REPLs, follow/watch (`tail -f`, `journalctl -f`, `watch`, `ping` without `-c`), `systemctl status` of large units, or anything that waits for a key/Ctrl+C. Use `--no-pager` / one-shot flags (`systemctl is-active`/`show`, `ss`/`lsof`). Never chain a blocking command with later steps in one bash call.
 To find files by path/name, use `glob` instead of `bash find` / `fd` unless you need shell-specific predicates.
 To search file contents, use `grep` instead of `bash grep` / `rg` unless you need shell-specific flags or streaming output.
 To change a file, use `edit_file` for targeted in-place replacements of existing files; reserve `write_file` for brand-new files or full rewrites. Never mutate a file with `bash` (`sed -i`, `echo >>`, heredoc redirects, `python -c '...write...'`).
@@ -1351,6 +1355,12 @@ mod tests {
         assert!(
             p.contains("do NOT pass `timeout`") && p.contains("max_timeout_secs"),
             "persona must tell the model not to pass bash timeout: {p}"
+        );
+        assert!(
+            p.contains("no keyboard")
+                && p.contains("--no-pager")
+                && p.contains("silent_kill_secs"),
+            "persona must warn against blocking/pager bash and name idle kill: {p}"
         );
     }
 

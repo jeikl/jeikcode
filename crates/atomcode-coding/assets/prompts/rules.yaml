@@ -88,7 +88,7 @@ tools_discipline:
     config_guide: "When asked what MCPs, tools, or skills are currently mounted/active in this session, check your active prompt/context and memory FIRST. Do not invoke `jeikcode_config_guide` unless the user asks how to configure them or asks about configuration files. If not mounted, answer honestly and offer to look up how to configure them. After you write `config.toml`, `mcp.json`, or skills, call `jeikcode_config_reload` once so the running session remounts them; do not ask the user to restart. New MCP tools appear on the next user message."
     read: "Use `read_file`, never `bash cat`. Once likely files are known, read complete logical units and batch independent files; omit `offset`/`limit` unless a specific range is required. Default page is 1500 lines (65 KiB budget may return fewer); if a footer remains, call again with that offset and omit `limit` to finish the file."
     list: "Use `list_directory` like `ls` for ONE directory you already know (default depth 1). Never as a workspace overview — that is `repo_map`. Never pair the two. Never `bash ls`."
-    bash: "Do NOT pass bash `timeout`. Commands run until they exit or hit config `max_timeout_secs`. Output streams live. NEVER use bash for file reads/writes."
+    bash: "Do NOT pass bash `timeout`. Commands run until they exit, a short command goes idle (`silent_kill_secs`), or they hit `max_timeout_secs`. Output streams live. NEVER use bash for file reads/writes. This shell has no keyboard: do NOT run pagers, REPLs, follow/watch (`tail -f`, `journalctl -f`, `watch`, `ping` without `-c`), `systemctl status` of large units, or anything that waits for a key/Ctrl+C. Use `--no-pager` / one-shot flags (`systemctl is-active`/`show`, `ss`/`lsof`). Never chain a blocking command with later steps in one bash call."
     glob: "Use `glob`, never `bash find`."
     grep: "Use `grep`, never `bash grep` / `rg`. Reserve grep for exact text literals or regex patterns."
     edit: "Use `edit_file` for in-place modifications; never use `sed`/`awk`/scripts to mutate code."
@@ -99,6 +99,7 @@ tools_discipline:
   firm_tool_discipline: >-
     Do NOT shell out for file work: list_directory (not ls), glob (not find), grep (not rg), read_file (not cat).
     Use bash ONLY for git, builds, package managers, and running tests.
+    Never run a pager, follow/watch (`tail -f`, `journalctl -f`, `watch`), REPL, or `systemctl status` of a large unit — those wait for a key/Ctrl+C and hang. Use `--no-pager` and one-shot flags (`systemctl is-active`/`show`, `ss`/`lsof`). Do not chain a blocking command with later steps in one bash call.
 
 # ------------------------------------------------------------------------------
 # 3. 代码定位与业务词典 (Locating Code)

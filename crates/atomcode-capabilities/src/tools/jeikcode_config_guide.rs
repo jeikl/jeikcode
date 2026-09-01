@@ -15,6 +15,7 @@ use atomcode_kernel::tool::{Tool, ToolContext, ToolResult};
 use serde::Deserialize;
 use serde_json::json;
 use std::collections::HashMap;
+use std::path::PathBuf;
 
 const DOC_OVERVIEW: &str = include_str!("../../assets/teaches/00_overview_index.md");
 const DOC_PROMPTS: &str = include_str!("../../assets/teaches/01_prompts_and_context.md");
@@ -34,10 +35,12 @@ impl JeikcodeConfigGuideTool {
         Self
     }
 
-    /// Load guide document content, prioritizing local ~/.atomcode/teaches/ if available.
+    /// Load guide document content, prioritizing `$ATOMCODE_HOME/teaches/`
+    /// (else `~/.atomcode/teaches/`) when present. Packaging and `/upgrade`
+    /// overwrite those host files with the bundled copy.
     fn load_document(&self, filename: &str, embedded: &'static str) -> String {
-        if let Some(home) = dirs::home_dir() {
-            let p = home.join(".atomcode").join("teaches").join(filename);
+        if let Some(home) = atomcode_home() {
+            let p = home.join("teaches").join(filename);
             if p.is_file() {
                 if let Ok(s) = std::fs::read_to_string(&p) {
                     let s = s.trim();
@@ -249,6 +252,18 @@ impl Tool for JeikcodeConfigGuideTool {
 
         ok(content)
     }
+}
+
+fn atomcode_home() -> Option<PathBuf> {
+    if let Ok(p) = std::env::var("ATOMCODE_HOME") {
+        let p = p.trim();
+        if !p.is_empty() {
+            return Some(PathBuf::from(p));
+        }
+    }
+    std::env::var_os("HOME")
+        .or_else(|| std::env::var_os("USERPROFILE"))
+        .map(|h| PathBuf::from(h).join(".atomcode"))
 }
 
 #[cfg(test)]

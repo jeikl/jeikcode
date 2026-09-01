@@ -52,6 +52,23 @@ export function withTrailingTodoList(parts: MsgPart[], items: TodoItem[]): MsgPa
   return [...without, { kind: 'todo_list', items: items.map((i) => ({ ...i })) }];
 }
 
+function isTerminalToolStatus(status: ToolRow['status']): boolean {
+  return status === 'done' || status === 'error' || status === 'incomplete';
+}
+
+function mergeToolRow(existing: ToolRow, incoming: ToolRow): ToolRow {
+  const merged: ToolRow = { ...existing, ...incoming };
+  // A leaked /live or /watch replay can re-deliver `tool_start` (pending) after
+  // `tool_result` already settled the row. Keep the terminal status and any
+  // output that the replay event omitted.
+  if (isTerminalToolStatus(existing.status) && !isTerminalToolStatus(incoming.status)) {
+    merged.status = existing.status;
+  }
+  if (incoming.output === undefined) merged.output = existing.output;
+  if (incoming.duration_ms === undefined) merged.duration_ms = existing.duration_ms;
+  return merged;
+}
+
 /**
  * Append `tool` as a new tool part, OR — when a tool part with the SAME `tool.id`
  * already exists — update that part in place (merging incoming fields over the
@@ -63,7 +80,7 @@ export function upsertToolPart(parts: MsgPart[], tool: ToolRow): MsgPart[] {
   if (idx < 0) return [...parts, { kind: 'tool', tool }];
   const existing = (parts[idx] as { kind: 'tool'; tool: ToolRow }).tool;
   const next = parts.slice();
-  next[idx] = { kind: 'tool', tool: { ...existing, ...tool } };
+  next[idx] = { kind: 'tool', tool: mergeToolRow(existing, tool) };
   return next;
 }
 
@@ -143,8 +160,43 @@ export function appendReasoningPart(parts: MsgPart[], delta: string): MsgPart[] 
   return [...parts, { kind: 'reasoning', text: delta }];
 }
 
-export function toolResultStatus(success: boolean, output: string): ToolRow['status'] {
-  if (output.includes('[bash-await-decision]')) return 'pending';
+export function toolResultStatus(
+  success: boolean,
+  output: string,
+  toolName?: string,
+): ToolRow['status'] {
+  // Only a live bash pane uses this marker. Guide/docs tools quote the same
+  // string; matching any output would leave them "运行中" with a blinking caret
+  // after the call already finished.
+  if (
+    (toolName ?? '').toLowerCase() === 'bash' &&
+    output.includes('[bash-await-decision]')
+  ) {
+    return 'pending';
+  }
   if (success) return 'done';
   return output.startsWith('Code review incomplete') ? 'incomplete' : 'error';
+}
+
+function isBashAwaitDecision(tool: ToolRow): boolean {
+  return (
+    tool.name.toLowerCase() === 'bash' &&
+    (tool.output ?? '').includes('[bash-await-decision]')
+  );
+}
+
+/** Turn ended: settle leftover pending rows except a still-live bash await. */
+export function finalizeToolsAfterTurn(parts: MsgPart[]): MsgPart[] {
+  return parts.map((part) => {
+    if (part.kind !== 'tool' || part.tool.status !== 'pending') return part;
+    if (isBashAwaitDecision(part.tool)) return part;
+    return {
+      kind: 'tool' as const,
+      tool: {
+        ...part.tool,
+        status: part.tool.output ? 'done' : 'error',
+        progress: undefined,
+      },
+    };
+  });
 }

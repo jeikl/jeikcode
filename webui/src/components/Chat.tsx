@@ -62,6 +62,7 @@ import {
 import {
   appendReasoningPart,
   appendToolOutput,
+  finalizeToolsAfterTurn,
   toolResultStatus,
   updateToolProgress,
   upsertToolPart,
@@ -2249,7 +2250,7 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
           for (const p of m.parts) {
             if (p.kind === 'tool' && p.tool.id === result.call_id) {
               p.tool.output = output;
-              p.tool.status = toolResultStatus(result.success, output);
+              p.tool.status = toolResultStatus(result.success, output, p.tool.name);
               // History path: fold `<task id=… state=completed>` into subtasks panel.
               if (p.tool.subtasks && p.tool.subtasks.length > 0) {
                 p.tool.subtasks = applySubtaskResultsFromOutput(
@@ -2493,7 +2494,10 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
         if (e.running && liveIdleSnapshotRef.current) {
           break;
         }
-        if (!e.running) liveIdleSnapshotRef.current = false;
+        if (!e.running) {
+          liveIdleSnapshotRef.current = false;
+          finalizePendingToolsOnCanvas();
+        }
         const lifecycle = reduceLiveLifecycle(liveLifecycleRef.current, {
           type: 'state',
           running: e.running,
@@ -3126,6 +3130,14 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
     });
   }
 
+  function finalizePendingToolsOnCanvas() {
+    setMessages((prev) =>
+      prev.map((m) =>
+        m.role === 'assistant' ? { ...m, parts: finalizeToolsAfterTurn(m.parts) } : m,
+      ),
+    );
+  }
+
   function addToolToLastAssistant(tool: ToolRow) {
     setMessages((prev) => {
       if (prev.length === 0) return prev;
@@ -3310,7 +3322,7 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
 
       case 'tool_result': {
         updateToolInLastAssistant(event.id, {
-          status: toolResultStatus(event.success, event.output),
+          status: toolResultStatus(event.success, event.output, event.name),
           duration_ms: event.duration_ms,
           output: event.output,
           progress: undefined,
@@ -3406,6 +3418,7 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
           saveTokenSnapshot(event.session_id, tokensAuthoritativeRef.current);
         }
         setBusyAndClock(false);
+        finalizePendingToolsOnCanvas();
         onPermissionResolved?.(null); // 回合结束：兜底清掉任何残留审批卡片
         setUserInputReq(null);
         break;
@@ -3418,6 +3431,7 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
           localTurnSessionsRef.current.delete(activeIdRef.current);
         }
         setBusyAndClock(false);
+        finalizePendingToolsOnCanvas();
         setQueued([]); // 用户中止：丢弃排队消息（对齐 VSCode 插件）
         onPermissionResolved?.(null);
         setUserInputReq(null);
@@ -3431,6 +3445,7 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
           localTurnSessionsRef.current.delete(activeIdRef.current);
         }
         setBusyAndClock(false);
+        finalizePendingToolsOnCanvas();
         setQueued([]); // 出错：丢弃排队消息
         onPermissionResolved?.(null);
         setUserInputReq(null);

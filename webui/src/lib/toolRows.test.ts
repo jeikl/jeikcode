@@ -2,6 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert';
 import {
   appendToolOutput,
+  finalizeToolsAfterTurn,
   MAX_LIVE_TOOL_OUTPUT,
   toolResultStatus,
   updateToolProgress,
@@ -105,9 +106,58 @@ test('partial review result is incomplete rather than a clean success or generic
 
 test('bash await-decision keeps the original row pending', () => {
   assert.equal(
-    toolResultStatus(true, '[bash-await-decision]\nbashid: b-00000001\n'),
+    toolResultStatus(true, '[bash-await-decision]\nbashid: b-00000001\n', 'bash'),
     'pending',
   );
+});
+
+test('quoting [bash-await-decision] in a non-bash tool does not keep it running', () => {
+  const guide = [
+    '# tools',
+    'idle → `[bash-await-decision]`, then the model decides',
+  ].join('\n');
+  assert.equal(toolResultStatus(true, guide, 'jeikcode_config_guide'), 'done');
+  assert.equal(toolResultStatus(true, guide), 'done');
+});
+
+test('replaying tool_start after tool_result does not regress status or drop output', () => {
+  const parts: MsgPart[] = [
+    {
+      kind: 'tool',
+      tool: tool('a', {
+        name: 'jeikcode_config_guide',
+        status: 'done',
+        output: 'full guide',
+        duration_ms: 8,
+      }),
+    },
+  ];
+  const next = upsertToolPart(
+    parts,
+    tool('a', { name: 'jeikcode_config_guide', status: 'pending' }),
+  );
+  const row = next[0]!.kind === 'tool' ? next[0].tool : undefined;
+  assert.equal(row?.status, 'done');
+  assert.equal(row?.output, 'full guide');
+  assert.equal(row?.duration_ms, 8);
+});
+
+test('finalizeToolsAfterTurn settles leftover pending rows except live bash await', () => {
+  const parts: MsgPart[] = [
+    { kind: 'tool', tool: tool('guide', { name: 'jeikcode_config_guide', output: 'docs' }) },
+    {
+      kind: 'tool',
+      tool: tool('bash', {
+        name: 'bash',
+        output: '[bash-await-decision]\nbashid: b-1\n',
+      }),
+    },
+    { kind: 'tool', tool: tool('empty', { name: 'grep' }) },
+  ];
+  const next = finalizeToolsAfterTurn(parts);
+  assert.equal(next[0]!.kind === 'tool' ? next[0].tool.status : '', 'done');
+  assert.equal(next[1]!.kind === 'tool' ? next[1].tool.status : '', 'pending');
+  assert.equal(next[2]!.kind === 'tool' ? next[2].tool.status : '', 'error');
 });
 
 

@@ -15,6 +15,7 @@ use clap_complete::Shell;
 
 mod schedule_cmd;
 mod schedule_os;
+mod server_cmd;
 mod telemetry_cmd;
 mod vision;
 use atomcode::uninstall;
@@ -452,14 +453,11 @@ async fn run_serve_mode(
         };
         (Some(store), Some(display))
     };
-    // Print after API endpoint catalog / bind notes so URLs stay at the bottom.
+    // Passed to either the native-service success summary or the foreground
+    // server footer. It is deliberately not printed until after the setup
+    // prompt has completed.
     let startup_footer =
         format_serve_banner(&host, port, &workdir, display_token.as_deref(), no_token);
-    if yolo {
-        eprintln!(
-            "serve: --yolo: auto-approve all tools; request_user_input tool hidden; no modal stalls"
-        );
-    }
 
     if config_auto_update_enabled() && !is_running_as_backup() && !atomcode_updater::is_package_managed() {
         spawn_detached_upgrade_prep();
@@ -475,31 +473,32 @@ async fn run_serve_mode(
         });
     }
 
-    // Systemd wizard BEFORE bind: raw-mode / stdin after the listen banner
-    // stops the process (shell `[Stopped]`) and leaves the port in use.
-    #[cfg(target_os = "linux")]
-    {
-        use is_terminal::IsTerminal;
-        if std::io::stdin().is_terminal() && atomcode::systemd::is_systemd_available() {
-            match atomcode::systemd::prompt_systemd_setup(
-                &host,
-                port,
-                &workdir,
-                no_token,
-                fixed_token.as_deref(),
-                display_token.as_deref(),
-                yolo,
-                no_telemetry,
-                &startup_footer,
-            ) {
-                Ok(true) => return 0,
-                Ok(false) => {}
-                Err(e) => {
-                    eprintln!("systemd setup: {e:#}");
-                    eprintln!("改为前台运行。");
-                }
-            }
+    // Native service wizard BEFORE bind and BEFORE any address/token output.
+    // Linux uses systemd, macOS launchd, and Windows Task Scheduler.
+    let setup = atomcode::host_service::HostServiceSetupOptions {
+        host: &host,
+        port,
+        workdir: &workdir,
+        no_token,
+        fixed_token: fixed_token.as_deref(),
+        display_token: display_token.as_deref(),
+        yolo,
+        no_telemetry,
+        banner: &startup_footer,
+    };
+    match atomcode::host_service::prompt_host_service_setup(&setup) {
+        Ok(true) => return 0,
+        Ok(false) => {}
+        Err(e) => {
+            eprintln!("系统服务配置失败: {e:#}");
+            eprintln!("改为前台运行。");
         }
+    }
+
+    if yolo {
+        eprintln!(
+            "serve: --yolo: auto-approve all tools; request_user_input tool hidden; no modal stalls"
+        );
     }
 
     let server_task = tokio::spawn(atomcode_daemon::run_server(atomcode_daemon::ServerOpts {
@@ -1981,7 +1980,7 @@ async fn run() -> Result<i32> {
             }
             Commands::Server(sub) => {
                 HEADLESS_MODE.store(true, Ordering::Relaxed);
-                atomcode::server_cmd::handle_server(&sub)?;
+                server_cmd::handle_server(&sub)?;
                 telemetry
                     .shutdown(std::time::Duration::from_millis(500))
                     .await;

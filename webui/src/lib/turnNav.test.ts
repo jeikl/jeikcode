@@ -7,6 +7,7 @@ import {
   resolveActiveTurnId,
   truncateTurnNavLabel,
   turnNavId,
+  turnNavScrollTop,
 } from './turnNav.ts';
 
 test('turnNavId is stable per message index', () => {
@@ -37,9 +38,34 @@ test('buildTurnNavItems keeps user questions in order and skips empty/system', (
   );
 });
 
+test('buildTurnNavItems preserves raw transcript indexes after display filtering', () => {
+  const items = buildTurnNavItems([
+    { role: 'assistant', text: '', sourceIndex: 80 },
+    { role: 'user', text: '工具调用后的问题', sourceIndex: 87 },
+  ], 80);
+  assert.deepEqual(
+    items.map((i) => ({ id: i.id, index: i.index })),
+    [{ id: 'turn-nav-87', index: 87 }],
+  );
+});
+
+test('buildTurnNavItems falls back to the history window offset', () => {
+  const items = buildTurnNavItems([
+    { role: 'assistant', text: '' },
+    { role: 'user', text: '窗口内问题' },
+  ], 40);
+  assert.equal(items[0]?.index, 41);
+});
+
+test('turnNavScrollTop targets the chat container and clamps above its start', () => {
+  assert.equal(turnNavScrollTop(600, 100, 240), 740);
+  assert.equal(turnNavScrollTop(20, 100, 40), 0);
+});
+
 test('buildTurnNavItemsFromOutline uses absolute transcript indexes', () => {
   const items = buildTurnNavItemsFromOutline([
     { index: 0, text: '第一问' },
+    { index: 25, text: '<system-reminder>internal</system-reminder>' },
     { index: 80, text: '很后面的提问' },
   ]);
   assert.deepEqual(

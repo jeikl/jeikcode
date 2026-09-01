@@ -1,4 +1,7 @@
-import { stripInjectedRemindersForDisplay } from './historyMessages.ts';
+import {
+  isInternalHistoryUserMessage,
+  stripInjectedRemindersForDisplay,
+} from './historyMessages.ts';
 
 /** One user question in the session outline (DeepSeek-style right rail). */
 export interface TurnNavItem {
@@ -35,6 +38,9 @@ export function buildTurnNavItemsFromOutline(
 ): TurnNavItem[] {
   const items: TurnNavItem[] = [];
   for (const turn of turns) {
+    // Older sessions may not mark injected user rows as synthetic. Keep the
+    // server outline aligned with the same rows history rendering suppresses.
+    if (isInternalHistoryUserMessage(turn.text)) continue;
     const text = compactTurnNavText(stripInjectedRemindersForDisplay(turn.text));
     const label = truncateTurnNavLabel(text);
     if (!label) continue;
@@ -44,7 +50,8 @@ export function buildTurnNavItemsFromOutline(
 }
 
 export function buildTurnNavItems(
-  messages: { role: string; text: string }[],
+  messages: { role: string; text: string; sourceIndex?: number }[],
+  windowOffset = 0,
 ): TurnNavItem[] {
   const items: TurnNavItem[] = [];
   for (let i = 0; i < messages.length; i++) {
@@ -53,9 +60,22 @@ export function buildTurnNavItems(
     const text = compactTurnNavText(stripInjectedRemindersForDisplay(msg.text));
     const label = truncateTurnNavLabel(text);
     if (!label) continue;
-    items.push({ id: turnNavId(i), index: i, label, text });
+    // History rendering filters synthetic messages and folds tool-result rows
+    // into their assistant. Prefer the raw transcript index carried through
+    // conversion; the visible index is only a fallback for live/legacy data.
+    const index = msg.sourceIndex ?? windowOffset + i;
+    items.push({ id: turnNavId(index), index, label, text });
   }
   return items;
+}
+
+/** Convert a target's viewport position into a scrollTop inside its chat root. */
+export function turnNavScrollTop(
+  rootScrollTop: number,
+  rootViewportTop: number,
+  targetViewportTop: number,
+): number {
+  return Math.max(0, rootScrollTop + targetViewportTop - rootViewportTop);
 }
 
 /** Case-insensitive substring filter over the full question text. */

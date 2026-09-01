@@ -6,7 +6,7 @@
 use anyhow::Result;
 use clap::Subcommand;
 
-use crate::host_service;
+use atomcode::host_service;
 
 // ── CLI enum ──────────────────────────────────────────────────────────────────
 

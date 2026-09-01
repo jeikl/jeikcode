@@ -40,7 +40,7 @@ import {
   FRONTEND_COMMANDS,
   type SlashHandlers,
 } from '../lib/slashCommands';
-import { buildTurnNavItems, buildTurnNavItemsFromOutline, compactTurnNavText, filterTurnNavItems, resolveActiveTurnId, turnNavId } from '../lib/turnNav';
+import { buildTurnNavItems, buildTurnNavItemsFromOutline, compactTurnNavText, filterTurnNavItems, resolveActiveTurnId, turnNavId, turnNavScrollTop } from '../lib/turnNav';
 import { resolvePendingAfterDecision } from '../lib/pendingPermission';
 import { beginModeSwitch, completeModeSwitch, failModeSwitch, initModeState } from '../lib/modeSwitch';
 import { randomUUID } from '../lib/randomId';
@@ -156,6 +156,9 @@ interface Message {
    *  finishes so the timeline can show "用时 12s" after refresh. Live ticks
    *  are computed from `turnStartedAt`, not this field. */
   elapsedMs?: number;
+  /** Absolute index in the persisted raw transcript. History display conversion
+   * filters/folds rows, so this cannot be reconstructed from the visible index. */
+  sourceIndex?: number;
 }
 
 /**
@@ -1283,7 +1286,7 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
           return;
         }
         if (session && Array.isArray(session.messages) && session.messages.length > 0) {
-          const loaded = sessionMessagesToDisplay(session.messages);
+          const loaded = sessionMessagesToDisplay(session.messages, session.offset ?? historyOffsetRef.current);
           if (loaded.length > messagesRef.current.length) {
             if (detachedWatchAbortRef.current) {
               setMessages((prev) => {
@@ -1316,7 +1319,7 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
         if (!stillActive) {
           transitionChatRecovery({ type: 'authoritative_terminal' });
           if (session && Array.isArray(session.messages)) {
-            setMessages(sessionMessagesToDisplay(session.messages));
+            setMessages(sessionMessagesToDisplay(session.messages, session.offset ?? historyOffsetRef.current));
           }
           // 回空闲态重新待机,让下一个 API turn 仍能被推到(watch 中途死掉时
           // 由 tick 兜底检测到回合结束,同样要重挂 idle watch)。
@@ -1737,7 +1740,10 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
             messagesRef.current.length === 0 &&
             !(currentCached && currentCached.length > 0);
           if (!isLiveSession || canvasEmpty) {
-            const loaded = sessionMessagesToDisplay(sessionResult.value.messages);
+            const loaded = sessionMessagesToDisplay(
+              sessionResult.value.messages,
+              sessionResult.value.offset ?? 0,
+            );
             const totalOnDisk = sessionResult.value.message_count ?? loaded.length;
             const diskOffset = sessionResult.value.offset ?? 0;
             historyTotalRef.current = totalOnDisk;
@@ -1869,15 +1875,20 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
   };
   /** After setMessages(history): force follow-bottom once layout settles. */
   const pinTimelineToBottom = () => {
+    const generation = sessionGenerationRef.current;
     atBottomRef.current = true;
     setShowJumpBtn(false);
     // Double rAF: first paint may still have incomplete message heights.
     requestAnimationFrame(() => {
       requestAnimationFrame(() => {
+        if (sessionGenerationRef.current !== generation) return;
         scrollToBottom('auto');
         // Late markdown/images can grow the timeline after first pin.
         window.setTimeout(() => {
-          if (atBottomRef.current) scrollToBottom('auto');
+          if (
+            sessionGenerationRef.current === generation &&
+            atBottomRef.current
+          ) scrollToBottom('auto');
         }, 50);
       });
     });
@@ -2172,7 +2183,7 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
     }
   }
 
-  function sessionMessagesToDisplay(msgs: SessionMessage[]): Message[] {
+  function sessionMessagesToDisplay(msgs: SessionMessage[], sourceOffset = 0): Message[] {
     const loaded: Message[] = [];
     // Per-assistant-turn todo calls so each reply freezes its own plan.
     let turnTodoCalls: { name: string; args: string }[] = [];
@@ -2193,7 +2204,7 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
         break;
       }
     };
-    for (const msg of msgs) {
+    for (const [rawIndex, msg] of msgs.entries()) {
       if (msg.role === 'user') {
         flushTurnTodos();
         if (isInternalHistoryUserMessage(msg.content ?? '', msg.synthetic)) continue;
@@ -2206,6 +2217,7 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
           parts: [{ kind: 'text', text: visible }],
           images: msg.images && msg.images.length ? msg.images : undefined,
           ts: msg.created_at,
+          sourceIndex: sourceOffset + rawIndex,
         });
       } else if (msg.role === 'assistant') {
         if (isInternalHistoryAssistantMessage(msg)) continue;
@@ -2497,10 +2509,11 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
             }
             return prev;
           }
-          rememberTurnOutline(e.text, historyOffsetRef.current + prev.length);
+          const turnIndex = nextTurnNavIndex(prev);
+          rememberTurnOutline(e.text, turnIndex);
           return [
             ...prev,
-            { role: 'user', parts: [{ kind: 'text', text: e.text }], images: e.images && e.images.length ? e.images : undefined, ts: now },
+            { role: 'user', parts: [{ kind: 'text', text: e.text }], images: e.images && e.images.length ? e.images : undefined, ts: now, sourceIndex: turnIndex },
             { role: 'assistant', parts: [] },
           ];
         });
@@ -2669,7 +2682,14 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
   const turnNavItems = useMemo(
     () => {
       if (turnOutline.length > 0) return buildTurnNavItemsFromOutline(turnOutline);
-      return buildTurnNavItems(messages.map((m) => ({ role: m.role, text: messageText(m) })));
+      return buildTurnNavItems(
+        messages.map((m) => ({
+          role: m.role,
+          text: messageText(m),
+          sourceIndex: m.sourceIndex,
+        })),
+        historyOffsetRef.current,
+      );
     },
     [turnOutline, messages],
   );
@@ -2683,6 +2703,7 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
   const turnNavItemsRef = useRef(turnNavItems);
   turnNavItemsRef.current = turnNavItems;
   const turnNavPinUntilRef = useRef(0);
+  const turnNavScrollCleanupRef = useRef<(() => void) | null>(null);
   function setActiveTurnId(id: string | null) {
     activeTurnIdRef.current = id;
     setActiveTurnIdState(id);
@@ -2700,7 +2721,7 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
         // ID mismatch when historyOffsetRef changes after loading older messages.
         const idx = id.startsWith('turn-nav-') ? id.slice('turn-nav-'.length) : null;
         const el = idx != null
-          ? document.querySelector(`[data-turn-nav-idx="${idx}"]`)
+          ? root.querySelector(`[data-turn-nav-idx="${idx}"]`)
           : document.getElementById(id);
         if (!el) return undefined;
         return el.getBoundingClientRect().top - rootRect.top + root.scrollTop;
@@ -2718,20 +2739,76 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
     });
   }
 
-  async function ensureHistoryIncludes(index: number) {
+  function nextTurnNavIndex(current: Message[] = messagesRef.current): number {
+    let next = historyTotalRef.current;
+    for (const message of current) {
+      if (message.sourceIndex != null) next = Math.max(next, message.sourceIndex + 1);
+    }
+    for (const item of turnNavItemsRef.current) next = Math.max(next, item.index + 1);
+    return next;
+  }
+
+  function cancelTurnNavScroll() {
+    const cleanup = turnNavScrollCleanupRef.current;
+    turnNavScrollCleanupRef.current = null;
+    cleanup?.();
+  }
+
+  /** Scroll only the transcript container. `scrollIntoView` also scrolls outer
+   * ancestors and races the bottom-follow observer during session replacement. */
+  function scrollToTurnIndex(index: number, behavior: ScrollBehavior = 'smooth'): boolean {
+    const root = scrollRef.current;
+    if (!root) return false;
+    const target = root.querySelector(`[data-turn-nav-idx="${index}"]`);
+    if (!(target instanceof HTMLElement)) return false;
+
+    cancelTurnNavScroll();
+    atBottomRef.current = false;
+    setShowJumpBtn(true);
+    const top = turnNavScrollTop(
+      root.scrollTop,
+      root.getBoundingClientRect().top,
+      target.getBoundingClientRect().top,
+    );
+    root.scrollTo({ top, behavior });
+
+    let timer: number | null = null;
+    const cleanup = () => {
+      root.removeEventListener('scrollend', finish);
+      if (timer != null) window.clearTimeout(timer);
+      if (turnNavScrollCleanupRef.current === cleanup) {
+        turnNavScrollCleanupRef.current = null;
+      }
+    };
+    const finish = () => {
+      cleanup();
+      turnNavPinUntilRef.current = 0;
+      syncTurnNavFromScroll();
+    };
+    root.addEventListener('scrollend', finish, { once: true });
+    timer = window.setTimeout(finish, 1600);
+    turnNavScrollCleanupRef.current = cleanup;
+    return true;
+  }
+
+  async function ensureHistoryIncludes(index: number): Promise<boolean> {
     const projectHash = activeSession?.project_hash;
     const sid = sessionId;
-    if (!projectHash || !sid) return;
+    if (!projectHash || !sid) return false;
+    const generation = sessionGenerationRef.current;
     const prevOffset = historyOffsetRef.current;
-    if (index >= prevOffset) return;
+    if (index >= prevOffset) return true;
     setLoadingOlder(true);
     try {
       const detail = await getSession(projectHash, sid, {
         offset: index,
         limit: prevOffset - index,
       });
-      if (activeIdRef.current !== sid) return;
-      const older = sessionMessagesToDisplay(detail.messages);
+      if (
+        activeIdRef.current !== sid ||
+        sessionGenerationRef.current !== generation
+      ) return false;
+      const older = sessionMessagesToDisplay(detail.messages, detail.offset ?? index);
       historyOffsetRef.current = detail.offset ?? index;
       historyTotalRef.current = detail.message_count ?? historyTotalRef.current;
       setHasOlder((detail.offset ?? index) > 0);
@@ -2740,51 +2817,56 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
       await new Promise<void>((resolve) => {
         requestAnimationFrame(() => resolve());
       });
+      return true;
+    } catch {
+      return false;
     } finally {
-      setLoadingOlder(false);
+      if (
+        activeIdRef.current === sid &&
+        sessionGenerationRef.current === generation
+      ) setLoadingOlder(false);
     }
   }
 
   async function jumpToTurn(id: string) {
     const index = Number(id.slice('turn-nav-'.length));
     if (!Number.isFinite(index)) return;
+    const sid = activeIdRef.current;
+    const generation = sessionGenerationRef.current;
+    pendingJumpIdxRef.current = index;
+    setActiveTurnId(id);
+    turnNavPinUntilRef.current = Date.now() + 1800;
     if (index < historyOffsetRef.current) {
       await ensureHistoryIncludes(index);
     }
-    // Store the target so the messages-effect can pick it up after React commits.
-    pendingJumpIdxRef.current = index;
-    setActiveTurnId(id);
-    turnNavPinUntilRef.current = Date.now() + 1200;
-    // Try immediate scroll — works when element is already in DOM.
-    const el = document.querySelector(`[data-turn-nav-idx="${index}"]`);
-    if (el) {
-      el.scrollIntoView({ behavior: 'smooth', block: 'start' });
-      const root = scrollRef.current;
-      if (root) {
-        const onEnd = () => {
-          turnNavPinUntilRef.current = 0;
-          root.removeEventListener('scrollend', onEnd);
-        };
-        root.addEventListener('scrollend', onEnd, { once: true });
-      }
-      pendingJumpIdxRef.current = null;
+    if (
+      activeIdRef.current !== sid ||
+      sessionGenerationRef.current !== generation
+    ) {
+      if (pendingJumpIdxRef.current === index) pendingJumpIdxRef.current = null;
+      return;
     }
-    // Fallback: if element wasn't found yet (React hasn't committed),
-    // retry with increasing delays. The messages-effect is the primary
-    // path; this covers edge cases where messages didn't change.
-    if (pendingJumpIdxRef.current != null) {
-      for (const ms of [50, 150, 300]) {
-        await new Promise<void>((r) => setTimeout(r, ms));
-        const retry = document.querySelector(`[data-turn-nav-idx="${index}"]`);
-        if (retry) {
-          retry.scrollIntoView({ behavior: 'smooth', block: 'start' });
-          pendingJumpIdxRef.current = null;
-          break;
-        }
+    // The messages effect may already have completed the pending jump after a
+    // history prepend. Otherwise try the current DOM and then bounded retries.
+    if (pendingJumpIdxRef.current === index && scrollToTurnIndex(index)) {
+      pendingJumpIdxRef.current = null;
+      return;
+    }
+    for (const ms of [50, 150, 300]) {
+      await new Promise<void>((resolve) => window.setTimeout(resolve, ms));
+      if (
+        activeIdRef.current !== sid ||
+        sessionGenerationRef.current !== generation ||
+        pendingJumpIdxRef.current !== index
+      ) return;
+      if (scrollToTurnIndex(index)) {
+        pendingJumpIdxRef.current = null;
+        return;
       }
     }
   }
   useEffect(() => {
+    cancelTurnNavScroll();
     setTurnNavQuery('');
     setActiveTurnId(null);
     turnNavPinUntilRef.current = 0;
@@ -2795,6 +2877,7 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
     pendingJumpIdxRef.current = null;
     setTurnOutline([]);
   }, [sessionId]);
+  useEffect(() => () => cancelTurnNavScroll(), []);
   useEffect(() => {
     const id = requestAnimationFrame(() => syncTurnNavFromScroll());
     return () => cancelAnimationFrame(id);
@@ -2805,18 +2888,8 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
   useEffect(() => {
     const idx = pendingJumpIdxRef.current;
     if (idx == null) return;
-    const el = document.querySelector(`[data-turn-nav-idx="${idx}"]`);
-    if (!el) return;
+    if (!scrollToTurnIndex(idx)) return;
     pendingJumpIdxRef.current = null;
-    el.scrollIntoView({ behavior: 'smooth', block: 'start' });
-    const root = scrollRef.current;
-    if (root) {
-      const onEnd = () => {
-        turnNavPinUntilRef.current = 0;
-        root.removeEventListener('scrollend', onEnd);
-      };
-      root.addEventListener('scrollend', onEnd, { once: true });
-    }
   }, [messages]);
 
   // Reload one session's transcript from disk into the view, guarded against a
@@ -2825,6 +2898,7 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
     const projectHash = activeSession?.project_hash;
     const id = sessionId;
     if (!projectHash || !id || loadingOlder || historyOffsetRef.current <= 0) return;
+    const generation = sessionGenerationRef.current;
     const prevOffset = historyOffsetRef.current;
     const page = Math.min(HISTORY_PAGE, prevOffset);
     const nextOffset = prevOffset - page;
@@ -2834,37 +2908,57 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
     const prevTop = root?.scrollTop ?? 0;
     try {
       const detail = await getSession(projectHash, id, { offset: nextOffset, limit: page });
-      if (activeIdRef.current !== id) return;
-      const older = sessionMessagesToDisplay(detail.messages);
+      if (
+        activeIdRef.current !== id ||
+        sessionGenerationRef.current !== generation
+      ) return;
+      const older = sessionMessagesToDisplay(detail.messages, detail.offset ?? nextOffset);
       historyOffsetRef.current = detail.offset ?? nextOffset;
       historyTotalRef.current = detail.message_count ?? historyTotalRef.current;
       setHasOlder((detail.offset ?? nextOffset) > 0);
       if (detail.turns && detail.turns.length > 0) setTurnOutline(detail.turns);
       setMessages((prev) => [...older, ...prev]);
       requestAnimationFrame(() => {
+        if (
+          activeIdRef.current !== id ||
+          sessionGenerationRef.current !== generation
+        ) return;
         const el = scrollRef.current;
         if (!el) return;
         el.scrollTop = prevTop + (el.scrollHeight - prevHeight);
       });
     } catch {
-      historyOffsetRef.current = prevOffset;
+      if (
+        activeIdRef.current === id &&
+        sessionGenerationRef.current === generation
+      ) historyOffsetRef.current = prevOffset;
     } finally {
-      setLoadingOlder(false);
+      if (
+        activeIdRef.current === id &&
+        sessionGenerationRef.current === generation
+      ) setLoadingOlder(false);
     }
   }
 
   async function reloadSessionTranscript(id: string) {
     const projectHash = activeSession?.project_hash;
     if (!projectHash) return;
+    const generation = sessionGenerationRef.current;
     try {
       const detail = await getSession(projectHash, id, {
         offset: historyOffsetRef.current,
       });
-      if (activeIdRef.current === id) {
+      if (
+        activeIdRef.current === id &&
+        sessionGenerationRef.current === generation
+      ) {
         historyTotalRef.current = detail.message_count ?? detail.messages.length;
         historyOffsetRef.current = detail.offset ?? historyOffsetRef.current;
         setHasOlder((detail.offset ?? 0) > 0);
-        setMessages(sessionMessagesToDisplay(detail.messages));
+        setMessages(sessionMessagesToDisplay(
+          detail.messages,
+          detail.offset ?? historyOffsetRef.current,
+        ));
         // History freezes todos under each assistant; sticky is live-only.
         setActiveTodos(null);
         activeTodosRef.current = null;
@@ -3274,9 +3368,11 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
           if (last && last.role === 'assistant' && (!last.parts || last.parts.length === 0)) {
             base = prev.slice(0, -1);
           }
+          const turnIndex = nextTurnNavIndex(base);
+          rememberTurnOutline(userText, turnIndex);
           return [
             ...base,
-            { role: 'user', parts: [{ kind: 'text', text: userText }], ts: Date.now() },
+            { role: 'user', parts: [{ kind: 'text', text: userText }], ts: Date.now(), sourceIndex: turnIndex },
           ];
         });
         break;
@@ -3641,7 +3737,8 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
         confirmed: false,
       };
       pendingSelfEchoRef.current.push({ id: pendingSteer.id, text });
-      rememberTurnOutline(text, historyOffsetRef.current + messagesRef.current.length);
+      const turnIndex = nextTurnNavIndex();
+      rememberTurnOutline(text, turnIndex);
       setMessages((prev) => [
         ...prev,
         {
@@ -3650,6 +3747,7 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
           images: images.length ? images : undefined,
           ts: now,
           pendingSteerId: pendingSteer.id,
+          sourceIndex: turnIndex,
         },
         { role: 'assistant', parts: [], pendingSteerId: pendingSteer.id },
       ]);
@@ -3709,10 +3807,11 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
 
     // Push user message + empty assistant placeholder
     const now = Date.now();
-    rememberTurnOutline(text, historyOffsetRef.current + messagesRef.current.length);
+    const turnIndex = nextTurnNavIndex();
+    rememberTurnOutline(text, turnIndex);
     setMessages((prev) => [
       ...prev,
-      { role: 'user', parts: [{ kind: 'text', text }], images: images.length ? images : undefined, ts: now },
+      { role: 'user', parts: [{ kind: 'text', text }], images: images.length ? images : undefined, ts: now, sourceIndex: turnIndex },
       { role: 'assistant', parts: [] },
     ]);
 
@@ -4906,12 +5005,13 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
             const isActiveSearchMatch = searchOpen && searchTrim ? (origIdx === matchPositions[matchIdx]) : false;
 
             if (msg.role === 'user') {
+              const turnIndex = msg.sourceIndex ?? historyOffsetRef.current + origIdx;
               return (
                 <UserMessageView
-                  key={historyOffsetRef.current + origIdx}
+                  key={turnIndex}
                   msg={msg}
-                  anchorId={turnNavId(historyOffsetRef.current + origIdx)}
-                  turnNavIdx={historyOffsetRef.current + origIdx}
+                  anchorId={turnNavId(turnIndex)}
+                  turnNavIdx={turnIndex}
                   searchRef={setMatchRef}
                   timeLabel={timeLabel}
                   timeFull={timeFull}

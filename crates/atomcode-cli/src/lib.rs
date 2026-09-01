@@ -16,7 +16,6 @@ fn _isolate_atomcode_home() {
 pub mod askpass;
 pub mod config_sync;
 pub mod host_service;
-pub mod server_cmd;
 pub mod systemd;
 pub mod uninstall;
 

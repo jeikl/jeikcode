@@ -377,7 +377,7 @@ mod session_window_tests {
     }
 
     #[test]
-    fn outline_lists_all_user_questions_with_absolute_index() {
+    fn outline_ordinals_ignore_failed_turn_diagnostic_rows() {
         let msgs = vec![
             MessageInfo {
                 role: "user".into(),
@@ -394,10 +394,10 @@ mod session_window_tests {
             },
             MessageInfo {
                 role: "assistant".into(),
-                content: "ok".into(),
+                content: "upstream unavailable".into(),
                 reasoning: None,
                 synthetic: false,
-                internal_origin: None,
+                internal_origin: Some("turn_diagnostic".into()),
                 tool_calls: None,
                 tool_result: None,
                 artifacts: None,
@@ -418,13 +418,44 @@ mod session_window_tests {
                 created_at: None,
                 elapsed_ms: None,
             },
+            MessageInfo {
+                role: "assistant".into(),
+                content: "upstream unavailable again".into(),
+                reasoning: None,
+                synthetic: false,
+                internal_origin: Some("turn_diagnostic".into()),
+                tool_calls: None,
+                tool_result: None,
+                artifacts: None,
+                images: None,
+                created_at: None,
+                elapsed_ms: None,
+            },
+            MessageInfo {
+                role: "user".into(),
+                content: "服务恢复后继续".into(),
+                reasoning: None,
+                synthetic: false,
+                internal_origin: None,
+                tool_calls: None,
+                tool_result: None,
+                artifacts: None,
+                images: None,
+                created_at: None,
+                elapsed_ms: None,
+            },
         ];
         let turns = session_user_outline(&msgs);
-        assert_eq!(turns.len(), 2);
+        assert_eq!(turns.len(), 3);
+        assert_eq!(turns[0].ordinal, 0);
         assert_eq!(turns[0].index, 0);
         assert_eq!(turns[0].text, "第一问");
+        assert_eq!(turns[1].ordinal, 1);
         assert_eq!(turns[1].index, 2);
         assert_eq!(turns[1].text, "第二问");
+        assert_eq!(turns[2].ordinal, 2);
+        assert_eq!(turns[2].index, 4);
+        assert_eq!(turns[2].text, "服务恢复后继续");
     }
 }
 
@@ -434,6 +465,9 @@ const DISPLAY_FIELD_CAP: usize = 24 * 1024;
 /// model context — just labels.
 #[derive(Debug, Clone, Serialize)]
 pub struct SessionTurnOutline {
+    /// Stable ordinal among real user questions. Unlike `index`, this is not
+    /// affected by assistant/tool/diagnostic rows inserted by failed turns.
+    pub ordinal: usize,
     pub index: usize,
     pub text: String,
 }
@@ -466,7 +500,13 @@ fn session_user_outline(messages: &[MessageInfo]) -> Vec<SessionTurnOutline> {
             } else {
                 text
             };
-            Some(SessionTurnOutline { index, text })
+            Some((index, text))
+        })
+        .enumerate()
+        .map(|(ordinal, (index, text))| SessionTurnOutline {
+            ordinal,
+            index,
+            text,
         })
         .collect()
 }

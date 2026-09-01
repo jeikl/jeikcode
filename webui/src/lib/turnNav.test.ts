@@ -10,7 +10,7 @@ import {
   turnNavScrollTop,
 } from './turnNav.ts';
 
-test('turnNavId is stable per message index', () => {
+test('turnNavId is stable per user-turn ordinal', () => {
   assert.equal(turnNavId(3), 'turn-nav-3');
 });
 
@@ -30,10 +30,10 @@ test('buildTurnNavItems keeps user questions in order and skips empty/system', (
     { role: 'user', text: '第二问' },
   ]);
   assert.deepEqual(
-    items.map((i) => ({ id: i.id, index: i.index, label: i.label, text: i.text })),
+    items.map((i) => ({ id: i.id, ordinal: i.ordinal, index: i.index, label: i.label, text: i.text })),
     [
-      { id: 'turn-nav-0', index: 0, label: '你好 今天天气', text: '你好 今天天气' },
-      { id: 'turn-nav-4', index: 4, label: '第二问', text: '第二问' },
+      { id: 'turn-nav-0', ordinal: 0, index: 0, label: '你好 今天天气', text: '你好 今天天气' },
+      { id: 'turn-nav-1', ordinal: 1, index: 4, label: '第二问', text: '第二问' },
     ],
   );
 });
@@ -45,7 +45,7 @@ test('buildTurnNavItems preserves raw transcript indexes after display filtering
   ], 80);
   assert.deepEqual(
     items.map((i) => ({ id: i.id, index: i.index })),
-    [{ id: 'turn-nav-87', index: 87 }],
+    [{ id: 'turn-nav-0', index: 87 }],
   );
 });
 
@@ -64,15 +64,31 @@ test('turnNavScrollTop targets the chat container and clamps above its start', (
 
 test('buildTurnNavItemsFromOutline uses absolute transcript indexes', () => {
   const items = buildTurnNavItemsFromOutline([
-    { index: 0, text: '第一问' },
-    { index: 25, text: '<system-reminder>internal</system-reminder>' },
-    { index: 80, text: '很后面的提问' },
+    { ordinal: 0, index: 0, text: '第一问' },
+    { ordinal: 1, index: 25, text: '<system-reminder>internal</system-reminder>' },
+    { ordinal: 2, index: 80, text: '很后面的提问' },
   ]);
   assert.deepEqual(
     items.map((i) => ({ id: i.id, index: i.index, label: i.label })),
     [
       { id: 'turn-nav-0', index: 0, label: '第一问' },
-      { id: 'turn-nav-80', index: 80, label: '很后面的提问' },
+      { id: 'turn-nav-2', index: 80, label: '很后面的提问' },
+    ],
+  );
+});
+
+test('outline ids do not shift when failed turns insert diagnostic rows', () => {
+  const items = buildTurnNavItemsFromOutline([
+    { ordinal: 4, index: 10, text: '第一次继续' },
+    { ordinal: 5, index: 12, text: '第二次继续' },
+    { ordinal: 6, index: 15, text: '服务恢复后继续' },
+  ]);
+  assert.deepEqual(
+    items.map((i) => ({ id: i.id, ordinal: i.ordinal, index: i.index })),
+    [
+      { id: 'turn-nav-4', ordinal: 4, index: 10 },
+      { id: 'turn-nav-5', ordinal: 5, index: 12 },
+      { id: 'turn-nav-6', ordinal: 6, index: 15 },
     ],
   );
 });

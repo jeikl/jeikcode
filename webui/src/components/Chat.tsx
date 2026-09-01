@@ -40,7 +40,7 @@ import {
   FRONTEND_COMMANDS,
   type SlashHandlers,
 } from '../lib/slashCommands';
-import { buildTurnNavItems, buildTurnNavItemsFromOutline, compactTurnNavText, filterTurnNavItems, resolveActiveTurnId, turnNavId, turnNavScrollTop } from '../lib/turnNav';
+import { buildTurnNavItems, buildTurnNavItemsFromOutline, compactTurnNavText, filterTurnNavItems, resolveActiveTurnId, turnNavScrollTop } from '../lib/turnNav';
 import { resolvePendingAfterDecision } from '../lib/pendingPermission';
 import { beginModeSwitch, completeModeSwitch, failModeSwitch, initModeState } from '../lib/modeSwitch';
 import { randomUUID } from '../lib/randomId';
@@ -159,6 +159,9 @@ interface Message {
   /** Absolute index in the persisted raw transcript. History display conversion
    * filters/folds rows, so this cannot be reconstructed from the visible index. */
   sourceIndex?: number;
+  /** Stable ordinal among real user questions. Browser-local optimistic turns
+   * carry this until the daemon's authoritative outline arrives. */
+  turnNavOrdinal?: number;
 }
 
 /**
@@ -1067,8 +1070,8 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
   const [hasOlder, setHasOlder] = useState(false);
   const [loadingOlder, setLoadingOlder] = useState(false);
   const [turnOutline, setTurnOutline] = useState<SessionTurnOutline[]>([]);
-  /** Absolute message index pending a scroll-jump after older history loads. */
-  const pendingJumpIdxRef = useRef<number | null>(null);
+  /** Stable turn-nav id pending a scroll-jump after older history loads. */
+  const pendingJumpIdRef = useRef<string | null>(null);
   // While another client (OpenAI API) owns `/chat/active`:
   // 1) `GET /chat/watch` reattaches to the live event bus (real-time progress)
   // 2) light history poll as a fallback for events missed before join
@@ -2510,10 +2513,11 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
             return prev;
           }
           const turnIndex = nextTurnNavIndex(prev);
-          rememberTurnOutline(e.text, turnIndex);
+          const turnOrdinal = nextTurnNavOrdinal(prev);
+          rememberTurnOutline(e.text, turnIndex, turnOrdinal);
           return [
             ...prev,
-            { role: 'user', parts: [{ kind: 'text', text: e.text }], images: e.images && e.images.length ? e.images : undefined, ts: now, sourceIndex: turnIndex },
+            { role: 'user', parts: [{ kind: 'text', text: e.text }], images: e.images && e.images.length ? e.images : undefined, ts: now, sourceIndex: turnIndex, turnNavOrdinal: turnOrdinal },
             { role: 'assistant', parts: [] },
           ];
         });
@@ -2702,6 +2706,14 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
   const activeTurnIdRef = useRef<string | null>(null);
   const turnNavItemsRef = useRef(turnNavItems);
   turnNavItemsRef.current = turnNavItems;
+  const turnNavByIndex = useMemo(
+    () => new Map(turnNavItems.map((item) => [item.index, item])),
+    [turnNavItems],
+  );
+  const turnNavByOrdinal = useMemo(
+    () => new Map(turnNavItems.map((item) => [item.ordinal, item])),
+    [turnNavItems],
+  );
   const turnNavPinUntilRef = useRef(0);
   const turnNavScrollCleanupRef = useRef<(() => void) | null>(null);
   function setActiveTurnId(id: string | null) {
@@ -2717,12 +2729,7 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
     const next = resolveActiveTurnId(
       items,
       (id) => {
-        // Use data-attribute lookup instead of getElementById to avoid
-        // ID mismatch when historyOffsetRef changes after loading older messages.
-        const idx = id.startsWith('turn-nav-') ? id.slice('turn-nav-'.length) : null;
-        const el = idx != null
-          ? root.querySelector(`[data-turn-nav-idx="${idx}"]`)
-          : document.getElementById(id);
+        const el = root.querySelector(`[data-turn-nav="${id}"]`);
         if (!el) return undefined;
         return el.getBoundingClientRect().top - rootRect.top + root.scrollTop;
       },
@@ -2730,12 +2737,14 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
     );
     if (next && next !== activeTurnIdRef.current) setActiveTurnId(next);
   }
-  function rememberTurnOutline(text: string, index: number) {
+  function rememberTurnOutline(text: string, index: number, ordinal: number) {
     const compact = compactTurnNavText(text);
     if (!compact) return;
     setTurnOutline((prev) => {
-      if (prev.some((item) => item.index === index)) return prev;
-      return [...prev, { index, text: compact }].sort((a, b) => a.index - b.index);
+      if (prev.some((item, position) => (item.ordinal ?? position) === ordinal)) return prev;
+      return [...prev, { ordinal, index, text: compact }].sort(
+        (a, b) => (a.ordinal ?? 0) - (b.ordinal ?? 0),
+      );
     });
   }
 
@@ -2748,6 +2757,17 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
     return next;
   }
 
+  function nextTurnNavOrdinal(current: Message[] = messagesRef.current): number {
+    let next = 0;
+    for (const message of current) {
+      if (message.turnNavOrdinal != null) {
+        next = Math.max(next, message.turnNavOrdinal + 1);
+      }
+    }
+    for (const item of turnNavItemsRef.current) next = Math.max(next, item.ordinal + 1);
+    return next;
+  }
+
   function cancelTurnNavScroll() {
     const cleanup = turnNavScrollCleanupRef.current;
     turnNavScrollCleanupRef.current = null;
@@ -2756,10 +2776,10 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
 
   /** Scroll only the transcript container. `scrollIntoView` also scrolls outer
    * ancestors and races the bottom-follow observer during session replacement. */
-  function scrollToTurnIndex(index: number, behavior: ScrollBehavior = 'smooth'): boolean {
+  function scrollToTurnId(id: string, behavior: ScrollBehavior = 'smooth'): boolean {
     const root = scrollRef.current;
     if (!root) return false;
-    const target = root.querySelector(`[data-turn-nav-idx="${index}"]`);
+    const target = root.querySelector(`[data-turn-nav="${id}"]`);
     if (!(target instanceof HTMLElement)) return false;
 
     cancelTurnNavScroll();
@@ -2829,11 +2849,12 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
   }
 
   async function jumpToTurn(id: string) {
-    const index = Number(id.slice('turn-nav-'.length));
-    if (!Number.isFinite(index)) return;
+    const item = turnNavItemsRef.current.find((candidate) => candidate.id === id);
+    if (!item) return;
+    const index = item.index;
     const sid = activeIdRef.current;
     const generation = sessionGenerationRef.current;
-    pendingJumpIdxRef.current = index;
+    pendingJumpIdRef.current = id;
     setActiveTurnId(id);
     turnNavPinUntilRef.current = Date.now() + 1800;
     if (index < historyOffsetRef.current) {
@@ -2843,13 +2864,13 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
       activeIdRef.current !== sid ||
       sessionGenerationRef.current !== generation
     ) {
-      if (pendingJumpIdxRef.current === index) pendingJumpIdxRef.current = null;
+      if (pendingJumpIdRef.current === id) pendingJumpIdRef.current = null;
       return;
     }
     // The messages effect may already have completed the pending jump after a
     // history prepend. Otherwise try the current DOM and then bounded retries.
-    if (pendingJumpIdxRef.current === index && scrollToTurnIndex(index)) {
-      pendingJumpIdxRef.current = null;
+    if (pendingJumpIdRef.current === id && scrollToTurnId(id)) {
+      pendingJumpIdRef.current = null;
       return;
     }
     for (const ms of [50, 150, 300]) {
@@ -2857,10 +2878,10 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
       if (
         activeIdRef.current !== sid ||
         sessionGenerationRef.current !== generation ||
-        pendingJumpIdxRef.current !== index
+        pendingJumpIdRef.current !== id
       ) return;
-      if (scrollToTurnIndex(index)) {
-        pendingJumpIdxRef.current = null;
+      if (scrollToTurnId(id)) {
+        pendingJumpIdRef.current = null;
         return;
       }
     }
@@ -2874,7 +2895,7 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
     setLoadingOlder(false);
     historyOffsetRef.current = 0;
     historyTotalRef.current = 0;
-    pendingJumpIdxRef.current = null;
+    pendingJumpIdRef.current = null;
     setTurnOutline([]);
   }, [sessionId]);
   useEffect(() => () => cancelTurnNavScroll(), []);
@@ -2886,10 +2907,10 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
   // After older messages load (or any messages change), scroll to the pending
   // turn-jump target that couldn't be resolved immediately.
   useEffect(() => {
-    const idx = pendingJumpIdxRef.current;
-    if (idx == null) return;
-    if (!scrollToTurnIndex(idx)) return;
-    pendingJumpIdxRef.current = null;
+    const id = pendingJumpIdRef.current;
+    if (id == null) return;
+    if (!scrollToTurnId(id)) return;
+    pendingJumpIdRef.current = null;
   }, [messages]);
 
   // Reload one session's transcript from disk into the view, guarded against a
@@ -3369,10 +3390,11 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
             base = prev.slice(0, -1);
           }
           const turnIndex = nextTurnNavIndex(base);
-          rememberTurnOutline(userText, turnIndex);
+          const turnOrdinal = nextTurnNavOrdinal(base);
+          rememberTurnOutline(userText, turnIndex, turnOrdinal);
           return [
             ...base,
-            { role: 'user', parts: [{ kind: 'text', text: userText }], ts: Date.now(), sourceIndex: turnIndex },
+            { role: 'user', parts: [{ kind: 'text', text: userText }], ts: Date.now(), sourceIndex: turnIndex, turnNavOrdinal: turnOrdinal },
           ];
         });
         break;
@@ -3738,7 +3760,8 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
       };
       pendingSelfEchoRef.current.push({ id: pendingSteer.id, text });
       const turnIndex = nextTurnNavIndex();
-      rememberTurnOutline(text, turnIndex);
+      const turnOrdinal = nextTurnNavOrdinal();
+      rememberTurnOutline(text, turnIndex, turnOrdinal);
       setMessages((prev) => [
         ...prev,
         {
@@ -3748,6 +3771,7 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
           ts: now,
           pendingSteerId: pendingSteer.id,
           sourceIndex: turnIndex,
+          turnNavOrdinal: turnOrdinal,
         },
         { role: 'assistant', parts: [], pendingSteerId: pendingSteer.id },
       ]);
@@ -3808,10 +3832,11 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
     // Push user message + empty assistant placeholder
     const now = Date.now();
     const turnIndex = nextTurnNavIndex();
-    rememberTurnOutline(text, turnIndex);
+    const turnOrdinal = nextTurnNavOrdinal();
+    rememberTurnOutline(text, turnIndex, turnOrdinal);
     setMessages((prev) => [
       ...prev,
-      { role: 'user', parts: [{ kind: 'text', text }], images: images.length ? images : undefined, ts: now, sourceIndex: turnIndex },
+      { role: 'user', parts: [{ kind: 'text', text }], images: images.length ? images : undefined, ts: now, sourceIndex: turnIndex, turnNavOrdinal: turnOrdinal },
       { role: 'assistant', parts: [] },
     ]);
 
@@ -5006,11 +5031,14 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
 
             if (msg.role === 'user') {
               const turnIndex = msg.sourceIndex ?? historyOffsetRef.current + origIdx;
+              const turnItem = msg.turnNavOrdinal != null
+                ? turnNavByOrdinal.get(msg.turnNavOrdinal)
+                : turnNavByIndex.get(turnIndex);
               return (
                 <UserMessageView
-                  key={turnIndex}
+                  key={turnItem?.id ?? turnIndex}
                   msg={msg}
-                  anchorId={turnNavId(turnIndex)}
+                  anchorId={turnItem?.id}
                   turnNavIdx={turnIndex}
                   searchRef={setMatchRef}
                   timeLabel={timeLabel}

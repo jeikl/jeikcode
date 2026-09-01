@@ -7,7 +7,9 @@ import {
 export interface TurnNavItem {
   /** Stable DOM id on the user message wrapper. */
   id: string;
-  /** Index into the messages array. */
+  /** Stable ordinal among real user questions. */
+  ordinal: number;
+  /** Absolute index in the raw persisted transcript, used for history loading. */
   index: number;
   /** Truncated label shown in the outline. */
   label: string;
@@ -17,8 +19,8 @@ export interface TurnNavItem {
 
 const DEFAULT_MAX_LABEL = 28;
 
-export function turnNavId(index: number): string {
-  return `turn-nav-${index}`;
+export function turnNavId(ordinal: number): string {
+  return `turn-nav-${ordinal}`;
 }
 
 export function compactTurnNavText(text: string): string {
@@ -34,7 +36,7 @@ export function truncateTurnNavLabel(text: string, max = DEFAULT_MAX_LABEL): str
 }
 
 export function buildTurnNavItemsFromOutline(
-  turns: { index: number; text: string }[],
+  turns: { ordinal?: number; index: number; text: string }[],
 ): TurnNavItem[] {
   const items: TurnNavItem[] = [];
   for (const turn of turns) {
@@ -44,7 +46,11 @@ export function buildTurnNavItemsFromOutline(
     const text = compactTurnNavText(stripInjectedRemindersForDisplay(turn.text));
     const label = truncateTurnNavLabel(text);
     if (!label) continue;
-    items.push({ id: turnNavId(turn.index), index: turn.index, label, text });
+    // New daemons provide an ordinal that stays stable when failed turns add
+    // diagnostic rows to the raw transcript. Older daemons fall back to the
+    // visible outline order, which has the same semantics.
+    const ordinal = turn.ordinal ?? items.length;
+    items.push({ id: turnNavId(ordinal), ordinal, index: turn.index, label, text });
   }
   return items;
 }
@@ -64,7 +70,8 @@ export function buildTurnNavItems(
     // into their assistant. Prefer the raw transcript index carried through
     // conversion; the visible index is only a fallback for live/legacy data.
     const index = msg.sourceIndex ?? windowOffset + i;
-    items.push({ id: turnNavId(index), index, label, text });
+    const ordinal = items.length;
+    items.push({ id: turnNavId(ordinal), ordinal, index, label, text });
   }
   return items;
 }

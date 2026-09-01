@@ -441,6 +441,8 @@ export interface SessionMessage {
 }
 
 export interface SessionTurnOutline {
+  /** Stable ordinal among real user questions. Absent on older daemons. */
+  ordinal?: number;
   /** Absolute index in the full transcript (not the returned window). */
   index: number;
   text: string;

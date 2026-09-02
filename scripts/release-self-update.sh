@@ -26,6 +26,26 @@ fi
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
 
+# ---------------------------------------------------------------
+# POSIX -> Windows 路径转换
+#
+# Git Bash 下 pwd 返回的是 POSIX 路径 (/e/code/jeikcode)。凡是要交给
+# Windows 原生进程的路径（CARGO_TARGET_DIR 环境变量、cc-rs 调用的
+# .cmd 编译器包装）都必须是 Windows 形式，否则 CreateProcessW 会把
+# /e/... 解析成 E:\e\... —— 结果是：
+#   * 整条编译链静默写进一个错位目录（白白全量重编）
+#   * ring 等 C 依赖报「系统找不到指定的路径」而构建失败
+# 在 PowerShell / cmd 下运行时 cygpath 不存在，原样返回即可。
+# ---------------------------------------------------------------
+native_path() {
+    if command -v cygpath >/dev/null 2>&1; then
+        cygpath -m "$1"
+    else
+        printf '%s' "$1"
+    fi
+}
+ROOT_WIN="$(native_path "$ROOT")"
+
 echo "=========================================="
 echo "  JeikCode 发版 v${VERSION}"
 echo "=========================================="
@@ -50,7 +70,8 @@ echo "  -> Cargo.toml version = \"${VERSION}\""
 # 沙箱 / CI 若注入了 CARGO_TARGET_DIR，增量产物可能仍带着旧的
 # env!("CARGO_PKG_VERSION")。发版一律用仓库内 target/，并先清相关包。
 unset CARGO_TARGET_DIR || true
-export CARGO_TARGET_DIR="${ROOT}/target"
+# 必须是 Windows 路径，否则 cargo 会把产物写进 E:\e\code\jeikcode\target
+export CARGO_TARGET_DIR="${ROOT_WIN}/target"
 echo "  -> CARGO_TARGET_DIR=${CARGO_TARGET_DIR}"
 echo "  -> 清理旧 release 产物，避免版本号烙印残留..."
 cargo clean -p atomcode -p atomcode-tuix -p atomcode-config -p atomcode-updater 2>/dev/null || true
@@ -71,9 +92,11 @@ echo "[3/5] 交叉编译 release 二进制..."
 
 # 设置 zig 工具链 (Linux musl cross-compile on Windows)
 if [ -f "$ROOT/tools/zig-cc.cmd" ]; then
-    export CC_x86_64_unknown_linux_musl="$ROOT/tools/zig-cc.cmd"
+    # 同样是 Windows 路径：cc-rs 直接把这些值交给 CreateProcessW
+    export CC_x86_64_unknown_linux_musl="${ROOT_WIN}/tools/zig-cc.cmd"
     export CFLAGS_x86_64_unknown_linux_musl="-fPIC"
-    export AR_x86_64_unknown_linux_musl="$ROOT/tools/zig-ar.cmd"
+    export AR_x86_64_unknown_linux_musl="${ROOT_WIN}/tools/zig-ar.cmd"
+    echo "  -> CC=${CC_x86_64_unknown_linux_musl}"
 fi
 
 rm -rf dist

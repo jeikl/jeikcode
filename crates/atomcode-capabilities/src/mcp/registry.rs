@@ -6,7 +6,7 @@ use std::time::Duration;
 
 use anyhow::Result;
 use futures::stream::{FuturesUnordered, StreamExt};
-use tokio::sync::{mpsc, watch, Mutex, RwLock};
+use tokio::sync::{mpsc, watch, Mutex, RwLock, Semaphore};
 
 use super::client::{McpClient, McpToolInfo};
 use super::config::{load_mcp_config, McpServerConfig};
@@ -16,8 +16,12 @@ use super::transport_stdio::StdioClient;
 use super::types::ServerStatus;
 
 const MAX_SERVER_INSTRUCTIONS_CHARS: usize = 4_000;
-const MAX_TOTAL_INSTRUCTIONS_CHARS: usize = 16_000;
+pub const MAX_TOTAL_INSTRUCTIONS_CHARS: usize = 16_000;
 const TRUNCATION_MARKER: &str = "\n[truncated]";
+/// Fair per-server bound shared by every session using this registry. Eight
+/// concurrent calls keeps high-latency search/browser servers busy without an
+/// unbounded pending-map or HTTP request burst consuming process memory.
+const MCP_SERVER_MAX_IN_FLIGHT: usize = super::config::DEFAULT_MAX_CONCURRENT_CALLS;
 /// Dedicated prompt boundary for untrusted MCP-provided guidance. This must stay
 /// distinct from AtomCode's authoritative `<system-reminder>` convention.
 pub const MCP_SERVER_INSTRUCTIONS_TAG: &str = "mcp-server-instructions";
@@ -123,6 +127,7 @@ fn is_project_trusted_local(project_dir: &std::path::Path) -> bool {
 pub struct McpRegistry {
     servers: Arc<RwLock<BTreeMap<String, Arc<dyn McpClient>>>>,
     server_timeouts_ms: Arc<RwLock<BTreeMap<String, u64>>>,
+    server_call_limits: Arc<RwLock<BTreeMap<String, Arc<Semaphore>>>>,
     /// Servers whose initial connect failed. The TUI's `/mcp` listing
     /// surfaces these as `failed: <error>` so a misconfigured server
     /// doesn't silently disappear from the list (#300). Cleared when a
@@ -159,6 +164,10 @@ pub struct McpRegistry {
     /// Collapses concurrent first-discovery requests from status polling and a
     /// newly-created runtime into one tools/list pass.
     tool_discovery_lock: Arc<Mutex<()>>,
+    /// Linearizes transport publication against shutdown. Background
+    /// initialize must not insert a freshly connected client after shutdown
+    /// already drained the server map.
+    transport_lifecycle: Arc<Mutex<()>>,
 }
 
 impl McpRegistry {
@@ -167,6 +176,7 @@ impl McpRegistry {
         Self {
             servers: Arc::new(RwLock::new(BTreeMap::new())),
             server_timeouts_ms: Arc::new(RwLock::new(BTreeMap::new())),
+            server_call_limits: Arc::new(RwLock::new(BTreeMap::new())),
             failed_servers: Arc::new(RwLock::new(BTreeMap::new())),
             status_overrides: Arc::new(std::sync::RwLock::new(BTreeMap::new())),
             configured_servers: Arc::new(std::sync::RwLock::new(HashSet::new())),
@@ -179,6 +189,7 @@ impl McpRegistry {
             server_instructions: Arc::new(std::sync::RwLock::new(BTreeMap::new())),
             tool_cache: Arc::new(RwLock::new(BTreeMap::new())),
             tool_discovery_lock: Arc::new(Mutex::new(())),
+            transport_lifecycle: Arc::new(Mutex::new(())),
         }
     }
 
@@ -189,6 +200,7 @@ impl McpRegistry {
             Self {
                 servers: Arc::new(RwLock::new(BTreeMap::new())),
                 server_timeouts_ms: Arc::new(RwLock::new(BTreeMap::new())),
+                server_call_limits: Arc::new(RwLock::new(BTreeMap::new())),
                 failed_servers: Arc::new(RwLock::new(BTreeMap::new())),
                 status_overrides: Arc::new(std::sync::RwLock::new(BTreeMap::new())),
                 configured_servers: Arc::new(std::sync::RwLock::new(HashSet::new())),
@@ -201,6 +213,7 @@ impl McpRegistry {
                 server_instructions: Arc::new(std::sync::RwLock::new(BTreeMap::new())),
                 tool_cache: Arc::new(RwLock::new(BTreeMap::new())),
                 tool_discovery_lock: Arc::new(Mutex::new(())),
+                transport_lifecycle: Arc::new(Mutex::new(())),
             },
             rx,
         )
@@ -414,7 +427,7 @@ impl McpRegistry {
     /// Returns immediately with an empty registry; servers are added as they connect.
     /// Connection status events are sent through the internal channel if configured.
     pub fn from_config_background(project_dir: &std::path::Path) -> Self {
-        Self::from_config_background_with_events(project_dir, None)
+        Self::from_config_background_for_scope(project_dir, None, super::config::McpScope::Project)
     }
 
     /// Load MCP configuration and start connecting to servers in the background,
@@ -422,6 +435,21 @@ impl McpRegistry {
     pub fn from_config_background_with_events(
         project_dir: &std::path::Path,
         event_tx: Option<mpsc::UnboundedSender<McpConnectEvent>>,
+    ) -> Self {
+        Self::from_config_background_for_scope(
+            project_dir,
+            event_tx,
+            super::config::McpScope::Project,
+        )
+    }
+
+    /// Build one registry containing only the requested ownership scope. Project
+    /// registries are process-wide cached; session registries are leased from
+    /// SessionMcpPool and die with their last runtime owner.
+    pub(crate) fn from_config_background_for_scope(
+        project_dir: &std::path::Path,
+        event_tx: Option<mpsc::UnboundedSender<McpConnectEvent>>,
+        scope: super::config::McpScope,
     ) -> Self {
         let mut registry = Self::new();
         // Merge external channel with internal one
@@ -447,6 +475,11 @@ impl McpRegistry {
                 return registry;
             }
         };
+
+        let configs: Vec<_> = configs
+            .into_iter()
+            .filter(|config| config.scope == scope)
+            .collect();
 
         // Gate: withhold project-source servers from untrusted projects.
         let (configs, blocked) = Self::partition_by_trust(configs, project_dir);
@@ -480,11 +513,13 @@ impl McpRegistry {
         if !configs.is_empty() {
             let servers = registry.servers.clone();
             let server_timeouts_ms = registry.server_timeouts_ms.clone();
+            let server_call_limits = registry.server_call_limits.clone();
             let failed_servers = registry.failed_servers.clone();
             let status_overrides = registry.status_overrides.clone();
             let server_instructions = registry.server_instructions.clone();
             let initial_ready = registry.initial_ready.clone();
             let cancelled = registry.cancelled.clone();
+            let transport_lifecycle = registry.transport_lifecycle.clone();
             tokio::spawn(async move {
                 // Connect servers in parallel
                 let tasks: Vec<_> = configs
@@ -492,13 +527,16 @@ impl McpRegistry {
                     .map(|config| {
                         let servers = servers.clone();
                         let server_timeouts_ms = server_timeouts_ms.clone();
+                        let server_call_limits = server_call_limits.clone();
                         let failed_servers = failed_servers.clone();
                         let status_overrides = status_overrides.clone();
                         let server_instructions = server_instructions.clone();
                         let cancelled = cancelled.clone();
+                        let transport_lifecycle = transport_lifecycle.clone();
                         let tx = combined_tx.clone();
                         async move {
                             let name = config.name.clone();
+                            let max_concurrent_calls = config.max_concurrent_calls;
                             let timeout_ms = config.timeout_ms();
                             let mut client: Box<dyn McpClient> = match &config.config {
                                 super::config::McpTransportConfig::Stdio {
@@ -538,6 +576,11 @@ impl McpRegistry {
 
                             match initialization {
                                 Ok(result) => {
+                                    let _transport_lifecycle = transport_lifecycle.lock().await;
+                                    if *cancelled.borrow() {
+                                        client.shutdown().await;
+                                        return;
+                                    }
                                     let normalized = result
                                         .instructions
                                         .as_deref()
@@ -557,6 +600,11 @@ impl McpRegistry {
                                     drop(servers);
                                     let mut timeouts = server_timeouts_ms.write().await;
                                     timeouts.insert(name.clone(), timeout_ms);
+                                    drop(timeouts);
+                                    server_call_limits.write().await.insert(
+                                        name.clone(),
+                                        Arc::new(Semaphore::new(max_concurrent_calls)),
+                                    );
                                     let mut failed = failed_servers.write().await;
                                     failed.remove(&name);
                                     drop(failed);
@@ -614,6 +662,11 @@ impl McpRegistry {
                 return registry;
             }
         };
+
+        let configs: Vec<_> = configs
+            .into_iter()
+            .filter(|config| config.scope == super::config::McpScope::Project)
+            .collect();
 
         // Gate: withhold project-source servers from untrusted projects.
         let (configs, blocked) = Self::partition_by_trust(configs, project_dir);
@@ -683,6 +736,11 @@ impl McpRegistry {
                 return Err(e);
             }
         };
+        let _transport_lifecycle = self.transport_lifecycle.lock().await;
+        if *self.cancelled.borrow() {
+            client.shutdown().await;
+            anyhow::bail!("MCP registry was shut down during server initialization");
+        }
         self.record_server_instructions(&config.name, initialization.instructions.as_deref());
 
         // A reconnect/replacement may expose a different schema under the same
@@ -696,6 +754,11 @@ impl McpRegistry {
         drop(_discovery);
         let mut timeouts = self.server_timeouts_ms.write().await;
         timeouts.insert(config.name.clone(), config.timeout_ms());
+        drop(timeouts);
+        self.server_call_limits.write().await.insert(
+            config.name.clone(),
+            Arc::new(Semaphore::new(config.max_concurrent_calls)),
+        );
         let mut failed = self.failed_servers.write().await;
         failed.remove(&config.name);
         self.status_overrides
@@ -918,6 +981,30 @@ impl McpRegistry {
                 .ok_or_else(|| anyhow::anyhow!("MCP server '{}' not found", server_name))?
         };
 
+        let limiter = {
+            // Keep the read guard in an explicit scope. An `if let` scrutinee
+            // temporary can otherwise live through the `else` branch, where
+            // waiting for this same RwLock's writer would deadlock the first
+            // call for a server without a pre-seeded limiter.
+            let existing = {
+                let limits = self.server_call_limits.read().await;
+                limits.get(server_name).cloned()
+            };
+            if let Some(limiter) = existing {
+                limiter
+            } else {
+                let mut limits = self.server_call_limits.write().await;
+                limits
+                    .entry(server_name.to_string())
+                    .or_insert_with(|| Arc::new(Semaphore::new(MCP_SERVER_MAX_IN_FLIGHT)))
+                    .clone()
+            }
+        };
+        let _permit = limiter
+            .acquire_owned()
+            .await
+            .map_err(|_| anyhow::anyhow!("MCP server '{}' is shutting down", server_name))?;
+
         let result = client.call_tool(tool_name, arguments).await?;
 
         // Extract text from content blocks
@@ -1010,6 +1097,7 @@ impl McpRegistry {
     /// Cancel pending work and tear down every connected transport.
     pub async fn shutdown(&self) {
         self.cancel_pending_work();
+        let _transport_lifecycle = self.transport_lifecycle.lock().await;
         let servers: Vec<Arc<dyn McpClient>> = {
             let mut map = self.servers.write().await;
             let clients: Vec<_> = map.values().cloned().collect();
@@ -1023,6 +1111,7 @@ impl McpRegistry {
             let mut cache = self.tool_cache.write().await;
             cache.clear();
         }
+        self.server_call_limits.write().await.clear();
         {
             let mut failed = self.failed_servers.write().await;
             failed.clear();
@@ -1050,6 +1139,7 @@ impl McpRegistry {
         Arc::new(Self {
             servers: self.servers.clone(),
             server_timeouts_ms: self.server_timeouts_ms.clone(),
+            server_call_limits: self.server_call_limits.clone(),
             failed_servers: self.failed_servers.clone(),
             status_overrides: self.status_overrides.clone(),
             configured_servers: self.configured_servers.clone(),
@@ -1062,6 +1152,7 @@ impl McpRegistry {
             server_instructions: self.server_instructions.clone(),
             tool_cache: self.tool_cache.clone(),
             tool_discovery_lock: self.tool_discovery_lock.clone(),
+            transport_lifecycle: self.transport_lifecycle.clone(),
         })
     }
 }
@@ -1457,6 +1548,8 @@ mod tests {
             },
             trust: false,
             auto_approve: vec!["query".to_string(), "mcp__docs__search".to_string()],
+            max_concurrent_calls: MCP_SERVER_MAX_IN_FLIGHT,
+            scope: super::super::config::McpScope::Project,
         };
         reg.apply_trust_from_config(&cfg);
         assert!(
@@ -1492,6 +1585,8 @@ mod tests {
             },
             trust: false,
             auto_approve: vec![format!("mcp__{server}__{tool}")],
+            max_concurrent_calls: MCP_SERVER_MAX_IN_FLIGHT,
+            scope: super::super::config::McpScope::Project,
         };
 
         reg.apply_trust_from_config(&cfg);
@@ -1561,6 +1656,8 @@ mod tests {
             },
             trust: false,
             auto_approve: vec![],
+            max_concurrent_calls: MCP_SERVER_MAX_IN_FLIGHT,
+            scope: super::super::config::McpScope::Project,
         };
 
         let result = registry.add_server(config).await;

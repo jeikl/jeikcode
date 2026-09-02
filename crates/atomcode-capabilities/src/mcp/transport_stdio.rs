@@ -2,10 +2,10 @@
 //!
 //! Communicates with MCP servers via subprocess stdin/stdout using JSON-RPC.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::process::Stdio;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex as StdMutex};
 use std::time::Duration;
 
 use anyhow::{bail, Context, Result};
@@ -34,20 +34,21 @@ pub struct StdioClient {
     status: Arc<Mutex<ServerStatus>>,
     next_id: Arc<AtomicU64>,
     process: Arc<Mutex<Option<Child>>>,
+    /// Owns the complete stdio server process tree on Windows. `npx` commonly
+    /// expands to cmd -> npx node -> package shim -> server/watchdog; killing
+    /// only the direct cmd.exe leaves every useful process orphaned.
+    #[cfg(target_os = "windows")]
+    process_job: Arc<Mutex<Option<crate::process_utils::JobHandle>>>,
     stdin: Arc<Mutex<Option<ChildStdin>>>,
     reader: Arc<Mutex<Option<BufReader<ChildStdout>>>>,
     /// First response line peeked during startup drain (NDJSON or `Content-Length:`), not yet consumed.
     preread_line: Arc<Mutex<Option<String>>>,
-    /// Serialize request/response round-trips.
-    ///
-    /// MCP over stdio is a single ordered byte stream. Allowing concurrent
-    /// in-flight requests can lead to response mix-ups or one caller
-    /// consuming the other's response, causing timeouts.
+    /// Serializes the initialize handshake before the response dispatcher is
+    /// active. Ordinary tool calls are multiplexed by JSON-RPC id.
     request_lock: Arc<Mutex<()>>,
-    /// Keeps an operation's request, recovery decision, and optional retry in
-    /// one critical section. Without this, a request from the failed generation
-    /// can overlap the replacement process's initialize handshake.
-    operation_lock: Arc<Mutex<()>>,
+    pending: PendingRequests,
+    reader_cancel: Arc<Mutex<CancellationToken>>,
+    multiplex_ready: Arc<AtomicBool>,
     /// Serializes teardown + respawn. Concurrent callers that observe the same
     /// dead pipe share one reconnect instead of spawning duplicate servers.
     reconnect_lock: Arc<Mutex<()>>,
@@ -81,11 +82,43 @@ impl std::fmt::Display for StdioConnectionClosed {
 impl std::error::Error for StdioConnectionClosed {}
 
 #[derive(Debug)]
+struct StdioTransportFailure(String);
+
+impl std::fmt::Display for StdioTransportFailure {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for StdioTransportFailure {}
+
+#[derive(Debug)]
+struct StdioRequestTimedOut(String);
+
+impl std::fmt::Display for StdioRequestTimedOut {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for StdioRequestTimedOut {}
+
+#[derive(Debug)]
 struct RequestAttemptError {
     error: anyhow::Error,
     generation: u64,
     request_may_have_been_sent: bool,
 }
+
+#[derive(Debug)]
+enum PendingFrame {
+    Activity,
+    Response(serde_json::Value),
+    TransportError(String),
+}
+
+type PendingRequests =
+    Arc<StdMutex<HashMap<u64, tokio::sync::mpsc::UnboundedSender<PendingFrame>>>>;
 
 impl StdioClient {
     /// Create a new stdio client.
@@ -105,11 +138,15 @@ impl StdioClient {
             status: Arc::new(Mutex::new(ServerStatus::Disconnected)),
             next_id: Arc::new(AtomicU64::new(1)),
             process: Arc::new(Mutex::new(None)),
+            #[cfg(target_os = "windows")]
+            process_job: Arc::new(Mutex::new(None)),
             stdin: Arc::new(Mutex::new(None)),
             reader: Arc::new(Mutex::new(None)),
             preread_line: Arc::new(Mutex::new(None)),
             request_lock: Arc::new(Mutex::new(())),
-            operation_lock: Arc::new(Mutex::new(())),
+            pending: Arc::new(StdMutex::new(HashMap::new())),
+            reader_cancel: Arc::new(Mutex::new(CancellationToken::new())),
+            multiplex_ready: Arc::new(AtomicBool::new(false)),
             reconnect_lock: Arc::new(Mutex::new(())),
             recovery_notify: Arc::new(Notify::new()),
             recovery_in_progress: Arc::new(AtomicBool::new(false)),
@@ -177,10 +214,17 @@ impl StdioClient {
             }
         })?;
 
+        #[cfg(target_os = "windows")]
+        let process_job = crate::process_utils::assign_child_to_kill_on_close_job(&child);
+
         let stdin = child.stdin.take().context("Failed to get stdin")?;
         let stdout = child.stdout.take().context("Failed to get stdout")?;
         let reader = BufReader::new(stdout);
 
+        #[cfg(target_os = "windows")]
+        {
+            *self.process_job.lock().await = process_job;
+        }
         *self.process.lock().await = Some(child);
         *self.stdin.lock().await = Some(stdin);
         *self.reader.lock().await = Some(reader);
@@ -188,8 +232,23 @@ impl StdioClient {
         Ok(())
     }
 
-    /// Send a request and wait for response.
+    /// Send a request and wait for response. Initialization uses the legacy
+    /// serialized path; after the handshake a dedicated reader dispatches
+    /// responses by JSON-RPC id so multiple sessions can share one process
+    /// without a whole-request queue.
     async fn send_request(
+        &self,
+        method: &str,
+        params: Option<serde_json::Value>,
+    ) -> std::result::Result<serde_json::Value, RequestAttemptError> {
+        if self.multiplex_ready.load(Ordering::Acquire) {
+            self.send_request_multiplexed(method, params).await
+        } else {
+            self.send_request_serialized(method, params).await
+        }
+    }
+
+    async fn send_request_serialized(
         &self,
         method: &str,
         params: Option<serde_json::Value>,
@@ -201,34 +260,7 @@ impl StdioClient {
         let generation = self.connection_generation.load(Ordering::SeqCst);
         let id = self.next_id.fetch_add(1, Ordering::SeqCst);
 
-        // IMPORTANT: omit `params` when it's None.
-        //
-        // The official JS MCP SDK's stdio transport can hang when it receives
-        // `"params": null` for methods that expect params to be absent.
-        let mut request = serde_json::Map::new();
-        request.insert(
-            "jsonrpc".to_string(),
-            serde_json::Value::String("2.0".to_string()),
-        );
-        request.insert("id".to_string(), serde_json::Value::Number(id.into()));
-        request.insert(
-            "method".to_string(),
-            serde_json::Value::String(method.to_string()),
-        );
-        if let Some(p) = params {
-            request.insert("params".to_string(), p);
-        }
-        // Advertise a progress token so servers that honor MCP progress
-        // emit `notifications/progress` — those frames reset the idle budget.
-        if method == "tools/call" {
-            if let Some(serde_json::Value::Object(map)) = request.get_mut("params") {
-                map.insert(
-                    "_meta".to_string(),
-                    serde_json::json!({ "progressToken": id }),
-                );
-            }
-        }
-        let request = serde_json::Value::Object(request);
+        let request = build_jsonrpc_request(method, params, id);
 
         let idle = Duration::from_millis(self.timeout_ms.max(1));
         let hard_deadline = tokio::time::Instant::now()
@@ -367,6 +399,182 @@ impl StdioClient {
         })
     }
 
+    async fn send_request_multiplexed(
+        &self,
+        method: &str,
+        params: Option<serde_json::Value>,
+    ) -> std::result::Result<serde_json::Value, RequestAttemptError> {
+        let generation = self.connection_generation.load(Ordering::SeqCst);
+        let id = self.next_id.fetch_add(1, Ordering::SeqCst);
+        let request = build_jsonrpc_request(method, params, id);
+        let idle = Duration::from_millis(self.timeout_ms.max(1));
+        let hard_deadline =
+            tokio::time::Instant::now() + Duration::from_millis(super::config::hard_cap_ms());
+        // One idle budget covers queueing for stdin, writing and the first
+        // response/activity frame. Only actual server activity renews it.
+        let mut idle_deadline = tokio::time::Instant::now() + idle;
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        self.pending
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .insert(id, tx);
+
+        let write_result: Result<()> = async {
+            let mut stdin = tokio::time::timeout_at(idle_deadline, self.stdin.lock())
+                .await
+                .with_context(|| {
+                    format!(
+                        "MCP request {method} timed out after {}ms waiting for stdin",
+                        self.timeout_ms
+                    )
+                })?;
+            let stdin = stdin
+                .as_mut()
+                .ok_or_else(|| anyhow::Error::new(StdioConnectionClosed("MCP stdin closed")))?;
+            let mut body = serde_json::to_vec(&request)?;
+            body.push(b'\n');
+            tokio::time::timeout_at(idle_deadline, stdin.write_all(&body))
+                .await
+                .with_context(|| {
+                    format!(
+                        "MCP request {method} timed out after {}ms while writing",
+                        self.timeout_ms
+                    )
+                })??;
+            tokio::time::timeout_at(idle_deadline, stdin.flush())
+                .await
+                .with_context(|| {
+                    format!(
+                        "MCP request {method} timed out after {}ms while flushing",
+                        self.timeout_ms
+                    )
+                })??;
+            Ok(())
+        }
+        .await;
+        if let Err(error) = write_result {
+            self.remove_pending(id);
+            return Err(RequestAttemptError {
+                error,
+                generation,
+                request_may_have_been_sent: true,
+            });
+        }
+
+        loop {
+            let now = tokio::time::Instant::now();
+            if now >= hard_deadline {
+                self.remove_pending(id);
+                return Err(RequestAttemptError {
+                    error: anyhow::Error::new(StdioRequestTimedOut(format!(
+                        "MCP request {method} reached configured max_timeout_secs ({}ms)",
+                        super::config::hard_cap_ms()
+                    ))),
+                    generation,
+                    request_may_have_been_sent: true,
+                });
+            }
+            let deadline = idle_deadline.min(hard_deadline);
+            let frame = match tokio::time::timeout_at(deadline, rx.recv()).await {
+                Ok(Some(frame)) => frame,
+                Ok(None) => PendingFrame::TransportError("MCP response dispatcher closed".into()),
+                Err(_) => {
+                    self.remove_pending(id);
+                    return Err(RequestAttemptError {
+                        error: anyhow::Error::new(StdioRequestTimedOut(format!(
+                            "MCP request {method} timed out after {}ms with no progress",
+                            self.timeout_ms
+                        ))),
+                        generation,
+                        request_may_have_been_sent: true,
+                    });
+                }
+            };
+            match frame {
+                PendingFrame::Activity => {
+                    idle_deadline = tokio::time::Instant::now() + idle;
+                    continue;
+                }
+                PendingFrame::TransportError(error) => {
+                    self.remove_pending(id);
+                    return Err(RequestAttemptError {
+                        error: anyhow::Error::new(StdioTransportFailure(error)),
+                        generation,
+                        request_may_have_been_sent: true,
+                    });
+                }
+                PendingFrame::Response(value) => {
+                    let response = serde_json::from_value::<super::types::JsonRpcResponse>(value)
+                        .context("Failed to parse NDJSON MCP message as JSON-RPC")
+                        .map_err(|error| RequestAttemptError {
+                            error,
+                            generation,
+                            request_may_have_been_sent: true,
+                        })?;
+                    if let Some(error) = response.error {
+                        return Err(RequestAttemptError {
+                            error: anyhow::anyhow!(
+                                "MCP error {} (code {})",
+                                error.message,
+                                error.code
+                            ),
+                            generation,
+                            request_may_have_been_sent: true,
+                        });
+                    }
+                    return response.result.ok_or_else(|| RequestAttemptError {
+                        error: anyhow::anyhow!("MCP response missing result"),
+                        generation,
+                        request_may_have_been_sent: true,
+                    });
+                }
+            }
+        }
+    }
+
+    fn remove_pending(&self, id: u64) {
+        self.pending
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .remove(&id);
+    }
+
+    fn fail_all_pending(&self, message: String) {
+        let pending: Vec<_> = self
+            .pending
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .drain()
+            .map(|(_, sender)| sender)
+            .collect();
+        for sender in pending {
+            let _ = sender.send(PendingFrame::TransportError(message.clone()));
+        }
+    }
+
+    async fn start_response_dispatcher(&self) {
+        let cancel = self.reader_cancel.lock().await.clone();
+        let client = self.clone_for_recovery();
+        self.multiplex_ready.store(true, Ordering::Release);
+        tokio::spawn(async move {
+            loop {
+                let value = tokio::select! {
+                    _ = cancel.cancelled() => break,
+                    value = client.recv_jsonrpc_value() => value,
+                };
+                let value = match value {
+                    Ok(value) => value,
+                    Err(error) => {
+                        client.multiplex_ready.store(false, Ordering::Release);
+                        client.fail_all_pending(format!("MCP stdio reader failed: {error:#}"));
+                        break;
+                    }
+                };
+                dispatch_jsonrpc_frame(&client.pending, value);
+            }
+        });
+    }
+
     async fn initialize_connection(&self) -> Result<InitializeResult> {
         *self.status.lock().await = ServerStatus::Connecting;
         self.start().await?;
@@ -396,12 +604,21 @@ impl StdioClient {
             stdin.flush().await?;
         }
 
+        self.start_response_dispatcher().await;
+
         *self.status.lock().await = ServerStatus::Connected;
         self.connection_generation.fetch_add(1, Ordering::SeqCst);
         Ok(result)
     }
 
     async fn clear_transport(&self) {
+        self.multiplex_ready.store(false, Ordering::Release);
+        let old_reader_cancel = {
+            let mut cancel = self.reader_cancel.lock().await;
+            std::mem::replace(&mut *cancel, CancellationToken::new())
+        };
+        old_reader_cancel.cancel();
+        self.fail_all_pending("MCP stdio transport was reset".to_string());
         self.stdin.lock().await.take();
         self.reader.lock().await.take();
         self.preread_line.lock().await.take();
@@ -430,8 +647,20 @@ impl StdioClient {
                     }
                 }
             }
+            #[cfg(target_os = "windows")]
+            {
+                let job = self.process_job.lock().await.take();
+                crate::process_utils::kill_windows_tree(&job, child.id());
+            }
             let _ = child.start_kill();
             let _ = child.wait().await;
+        } else {
+            #[cfg(target_os = "windows")]
+            {
+                // Dropping a KILL_ON_JOB_CLOSE handle also reaps descendants
+                // when the direct child was already observed/reaped elsewhere.
+                self.process_job.lock().await.take();
+            }
         }
     }
 
@@ -521,11 +750,15 @@ impl StdioClient {
             status: self.status.clone(),
             next_id: self.next_id.clone(),
             process: self.process.clone(),
+            #[cfg(target_os = "windows")]
+            process_job: self.process_job.clone(),
             stdin: self.stdin.clone(),
             reader: self.reader.clone(),
             preread_line: self.preread_line.clone(),
             request_lock: self.request_lock.clone(),
-            operation_lock: self.operation_lock.clone(),
+            pending: self.pending.clone(),
+            reader_cancel: self.reader_cancel.clone(),
+            multiplex_ready: self.multiplex_ready.clone(),
             reconnect_lock: self.reconnect_lock.clone(),
             recovery_notify: self.recovery_notify.clone(),
             recovery_in_progress: self.recovery_in_progress.clone(),
@@ -541,7 +774,6 @@ impl StdioClient {
         params: Option<serde_json::Value>,
         retry_after_send: bool,
     ) -> Result<serde_json::Value> {
-        let _operation = self.operation_lock.lock().await;
         self.wait_for_background_recovery().await?;
         match self.send_request(method, params.clone()).await {
             Ok(value) => Ok(value),
@@ -763,6 +995,8 @@ fn is_reconnectable_stdio_error(error: &anyhow::Error) -> bool {
 
     error.chain().any(|cause| {
         if cause.downcast_ref::<StdioConnectionClosed>().is_some()
+            || cause.downcast_ref::<StdioTransportFailure>().is_some()
+            || cause.downcast_ref::<StdioRequestTimedOut>().is_some()
             || cause
                 .downcast_ref::<tokio::time::error::Elapsed>()
                 .is_some()
@@ -783,6 +1017,87 @@ fn is_reconnectable_stdio_error(error: &anyhow::Error) -> bool {
     })
 }
 
+fn build_jsonrpc_request(
+    method: &str,
+    params: Option<serde_json::Value>,
+    id: u64,
+) -> serde_json::Value {
+    // Omit params rather than serializing null: several JS MCP SDK versions
+    // treat `params: null` differently from an absent params member.
+    let mut request = serde_json::Map::new();
+    request.insert("jsonrpc".into(), serde_json::Value::String("2.0".into()));
+    request.insert("id".into(), serde_json::Value::Number(id.into()));
+    request.insert("method".into(), serde_json::Value::String(method.into()));
+    if let Some(params) = params {
+        request.insert("params".into(), params);
+    }
+    if method == "tools/call" {
+        if let Some(serde_json::Value::Object(map)) = request.get_mut("params") {
+            map.insert("_meta".into(), serde_json::json!({ "progressToken": id }));
+        }
+    }
+    serde_json::Value::Object(request)
+}
+
+fn jsonrpc_response_id(value: &serde_json::Value) -> Option<u64> {
+    if value.get("result").is_none() && value.get("error").is_none() {
+        return None;
+    }
+    match value.get("id") {
+        Some(serde_json::Value::Number(number)) => number.as_u64(),
+        Some(serde_json::Value::String(string)) => string.parse().ok(),
+        _ => None,
+    }
+}
+
+fn jsonrpc_progress_id(value: &serde_json::Value) -> Option<u64> {
+    if value.get("method").and_then(serde_json::Value::as_str) != Some("notifications/progress") {
+        return None;
+    }
+    match value.pointer("/params/progressToken") {
+        Some(serde_json::Value::Number(number)) => number.as_u64(),
+        Some(serde_json::Value::String(string)) => string.parse().ok(),
+        _ => None,
+    }
+}
+
+fn dispatch_jsonrpc_frame(pending: &PendingRequests, value: serde_json::Value) {
+    if let Some(id) = jsonrpc_response_id(&value) {
+        let sender = pending
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .remove(&id);
+        if let Some(sender) = sender {
+            let _ = sender.send(PendingFrame::Response(value));
+        }
+        return;
+    }
+    // Progress tokens are the request ids we supplied in tools/call. Route a
+    // progress tick narrowly so one noisy call cannot indefinitely reset every
+    // other call's idle timeout. Unknown/general notifications are broadcast:
+    // older servers may omit progressToken, and all calls still have a hard cap.
+    if let Some(id) = jsonrpc_progress_id(&value) {
+        let sender = pending
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .get(&id)
+            .cloned();
+        if let Some(sender) = sender {
+            let _ = sender.send(PendingFrame::Activity);
+        }
+        return;
+    }
+    let senders: Vec<_> = pending
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .values()
+        .cloned()
+        .collect();
+    for sender in senders {
+        let _ = sender.send(PendingFrame::Activity);
+    }
+}
+
 fn jsonrpc_id_matches(value: &serde_json::Value, id: u64) -> bool {
     match value.get("id") {
         Some(serde_json::Value::Number(n)) => n.as_u64() == Some(id),
@@ -793,8 +1108,13 @@ fn jsonrpc_id_matches(value: &serde_json::Value, id: u64) -> bool {
 
 #[cfg(test)]
 mod idle_progress_tests {
-    use super::jsonrpc_id_matches;
+    use super::{
+        build_jsonrpc_request, dispatch_jsonrpc_frame, jsonrpc_id_matches, jsonrpc_progress_id,
+        jsonrpc_response_id, PendingFrame, PendingRequests,
+    };
     use serde_json::json;
+    use std::collections::HashMap;
+    use std::sync::{Arc, Mutex};
 
     #[test]
     fn matching_response_id_is_detected() {
@@ -811,6 +1131,60 @@ mod idle_progress_tests {
             &json!({"jsonrpc":"2.0","method":"notifications/progress","params":{"progressToken":7}}),
             7
         ));
+    }
+
+    #[test]
+    fn response_dispatch_requires_result_or_error_and_correlates_string_ids() {
+        assert_eq!(
+            jsonrpc_response_id(&json!({"jsonrpc":"2.0","id":"12","result":{}})),
+            Some(12)
+        );
+        assert_eq!(
+            jsonrpc_response_id(
+                &json!({"jsonrpc":"2.0","id":12,"method":"sampling/createMessage"})
+            ),
+            None,
+            "server-to-client requests must not be consumed as responses"
+        );
+    }
+
+    #[test]
+    fn tool_call_request_gets_a_matching_progress_token() {
+        let request = build_jsonrpc_request(
+            "tools/call",
+            Some(json!({"name":"search","arguments":{}})),
+            42,
+        );
+        assert_eq!(request["id"], 42);
+        assert_eq!(request["params"]["_meta"]["progressToken"], 42);
+        assert_eq!(
+            jsonrpc_progress_id(
+                &json!({"jsonrpc":"2.0","method":"notifications/progress","params":{"progressToken":"42","progress":1}})
+            ),
+            Some(42)
+        );
+    }
+
+    #[test]
+    fn concurrent_responses_are_dispatched_out_of_order_by_id() {
+        let pending: PendingRequests = Arc::new(Mutex::new(HashMap::new()));
+        let (tx1, mut rx1) = tokio::sync::mpsc::unbounded_channel();
+        let (tx2, mut rx2) = tokio::sync::mpsc::unbounded_channel();
+        pending.lock().unwrap().insert(1, tx1);
+        pending.lock().unwrap().insert(2, tx2);
+
+        dispatch_jsonrpc_frame(&pending, json!({"jsonrpc":"2.0","id":2,"result":"two"}));
+        dispatch_jsonrpc_frame(&pending, json!({"jsonrpc":"2.0","id":1,"result":"one"}));
+
+        assert!(matches!(
+            rx1.try_recv(),
+            Ok(PendingFrame::Response(value)) if value["result"] == "one"
+        ));
+        assert!(matches!(
+            rx2.try_recv(),
+            Ok(PendingFrame::Response(value)) if value["result"] == "two"
+        ));
+        assert!(pending.lock().unwrap().is_empty());
     }
 }
 
@@ -891,6 +1265,15 @@ impl Drop for StdioClient {
         // Try to kill the subprocess gracefully
         if let Ok(mut process) = self.process.try_lock() {
             if let Some(mut child) = process.take() {
+                #[cfg(target_os = "windows")]
+                {
+                    let job = self
+                        .process_job
+                        .try_lock()
+                        .ok()
+                        .and_then(|mut guard| guard.take());
+                    crate::process_utils::kill_windows_tree(&job, child.id());
+                }
                 let _ = child.start_kill();
             }
         }

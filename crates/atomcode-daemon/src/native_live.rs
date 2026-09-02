@@ -32,6 +32,14 @@ pub fn live_running_session_id() -> Option<String> {
     hub().running_session_id()
 }
 
+/// Session currently projected in the live WebUI/TUI, including while its
+/// runtime is idle. Status panels must use this rather than
+/// `live_running_session_id`, otherwise session-owned resources falsely appear
+/// disconnected between turns.
+pub fn live_view_session_id() -> Option<String> {
+    hub().binding().ok().map(|binding| binding.session_id)
+}
+
 fn headless() -> &'static Mutex<Option<HeadlessRuntime>> {
     HEADLESS.get_or_init(|| Mutex::new(None))
 }

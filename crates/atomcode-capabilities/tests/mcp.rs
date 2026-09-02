@@ -8,7 +8,9 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use atomcode_capabilities::mcp::config::{McpConfigSource, McpServerConfig, McpTransportConfig};
-use atomcode_capabilities::mcp::{McpRegistry, McpToolAdapter, ServerStatus, CONNECT_TIMEOUT};
+use atomcode_capabilities::mcp::{
+    McpRegistry, McpToolAdapter, ServerStatus, SessionMcpPool, CONNECT_TIMEOUT,
+};
 use atomcode_kernel::conformance;
 use atomcode_kernel::tool::{ProgressSink, RiskLevel, Tool, ToolContext};
 use tokio_util::sync::CancellationToken;
@@ -47,6 +49,8 @@ fn test_server_config_with_env_and_timeout(
         },
         trust: false,
         auto_approve: vec![],
+        max_concurrent_calls: 8,
+        scope: atomcode_capabilities::mcp::config::McpScope::Project,
     }
 }
 
@@ -95,7 +99,7 @@ async fn registry_connect_discover_and_call_echo() {
 }
 
 #[tokio::test]
-async fn stdio_reconnects_once_after_server_exit_for_concurrent_calls() {
+async fn stdio_multiplexed_calls_share_one_reconnect_after_server_exit() {
     let temp = tempfile::tempdir().unwrap();
     let marker = temp.path().join("exit-once");
     let counter = temp.path().join("spawn-count");
@@ -127,28 +131,41 @@ async fn stdio_reconnects_once_after_server_exit_for_concurrent_calls() {
     let (first, second) = tokio::join!(first, second);
 
     let outcomes = [first, second];
-    assert_eq!(
-        outcomes.iter().filter(|result| result.is_ok()).count(),
-        1,
-        "the call handled by the replacement process should succeed"
-    );
-    let uncertain = outcomes
-        .iter()
-        .find_map(|result| result.as_ref().err())
-        .expect("the call sent to the dying process must not be replayed");
-    assert!(
-        uncertain.to_string().contains("result is unknown"),
-        "unexpected error: {uncertain:#}"
-    );
+    for result in outcomes {
+        let uncertain = result.expect_err(
+            "both multiplexed calls reached the dying generation and must not be replayed",
+        );
+        assert!(
+            uncertain.to_string().contains("result is unknown"),
+            "unexpected error: {uncertain:#}"
+        );
+    }
+    let mut recovered = false;
+    for _ in 0..100 {
+        if spawn_count(&counter) == 2
+            && registry.server_statuses().await
+                == vec![("recover".to_string(), ServerStatus::Connected)]
+        {
+            recovered = true;
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    assert!(recovered, "the failed generation should reconnect once");
     assert_eq!(
         spawn_count(&counter),
         2,
         "initial process plus exactly one replacement should be spawned"
     );
-    assert_eq!(
-        registry.server_statuses().await,
-        vec![("recover".to_string(), ServerStatus::Connected)]
-    );
+    let follow_up = registry
+        .call_tool(
+            "recover",
+            "echo",
+            serde_json::json!({ "message": "after recovery" }),
+        )
+        .await
+        .expect("replacement process should serve subsequent calls");
+    assert!(follow_up.contains("echo:after recovery"));
 }
 
 #[tokio::test]
@@ -319,6 +336,34 @@ async fn concurrent_failures_reconnect_the_generation_that_actually_failed() {
             "sent tool calls must not be replayed: {error:#}"
         );
     }
+    let mut first_recovered = false;
+    for _ in 0..100 {
+        if spawn_count(&counter) == 2
+            && registry.server_statuses().await
+                == vec![("two-exits".to_string(), ServerStatus::Connected)]
+        {
+            first_recovered = true;
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    assert!(
+        first_recovered,
+        "the first failed generation should recover"
+    );
+
+    let second_generation = registry
+        .call_tool(
+            "two-exits",
+            "echo",
+            serde_json::json!({ "message": "third" }),
+        )
+        .await
+        .expect_err("the fixture should terminate the second generation too");
+    assert!(
+        second_generation.to_string().contains("result is unknown"),
+        "sent tool call must not be replayed: {second_generation:#}"
+    );
     let mut recovered = false;
     for _ in 0..100 {
         if spawn_count(&counter) == 3
@@ -465,5 +510,70 @@ async fn background_registry_reads_project_mcp_json() {
     assert!(
         statuses.iter().any(|(n, _)| n == "proj"),
         "the connected server should appear in server_statuses"
+    );
+}
+
+#[tokio::test]
+#[serial_test::serial]
+async fn session_scope_spawns_once_per_session_while_project_scope_stays_shared() {
+    let home = tempfile::tempdir().unwrap();
+    unsafe {
+        std::env::set_var("ATOMCODE_HOME", home.path());
+    }
+    let project = tempfile::tempdir().unwrap();
+    let trust_store = home.path().join("mcp_trust.json");
+    unsafe {
+        std::env::set_var("ATOMCODE_MCP_TRUST_STORE", &trust_store);
+    }
+    write_trusted_store(&trust_store, project.path());
+
+    let project_spawns = home.path().join("project-spawns");
+    let session_spawns = home.path().join("session-spawns");
+    let server = env!("CARGO_BIN_EXE_mcp-test-server");
+    let mcp_json = serde_json::json!({
+        "mcpServers": {
+            "shared": {
+                "command": server,
+                "env": { "MCP_TEST_SPAWN_COUNTER": project_spawns },
+                "scope": "project"
+            },
+            "browser": {
+                "command": server,
+                "env": { "MCP_TEST_SPAWN_COUNTER": session_spawns },
+                "scope": "session",
+                "maxConcurrentCalls": 1
+            }
+        }
+    });
+    std::fs::write(project.path().join(".mcp.json"), mcp_json.to_string()).unwrap();
+
+    let shared = McpRegistry::from_config_background(project.path()).share();
+    shared.wait_for_initial_connections(CONNECT_TIMEOUT).await;
+    assert_eq!(shared.connected_server_names().await, vec!["shared"]);
+    assert_eq!(spawn_count(&project_spawns), 1);
+    assert_eq!(spawn_count(&session_spawns), 0);
+
+    let pool = Arc::new(SessionMcpPool::new());
+    let first = pool.acquire(project.path(), "session-a").await;
+    let same = pool.acquire(project.path(), "session-a").await;
+    let other = pool.acquire(project.path(), "session-b").await;
+    assert!(Arc::ptr_eq(&first.registry(), &same.registry()));
+    assert!(!Arc::ptr_eq(&first.registry(), &other.registry()));
+    first
+        .registry()
+        .wait_for_initial_connections(CONNECT_TIMEOUT)
+        .await;
+    other
+        .registry()
+        .wait_for_initial_connections(CONNECT_TIMEOUT)
+        .await;
+    assert_eq!(spawn_count(&session_spawns), 2);
+    assert_eq!(
+        first.registry().connected_server_names().await,
+        vec!["browser"]
+    );
+    assert_eq!(
+        other.registry().connected_server_names().await,
+        vec!["browser"]
     );
 }

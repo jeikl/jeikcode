@@ -28,13 +28,15 @@
     // 模板 A — stdio：启动本地子进程，经标准输入输出走 MCP（不要写 url）
     // server 键名会出现在工具名里：mcp__<键名>__<远端工具名>
     //
-    // 注意：stdio 传输的所有请求是串行的（MCP 协议限制，单通道通信）。
-    // 如果某个工具调用耗时较长（如代码分析），其他工具调用会排队等待。
-    // 对于耗时操作，建议使用 HTTP 传输（模板 B）以获得更好的并发性能。
+    // stdio 连接支持按 JSON-RPC ID 多路复用。maxConcurrentCalls 控制同一
+    // server 的在途调用上限（1–64，默认 8）；有共享可变状态的浏览器类建议为 1。
+    // scope 省略或 project 时由同项目会话共享；session 时每个会话独立启动。
     // -------------------------------------------------------------------------
     "test-echo": {
       "command": "cargo",
       "args": ["run", "--release", "--bin", "mcp-test-server", "--manifest-path", "."],
+      "maxConcurrentCalls": 8,
+      "scope": "project",
       "disabled": true
       // 启用前改为 false，并把 manifest-path 指到正确 Cargo.toml（如本仓库
       // crates/atomcode-capabilities/Cargo.toml），否则从错误目录执行会找不到包。
@@ -54,6 +56,8 @@
         "Authorization": "Bearer ${YOUR_TOKEN}"
       },
       "timeout_ms": 30000,
+      "maxConcurrentCalls": 8,
+      "scope": "project",
       "disabled": true
       // 把 url 换成真实端点；不需要鉴权时可删掉整个 headers 对象。
       // 启用前改为 false。
@@ -75,6 +79,8 @@
         "provider": "github",
         "client_secret_env": "GITHUB_MCP_CLIENT_SECRET"
       },
+      "maxConcurrentCalls": 8,
+      "scope": "project",
       "disabled": true
     }
   }

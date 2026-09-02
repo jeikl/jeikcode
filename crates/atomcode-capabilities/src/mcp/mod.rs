@@ -25,6 +25,7 @@ pub mod config;
 pub mod oauth;
 pub mod pool;
 pub mod registry;
+pub mod session_pool;
 pub mod tool;
 pub mod transport_http;
 pub mod transport_stdio;
@@ -35,8 +36,8 @@ mod util;
 pub use client::{McpClient, McpToolInfo};
 pub use config::{
     load_mcp_config, merge_http_oauth_mcp_server_into_json_file,
-    merge_stdio_mcp_server_into_json_file, McpHttpAuthConfig, McpOAuthConfig, McpServerConfig,
-    McpTransportConfig,
+    merge_stdio_mcp_server_into_json_file, McpHttpAuthConfig, McpOAuthConfig, McpScope,
+    McpServerConfig, McpTransportConfig,
 };
 pub use oauth::{
     login_github_oauth, login_mcp_oauth, refresh_mcp_oauth_token, McpOAuthLoginOptions,
@@ -44,6 +45,7 @@ pub use oauth::{
 };
 pub use pool::{CachedMcpRegistry, ProjectMcpHandle, ProjectMcpPool, MCP_CACHE_MAX};
 pub use registry::{project_trust_key, McpConnectEvent, McpRegistry};
+pub use session_pool::{SessionMcpLease, SessionMcpPool};
 pub use tool::{mcp_tool_full_name, sanitize_name_segment, McpToolAdapter};
 pub use types::*;
 

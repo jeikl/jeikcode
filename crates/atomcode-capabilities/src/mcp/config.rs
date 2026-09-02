@@ -61,7 +61,25 @@ pub struct McpServerConfig {
     /// Per-tool auto-approve allowlist (the `autoApprove` array): bare tool names
     /// (e.g. `["query", "search"]`) whose calls skip the approval prompt.
     pub auto_approve: Vec<String>,
+    /// Per-registry backpressure bound for this server. Project-scoped servers
+    /// share it across project sessions; session-scoped servers get one bound
+    /// per isolated session registry.
+    pub max_concurrent_calls: usize,
+    /// Connection/process ownership boundary. Project is backward-compatible;
+    /// Session gives every live coding session an isolated transport instance.
+    pub scope: McpScope,
 }
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum McpScope {
+    #[default]
+    Project,
+    Session,
+}
+
+pub const DEFAULT_MAX_CONCURRENT_CALLS: usize = 8;
+pub const MAX_MAX_CONCURRENT_CALLS: usize = 64;
 
 /// Configuration source for a server.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -142,6 +160,17 @@ struct McpServerEntry {
     /// `autoApprove: ["query", ...]` ⇒ per-tool auto-approve allowlist.
     #[serde(default, rename = "autoApprove", alias = "auto_approve")]
     auto_approve: Vec<String>,
+    /// Per-project shared transport concurrency. Stateful servers can set 1;
+    /// stateless/high-latency servers normally keep the default of 8.
+    #[serde(
+        default,
+        rename = "maxConcurrentCalls",
+        alias = "max_concurrent_calls",
+        alias = "max_in_flight"
+    )]
+    max_concurrent_calls: Option<usize>,
+    #[serde(default)]
+    scope: McpScope,
 }
 
 use serde::Deserialize;
@@ -377,6 +406,17 @@ fn server_entry_to_config(name: &str, entry: McpServerEntry) -> Result<McpServer
         );
     };
 
+    let max_concurrent_calls = entry
+        .max_concurrent_calls
+        .unwrap_or(DEFAULT_MAX_CONCURRENT_CALLS);
+    if !(1..=MAX_MAX_CONCURRENT_CALLS).contains(&max_concurrent_calls) {
+        bail!(
+            "MCP server '{}' maxConcurrentCalls must be between 1 and {}",
+            name,
+            MAX_MAX_CONCURRENT_CALLS
+        );
+    }
+
     Ok(McpServerConfig {
         name: name.to_string(),
         disabled,
@@ -384,6 +424,8 @@ fn server_entry_to_config(name: &str, entry: McpServerEntry) -> Result<McpServer
         source: McpConfigSource::Project, // default; overwritten by load_config_file
         trust,
         auto_approve: entry.auto_approve,
+        max_concurrent_calls,
+        scope: entry.scope,
     })
 }
 
@@ -912,6 +954,57 @@ mod tests {
         let cfg = server_entry_to_config(&name, entry).unwrap();
         assert!(!cfg.trust);
         assert!(cfg.auto_approve.is_empty());
+        assert_eq!(cfg.max_concurrent_calls, DEFAULT_MAX_CONCURRENT_CALLS);
+    }
+
+    #[test]
+    fn parses_and_validates_per_server_concurrency() {
+        let raw: McpConfigFile = serde_json::from_str(
+            r#"{"mcpServers":{"browser":{"command":"browser-mcp","maxConcurrentCalls":1}}}"#,
+        )
+        .unwrap();
+        let (name, entry) = raw.mcp_servers.into_iter().next().unwrap();
+        assert_eq!(
+            server_entry_to_config(&name, entry)
+                .unwrap()
+                .max_concurrent_calls,
+            1
+        );
+
+        let invalid: McpConfigFile = serde_json::from_str(
+            r#"{"mcpServers":{"bad":{"command":"bad-mcp","maxConcurrentCalls":0}}}"#,
+        )
+        .unwrap();
+        let (name, entry) = invalid.mcp_servers.into_iter().next().unwrap();
+        assert!(server_entry_to_config(&name, entry)
+            .unwrap_err()
+            .to_string()
+            .contains("between 1 and"));
+    }
+
+    #[test]
+    fn scope_defaults_to_project_and_accepts_session() {
+        let defaults: McpConfigFile =
+            serde_json::from_str(r#"{"mcpServers":{"search":{"command":"search-mcp"}}}"#).unwrap();
+        let (name, entry) = defaults.mcp_servers.into_iter().next().unwrap();
+        assert_eq!(
+            server_entry_to_config(&name, entry).unwrap().scope,
+            McpScope::Project
+        );
+
+        let isolated: McpConfigFile = serde_json::from_str(
+            r#"{"mcpServers":{"browser":{"command":"browser-mcp","scope":"session"}}}"#,
+        )
+        .unwrap();
+        let (name, entry) = isolated.mcp_servers.into_iter().next().unwrap();
+        assert_eq!(
+            server_entry_to_config(&name, entry).unwrap().scope,
+            McpScope::Session
+        );
+        assert!(serde_json::from_str::<McpConfigFile>(
+            r#"{"mcpServers":{"bad":{"command":"bad","scope":"global"}}}"#
+        )
+        .is_err());
     }
 
     #[test]

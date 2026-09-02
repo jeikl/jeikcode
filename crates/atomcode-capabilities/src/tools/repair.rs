@@ -171,6 +171,159 @@ fn repair_stringified_structured_fields(args: &str, schema: &serde_json::Value) 
     }
 }
 
+/// Route unmistakably-native PowerShell scripts through the bash tool's native
+/// PowerShell mode on Windows. This is deliberately narrow: generic `$name`,
+/// pipes, redirects, and command names are not enough because they are valid in
+/// POSIX shells too. The repair only absorbs the common model mistake where a
+/// PowerShell cmdlet/pipe variable was emitted while `shell` was omitted (or
+/// left at its schema default), which would otherwise let Git Bash expand `$_`
+/// before PowerShell ever sees it.
+fn route_native_windows_shell(tool_name: &str, args: &str) -> String {
+    if !cfg!(target_os = "windows") || !tool_name.eq_ignore_ascii_case("bash") {
+        return args.to_string();
+    }
+    let Ok(mut value) = serde_json::from_str::<serde_json::Value>(args) else {
+        return args.to_string();
+    };
+    let Some(object) = value.as_object_mut() else {
+        return args.to_string();
+    };
+    let mut changed = false;
+    // Absorb two common schema-shape mistakes without touching command bytes.
+    if !object.contains_key("command") {
+        if let Some(command) = object.get("cmd").and_then(serde_json::Value::as_str) {
+            let command = command.to_string();
+            object.remove("cmd");
+            object.insert("command".into(), serde_json::Value::String(command));
+            changed = true;
+        }
+    }
+    if let Some(shell) = object
+        .get("shell")
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_ascii_lowercase)
+    {
+        let canonical = match shell.as_str() {
+            "powershell.exe" | "pwsh" | "pwsh.exe" | "ps" => Some("powershell"),
+            "cmd.exe" | "command_prompt" => Some("cmd"),
+            _ => None,
+        };
+        if let Some(canonical) = canonical {
+            object.insert(
+                "shell".into(),
+                serde_json::Value::String(canonical.to_string()),
+            );
+            changed = true;
+        }
+    }
+    if object
+        .get("shell")
+        .and_then(serde_json::Value::as_str)
+        .is_some_and(|shell| !shell.eq_ignore_ascii_case("default"))
+    {
+        return if changed {
+            serde_json::to_string(&value).unwrap_or_else(|_| args.to_string())
+        } else {
+            args.to_string()
+        };
+    }
+    let Some(command) = object.get("command").and_then(serde_json::Value::as_str) else {
+        return args.to_string();
+    };
+    let inferred = if looks_unmistakably_powershell(command) {
+        "powershell"
+    } else if looks_unmistakably_cmd(command) {
+        "cmd"
+    } else {
+        return if changed {
+            serde_json::to_string(&value).unwrap_or_else(|_| args.to_string())
+        } else {
+            args.to_string()
+        };
+    };
+    object.insert(
+        "shell".to_string(),
+        serde_json::Value::String(inferred.to_string()),
+    );
+    serde_json::to_string(&value).unwrap_or_else(|_| args.to_string())
+}
+
+fn looks_unmistakably_powershell(command: &str) -> bool {
+    let lower = command.trim_start().to_ascii_lowercase();
+    // Do not reinterpret an explicit nested shell invocation. Its quoting is
+    // user/model-authored and unwrapping it would be a semantics-changing repair.
+    if [
+        "powershell ",
+        "powershell.exe ",
+        "pwsh ",
+        "pwsh.exe ",
+        "cmd ",
+        "cmd.exe ",
+        "bash ",
+    ]
+    .iter()
+    .any(|prefix| lower.starts_with(prefix))
+    {
+        return false;
+    }
+    const SIGNALS: &[&str] = &[
+        "get-ciminstance",
+        "get-process",
+        "get-childitem",
+        "where-object",
+        "foreach-object",
+        "select-object",
+        "format-table",
+        "format-list",
+        "convertto-json",
+        "convertfrom-json",
+        "invoke-webrequest",
+        "invoke-restmethod",
+        "test-path",
+        "resolve-path",
+        "get-content",
+        "set-content",
+        "remove-item",
+        "new-item",
+        "copy-item",
+        "move-item",
+        "get-service",
+        "get-command",
+        "$psversiontable",
+        "$env:",
+        "$_.",
+        "${_}.",
+    ];
+    SIGNALS.iter().any(|signal| lower.contains(signal))
+}
+
+fn looks_unmistakably_cmd(command: &str) -> bool {
+    let lower = command.trim_start().to_ascii_lowercase();
+    if [
+        "powershell ",
+        "powershell.exe ",
+        "pwsh ",
+        "pwsh.exe ",
+        "cmd ",
+        "cmd.exe ",
+        "bash ",
+    ]
+    .iter()
+    .any(|prefix| lower.starts_with(prefix))
+    {
+        return false;
+    }
+    lower.starts_with("for /f ")
+        || lower.starts_with("if exist ")
+        || lower.starts_with("if not exist ")
+        || lower.starts_with("set /a ")
+        || lower.starts_with("set /p ")
+        || lower.starts_with("dir /b")
+        || lower.contains("%errorlevel%")
+        || lower.contains("%cd%")
+        || lower.contains("%~dp0")
+}
+
 fn collect_schema_types(
     schema: &serde_json::Value,
     types: &mut std::collections::BTreeSet<String>,
@@ -1465,6 +1618,52 @@ mod tests {
     }
 
     #[test]
+    #[cfg(windows)]
+    fn bash_repair_routes_unmistakable_powershell_without_outer_shell() {
+        let input = r#"{"command":"Get-Process | Where-Object { $_.Name -eq 'node.exe' }"}"#;
+        let out = route_native_windows_shell("bash", input);
+        let value: serde_json::Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(value["shell"], "powershell");
+        assert_eq!(
+            value["command"],
+            "Get-Process | Where-Object { $_.Name -eq 'node.exe' }"
+        );
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn bash_repair_does_not_reinterpret_generic_or_explicit_nested_shells() {
+        let generic = r#"{"command":"printf '%s\\n' \"$HOME\""}"#;
+        assert_eq!(route_native_windows_shell("bash", generic), generic);
+        let nested =
+            r#"{"command":"powershell -Command \"Get-Process | Where-Object { $_.Name }\""}"#;
+        assert_eq!(route_native_windows_shell("bash", nested), nested);
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn bash_repair_normalizes_known_shell_aliases_and_cmd_field_only() {
+        let input = r#"{"cmd":"Get-CimInstance Win32_Process","shell":"pwsh"}"#;
+        let out = route_native_windows_shell("bash", input);
+        let value: serde_json::Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(value["command"], "Get-CimInstance Win32_Process");
+        assert_eq!(value["shell"], "powershell");
+        assert!(value.get("cmd").is_none());
+
+        let cmd = r#"{"command":"for /f %i in ('where node') do @echo %i"}"#;
+        let out = route_native_windows_shell("bash", cmd);
+        let value: serde_json::Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(value["shell"], "cmd");
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn bash_repair_preserves_unknown_explicit_shell_and_script_bytes() {
+        let input = r#"{"command":"Invoke-StrangeThing --raw '$x'","shell":"custom-shell"}"#;
+        assert_eq!(route_native_windows_shell("bash", input), input);
+    }
+
+    #[test]
     fn pre_escape_idempotent_under_double_application() {
         // Belt-and-suspenders: pre-pass must be a fixed point so a
         // future refactor that accidentally applies it twice doesn't
@@ -1649,6 +1848,7 @@ impl RepairToolArgsMiddleware {
     ) {
         call.arguments = repair_tool_args(tool_name, &call.arguments);
         call.arguments = repair_stringified_structured_fields(&call.arguments, parameters_schema);
+        call.arguments = route_native_windows_shell(tool_name, &call.arguments);
     }
 }
 

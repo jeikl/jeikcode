@@ -22,7 +22,7 @@ use std::sync::Arc;
 
 use atomcode_capabilities::cc_hooks::{CCExternalHooks, HookConfig};
 use atomcode_capabilities::datalog::DatalogHook;
-use atomcode_capabilities::mcp::{self, McpConnectEvent, McpRegistry};
+use atomcode_capabilities::mcp::{self, McpRegistry};
 use atomcode_capabilities::memory::MemoryHook;
 
 use atomcode_capabilities::session::snapshot::SnapshotPersistenceStatus;
@@ -178,6 +178,7 @@ pub struct SessionBinding {
 struct McpWorkGuard {
     registry: Option<Arc<McpRegistry>>,
     owns_registry: bool,
+    _session_lease: Option<atomcode_capabilities::mcp::SessionMcpLease>,
     publication_enabled: Arc<std::sync::atomic::AtomicBool>,
 }
 
@@ -206,7 +207,6 @@ pub struct CodingParts {
     mcp_tool_names: Arc<std::sync::RwLock<Vec<String>>>,
     mounted_tools: Option<MountedTools>,
     mounted_tools_publisher: Option<MountedToolsPublisher>,
-    mcp_connect_rx: Option<tokio::sync::mpsc::UnboundedReceiver<McpConnectEvent>>,
     mcp_publish_lock: Arc<tokio::sync::Mutex<()>>,
     mcp_publication_enabled: Arc<std::sync::atomic::AtomicBool>,
     /// True only after the publisher has reconciled every initial connection into
@@ -231,6 +231,9 @@ pub struct CodingParts {
     runtime_resume: Option<SessionSnapshot>,
     /// Connected MCP servers (None when `opts.mcp` was false or no config exists).
     pub mcp_registry: Option<Arc<McpRegistry>>,
+    /// Per-session isolated registry. Its lease lives in `_mcp_work_guard`, so
+    /// provider reassembly cannot accidentally tear it down.
+    session_mcp_registry: Option<Arc<McpRegistry>>,
     /// The agent's tool working dir as a LIVE handle (kernel Seam 1b): the driver
     /// mutates it to implement `/cd` — tools resolve against the new dir from the
     /// next call. Session/memory/recall stay anchored to the PREPARE-time project
@@ -528,15 +531,15 @@ async fn prepare_with_plugin_hooks_reusing_lease(
     // the session candidate path. `mount()` publishes each connected server's tools
     // atomically for the next turn, then publishes once more when the initial pass
     // reaches its bounded terminal state.
-    let (mcp_registry, mcp_connect_rx, owns_mcp_registry) = if !opts.mcp {
-        (None, None, false)
+    let (mcp_registry, owns_mcp_registry) = if !opts.mcp {
+        (None, false)
     } else if let Some(shared) = opts.shared_mcp_registry.clone() {
-        (Some(shared), None, false)
+        (Some(shared), false)
     } else {
         let registry = atomcode_capabilities::mcp::ProjectMcpPool::global()
             .registry(&cfg.working_dir)
             .await;
-        (Some(registry), None, false)
+        (Some(registry), false)
     };
     let mcp_tool_names = Arc::new(std::sync::RwLock::new(Vec::new()));
 
@@ -647,6 +650,23 @@ async fn prepare_with_plugin_hooks_reusing_lease(
         names.push("recall".into());
     }
 
+    let session_mcp_lease = if opts.mcp {
+        if let Some(binding) = &session {
+            Some(
+                atomcode_capabilities::mcp::SessionMcpPool::global()
+                    .acquire(&cfg.working_dir, &binding.id)
+                    .await,
+            )
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+    let session_mcp_registry = session_mcp_lease
+        .as_ref()
+        .map(atomcode_capabilities::mcp::SessionMcpLease::registry);
+
     // Hooks in the CANONICAL ORDER (registration order = HookChain execution order):
     // 1. SessionContextHook — session_start: inject env + project-instructions + git
     //    snapshot after persona as a System message. Rewrites in place on turn_start.
@@ -693,9 +713,14 @@ async fn prepare_with_plugin_hooks_reusing_lease(
     hooks.push(Arc::new(crate::code_tools::CodeToolsHook::new(
         code_explore_mounted,
     )));
-    if let Some(registry) = &mcp_registry {
+    let mcp_registries: Vec<_> = mcp_registry
+        .iter()
+        .chain(session_mcp_registry.iter())
+        .cloned()
+        .collect();
+    if !mcp_registries.is_empty() {
         hooks.push(Arc::new(McpInstructionsHook::new(
-            Arc::clone(registry),
+            mcp_registries,
             Arc::clone(&mcp_tool_names),
         )));
     }
@@ -799,6 +824,7 @@ async fn prepare_with_plugin_hooks_reusing_lease(
     let mcp_work_guard = McpWorkGuard {
         registry: mcp_registry.clone(),
         owns_registry: owns_mcp_registry,
+        _session_lease: session_mcp_lease,
         publication_enabled: Arc::clone(&mcp_publication_enabled),
     };
 
@@ -827,10 +853,12 @@ async fn prepare_with_plugin_hooks_reusing_lease(
         mcp_tool_names,
         mounted_tools: None,
         mounted_tools_publisher: None,
-        mcp_connect_rx,
         mcp_publish_lock: Arc::new(tokio::sync::Mutex::new(())),
         mcp_publication_enabled,
-        mcp_catalog_ready: tokio::sync::watch::channel(mcp_registry.is_none()).0,
+        mcp_catalog_ready: tokio::sync::watch::channel(
+            mcp_registry.is_none() && session_mcp_registry.is_none(),
+        )
+        .0,
         _mcp_work_guard: mcp_work_guard,
         approval: Arc::new(ApprovalMiddleware::in_memory()),
         hooks,
@@ -840,6 +868,7 @@ async fn prepare_with_plugin_hooks_reusing_lease(
         session,
         runtime_resume: None,
         mcp_registry,
+        session_mcp_registry,
         review_provider,
         subagent_provider,
         cc_external_hooks: cc_external,
@@ -1038,7 +1067,13 @@ impl CodingParts {
         }
 
         let (mounted, publisher) = self.registry.mount_updatable(&refs);
-        if let Some(mcp_registry) = self.mcp_registry.clone() {
+        let mcp_registries: Vec<_> = self
+            .mcp_registry
+            .iter()
+            .chain(self.session_mcp_registry.iter())
+            .cloned()
+            .collect();
+        if !mcp_registries.is_empty() {
             let tool_registry = self.registry.clone();
             let base_names = self.tool_names.clone();
             let mcp_tool_names = Arc::clone(&self.mcp_tool_names);
@@ -1046,81 +1081,35 @@ impl CodingParts {
             let publish_lock = Arc::clone(&self.mcp_publish_lock);
             let publication_enabled = Arc::clone(&self.mcp_publication_enabled);
             let catalog_ready = self.mcp_catalog_ready.clone();
-            let mut connect_rx = self.mcp_connect_rx.take();
             tokio::spawn(async move {
-                // A pre-warmed shared daemon registry can publish immediately.
-                // A cold registry must not report catalog readiness after an empty
-                // preliminary pass: wait until every configured server reaches an
-                // initial terminal state, then publish one authoritative snapshot.
-                if mcp_registry.initial_connections_complete() {
+                // Project and session registries become one model-visible catalog.
+                // Wait for both scopes to reach an initial terminal state so a
+                // session-scoped browser tool never disappears from turn one.
+                let waits = mcp_registries.iter().map(|registry| async move {
+                    if registry.initial_connections_complete() {
+                        return true;
+                    }
+                    tokio::select! {
+                        _ = registry.wait_until_initial_connections_done() => true,
+                        _ = registry.wait_for_cancellation() => false,
+                    }
+                });
+                if futures::future::join_all(waits)
+                    .await
+                    .into_iter()
+                    .all(|ready| ready)
+                {
                     publish_ready_mcp_tools(
-                        Arc::clone(&mcp_registry),
-                        tool_registry.clone(),
-                        base_names.clone(),
-                        Arc::clone(&mcp_tool_names),
-                        catalog_publisher.clone(),
-                        Arc::clone(&publish_lock),
-                        Arc::clone(&publication_enabled),
+                        mcp_registries,
+                        tool_registry,
+                        base_names,
+                        mcp_tool_names,
+                        catalog_publisher,
+                        publish_lock,
+                        publication_enabled,
                     )
                     .await;
                     catalog_ready.send_replace(true);
-                    return;
-                }
-                let readiness_registry = Arc::clone(&mcp_registry);
-                let initial_readiness = async move {
-                    readiness_registry
-                        .wait_until_initial_connections_done()
-                        .await;
-                };
-                tokio::pin!(initial_readiness);
-                let cancellation_registry = Arc::clone(&mcp_registry);
-                let cancellation = async move {
-                    cancellation_registry.wait_for_cancellation().await;
-                };
-                tokio::pin!(cancellation);
-
-                loop {
-                    tokio::select! {
-                        _ = &mut cancellation => break,
-                        _ = &mut initial_readiness => {
-                            publish_ready_mcp_tools(
-                                Arc::clone(&mcp_registry),
-                                tool_registry.clone(),
-                                base_names.clone(),
-                                Arc::clone(&mcp_tool_names),
-                                catalog_publisher.clone(),
-                                Arc::clone(&publish_lock),
-                                Arc::clone(&publication_enabled),
-                            )
-                            .await;
-                            catalog_ready.send_replace(true);
-                            break;
-                        }
-                        event = async {
-                            match connect_rx.as_mut() {
-                                Some(rx) => rx.recv().await,
-                                None => std::future::pending().await,
-                            }
-                        } => {
-                            match event {
-                                Some(McpConnectEvent::Connected { name }) => {
-                                    publish_connected_mcp_server(
-                                        Arc::clone(&mcp_registry),
-                                        name,
-                                        tool_registry.clone(),
-                                        base_names.clone(),
-                                        Arc::clone(&mcp_tool_names),
-                                        catalog_publisher.clone(),
-                                        Arc::clone(&publish_lock),
-                                        Arc::clone(&publication_enabled),
-                                    )
-                                    .await;
-                                }
-                                Some(_) => {}
-                                None => break,
-                            }
-                        }
-                    }
                 }
             });
         }
@@ -1170,10 +1159,16 @@ impl CodingParts {
     pub(crate) async fn mcp_statuses(
         &self,
     ) -> Vec<(String, atomcode_capabilities::mcp::ServerStatus)> {
-        match &self.mcp_registry {
-            Some(registry) => registry.server_statuses().await,
-            None => Vec::new(),
+        let mut statuses = Vec::new();
+        if let Some(registry) = &self.mcp_registry {
+            statuses.extend(registry.server_statuses().await);
         }
+        if let Some(registry) = &self.session_mcp_registry {
+            statuses.extend(registry.server_statuses().await);
+        }
+        statuses.sort_by(|left, right| left.0.cmp(&right.0));
+        statuses.dedup_by(|left, right| left.0 == right.0);
+        statuses
     }
 
     pub(crate) fn mcp_tools_for_server(&self, server: &str) -> Vec<String> {
@@ -1181,13 +1176,11 @@ impl CodingParts {
             Ok(names) => names,
             Err(poisoned) => poisoned.into_inner(),
         };
-        let Some(registry) = self.mcp_registry.as_ref() else {
-            return Vec::new();
-        };
         let published: std::collections::HashSet<&str> = names.iter().map(String::as_str).collect();
-        registry
-            .tool_aliases_for_server(server)
-            .into_iter()
+        self.mcp_registry
+            .iter()
+            .chain(self.session_mcp_registry.iter())
+            .flat_map(|registry| registry.tool_aliases_for_server(server))
             .filter(|alias| published.contains(alias.as_str()))
             .collect()
     }
@@ -1215,7 +1208,7 @@ impl CodingParts {
 }
 
 async fn publish_ready_mcp_tools(
-    mcp_registry: Arc<McpRegistry>,
+    mcp_registries: Vec<Arc<McpRegistry>>,
     mut tool_registry: ToolRegistry,
     base_names: Vec<String>,
     mcp_tool_names: Arc<std::sync::RwLock<Vec<String>>>,
@@ -1228,22 +1221,28 @@ async fn publish_ready_mcp_tools(
     }
     // Discovery is network I/O. Keep it outside the publication lock so a
     // fail-closed withdrawal is never delayed by an MCP server timeout.
-    let tool_infos = tokio::select! {
-        tools = mcp_registry.list_all_tools_cached() => tools,
-        _ = mcp_registry.wait_for_cancellation() => return,
-    };
-    let adapters: Vec<Arc<dyn atomcode_kernel::tool::Tool>> = tool_infos
-        .into_iter()
-        .filter_map(|info| {
+    let mut adapters: Vec<Arc<dyn atomcode_kernel::tool::Tool>> = Vec::new();
+    let mut aliases = std::collections::HashSet::new();
+    for mcp_registry in mcp_registries {
+        let tool_infos = tokio::select! {
+            tools = mcp_registry.list_all_tools_cached() => tools,
+            _ = mcp_registry.wait_for_cancellation() => return,
+        };
+        for info in tool_infos {
             match atomcode_capabilities::mcp::McpToolAdapter::new(mcp_registry.clone(), info) {
-                Ok(adapter) => Some(Arc::new(adapter) as Arc<dyn atomcode_kernel::tool::Tool>),
-                Err(error) => {
-                    eprintln!("[mcp] tool publication skipped: {error}");
-                    None
+                Ok(adapter) if aliases.insert(adapter.full_name().to_string()) => {
+                    adapters.push(Arc::new(adapter) as Arc<dyn atomcode_kernel::tool::Tool>);
                 }
+                Ok(adapter) => {
+                    eprintln!(
+                        "[mcp] cross-scope tool alias collision skipped: {}",
+                        adapter.full_name()
+                    );
+                }
+                Err(error) => eprintln!("[mcp] tool publication skipped: {error}"),
             }
-        })
-        .collect();
+        }
+    }
     // Serialize only the in-memory commit. Re-check after locking because a
     // capability reload may have revoked this publication while discovery ran.
     let _publish_guard = publish_lock.lock().await;
@@ -1257,58 +1256,6 @@ async fn publish_ready_mcp_tools(
     }
     let mut selected = base_names;
     selected.extend(discovered);
-    let refs: Vec<&str> = selected.iter().map(String::as_str).collect();
-    catalog_publisher.publish(&tool_registry, &refs);
-}
-
-async fn publish_connected_mcp_server(
-    mcp_registry: Arc<McpRegistry>,
-    server: String,
-    mut tool_registry: ToolRegistry,
-    base_names: Vec<String>,
-    mcp_tool_names: Arc<std::sync::RwLock<Vec<String>>>,
-    catalog_publisher: MountedToolsPublisher,
-    publish_lock: Arc<tokio::sync::Mutex<()>>,
-    publication_enabled: Arc<std::sync::atomic::AtomicBool>,
-) {
-    // A newly connected server should not make every existing server repeat
-    // tools/list. The final readiness publication below remains the reconciliation
-    // pass for transient discovery failures.
-    if !publication_enabled.load(std::sync::atomic::Ordering::Acquire) {
-        return;
-    }
-    let tool_infos = tokio::select! {
-        tools = mcp_registry.list_tools_for_server(&server) => tools,
-        _ = mcp_registry.wait_for_cancellation() => return,
-    };
-    let adapters: Vec<Arc<dyn atomcode_kernel::tool::Tool>> = tool_infos
-        .into_iter()
-        .filter_map(|info| {
-            match atomcode_capabilities::mcp::McpToolAdapter::new(Arc::clone(&mcp_registry), info) {
-                Ok(adapter) => Some(Arc::new(adapter) as Arc<dyn atomcode_kernel::tool::Tool>),
-                Err(error) => {
-                    eprintln!("[mcp] tool publication skipped: {error}");
-                    None
-                }
-            }
-        })
-        .collect();
-    let _publish_guard = publish_lock.lock().await;
-    if !publication_enabled.load(std::sync::atomic::Ordering::Acquire) {
-        return;
-    }
-    let discovered = mcp::register_mcp_tools(&mut tool_registry, adapters);
-    let mut selected = base_names;
-    {
-        let mut names = match mcp_tool_names.write() {
-            Ok(names) => names,
-            Err(poisoned) => poisoned.into_inner(),
-        };
-        names.extend(discovered);
-        names.sort_unstable();
-        names.dedup();
-        selected.extend(names.iter().cloned());
-    }
     let refs: Vec<&str> = selected.iter().map(String::as_str).collect();
     catalog_publisher.publish(&tool_registry, &refs);
 }

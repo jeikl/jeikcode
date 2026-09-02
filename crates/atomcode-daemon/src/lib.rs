@@ -6459,7 +6459,17 @@ async fn mcp_status(State(state): State<AppState>) -> Json<McpStatusResponse> {
         state.mcp_registry.read().await.clone()
     };
 
-    let statuses = registry.server_statuses().await;
+    let session_registry = if let Some(session_id) = crate::native_live::live_view_session_id() {
+        atomcode_capabilities::mcp::SessionMcpPool::global()
+            .cached_registry(&working_dir, &session_id)
+            .await
+    } else {
+        None
+    };
+    let mut statuses = registry.server_statuses().await;
+    if let Some(session_registry) = &session_registry {
+        statuses.extend(session_registry.server_statuses().await);
+    }
 
     let all_cfgs = atomcode_capabilities::mcp::load_mcp_config(&working_dir).unwrap_or_default();
 
@@ -6482,13 +6492,32 @@ async fn mcp_status(State(state): State<AppState>) -> Json<McpStatusResponse> {
     // already appear in the `blocked[]` list above.
     let configured_names: Vec<String> = all_cfgs
         .iter()
+        .filter(|config| config.scope == atomcode_capabilities::mcp::McpScope::Project)
         .map(|c| c.name.clone())
         .filter(|n| !blocked.contains(n))
         .collect();
-    let statuses = merge_configured_mcp_statuses(statuses, &configured_names);
+    let mut statuses = merge_configured_mcp_statuses(statuses, &configured_names);
+    if session_registry.is_none() {
+        statuses.extend(
+            all_cfgs
+                .iter()
+                .filter(|config| config.scope == atomcode_capabilities::mcp::McpScope::Session)
+                .filter(|config| !blocked.contains(&config.name))
+                .map(|config| {
+                    (
+                        config.name.clone(),
+                        atomcode_capabilities::mcp::ServerStatus::Disconnected,
+                    )
+                }),
+        );
+        statuses.sort_by(|left, right| left.0.cmp(&right.0));
+    }
 
     // Fetch the tool list once (was previously re-fetched per connected server).
-    let tools = registry.list_all_tools_cached().await;
+    let mut tools = registry.list_all_tools_cached().await;
+    if let Some(session_registry) = session_registry {
+        tools.extend(session_registry.list_all_tools_cached().await);
+    }
     let servers = build_mcp_server_rows(statuses, &tools);
     Json(McpStatusResponse {
         servers,
@@ -7591,7 +7620,7 @@ pub async fn run_server(opts: ServerOpts) -> anyhow::Result<()> {
         project: project_store,
         active_chats: ActiveChatRegistry::default(),
         mcp_registry: Arc::new(RwLock::new(mcp_registry)),
-        mcp_pool,
+        mcp_pool: mcp_pool.clone(),
         login_sessions: Arc::new(RwLock::new(HashMap::new())),
         login_start_lock: Arc::new(Mutex::new(())),
         daemon_instance_id: Arc::from(uuid::Uuid::new_v4().to_string()),
@@ -7995,6 +8024,14 @@ pub async fn run_server(opts: ServerOpts) -> anyhow::Result<()> {
         handle.abort();
         let _ = handle.await;
     }
+
+    // Reap every stdio MCP tree owned by this daemon. On Windows the registry
+    // transport holds kill-on-close Job Objects, so npx/node/watchdog
+    // descendants cannot outlive a graceful host shutdown.
+    mcp_pool.shutdown_all().await;
+    atomcode_capabilities::mcp::SessionMcpPool::global()
+        .shutdown_all()
+        .await;
 
     // Step 14: Final telemetry flush before process exit (R10.2-R10.5)
     telemetry.shutdown(Duration::from_millis(500)).await;

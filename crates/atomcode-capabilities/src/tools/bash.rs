@@ -67,12 +67,14 @@ enum ShellMode {
     #[default]
     Default,
     Powershell,
+    Cmd,
 }
 
 fn command_for_policy(args: &Args) -> Cow<'_, str> {
     match args.shell {
         ShellMode::Default => Cow::Borrowed(&args.command),
         ShellMode::Powershell => Cow::Owned(format!("powershell -Command {}", args.command)),
+        ShellMode::Cmd => Cow::Owned(format!("cmd.exe /C {}", args.command)),
     }
 }
 
@@ -96,15 +98,20 @@ impl Tool for BashTool {
         )
     }
     fn parameters_schema(&self) -> serde_json::Value {
+        let shell_values = if cfg!(target_os = "windows") {
+            json!(["default", "powershell", "cmd"])
+        } else {
+            json!(["default", "powershell"])
+        };
         json!({
             "type": "object",
             "properties": {
-                "command": { "type": "string", "description": "The shell command to run" },
+                "command": { "type": "string", "description": "The command in the selected shell's native syntax. On Windows, send PowerShell cmdlets directly with shell=powershell; never nest powershell -Command inside the default shell." },
                 "shell": {
                     "type": "string",
-                    "enum": ["default", "powershell"],
+                    "enum": shell_values,
                     "default": "default",
-                    "description": "Interpreter selection. `default` uses the platform shell (Git Bash/MSYS2 or cmd.exe on Windows). `powershell` launches PowerShell directly with an encoded command, bypassing Bash/cmd quoting and variable expansion. Use it for native Windows operations and UNC paths; quote paths inside the PowerShell script and use `-LiteralPath`, e.g. Get-ChildItem -LiteralPath '\\\\server\\share$'."
+                    "description": "Interpreter selection. `default` uses the platform shell (Git Bash/MSYS2 or cmd.exe on Windows). On Windows, choose `powershell` for Get-*, Where-Object, $_, $env:, CIM and other PowerShell syntax; choose `cmd` for cmd.exe builtins, %VAR%, FOR /F and IF EXIST. PowerShell mode internally encodes the original script, bypassing outer-shell expansion; do not encode it yourself and do not nest powershell -Command/cmd /C. For UNC paths use -LiteralPath, e.g. Get-ChildItem -LiteralPath '\\\\server\\share$'."
                 }
             },
             "required": ["command"]
@@ -135,6 +142,7 @@ impl Tool for BashTool {
                 ShellMode::Powershell => {
                     format!("powershell:{}", normalize_command_for_grant(&a.command))
                 }
+                ShellMode::Cmd => format!("cmd:{}", normalize_command_for_grant(&a.command)),
             },
             Err(_) => args.to_string(),
         }
@@ -919,6 +927,9 @@ fn build_command(command: &str, shell_mode: ShellMode) -> Result<tokio::process:
     if shell_mode == ShellMode::Powershell {
         return Ok(build_powershell_command(command));
     }
+    if shell_mode == ShellMode::Cmd {
+        return Err("shell=cmd is available only on Windows".to_string());
+    }
     // Prefer bash for the bash-isms models emit; the OS PATH resolves it. If bash is
     // absent the spawn fails and the model sees a clear error (it can retry with sh).
     // HarmonyOS / OpenHarmony does NOT ship bash — fall back to sh (mksh).
@@ -1265,6 +1276,13 @@ fn rewrite_nul_redirect(command: &str) -> Cow<'_, str> {
 fn build_command(command: &str, shell_mode: ShellMode) -> Result<tokio::process::Command, String> {
     if shell_mode == ShellMode::Powershell {
         return Ok(build_powershell_command(command));
+    }
+    if shell_mode == ShellMode::Cmd {
+        use std::os::windows::process::CommandExt;
+        let mut cmd = tokio::process::Command::new("cmd.exe");
+        cmd.arg("/C");
+        cmd.as_std_mut().raw_arg(command);
+        return Ok(cmd);
     }
     if let Some(bash) = detect_windows_bash() {
         // Bash available (Git Bash / WSL / MSYS2) — route through it, unifying with
@@ -4214,6 +4232,11 @@ mod tests {
                 && schema.contains("share$"),
             "schema must expose the native PowerShell mode and UNC guidance: {schema}"
         );
+        assert_eq!(
+            schema.contains("\"cmd\""),
+            cfg!(windows),
+            "cmd mode must be advertised only on Windows: {schema}"
+        );
         let desc = shell_tool_description(false, false, false);
         assert!(
             desc.contains("max_timeout_secs") && !desc.contains("bash_timeout_add"),
@@ -4284,6 +4307,20 @@ mod tests {
         let result = BashTool.execute(&args, &ctx(project.path())).await;
         assert!(!result.is_error, "{}", result.content);
         assert!(result.content.contains("visible.txt"), "{}", result.content);
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn native_cmd_mode_bypasses_git_bash() {
+        let project = tempfile::tempdir().unwrap();
+        let args = json!({
+            "command": "if defined OS (echo %OS%) else (exit /b 7)",
+            "shell": "cmd"
+        })
+        .to_string();
+        let result = BashTool.execute(&args, &ctx(project.path())).await;
+        assert!(!result.is_error, "{}", result.content);
+        assert!(result.content.contains("Windows_NT"), "{}", result.content);
     }
 
     #[test]

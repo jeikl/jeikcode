@@ -156,6 +156,8 @@ mod tests {
             source,
             trust: false,
             auto_approve: vec![],
+            max_concurrent_calls: super::super::config::DEFAULT_MAX_CONCURRENT_CALLS,
+            scope: super::super::config::McpScope::Project,
         }
     }
 

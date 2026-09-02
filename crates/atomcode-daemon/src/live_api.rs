@@ -2845,6 +2845,8 @@ mod tests {
             source: McpConfigSource::Project,
             trust: false,
             auto_approve: vec![],
+            max_concurrent_calls: atomcode_capabilities::mcp::config::DEFAULT_MAX_CONCURRENT_CALLS,
+            scope: atomcode_capabilities::mcp::McpScope::Project,
         };
         let part_before = partition_by_trust(vec![project_cfg.clone()], &proj);
         assert_eq!(

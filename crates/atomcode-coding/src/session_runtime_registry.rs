@@ -798,8 +798,7 @@ mod tests {
         use crate::runtime::RuntimeRequest;
         let user_input = crate::runtime::CodingRuntimeEvent::Request(RuntimeRequest {
             id: 1,
-            kind: atomcode_capabilities::tools::request_user_input::REQUEST_USER_INPUT_KIND
-                .into(),
+            kind: atomcode_capabilities::tools::request_user_input::REQUEST_USER_INPUT_KIND.into(),
             payload: serde_json::json!({}),
             snapshot: None,
         });

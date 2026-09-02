@@ -70,6 +70,17 @@ pub struct McpServerConfig {
     pub scope: McpScope,
 }
 
+impl McpServerConfig {
+    /// Transport identity used to decide whether a live process must be recycled.
+    /// Trust / auto-approve changes do not count: those apply without a restart.
+    pub fn spawn_identity(&self) -> String {
+        format!(
+            "{:?}|max_concurrent={}",
+            self.config, self.max_concurrent_calls
+        )
+    }
+}
+
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum McpScope {

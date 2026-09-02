@@ -128,7 +128,10 @@ fn sync_user_home_assets_if_present() {
                 if p.is_file() {
                     if let Some(fname) = p.file_name() {
                         let fname_str = fname.to_string_lossy();
-                        if fname_str == "prompts.md" || fname_str == "内置工具.yaml" || fname_str == "内置技能.yaml" {
+                        if fname_str == "prompts.md"
+                            || fname_str == "内置工具.yaml"
+                            || fname_str == "内置技能.yaml"
+                        {
                             continue;
                         }
                         let target = dest.join(fname);
@@ -180,10 +183,22 @@ fn sync_user_home_assets_if_present() {
 
     // 4. Standalone asset files: builtin-tools.txt, .codegraphignore, config_teachs.md, user-wrap.md
     for (src_rel, dest_rel) in [
-        ("builtin-tools.txt", "crates/atomcode-capabilities/assets/builtin-tools.txt"),
-        (".codegraphignore", "crates/atomcode-capabilities/assets/.codegraphignore"),
-        ("config_teachs.md", "crates/atomcode-cli/assets/config_teachs.md"),
-        ("user-wrap.md", "crates/atomcode-capabilities/assets/user-wrap.md"),
+        (
+            "builtin-tools.txt",
+            "crates/atomcode-capabilities/assets/builtin-tools.txt",
+        ),
+        (
+            ".codegraphignore",
+            "crates/atomcode-capabilities/assets/.codegraphignore",
+        ),
+        (
+            "config_teachs.md",
+            "crates/atomcode-cli/assets/config_teachs.md",
+        ),
+        (
+            "user-wrap.md",
+            "crates/atomcode-capabilities/assets/user-wrap.md",
+        ),
     ] {
         let src = home.join(src_rel);
         if src.is_file() {

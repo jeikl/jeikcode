@@ -354,6 +354,8 @@ export function Sidebar({
   const [deleteTargets, setDeleteTargets] = useState<SessionMetaWithProject[] | null>(null);
   const [selectMode, setSelectMode] = useState(false);
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
+  const [pendingDeleteCount, setPendingDeleteCount] = useState(0);
+  const [deleteError, setDeleteError] = useState<string | null>(null);
   // Settings menu (3 entries → each opens its own dialog), fixed-anchored above the button.
   const [settingsMenuOpen, setSettingsMenuOpen] = useState(false);
   const [settingsSub, setSettingsSub] = useState<'theme' | 'language' | null>(null);
@@ -532,13 +534,26 @@ export function Sidebar({
       for (const id of ids) next.delete(id);
       return next;
     });
-    const leftover = (deleteTargets ?? []).filter((session) => !removed.has(session.id));
-    setDeleteTargets(leftover.length > 0 ? leftover : null);
-    if (leftover.length === 0) {
-      setSelectMode(false);
-      setSelectedIds(new Set());
-    }
     for (const id of ids) onSessionDeleted?.(id);
+  }
+
+  function handleDeleteBatchStart(count: number) {
+    setDeleteError(null);
+    setPendingDeleteCount(count);
+  }
+
+  function handleDeleteBatchProgress() {
+    setPendingDeleteCount((current) => Math.max(0, current - 1));
+  }
+
+  function handleDeleteBatchFinished(error: string | null) {
+    setPendingDeleteCount(0);
+    if (error) {
+      setDeleteError(error);
+      return;
+    }
+    setSelectMode(false);
+    setSelectedIds(new Set());
   }
 
   function exitSelectMode() {
@@ -1369,6 +1384,7 @@ export function Sidebar({
                 type="button"
                 class="session-select-btn"
                 onClick={exitSelectMode}
+                disabled={pendingDeleteCount > 0}
               >
                 {t('sidebar.selectDone')}
               </button>
@@ -1390,13 +1406,22 @@ export function Sidebar({
       </div>
       {selectMode && (
         <div class="session-select-delete-bar">
+          {deleteError && (
+            <div class="session-select-delete-error" role="alert">{deleteError}</div>
+          )}
+          {pendingDeleteCount > 0 && (
+            <div class="session-select-delete-progress" aria-live="polite">
+              {t('sidebar.deletingCount', { n: pendingDeleteCount })}
+            </div>
+          )}
           <button
             type="button"
             class="session-select-delete-btn"
-            disabled={selectedIds.size === 0}
+            disabled={selectedIds.size === 0 || pendingDeleteCount > 0}
             onClick={() => {
               const targets = filtered.filter((s) => selectedIds.has(s.id));
               if (targets.length === 0) return;
+              setDeleteError(null);
               setDeleteTargets(targets);
             }}
           >
@@ -1410,7 +1435,7 @@ export function Sidebar({
         </div>
       )}
 
-      <div class="session-list-body" ref={sessionListBodyRef} aria-busy={loading}>
+      <div class="session-list-body" ref={sessionListBodyRef} aria-busy={loading || pendingDeleteCount > 0}>
         {loading && dateGroups.length === 0 && (
           <div class="session-empty">{t('sidebar.loading')}</div>
         )}
@@ -1565,6 +1590,9 @@ export function Sidebar({
           sessions={deleteTargets}
           onClose={() => setDeleteTargets(null)}
           onDone={handleDeleted}
+          onBatchStart={handleDeleteBatchStart}
+          onBatchProgress={handleDeleteBatchProgress}
+          onBatchFinished={handleDeleteBatchFinished}
         />,
         document.body,
       )}

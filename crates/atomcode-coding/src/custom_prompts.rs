@@ -707,7 +707,6 @@ doing_tasks:
         );
     }
 
-
     #[test]
     fn prompt_seeds_are_live_yaml_or_root_docs() {
         let names: Vec<&str> = PROMPT_SEEDS.iter().map(|(n, _)| *n).collect();

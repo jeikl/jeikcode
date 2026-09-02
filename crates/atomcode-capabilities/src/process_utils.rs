@@ -99,6 +99,16 @@ impl Drop for JobHandle {
 /// which tokio's `Child` doesn't expose.
 #[cfg(target_os = "windows")]
 pub fn assign_child_to_kill_on_close_job(child: &tokio::process::Child) -> Option<JobHandle> {
+    assign_child_to_job(child, true)
+}
+
+/// Assign `child` to a Job Object so [`JobHandle::terminate`] can reap the tree.
+/// MCP stdio always uses `kill_on_close` so the tree dies with JeikCode.
+#[cfg(target_os = "windows")]
+pub fn assign_child_to_job(
+    child: &tokio::process::Child,
+    kill_on_close: bool,
+) -> Option<JobHandle> {
     use windows_sys::Win32::Foundation::{CloseHandle, HANDLE};
     use windows_sys::Win32::System::JobObjects::{
         AssignProcessToJobObject, CreateJobObjectW, JobObjectExtendedLimitInformation,
@@ -113,7 +123,9 @@ pub fn assign_child_to_kill_on_close_job(child: &tokio::process::Child) -> Optio
             return None;
         }
         let mut info: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = std::mem::zeroed();
-        info.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+        if kill_on_close {
+            info.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+        }
         let set_ok = SetInformationJobObject(
             job,
             JobObjectExtendedLimitInformation,
@@ -160,8 +172,7 @@ impl JobHandle {
             JobObjectBasicAndIoAccountingInformation, QueryInformationJobObject,
             JOBOBJECT_BASIC_AND_IO_ACCOUNTING_INFORMATION,
         };
-        let mut info: JOBOBJECT_BASIC_AND_IO_ACCOUNTING_INFORMATION =
-            unsafe { std::mem::zeroed() };
+        let mut info: JOBOBJECT_BASIC_AND_IO_ACCOUNTING_INFORMATION = unsafe { std::mem::zeroed() };
         let mut ret = 0u32;
         let ok = unsafe {
             QueryInformationJobObject(

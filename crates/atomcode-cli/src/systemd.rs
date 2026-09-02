@@ -10,10 +10,10 @@
 //!   stdin (no crossterm raw mode). Prompting after bind+banner races job-control
 //!   (`SIGTTOU`/`SIGTTIN` → shell `[Stopped]`) and leaves the port occupied.
 
-use std::io::{self, Write};
-use std::path::{Path, PathBuf};
 use anyhow::{anyhow, Context, Result};
 use is_terminal::IsTerminal;
+use std::io::{self, Write};
+use std::path::{Path, PathBuf};
 
 /// Options required to render a systemd service unit.
 #[derive(Debug, Clone)]
@@ -63,7 +63,10 @@ pub fn resolve_service_exe() -> PathBuf {
 
     // If current executable is already in a standard system location, use it
     let current_str = current.to_string_lossy();
-    if current_str.starts_with("/usr/") || current_str.starts_with("/bin/") || current_str.contains("/.local/bin/") {
+    if current_str.starts_with("/usr/")
+        || current_str.starts_with("/bin/")
+        || current_str.contains("/.local/bin/")
+    {
         return current;
     }
 
@@ -239,15 +242,16 @@ WantedBy=multi-user.target
 
 #[cfg(unix)]
 fn run_systemctl(args: &[&str]) -> Result<()> {
-    let output = std::process::Command::new("systemctl")
-        .args(args)
-        .output();
+    let output = std::process::Command::new("systemctl").args(args).output();
 
     match output {
         Ok(out) if out.status.success() => Ok(()),
         Ok(out) => {
             let stderr = String::from_utf8_lossy(&out.stderr);
-            if stderr.contains("Access denied") || stderr.contains("interactive authentication") || stderr.contains("permission") {
+            if stderr.contains("Access denied")
+                || stderr.contains("interactive authentication")
+                || stderr.contains("permission")
+            {
                 // Try sudo
                 let sudo_out = std::process::Command::new("sudo")
                     .arg("systemctl")
@@ -258,9 +262,17 @@ fn run_systemctl(args: &[&str]) -> Result<()> {
                     return Ok(());
                 }
                 let sudo_err = String::from_utf8_lossy(&sudo_out.stderr);
-                return Err(anyhow!("sudo systemctl {} failed: {}", args.join(" "), sudo_err.trim()));
+                return Err(anyhow!(
+                    "sudo systemctl {} failed: {}",
+                    args.join(" "),
+                    sudo_err.trim()
+                ));
             }
-            Err(anyhow!("systemctl {} failed: {}", args.join(" "), stderr.trim()))
+            Err(anyhow!(
+                "systemctl {} failed: {}",
+                args.join(" "),
+                stderr.trim()
+            ))
         }
         Err(e) => {
             // Try sudo directly
@@ -273,7 +285,11 @@ fn run_systemctl(args: &[&str]) -> Result<()> {
                 return Ok(());
             }
             let sudo_err = String::from_utf8_lossy(&sudo_out.stderr);
-            Err(anyhow!("sudo systemctl {} failed: {}", args.join(" "), sudo_err.trim()))
+            Err(anyhow!(
+                "sudo systemctl {} failed: {}",
+                args.join(" "),
+                sudo_err.trim()
+            ))
         }
     }
 }
@@ -302,11 +318,19 @@ pub fn install_and_start_systemd_service(service_name: &str, unit_content: &str)
         if let Err(e) = write_res {
             // Fallback: write to temp and sudo cp
             let tmp_path = std::env::temp_dir().join(format!(".{}.service", service_name));
-            std::fs::write(&tmp_path, unit_content)
-                .with_context(|| format!("failed to write temporary service file at {}", tmp_path.display()))?;
+            std::fs::write(&tmp_path, unit_content).with_context(|| {
+                format!(
+                    "failed to write temporary service file at {}",
+                    tmp_path.display()
+                )
+            })?;
 
             let cp_res = std::process::Command::new("sudo")
-                .args(["cp", tmp_path.to_str().unwrap(), target_path.to_str().unwrap()])
+                .args([
+                    "cp",
+                    tmp_path.to_str().unwrap(),
+                    target_path.to_str().unwrap(),
+                ])
                 .output();
 
             let _ = std::fs::remove_file(&tmp_path);
@@ -315,10 +339,17 @@ pub fn install_and_start_systemd_service(service_name: &str, unit_content: &str)
                 Ok(out) if out.status.success() => {}
                 Ok(out) => {
                     let err = String::from_utf8_lossy(&out.stderr);
-                    return Err(anyhow!("sudo cp service file to {} failed: {}", target_path.display(), err.trim()));
+                    return Err(anyhow!(
+                        "sudo cp service file to {} failed: {}",
+                        target_path.display(),
+                        err.trim()
+                    ));
                 }
                 Err(sudo_err) => {
-                    return Err(anyhow!("could not write {} (direct error: {e}, sudo error: {sudo_err})", target_path.display()));
+                    return Err(anyhow!(
+                        "could not write {} (direct error: {e}, sudo error: {sudo_err})",
+                        target_path.display()
+                    ));
                 }
             }
         }
@@ -329,16 +360,13 @@ pub fn install_and_start_systemd_service(service_name: &str, unit_content: &str)
             .output();
 
         // Reload systemd daemon
-        run_systemctl(&["daemon-reload"])
-            .context("reloading systemd daemon")?;
+        run_systemctl(&["daemon-reload"]).context("reloading systemd daemon")?;
 
         // Enable service on boot
-        run_systemctl(&["enable", &service_file_name])
-            .context("enabling systemd service")?;
+        run_systemctl(&["enable", &service_file_name]).context("enabling systemd service")?;
 
         // Restart/start the service now
-        run_systemctl(&["restart", &service_file_name])
-            .context("starting systemd service")?;
+        run_systemctl(&["restart", &service_file_name]).context("starting systemd service")?;
 
         Ok(())
     }
@@ -477,7 +505,10 @@ pub fn prompt_systemd_setup(
 
     if let Err(e) = install_and_start_systemd_service(&service_name, &unit_content) {
         eprintln!("\n❌ 安装系统服务失败: {e:#}");
-        eprintln!("您可以手动创建 `/etc/systemd/system/{}.service` 并执行 systemctl start。", service_name);
+        eprintln!(
+            "您可以手动创建 `/etc/systemd/system/{}.service` 并执行 systemctl start。",
+            service_name
+        );
         return Err(e);
     }
 
@@ -486,9 +517,15 @@ pub fn prompt_systemd_setup(
     // Print final retained output summary
     println!("\n========================================================================");
     if active {
-        println!("✨ 系统服务 [{}] 配置成功并已在后台运行 (开机自启已就绪)！", service_name);
+        println!(
+            "✨ 系统服务 [{}] 配置成功并已在后台运行 (开机自启已就绪)！",
+            service_name
+        );
     } else {
-        println!("⚠️ 系统服务 [{}] 已创建并已尝试启动，请检查状态。", service_name);
+        println!(
+            "⚠️ 系统服务 [{}] 已创建并已尝试启动，请检查状态。",
+            service_name
+        );
     }
     println!("------------------------------------------------------------------------");
     // Print the connection banner and URLs so the user doesn't lose them upon exit

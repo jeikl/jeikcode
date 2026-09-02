@@ -8175,9 +8175,7 @@ fn handle_os_interrupt(
     ctx: &mut LoopCtx,
     renderer: &mut dyn Renderer,
 ) -> Result<()> {
-    if cancel_local_shell_if_running(ctx)
-        && !matches!(app.state.phase, UiPhase::Streaming)
-    {
+    if cancel_local_shell_if_running(ctx) && !matches!(app.state.phase, UiPhase::Streaming) {
         crate::tuix_trace!("KEY", "os interrupt -> cancel local shell");
         return Ok(());
     }
@@ -21277,9 +21275,7 @@ fn handle_agent_event(
             // Short bash that printed then went silent: process is still live.
             // Keep the inflight pane so later stdout / kill / promote lines
             // land on the same window. add/kill tools have their own rows.
-            if name.eq_ignore_ascii_case("bash")
-                && output.contains("[bash-await-decision]")
-            {
+            if name.eq_ignore_ascii_case("bash") && output.contains("[bash-await-decision]") {
                 renderer.flush();
                 return;
             }
@@ -22911,10 +22907,8 @@ pub(crate) fn apply_session_snapshot(
             .map(|m| m.text.as_str())
             .find(|t| !is_synthetic_user_text(t));
         if let Some(text) = first_real_user {
-            let unwrapped = atomcode_capabilities::session::user_text_for_display(
-                &session.working_dir,
-                text,
-            );
+            let unwrapped =
+                atomcode_capabilities::session::user_text_for_display(&session.working_dir, text);
             let name: String = unwrapped
                 .lines()
                 .next()

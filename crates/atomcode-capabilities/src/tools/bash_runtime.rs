@@ -223,24 +223,19 @@ pub fn command_matches_keyword(command: &str, keyword: &str) -> bool {
 }
 
 pub fn command_matches_any_keyword(command: &str, keywords: &[String]) -> bool {
-    keywords
-        .iter()
-        .any(|k| command_matches_keyword(command, k))
+    keywords.iter().any(|k| command_matches_keyword(command, k))
 }
 
 /// Promote every live bash whose command contains `keyword`. Returns how many
 /// were newly promoted (already-promoted entries are skipped).
 pub fn promote_matching(keyword: &str) -> usize {
-    let snapshot: Vec<Arc<LiveBash>> = REGISTRY
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .clone();
+    let snapshot: Vec<Arc<LiveBash>> = REGISTRY.lock().unwrap_or_else(|e| e.into_inner()).clone();
     let mut n = 0;
     for e in snapshot {
-        if command_matches_keyword(&e.command, keyword)
-            && !e.promoted.swap(true, Ordering::SeqCst)
+        if command_matches_keyword(&e.command, keyword) && !e.promoted.swap(true, Ordering::SeqCst)
         {
-            e.progress.emit(format!("{PROMOTED_MARK} keyword={keyword}\n"));
+            e.progress
+                .emit(format!("{PROMOTED_MARK} keyword={keyword}\n"));
             n += 1;
         }
     }
@@ -289,10 +284,7 @@ pub fn parse_linux_proc_io(io: &str) -> u64 {
 /// (servers sitting idle) and not TIME_WAIT/CLOSE.
 #[cfg(test)]
 pub fn tcp_hex_state_is_inflight(st: &str) -> bool {
-    matches!(
-        st,
-        "01" | "02" | "03" | "04" | "05" | "08" | "09" | "0B"
-    )
+    matches!(st, "01" | "02" | "03" | "04" | "05" | "08" | "09" | "0B")
 }
 
 /// `/proc/net/tcp` (and tcp6) line → inode if the connection is in-flight.
@@ -373,11 +365,7 @@ pub async fn tree_is_busy(
         };
         // CPU only. Disk/network byte counters must not auto-promote: those
         // commands take the first+second idle path and the model decides.
-        return if c2 > c1 {
-            BusyKind::Yes
-        } else {
-            BusyKind::No
-        };
+        return if c2 > c1 { BusyKind::Yes } else { BusyKind::No };
     }
     #[cfg(target_os = "linux")]
     {

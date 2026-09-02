@@ -142,7 +142,10 @@ mod tests {
             "https://api-ai.gitcode.com/v1",
             "https://api.openai.com/v1",
         ] {
-            assert!(!is_atomgit_gateway(url), "gateway signing is retired: {url}");
+            assert!(
+                !is_atomgit_gateway(url),
+                "gateway signing is retired: {url}"
+            );
         }
     }
 

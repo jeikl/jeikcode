@@ -263,8 +263,8 @@ impl StdioClient {
         let request = build_jsonrpc_request(method, params, id);
 
         let idle = Duration::from_millis(self.timeout_ms.max(1));
-        let hard_deadline = tokio::time::Instant::now()
-            + Duration::from_millis(super::config::hard_cap_ms());
+        let hard_deadline =
+            tokio::time::Instant::now() + Duration::from_millis(super::config::hard_cap_ms());
         let deadline = tokio::time::Instant::now() + idle;
 
         // Write request (NDJSON).
@@ -1118,7 +1118,10 @@ mod idle_progress_tests {
 
     #[test]
     fn matching_response_id_is_detected() {
-        assert!(jsonrpc_id_matches(&json!({"jsonrpc":"2.0","id":7,"result":{}}), 7));
+        assert!(jsonrpc_id_matches(
+            &json!({"jsonrpc":"2.0","id":7,"result":{}}),
+            7
+        ));
         assert!(jsonrpc_id_matches(
             &json!({"jsonrpc":"2.0","id":"7","result":{}}),
             7

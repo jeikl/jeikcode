@@ -231,8 +231,9 @@ pub struct CodingParts {
     runtime_resume: Option<SessionSnapshot>,
     /// Connected MCP servers (None when `opts.mcp` was false or no config exists).
     pub mcp_registry: Option<Arc<McpRegistry>>,
-    /// Per-session isolated registry. Its lease lives in `_mcp_work_guard`, so
-    /// provider reassembly cannot accidentally tear it down.
+    /// Per-session isolated registry. Its lease lives in `_mcp_work_guard`.
+    /// Transports stay with the session until delete; schema comes from the
+    /// shared probe cache so tools are mounted before the first spawn.
     session_mcp_registry: Option<Arc<McpRegistry>>,
     /// The agent's tool working dir as a LIVE handle (kernel Seam 1b): the driver
     /// mutates it to implement `/cd` — tools resolve against the new dir from the

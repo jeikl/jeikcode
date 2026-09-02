@@ -324,11 +324,7 @@ fn apply_session_message_window<T>(
     let total = messages.len();
     if let Some(n) = query.tail.filter(|n| *n > 0) {
         let offset = total.saturating_sub(n);
-        return (
-            total,
-            offset,
-            messages.into_iter().skip(offset).collect(),
-        );
+        return (total, offset, messages.into_iter().skip(offset).collect());
     }
     let offset = query.offset.unwrap_or(0).min(total);
     let limit = query.limit.unwrap_or(usize::MAX);
@@ -482,11 +478,7 @@ fn session_user_outline(messages: &[MessageInfo]) -> Vec<SessionTurnOutline> {
             if !msg.role.eq_ignore_ascii_case("user") || msg.synthetic {
                 return None;
             }
-            let text = msg
-                .content
-                .split_whitespace()
-                .collect::<Vec<_>>()
-                .join(" ");
+            let text = msg.content.split_whitespace().collect::<Vec<_>>().join(" ");
             if text.is_empty() {
                 return None;
             }
@@ -3028,8 +3020,7 @@ async fn get_session_detail(
                 }
             };
             let turns = session_user_outline(&messages);
-            let (message_count, offset, messages) =
-                apply_session_message_window(messages, &query);
+            let (message_count, offset, messages) = apply_session_message_window(messages, &query);
             let token_usage = session_token_usage_from_session(&session.meta, &session.snapshot);
             let detail = SessionDetail {
                 id: session.meta.id,
@@ -3845,6 +3836,15 @@ async fn delete_session(
                 .await;
         match deleted {
             Ok(Ok(())) => {
+                let working_dir = state_clone.project.read().await.working_dir.clone();
+                let id_for_mcp = id.clone();
+                // Session files are already gone. Reap MCP in the background so a
+                // bulk WebUI delete is not blocked on process teardown.
+                tokio::spawn(async move {
+                    let pool = atomcode_capabilities::mcp::SessionMcpPool::global();
+                    pool.retire_session(&working_dir, &id_for_mcp).await;
+                    pool.retire_session_id(&id_for_mcp).await;
+                });
                 state_clone.telemetry.track(Event::UseCommand {
                     type_: "delete_session".into(),
                     success: Some(true),
@@ -5981,106 +5981,110 @@ async fn chat_watch(
     // deltas after reconnect. Idle standby watchers skip this so a leftover
     // alias cannot replay a finished turn into the composer.
     if !q.standby {
-    if let Some((snapshot, mut bus_rx)) = state
-        .active_chats
-        .subscribe_live_with_replay(&session_id)
-        .await
-    {
-        tracing::debug!(
-            session_id = %session_id,
-            replay_events = snapshot.len(),
-            "chat_watch: LIVE with replay"
-        );
-        tokio::spawn(async move {
-            for event in snapshot {
-                let terminal = matches!(
-                    event,
-                    ChatEvent::Done { .. } | ChatEvent::Error { .. } | ChatEvent::Stopped
-                );
-                if tx.send(event).is_err() {
-                    return;
-                }
-                if terminal {
-                    return;
-                }
-            }
-            loop {
-                match bus_rx.recv().await {
-                    Ok(event) => {
-                        let terminal = matches!(
-                            event,
-                            ChatEvent::Done { .. } | ChatEvent::Error { .. } | ChatEvent::Stopped
-                        );
-                        if tx.send(event).is_err() {
-                            break;
-                        }
-                        if terminal {
-                            break;
-                        }
-                    }
-                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
-                    Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
-                }
-            }
-        });
-    } else {
-        match state
+        if let Some((snapshot, mut bus_rx)) = state
             .active_chats
-            .subscribe_or_standby(&session_id, &tx)
+            .subscribe_live_with_replay(&session_id)
             .await
         {
-            WatchOutcome::Live(mut bus_rx) => {
-                // Race: turn admitted between the two lookups — no replay buffer
-                // snapshot, fall back to live-only + admitted user message.
-                tracing::debug!(
-                    session_id = %session_id,
-                    "chat_watch: LIVE race fallback (no snapshot)"
-                );
-                if let Some(operation_id) =
-                    state.active_chats.operation_for_session(&session_id).await
-                {
-                    if let Some(content) = state
-                        .active_chats
-                        .admitted_user_message(&operation_id)
-                        .await
-                    {
-                        let _ = tx.send(ChatEvent::User {
-                            content,
-                            session_id: Some(session_id.clone()),
-                        });
+            tracing::debug!(
+                session_id = %session_id,
+                replay_events = snapshot.len(),
+                "chat_watch: LIVE with replay"
+            );
+            tokio::spawn(async move {
+                for event in snapshot {
+                    let terminal = matches!(
+                        event,
+                        ChatEvent::Done { .. } | ChatEvent::Error { .. } | ChatEvent::Stopped
+                    );
+                    if tx.send(event).is_err() {
+                        return;
+                    }
+                    if terminal {
+                        return;
                     }
                 }
-                tokio::spawn(async move {
-                    loop {
-                        match bus_rx.recv().await {
-                            Ok(event) => {
-                                let terminal = matches!(
-                                    event,
-                                    ChatEvent::Done { .. }
-                                        | ChatEvent::Error { .. }
-                                        | ChatEvent::Stopped
-                                );
-                                if tx.send(event).is_err() {
-                                    break;
-                                }
-                                if terminal {
-                                    break;
-                                }
+                loop {
+                    match bus_rx.recv().await {
+                        Ok(event) => {
+                            let terminal = matches!(
+                                event,
+                                ChatEvent::Done { .. }
+                                    | ChatEvent::Error { .. }
+                                    | ChatEvent::Stopped
+                            );
+                            if tx.send(event).is_err() {
+                                break;
                             }
-                            Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
-                            Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                            if terminal {
+                                break;
+                            }
+                        }
+                        Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                        Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                    }
+                }
+            });
+        } else {
+            match state
+                .active_chats
+                .subscribe_or_standby(&session_id, &tx)
+                .await
+            {
+                WatchOutcome::Live(mut bus_rx) => {
+                    // Race: turn admitted between the two lookups — no replay buffer
+                    // snapshot, fall back to live-only + admitted user message.
+                    tracing::debug!(
+                        session_id = %session_id,
+                        "chat_watch: LIVE race fallback (no snapshot)"
+                    );
+                    if let Some(operation_id) =
+                        state.active_chats.operation_for_session(&session_id).await
+                    {
+                        if let Some(content) = state
+                            .active_chats
+                            .admitted_user_message(&operation_id)
+                            .await
+                        {
+                            let _ = tx.send(ChatEvent::User {
+                                content,
+                                session_id: Some(session_id.clone()),
+                            });
                         }
                     }
-                });
-            }
-            WatchOutcome::Standby => {
-                tracing::debug!(
-                    session_id = %session_id,
-                    "chat_watch: STANDBY until next admit"
-                );
+                    tokio::spawn(async move {
+                        loop {
+                            match bus_rx.recv().await {
+                                Ok(event) => {
+                                    let terminal = matches!(
+                                        event,
+                                        ChatEvent::Done { .. }
+                                            | ChatEvent::Error { .. }
+                                            | ChatEvent::Stopped
+                                    );
+                                    if tx.send(event).is_err() {
+                                        break;
+                                    }
+                                    if terminal {
+                                        break;
+                                    }
+                                }
+                                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
+                                    continue
+                                }
+                                Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                            }
+                        }
+                    });
+                }
+                WatchOutcome::Standby => {
+                    tracing::debug!(
+                        session_id = %session_id,
+                        "chat_watch: STANDBY until next admit"
+                    );
+                }
             }
         }
-    }
     } else {
         match state
             .active_chats
@@ -6463,6 +6467,7 @@ async fn mcp_status(State(state): State<AppState>) -> Json<McpStatusResponse> {
         state.mcp_registry.read().await.clone()
     };
 
+    let session_schema = atomcode_capabilities::mcp::ensure_session_mcp_schema(&working_dir).await;
     let session_registry = if let Some(session_id) = crate::native_live::live_view_session_id() {
         atomcode_capabilities::mcp::SessionMcpPool::global()
             .cached_registry(&working_dir, &session_id)
@@ -6473,6 +6478,8 @@ async fn mcp_status(State(state): State<AppState>) -> Json<McpStatusResponse> {
     let mut statuses = registry.server_statuses().await;
     if let Some(session_registry) = &session_registry {
         statuses.extend(session_registry.server_statuses().await);
+    } else {
+        statuses.extend(session_schema.statuses.clone());
     }
 
     let all_cfgs = atomcode_capabilities::mcp::load_mcp_config(&working_dir).unwrap_or_default();
@@ -6501,26 +6508,38 @@ async fn mcp_status(State(state): State<AppState>) -> Json<McpStatusResponse> {
         .filter(|n| !blocked.contains(n))
         .collect();
     let mut statuses = merge_configured_mcp_statuses(statuses, &configured_names);
-    if session_registry.is_none() {
-        statuses.extend(
-            all_cfgs
-                .iter()
-                .filter(|config| config.scope == atomcode_capabilities::mcp::McpScope::Session)
-                .filter(|config| !blocked.contains(&config.name))
-                .map(|config| {
-                    (
-                        config.name.clone(),
-                        atomcode_capabilities::mcp::ServerStatus::Disconnected,
-                    )
-                }),
-        );
-        statuses.sort_by(|left, right| left.0.cmp(&right.0));
+    let session_names: Vec<String> = all_cfgs
+        .iter()
+        .filter(|config| config.scope == atomcode_capabilities::mcp::McpScope::Session)
+        .filter(|config| !blocked.contains(&config.name))
+        .map(|c| c.name.clone())
+        .collect();
+    // Session-scoped servers are catalog-ready from the shared probe cache even
+    // before a per-session process exists. Never synthesize Disconnected.
+    statuses = merge_configured_mcp_statuses(statuses, &session_names);
+    for (name, status) in &session_schema.statuses {
+        if matches!(status, atomcode_capabilities::mcp::ServerStatus::Connected) {
+            statuses
+                .iter_mut()
+                .filter(|(existing, _)| existing == name)
+                .for_each(|(_, current)| {
+                    if matches!(
+                        current,
+                        atomcode_capabilities::mcp::ServerStatus::Connecting
+                    ) {
+                        *current = atomcode_capabilities::mcp::ServerStatus::Connected;
+                    }
+                });
+        }
     }
+    statuses.sort_by(|left, right| left.0.cmp(&right.0));
 
     // Fetch the tool list once (was previously re-fetched per connected server).
     let mut tools = registry.list_all_tools_cached().await;
     if let Some(session_registry) = session_registry {
         tools.extend(session_registry.list_all_tools_cached().await);
+    } else {
+        tools.extend(session_schema.tools);
     }
     let servers = build_mcp_server_rows(statuses, &tools);
     Json(McpStatusResponse {
@@ -8029,13 +8048,8 @@ pub async fn run_server(opts: ServerOpts) -> anyhow::Result<()> {
         let _ = handle.await;
     }
 
-    // Reap every stdio MCP tree owned by this daemon. On Windows the registry
-    // transport holds kill-on-close Job Objects, so npx/node/watchdog
-    // descendants cannot outlive a graceful host shutdown.
-    mcp_pool.shutdown_all().await;
-    atomcode_capabilities::mcp::SessionMcpPool::global()
-        .shutdown_all()
-        .await;
+    // Reap project-scoped and session-scoped stdio MCP trees with this host.
+    atomcode_capabilities::mcp::shutdown_all_mcp_pools().await;
 
     // Step 14: Final telemetry flush before process exit (R10.2-R10.5)
     telemetry.shutdown(Duration::from_millis(500)).await;

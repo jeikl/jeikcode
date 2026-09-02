@@ -9,7 +9,8 @@ use std::sync::Arc;
 
 use atomcode_capabilities::mcp::config::{McpConfigSource, McpServerConfig, McpTransportConfig};
 use atomcode_capabilities::mcp::{
-    McpRegistry, McpToolAdapter, ServerStatus, SessionMcpPool, CONNECT_TIMEOUT,
+    refresh_session_mcp_schema, McpRegistry, McpToolAdapter, ServerStatus, SessionMcpPool,
+    CONNECT_TIMEOUT,
 };
 use atomcode_kernel::conformance;
 use atomcode_kernel::tool::{ProgressSink, RiskLevel, Tool, ToolContext};
@@ -553,7 +554,8 @@ async fn session_scope_spawns_once_per_session_while_project_scope_stays_shared(
     assert_eq!(spawn_count(&project_spawns), 1);
     assert_eq!(spawn_count(&session_spawns), 0);
 
-    let pool = Arc::new(SessionMcpPool::new());
+    let pool = SessionMcpPool::global();
+    pool.shutdown_all().await;
     let first = pool.acquire(project.path(), "session-a").await;
     let same = pool.acquire(project.path(), "session-a").await;
     let other = pool.acquire(project.path(), "session-b").await;
@@ -567,7 +569,33 @@ async fn session_scope_spawns_once_per_session_while_project_scope_stays_shared(
         .registry()
         .wait_for_initial_connections(CONNECT_TIMEOUT)
         .await;
-    assert_eq!(spawn_count(&session_spawns), 2);
+    assert_eq!(
+        spawn_count(&session_spawns),
+        1,
+        "schema probe should spawn once; session registries stay lazy"
+    );
+    assert!(first.registry().connected_server_names().await.is_empty());
+    assert!(other.registry().connected_server_names().await.is_empty());
+    let cached = first.registry().list_all_tools_cached().await;
+    assert!(
+        cached
+            .iter()
+            .any(|tool| tool.server_name == "browser" && tool.tool_name == "echo"),
+        "agent catalog should see probe-cached session tools; got {cached:?}"
+    );
+    assert_eq!(spawn_count(&session_spawns), 1);
+
+    first
+        .registry()
+        .call_tool("browser", "echo", serde_json::json!({"message": "a"}))
+        .await
+        .expect("first session tool call should spawn its own process");
+    other
+        .registry()
+        .call_tool("browser", "echo", serde_json::json!({"message": "b"}))
+        .await
+        .expect("other session tool call should spawn a distinct process");
+    assert_eq!(spawn_count(&session_spawns), 3);
     assert_eq!(
         first.registry().connected_server_names().await,
         vec!["browser"]
@@ -576,4 +604,151 @@ async fn session_scope_spawns_once_per_session_while_project_scope_stays_shared(
         other.registry().connected_server_names().await,
         vec!["browser"]
     );
+
+    atomcode_capabilities::mcp::refresh_session_mcp_schema(project.path()).await;
+    assert_eq!(
+        first.registry().connected_server_names().await,
+        vec!["browser"],
+        "schema refresh must not tear down an already-running session process"
+    );
+    assert_eq!(
+        spawn_count(&session_spawns),
+        4,
+        "unchanged config may probe again but must not respawn the live session process"
+    );
+
+    drop(first);
+    drop(same);
+    tokio::task::yield_now().await;
+    assert_eq!(
+        other.registry().connected_server_names().await,
+        vec!["browser"],
+        "dropping another session's lease must not kill this session's process"
+    );
+    pool.retire_session(project.path(), "session-b").await;
+    assert!(other.registry().connected_server_names().await.is_empty());
+    pool.shutdown_all().await;
+}
+
+#[tokio::test]
+#[serial_test::serial]
+async fn session_scope_reload_recycles_only_the_changed_server() {
+    let home = tempfile::tempdir().unwrap();
+    unsafe {
+        std::env::set_var("ATOMCODE_HOME", home.path());
+    }
+    let project = tempfile::tempdir().unwrap();
+    let trust_store = home.path().join("mcp_trust.json");
+    unsafe {
+        std::env::set_var("ATOMCODE_MCP_TRUST_STORE", &trust_store);
+    }
+    write_trusted_store(&trust_store, project.path());
+
+    let browser_spawns = home.path().join("browser-spawns");
+    let editor_spawns = home.path().join("editor-spawns");
+    let server = env!("CARGO_BIN_EXE_mcp-test-server");
+    let write_mcp = |browser_marker: &str| {
+        let mcp_json = serde_json::json!({
+            "mcpServers": {
+                "browser": {
+                    "command": server,
+                    "env": {
+                        "MCP_TEST_SPAWN_COUNTER": browser_spawns,
+                        "MCP_TEST_MARKER": browser_marker
+                    },
+                    "scope": "session",
+                    "maxConcurrentCalls": 1
+                },
+                "editor": {
+                    "command": server,
+                    "env": { "MCP_TEST_SPAWN_COUNTER": editor_spawns },
+                    "scope": "session",
+                    "maxConcurrentCalls": 1
+                }
+            }
+        });
+        std::fs::write(project.path().join(".mcp.json"), mcp_json.to_string()).unwrap();
+    };
+    write_mcp("v1");
+
+    let pool = SessionMcpPool::global();
+    pool.shutdown_all().await;
+    let lease = pool.acquire(project.path(), "session-a").await;
+    lease
+        .registry()
+        .wait_for_initial_connections(CONNECT_TIMEOUT)
+        .await;
+    assert_eq!(
+        spawn_count(&browser_spawns),
+        1,
+        "probe should spawn browser"
+    );
+    assert_eq!(spawn_count(&editor_spawns), 1, "probe should spawn editor");
+
+    lease
+        .registry()
+        .call_tool("browser", "echo", serde_json::json!({"message": "b"}))
+        .await
+        .unwrap();
+    lease
+        .registry()
+        .call_tool("editor", "echo", serde_json::json!({"message": "e"}))
+        .await
+        .unwrap();
+    assert_eq!(spawn_count(&browser_spawns), 2);
+    assert_eq!(spawn_count(&editor_spawns), 2);
+    assert_eq!(
+        lease.registry().connected_server_names().await,
+        vec!["browser", "editor"]
+    );
+
+    write_mcp("v2");
+    refresh_session_mcp_schema(project.path()).await;
+    assert_eq!(
+        lease.registry().connected_server_names().await,
+        vec!["editor"],
+        "only the identity-changed server should be recycled"
+    );
+    let cached = lease.registry().list_all_tools_cached().await;
+    assert!(
+        cached
+            .iter()
+            .any(|tool| tool.server_name == "browser" && tool.tool_name == "echo"),
+        "recycled server must stay catalog-ready from the probe cache; got {cached:?}"
+    );
+    assert!(
+        cached
+            .iter()
+            .any(|tool| tool.server_name == "editor" && tool.tool_name == "echo"),
+        "unchanged live server must keep its catalog; got {cached:?}"
+    );
+    assert_eq!(
+        spawn_count(&editor_spawns),
+        3,
+        "reload probe plus retained live"
+    );
+    let browser_after_reload = spawn_count(&browser_spawns);
+    assert!(
+        browser_after_reload >= 3,
+        "changed server is probed again after recycle"
+    );
+
+    lease
+        .registry()
+        .call_tool("browser", "echo", serde_json::json!({"message": "b2"}))
+        .await
+        .unwrap();
+    assert_eq!(
+        lease.registry().connected_server_names().await,
+        vec!["browser", "editor"]
+    );
+    assert_eq!(
+        spawn_count(&editor_spawns),
+        3,
+        "editor must not respawn on the other server's lazy start"
+    );
+    assert_eq!(spawn_count(&browser_spawns), browser_after_reload + 1);
+
+    pool.shutdown_all().await;
+    assert!(lease.registry().connected_server_names().await.is_empty());
 }

@@ -316,8 +316,14 @@ impl Tool for BashTool {
             (out, errb)
         };
         let has_output = || {
-            !stdout_cap.lock().unwrap_or_else(|e| e.into_inner()).is_empty()
-                || !stderr_cap.lock().unwrap_or_else(|e| e.into_inner()).is_empty()
+            !stdout_cap
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .is_empty()
+                || !stderr_cap
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .is_empty()
         };
 
         enum Drive {
@@ -515,12 +521,8 @@ impl Tool for BashTool {
             Drive::Result(r) => r,
             Drive::Yield => {
                 let suggested = suggested_long_keyword(&effective_command);
-                let prompt = decision_prompt(
-                    &bashid,
-                    idle_note_secs,
-                    second_levell_secs,
-                    &suggested,
-                );
+                let prompt =
+                    decision_prompt(&bashid, idle_note_secs, second_levell_secs, &suggested);
                 progress.emit(format!("{prompt}\n"));
                 let (out, errb) = snapshot();
                 let body = with_note(&out, &errb, &prompt);
@@ -2814,20 +2816,18 @@ fn go_is_long(args: &[String]) -> bool {
     let words = non_flag_words(args);
     match words.first().copied() {
         Some("build" | "test" | "install" | "get" | "generate") => true,
-        Some("mod") => words.get(1).is_some_and(|s| {
-            matches!(*s, "download" | "tidy" | "vendor" | "verify")
-        }),
+        Some("mod") => words
+            .get(1)
+            .is_some_and(|s| matches!(*s, "download" | "tidy" | "vendor" | "verify")),
         _ => false,
     }
 }
 
 fn npm_family_is_long(bin: &str, args: &[String]) -> bool {
-    if args.iter().any(|a| {
-        matches!(
-            arg_word(a),
-            "-v" | "-V" | "--version" | "-h" | "--help"
-        )
-    }) && non_flag_words(args).is_empty()
+    if args
+        .iter()
+        .any(|a| matches!(arg_word(a), "-v" | "-V" | "--version" | "-h" | "--help"))
+        && non_flag_words(args).is_empty()
     {
         return false;
     }
@@ -2904,10 +2904,7 @@ fn docker_is_long(args: &[String]) -> bool {
 
 fn docker_compose_bin_is_long(args: &[String]) -> bool {
     let words = non_flag_words(args);
-    matches!(
-        words.first().copied(),
-        Some("build" | "pull" | "push")
-    )
+    matches!(words.first().copied(), Some("build" | "pull" | "push"))
 }
 
 fn dotnet_is_long(args: &[String]) -> bool {
@@ -2954,10 +2951,7 @@ fn terraform_is_long(args: &[String]) -> bool {
 
 fn zig_is_long(args: &[String]) -> bool {
     let words = non_flag_words(args);
-    matches!(
-        words.first().copied(),
-        Some("build" | "test" | "install")
-    )
+    matches!(words.first().copied(), Some("build" | "test" | "install"))
 }
 
 fn vite_is_long(args: &[String]) -> bool {
@@ -2975,16 +2969,7 @@ fn pulumi_is_long(args: &[String]) -> bool {
 /// Bare `sudo` (no command) stays long so a password prompt is not idle-killed.
 fn peel_sudo_command(args: &[String]) -> Option<BashInvocation> {
     const TAKING: &[&str] = &[
-        "-u",
-        "-g",
-        "-C",
-        "-D",
-        "-h",
-        "--user",
-        "--group",
-        "--chdir",
-        "--host",
-        "--prompt",
+        "-u", "-g", "-C", "-D", "-h", "--user", "--group", "--chdir", "--host", "--prompt",
     ];
     let mut i = 0;
     while i < args.len() {
@@ -3150,7 +3135,9 @@ fn invocation_is_resident(inv: &BashInvocation) -> bool {
             if words.first().copied() == Some("start") {
                 return true;
             }
-            if let Some(i) = words.iter().position(|w| matches!(*w, "run" | "run-script"))
+            if let Some(i) = words
+                .iter()
+                .position(|w| matches!(*w, "run" | "run-script"))
             {
                 return is_dev_server_script(words.get(i + 1).copied().unwrap_or(""));
             }
@@ -3186,9 +3173,9 @@ pub(crate) fn looks_like_resident_service(command: &str) -> bool {
     if let Some(invs) = bash_invocations(command) {
         return invs.iter().any(invocation_is_resident);
     }
-    command.split_whitespace().any(|tok| {
-        RESIDENT_BINS.contains(&command_basename(tok).as_str())
-    })
+    command
+        .split_whitespace()
+        .any(|tok| RESIDENT_BINS.contains(&command_basename(tok).as_str()))
 }
 
 /// Idle budget for agent `bash` / `!cmd` short commands from
@@ -4166,10 +4153,7 @@ mod tests {
             "sudo cargo test",
             "sudo -n apt-get install -y foo",
         ] {
-            assert!(
-                super::looks_like_long_job(cmd),
-                "expected long job: {cmd}"
-            );
+            assert!(super::looks_like_long_job(cmd), "expected long job: {cmd}");
         }
         assert!(!super::looks_like_long_job("docker ps -a"));
         assert!(!super::looks_like_long_job("npm run start"));
@@ -4188,7 +4172,9 @@ mod tests {
         assert!(super::looks_like_resident_service("npm run dev"));
         assert!(super::looks_like_resident_service("docker compose up"));
         assert!(!super::looks_like_resident_service("docker compose up -d"));
-        assert!(super::looks_like_resident_service("python -m http.server 8000"));
+        assert!(super::looks_like_resident_service(
+            "python -m http.server 8000"
+        ));
         assert!(!super::looks_like_resident_service("docker ps"));
         assert!(!super::looks_like_resident_service("cargo test"));
     }
@@ -4200,10 +4186,7 @@ mod tests {
             Some(Duration::from_secs(60))
         );
         assert_eq!(
-            super::agent_bash_idle_timeout(
-                "systemctl status foo.service --no-pager",
-                60
-            ),
+            super::agent_bash_idle_timeout("systemctl status foo.service --no-pager", 60),
             Some(Duration::from_secs(60))
         );
         assert_eq!(super::agent_bash_idle_timeout("cargo build", 60), None);
@@ -5249,7 +5232,9 @@ mod tests {
             && (r.content.contains("process is idle")
                 || r.content.contains("stuck")
                 || r.content.contains("resident service"));
-        let asked = r.content.contains(crate::tools::bash_runtime::AWAIT_DECISION_MARK);
+        let asked = r
+            .content
+            .contains(crate::tools::bash_runtime::AWAIT_DECISION_MARK);
         assert!(
             killed || asked,
             "0-CPU after output must kill (or await if CPU sample unknown): {}",

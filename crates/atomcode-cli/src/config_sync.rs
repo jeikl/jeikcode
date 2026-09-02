@@ -1,9 +1,9 @@
-use std::fs;
-use std::io::{self, Write};
-use std::path::{Path, PathBuf};
 use anyhow::Result;
 use crossterm::event::{self, Event, KeyCode, KeyModifiers};
 use crossterm::terminal::{disable_raw_mode, enable_raw_mode};
+use std::fs;
+use std::io::{self, Write};
+use std::path::{Path, PathBuf};
 
 /// 内置全量默认模板条目定义
 pub struct BundledFileEntry {
@@ -121,12 +121,16 @@ pub const BUNDLED_ASSETS: &[BundledFileEntry] = &[
     },
     BundledFileEntry {
         relative_path: "teaches/01_prompts_and_context.md",
-        content: include_str!("../../atomcode-capabilities/assets/teaches/01_prompts_and_context.md"),
+        content: include_str!(
+            "../../atomcode-capabilities/assets/teaches/01_prompts_and_context.md"
+        ),
         description: "提示词与上下文指南 (teaches/01_prompts_and_context.md)",
     },
     BundledFileEntry {
         relative_path: "teaches/02_models_and_providers.md",
-        content: include_str!("../../atomcode-capabilities/assets/teaches/02_models_and_providers.md"),
+        content: include_str!(
+            "../../atomcode-capabilities/assets/teaches/02_models_and_providers.md"
+        ),
         description: "模型与提供商指南 (teaches/02_models_and_providers.md)",
     },
     BundledFileEntry {
@@ -136,27 +140,37 @@ pub const BUNDLED_ASSETS: &[BundledFileEntry] = &[
     },
     BundledFileEntry {
         relative_path: "teaches/04_thesaurus_and_retrieval.md",
-        content: include_str!("../../atomcode-capabilities/assets/teaches/04_thesaurus_and_retrieval.md"),
+        content: include_str!(
+            "../../atomcode-capabilities/assets/teaches/04_thesaurus_and_retrieval.md"
+        ),
         description: "词林检索相关性指南 (teaches/04_thesaurus_and_retrieval.md)",
     },
     BundledFileEntry {
         relative_path: "teaches/05_tools_and_timeouts.md",
-        content: include_str!("../../atomcode-capabilities/assets/teaches/05_tools_and_timeouts.md"),
+        content: include_str!(
+            "../../atomcode-capabilities/assets/teaches/05_tools_and_timeouts.md"
+        ),
         description: "工具超时与策略指南 (teaches/05_tools_and_timeouts.md)",
     },
     BundledFileEntry {
         relative_path: "teaches/06_directories_and_system.md",
-        content: include_str!("../../atomcode-capabilities/assets/teaches/06_directories_and_system.md"),
+        content: include_str!(
+            "../../atomcode-capabilities/assets/teaches/06_directories_and_system.md"
+        ),
         description: "系统目录与文件全景指南 (teaches/06_directories_and_system.md)",
     },
     BundledFileEntry {
         relative_path: "teaches/07_project_constraints_and_rules.md",
-        content: include_str!("../../atomcode-capabilities/assets/teaches/07_project_constraints_and_rules.md"),
+        content: include_str!(
+            "../../atomcode-capabilities/assets/teaches/07_project_constraints_and_rules.md"
+        ),
         description: "项目约束与业务知识包指南 (teaches/07_project_constraints_and_rules.md)",
     },
     BundledFileEntry {
         relative_path: "teaches/08_updates_and_releases.md",
-        content: include_str!("../../atomcode-capabilities/assets/teaches/08_updates_and_releases.md"),
+        content: include_str!(
+            "../../atomcode-capabilities/assets/teaches/08_updates_and_releases.md"
+        ),
         description: "升级与发版指南 (teaches/08_updates_and_releases.md)",
     },
 ];
@@ -360,7 +374,10 @@ pub fn prompt_interactive_config_sync(mut items: Vec<ConfigDiffItem>) -> Result<
                 DiffKind::Modified => " (有更新/修改)",
                 DiffKind::Obsolete => " (已废弃/建议清理)",
             };
-            println!("\r{}{}{}{}\x1b[K", pointer, checkbox, item.description, status);
+            println!(
+                "\r{}{}{}{}\x1b[K",
+                pointer, checkbox, item.description, status
+            );
         }
         stdout.flush()?;
         Ok(())
@@ -459,7 +476,11 @@ pub fn apply_selected_diffs(items: Vec<ConfigDiffItem>) -> usize {
                     let _ = fs::create_dir_all(parent);
                 }
                 if fs::write(&item.target_path, &item.new_content).is_ok() {
-                    let tag = if item.kind == DiffKind::New { "已新增" } else { "已更新" };
+                    let tag = if item.kind == DiffKind::New {
+                        "已新增"
+                    } else {
+                        "已更新"
+                    };
                     println!("  ✔ {}: {}", tag, item.relative_path);
                     applied_count += 1;
                 }
@@ -474,7 +495,10 @@ pub fn apply_selected_diffs(items: Vec<ConfigDiffItem>) -> usize {
     }
 
     if applied_count > 0 {
-        println!("✨ 成功同步了 {} 个配置文件（已自动保护用户模型配置与 MCP/Skills）！", applied_count);
+        println!(
+            "✨ 成功同步了 {} 个配置文件（已自动保护用户模型配置与 MCP/Skills）！",
+            applied_count
+        );
     }
     applied_count
 }
@@ -499,7 +523,10 @@ pub fn apply_all_bundled_assets(atomcode_home: &Path, force: bool) -> Result<usi
             let merged = merge_user_config_preserving_models(&existing_content, entry.content);
             if merged.trim() != existing_content.trim() || force {
                 fs::write(&target, &merged)?;
-                println!("  ✔ [更新] {} (已保留用户模型/账号配置)", entry.relative_path);
+                println!(
+                    "  ✔ [更新] {} (已保留用户模型/账号配置)",
+                    entry.relative_path
+                );
                 applied_count += 1;
             }
         } else if force {
@@ -530,7 +557,9 @@ mod tests {
         assert!(is_user_custom_mcp_or_skill("skills"));
         assert!(!is_user_custom_mcp_or_skill("teaches/03_mcp_and_skills.md"));
         assert!(!is_user_custom_mcp_or_skill("prompts/init.yaml"));
-        assert!(!is_user_custom_mcp_or_skill("prompts/root_docs_内置技能.yaml"));
+        assert!(!is_user_custom_mcp_or_skill(
+            "prompts/root_docs_内置技能.yaml"
+        ));
         assert!(!is_user_custom_mcp_or_skill("config.toml"));
     }
 
@@ -539,7 +568,11 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let home = dir.path();
         fs::create_dir_all(home.join("prompts")).unwrap();
-        fs::write(home.join("mcp.json"), "{ \"mcpServers\": { \"custom\": {} } }\n").unwrap();
+        fs::write(
+            home.join("mcp.json"),
+            "{ \"mcpServers\": { \"custom\": {} } }\n",
+        )
+        .unwrap();
         fs::write(home.join("prompts/init.yaml"), "user-custom-init\n").unwrap();
 
         let diffs = scan_atomcode_config_diffs(home);

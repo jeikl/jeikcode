@@ -84,9 +84,7 @@ impl ProjectMcpPool {
     /// Tear down the current registry for `project_dir` and build a fresh one.
     pub async fn reload_full(&self, project_dir: &Path) -> Arc<McpRegistry> {
         let project_dir = project_key(project_dir);
-        super::session_pool::SessionMcpPool::global()
-            .invalidate_project(&project_dir)
-            .await;
+        super::schema_cache::refresh_session_mcp_schema(&project_dir).await;
         let _lifecycle = self.lifecycle.lock().await;
         let registry = Arc::new(McpRegistry::from_config_background(&project_dir));
         spawn_mcp_registry_warmup(registry.clone());
@@ -153,6 +151,12 @@ impl ProjectMcpPool {
 
         let registry = Arc::new(McpRegistry::from_config_background(project_dir));
         spawn_mcp_registry_warmup(registry.clone());
+        tokio::spawn({
+            let project_dir = project_dir.to_path_buf();
+            async move {
+                let _ = super::schema_cache::refresh_session_mcp_schema(&project_dir).await;
+            }
+        });
         let evicted = {
             let mut slots = self.slots.write().await;
             let evicted = evict_oldest_if_needed(&mut slots, project_dir);

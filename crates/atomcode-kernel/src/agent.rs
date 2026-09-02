@@ -2086,20 +2086,20 @@ impl RunningAgent {
                                 .await;
                             return;
                         }
-                        } else {
-                            self.rt.emit(AgentEvent::Error {
-                                message: format!("max rounds ({cap}) reached"),
-                                http_status: None,
-                                code: None,
-                            });
-                            Self::persist_turn_diagnostic(
-                                convo,
-                                &format!("max rounds ({cap}) reached"),
-                            );
-                            self.finish_turn(convo, StopReason::MaxRounds, &turn_ctx)
-                                .await;
-                            return;
-                        }
+                    } else {
+                        self.rt.emit(AgentEvent::Error {
+                            message: format!("max rounds ({cap}) reached"),
+                            http_status: None,
+                            code: None,
+                        });
+                        Self::persist_turn_diagnostic(
+                            convo,
+                            &format!("max rounds ({cap}) reached"),
+                        );
+                        self.finish_turn(convo, StopReason::MaxRounds, &turn_ctx)
+                            .await;
+                        return;
+                    }
                 }
             }
             let start = self.clock.now_millis();
@@ -3127,9 +3127,7 @@ impl RunningAgent {
                             });
                             Self::persist_turn_diagnostic(
                                 convo,
-                                &format!(
-                                    "max offer_continuation continuations ({max}) reached"
-                                ),
+                                &format!("max offer_continuation continuations ({max}) reached"),
                             );
                             self.finish_turn(convo, StopReason::MaxContinuations, &turn_ctx)
                                 .await;
@@ -5577,10 +5575,10 @@ mod provider_message_pairing_tests {
             "follow-up user prompt stays on the wire: {outgoing:?}"
         );
         assert!(
-            outgoing
-                .iter()
-                .all(|m| m.internal_origin.as_deref() != Some(TURN_DIAGNOSTIC_ORIGIN)
-                    && m.text != "upstream 503"),
+            outgoing.iter().all(
+                |m| m.internal_origin.as_deref() != Some(TURN_DIAGNOSTIC_ORIGIN)
+                    && m.text != "upstream 503"
+            ),
             "turn diagnostic must not reach the provider: {outgoing:?}"
         );
     }

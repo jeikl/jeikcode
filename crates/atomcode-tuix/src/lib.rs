@@ -890,6 +890,8 @@ pub async fn run(
     renderer.shutdown();
     drop(pipe_reader); // pipe-mode thread exits on next channel send failure
 
+    atomcode_capabilities::mcp::shutdown_all_mcp_pools().await;
+
     // If /upgrade succeeded, the live binary has been replaced on disk.
     // Re-exec into the new version so the user gets a seamless upgrade
     // without manually restarting. This mirrors the startup-time upgrade

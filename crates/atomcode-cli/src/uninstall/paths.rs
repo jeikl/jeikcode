@@ -37,7 +37,15 @@ pub fn uninstall_manifest() -> UninstallManifest {
             "device_id",
             "config_teachs.md",
         ],
-        state_dirs: &["staged", "telemetry", "plugins", "commands", "skills", "prompts", "thesaurus"],
+        state_dirs: &[
+            "staged",
+            "telemetry",
+            "plugins",
+            "commands",
+            "skills",
+            "prompts",
+            "thesaurus",
+        ],
         state_prefixes: &["notice."],
     }
 }
@@ -135,7 +143,15 @@ mod tests {
         ] {
             assert!(m.state_files.contains(&f), "missing {f}");
         }
-        for d in ["staged", "telemetry", "plugins", "commands", "skills", "prompts", "thesaurus"] {
+        for d in [
+            "staged",
+            "telemetry",
+            "plugins",
+            "commands",
+            "skills",
+            "prompts",
+            "thesaurus",
+        ] {
             assert!(m.state_dirs.contains(&d), "missing {d}");
         }
     }

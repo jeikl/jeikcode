@@ -43,7 +43,9 @@ pub fn manifest_url() -> &'static str {
     if let Some(v) = env.filter(|s| !s.trim().is_empty()) {
         return Box::leak(v.into_boxed_str());
     }
-    if let Some(cfg) = atomcode_config::config::Config::load(&atomcode_config::config::Config::default_path()).ok() {
+    if let Some(cfg) =
+        atomcode_config::config::Config::load(&atomcode_config::config::Config::default_path()).ok()
+    {
         if let Some(v) = cfg.update_manifest_url.filter(|s| !s.trim().is_empty()) {
             return Box::leak(v.into_boxed_str());
         }
@@ -59,7 +61,9 @@ pub fn download_base() -> &'static str {
     if let Some(v) = env.filter(|s| !s.trim().is_empty()) {
         return Box::leak(v.into_boxed_str());
     }
-    if let Some(cfg) = atomcode_config::config::Config::load(&atomcode_config::config::Config::default_path()).ok() {
+    if let Some(cfg) =
+        atomcode_config::config::Config::load(&atomcode_config::config::Config::default_path()).ok()
+    {
         if let Some(v) = cfg.update_download_base.filter(|s| !s.trim().is_empty()) {
             return Box::leak(v.into_boxed_str());
         }
@@ -298,8 +302,12 @@ pub async fn fetch_manifest() -> Result<Manifest> {
     }
     let body = resp.text().await.context("reading latest.json body")?;
     let clean_body = body.trim_start_matches('\u{feff}');
-    serde_json::from_str(clean_body)
-        .with_context(|| format!("parsing latest.json (body: {:?})", truncate(clean_body, 200)))
+    serde_json::from_str(clean_body).with_context(|| {
+        format!(
+            "parsing latest.json (body: {:?})",
+            truncate(clean_body, 200)
+        )
+    })
 }
 
 fn truncate(s: &str, max_chars: usize) -> String {

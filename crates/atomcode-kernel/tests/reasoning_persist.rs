@@ -150,7 +150,10 @@ async fn reasoning_only_turn_is_persisted_in_reasoning_channel() {
         .find(|m| m.role == Role::Assistant)
         .expect("the assistant message must be stored");
     assert!(assistant.tool_calls.is_empty());
-    assert_eq!(assistant.text, "", "text must remain empty without promotion");
+    assert_eq!(
+        assistant.text, "",
+        "text must remain empty without promotion"
+    );
     assert_eq!(
         assistant.reasoning.as_deref(),
         Some("目录下有 2 个文件：a.png 和 b.png。"),

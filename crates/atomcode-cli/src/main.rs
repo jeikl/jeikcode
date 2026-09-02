@@ -175,9 +175,7 @@ fn format_serve_banner(
     } else {
         None
     };
-    let base_remote = remote_host
-        .as_ref()
-        .map(|h| format!("http://{h}:{port}"));
+    let base_remote = remote_host.as_ref().map(|h| format!("http://{h}:{port}"));
 
     let with_token = |base: &str| -> String {
         match token {
@@ -355,8 +353,10 @@ async fn attach_to_server(url: &str, token_arg: Option<&str>, no_open: bool) -> 
     // HTTP 200 alone is not enough: reverse proxies sometimes return 200 HTML
     // error pages. Reject clear non-JSON/HTML garbage; soft-warn on odd text.
     let looks_like_html = body_l.contains("<!doctype") || body_l.contains("<html");
-    let looks_like_atomcode_health =
-        body_l.contains("atomcode") || body_l.contains("\"ok\"") || body.trim() == "ok" || body.trim() == "OK";
+    let looks_like_atomcode_health = body_l.contains("atomcode")
+        || body_l.contains("\"ok\"")
+        || body.trim() == "ok"
+        || body.trim() == "OK";
     if looks_like_html && !looks_like_atomcode_health {
         return Err(format!(
             "server health check returned HTML, not AtomCode /health (from {health_url}): {}",
@@ -378,9 +378,7 @@ async fn attach_to_server(url: &str, token_arg: Option<&str>, no_open: bool) -> 
     eprintln!("Connected to AtomCode server at {base}");
     eprintln!("  UI: {client_url}");
     if token.is_none() {
-        eprintln!(
-            "  (no token; if the server requires auth, pass --token or a full ?token= URL)"
-        );
+        eprintln!("  (no token; if the server requires auth, pass --token or a full ?token= URL)");
     }
 
     if no_open {
@@ -459,7 +457,10 @@ async fn run_serve_mode(
     let startup_footer =
         format_serve_banner(&host, port, &workdir, display_token.as_deref(), no_token);
 
-    if config_auto_update_enabled() && !is_running_as_backup() && !atomcode_updater::is_package_managed() {
+    if config_auto_update_enabled()
+        && !is_running_as_backup()
+        && !atomcode_updater::is_package_managed()
+    {
         spawn_detached_upgrade_prep();
         let cfg = Config::load(&Config::default_path()).unwrap_or_default();
         let interval_secs = cfg.auto_update_interval_mins.max(1) * 60;
@@ -749,7 +750,9 @@ fn build_i18n_command() -> clap::Command {
         .mut_subcommand("status", |s| s.about(t(Msg::CliAboutStatus).into_owned()))
         .mut_subcommand("upgrade", |s| {
             s.about(t(Msg::CliAboutUpgrade).into_owned())
-                .mut_arg("force", |a| a.help(t(Msg::CliHelpUpgradeForce).into_owned()))
+                .mut_arg("force", |a| {
+                    a.help(t(Msg::CliHelpUpgradeForce).into_owned())
+                })
                 .mut_arg("yes", |a| a.help(t(Msg::CliHelpUpgradeYes).into_owned()))
         })
         .mut_subcommand("rollback", |s| {
@@ -1532,7 +1535,10 @@ async fn async_main() {
         let staged = atomcode_updater::staged_dir();
         if staged.exists() {
             let _ = std::fs::remove_dir_all(&staged);
-            eprintln!("[auto_update=false] cleared staged upgrade at {}", staged.display());
+            eprintln!(
+                "[auto_update=false] cleared staged upgrade at {}",
+                staged.display()
+            );
         }
     }
 
@@ -1897,7 +1903,11 @@ async fn run() -> Result<i32> {
                     .await;
                 return Ok(0);
             }
-            Commands::Setup { force, yes, defaults } => {
+            Commands::Setup {
+                force,
+                yes,
+                defaults,
+            } => {
                 HEADLESS_MODE.store(true, Ordering::Relaxed);
                 let exit_code = run_setup_command(force, yes || defaults);
                 telemetry
@@ -2394,7 +2404,8 @@ async fn run() -> Result<i32> {
 
                 let poll_interval_secs = config.auto_update_interval_mins.max(1) * 60;
                 tokio::spawn(async move {
-                    let mut interval = tokio::time::interval(std::time::Duration::from_secs(poll_interval_secs));
+                    let mut interval =
+                        tokio::time::interval(std::time::Duration::from_secs(poll_interval_secs));
                     interval.tick().await;
                     loop {
                         interval.tick().await;
@@ -3272,12 +3283,24 @@ fn run_init_command(dir: Option<PathBuf>, force: bool) -> i32 {
                 r.cache_hit,
                 r.elapsed.as_secs_f64()
             );
-            if !r.cache_hit && (r.phases.parse_ast > std::time::Duration::ZERO || r.phases.save_disk > std::time::Duration::ZERO) {
+            if !r.cache_hit
+                && (r.phases.parse_ast > std::time::Duration::ZERO
+                    || r.phases.save_disk > std::time::Duration::ZERO)
+            {
                 println!();
                 println!("  [Phase Breakdown]");
-                println!("    • Parse AST & Compress: {:.2}s", r.phases.parse_ast.as_secs_f64());
-                println!("    • Graph Composition:    {:.2}s", r.phases.compose_graph.as_secs_f64());
-                println!("    • Disk SQLite Persist:  {:.2}s", r.phases.save_disk.as_secs_f64());
+                println!(
+                    "    • Parse AST & Compress: {:.2}s",
+                    r.phases.parse_ast.as_secs_f64()
+                );
+                println!(
+                    "    • Graph Composition:    {:.2}s",
+                    r.phases.compose_graph.as_secs_f64()
+                );
+                println!(
+                    "    • Disk SQLite Persist:  {:.2}s",
+                    r.phases.save_disk.as_secs_f64()
+                );
             }
             println!();
             println!(
@@ -4299,10 +4322,11 @@ mod tests {
     use super::{
         apply_cli_runtime_overrides, atomcode_log_path, close_thinking_chunk,
         format_thinking_chunk, format_verbose_tool_chunk, headless_completion_exit_code,
-        headless_completion_notify_reason, is_completion_invocation, merge_startup_notices,
-        interactive_provider_bootstrap, normalize_attach_base, print_shell_completion,
-        resolve_working_dir, runtime_config_from, should_fork_busy_continue, token_from_url,
-        truncate_log_line, Cli, Commands, DEFAULT_LOG_DIRECTIVES,
+        headless_completion_notify_reason, interactive_provider_bootstrap,
+        is_completion_invocation, merge_startup_notices, normalize_attach_base,
+        print_shell_completion, resolve_working_dir, runtime_config_from,
+        should_fork_busy_continue, token_from_url, truncate_log_line, Cli, Commands,
+        DEFAULT_LOG_DIRECTIVES,
     };
     use clap::Parser;
     use clap_complete::Shell;
@@ -4393,27 +4417,11 @@ mod tests {
             }) if t == "sk-fixed-secret"
         ));
         // --token and --no-token conflict
-        assert!(Cli::try_parse_from([
-            "atomcode",
-            "serve",
-            "--token",
-            "x",
-            "--no-token",
-        ])
-        .is_err());
-        let serve_alias = Cli::try_parse_from([
-            "atomcode",
-            "serve",
-            "--hosts",
-            "0.0.0.0",
-            "--port",
-            "4096",
-        ])
-        .unwrap();
-        assert!(matches!(
-            serve_alias.command,
-            Some(Commands::Serve { .. })
-        ));
+        assert!(Cli::try_parse_from(["atomcode", "serve", "--token", "x", "--no-token",]).is_err());
+        let serve_alias =
+            Cli::try_parse_from(["atomcode", "serve", "--hosts", "0.0.0.0", "--port", "4096"])
+                .unwrap();
+        assert!(matches!(serve_alias.command, Some(Commands::Serve { .. })));
         let attach =
             Cli::try_parse_from(["atomcode", "attach", "http://127.0.0.1:4096", "--no-open"])
                 .unwrap();
@@ -4436,13 +4444,7 @@ mod tests {
         assert_eq!(top.port, Some(4096));
         assert!(top.no_token);
         let top_tok = Cli::try_parse_from([
-            "atomcode",
-            "--host",
-            "0.0.0.0",
-            "--port",
-            "4096",
-            "--token",
-            "sk-abc",
+            "atomcode", "--host", "0.0.0.0", "--port", "4096", "--token", "sk-abc",
         ])
         .unwrap();
         assert_eq!(top_tok.token.as_deref(), Some("sk-abc"));
@@ -4635,8 +4637,14 @@ mod tests {
             "#,
         )
         .unwrap();
-        let runtime_cfg =
-            runtime_config_from(&config, std::path::Path::new("/tmp"), None, None, false, true);
+        let runtime_cfg = runtime_config_from(
+            &config,
+            std::path::Path::new("/tmp"),
+            None,
+            None,
+            false,
+            true,
+        );
 
         assert!(config.providers.is_empty(), "legacy table stays empty");
         assert_eq!(
@@ -4685,8 +4693,14 @@ mod tests {
             "#,
         )
         .unwrap();
-        let runtime_cfg =
-            runtime_config_from(&config, std::path::Path::new("/tmp"), None, None, false, true);
+        let runtime_cfg = runtime_config_from(
+            &config,
+            std::path::Path::new("/tmp"),
+            None,
+            None,
+            false,
+            true,
+        );
 
         assert_eq!(runtime_cfg.model, "fallback-model");
         assert_eq!(

@@ -25,6 +25,7 @@ pub mod config;
 pub mod oauth;
 pub mod pool;
 pub mod registry;
+pub mod schema_cache;
 pub mod session_pool;
 pub mod tool;
 pub mod transport_http;
@@ -45,9 +46,21 @@ pub use oauth::{
 };
 pub use pool::{CachedMcpRegistry, ProjectMcpHandle, ProjectMcpPool, MCP_CACHE_MAX};
 pub use registry::{project_trust_key, McpConnectEvent, McpRegistry};
+pub use schema_cache::{
+    cached_session_mcp_schema, ensure_session_mcp_schema, refresh_session_mcp_schema,
+    SessionMcpSchemaSnapshot,
+};
 pub use session_pool::{SessionMcpLease, SessionMcpPool};
 pub use tool::{mcp_tool_full_name, sanitize_name_segment, McpToolAdapter};
 pub use types::*;
+
+/// Reap every project-scoped and session-scoped MCP transport. Drivers must
+/// call this on host exit; `OnceLock` globals do not run `Drop` on process
+/// teardown, and session stdio children otherwise become orphans.
+pub async fn shutdown_all_mcp_pools() {
+    ProjectMcpPool::global().shutdown_all().await;
+    SessionMcpPool::global().shutdown_all().await;
+}
 
 /// Default bound used by callers that explicitly require initial MCP readiness.
 pub const CONNECT_TIMEOUT: Duration = Duration::from_secs(30);

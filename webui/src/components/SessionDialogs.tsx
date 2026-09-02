@@ -2,6 +2,7 @@
 
 import { useEffect, useRef, useState } from 'preact/hooks';
 import { renameSession, deleteSession, DeleteSessionError, SessionMetaWithProject } from '../api';
+import { deleteSessionsStreaming, SESSION_DELETE_CONCURRENCY } from '../lib/sessionDelete';
 import { useT } from '../settings';
 
 interface RenameDialogProps {
@@ -82,8 +83,14 @@ interface DeleteDialogProps {
   /** One or more sessions. A single item keeps the original confirm copy. */
   sessions: SessionMetaWithProject[];
   onClose: () => void;
-  /** Called with ids that were actually removed (may be a subset on partial failure). */
+  /** Called with ids that were actually removed. May fire repeatedly during a bulk delete. */
   onDone: (deletedIds: string[]) => void;
+  /** Bulk delete: fired once the confirm overlay is dismissed and work starts. */
+  onBatchStart?: (count: number) => void;
+  /** Bulk delete: fired after each item settles so the sidebar can count down. */
+  onBatchProgress?: () => void;
+  /** Bulk delete: fired when every item has succeeded or failed. */
+  onBatchFinished?: (error: string | null) => void;
 }
 
 function localizeDeleteError(cause: unknown, t: ReturnType<typeof useT>): string {
@@ -101,7 +108,14 @@ function localizeDeleteError(cause: unknown, t: ReturnType<typeof useT>): string
   return cause instanceof Error ? cause.message : String(cause);
 }
 
-export function DeleteDialog({ sessions, onClose, onDone }: DeleteDialogProps) {
+export function DeleteDialog({
+  sessions,
+  onClose,
+  onDone,
+  onBatchStart,
+  onBatchFinished,
+  onBatchProgress,
+}: DeleteDialogProps) {
   const t = useT();
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -114,32 +128,40 @@ export function DeleteDialog({ sessions, onClose, onDone }: DeleteDialogProps) {
 
   async function confirm() {
     if (busy || remaining.length === 0) return;
+    const batch = remaining.slice();
+    const bulk = batch.length > 1;
     setBusy(true);
     setError(null);
-    const deleted: string[] = [];
-    const failed: { name: string; message: string }[] = [];
-    for (const session of remaining) {
-      try {
-        await deleteSession(session.project_hash, session.id);
-        deleted.push(session.id);
-      } catch (cause) {
-        failed.push({
-          name: session.name || session.id.slice(0, 8),
-          message: localizeDeleteError(cause, t),
-        });
-      }
+    const notifyDone = onDone;
+    const notifyProgress = onBatchProgress;
+    const notifyFinished = onBatchFinished;
+    const close = onClose;
+    if (bulk) {
+      onBatchStart?.(batch.length);
+      close();
     }
-    if (deleted.length > 0) onDone(deleted);
+    const { failed } = await deleteSessionsStreaming(
+      batch,
+      deleteSession,
+      (id) => notifyDone([id]),
+      SESSION_DELETE_CONCURRENCY,
+      notifyProgress,
+    );
     if (failed.length === 0) {
-      onClose();
+      if (!bulk) close();
+      if (bulk) notifyFinished?.(null);
       return;
     }
     const names = failed.map((item) => item.name).join('、');
-    setError(
-      failed.length === remaining.length && failed.length === 1
-        ? failed[0].message
-        : t('delete.partialFailed', { n: failed.length, names }),
-    );
+    const message =
+      failed.length === 1
+        ? localizeDeleteError(failed[0].cause, t)
+        : t('delete.partialFailed', { n: failed.length, names });
+    if (bulk) {
+      notifyFinished?.(message);
+      return;
+    }
+    setError(message);
     setBusy(false);
   }
 

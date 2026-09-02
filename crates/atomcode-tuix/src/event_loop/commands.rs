@@ -22,9 +22,9 @@
 use std::path::{Path, PathBuf};
 
 use super::{
-    apply_persisted_config, bg_runtime,
-    provider_transition_pending, reload_persisted_config, request_context_stats_render,
-    save_and_reload, save_language_and_reload, LoopCtx, PersistedConfigReload,
+    apply_persisted_config, bg_runtime, provider_transition_pending, reload_persisted_config,
+    request_context_stats_render, save_and_reload, save_language_and_reload, LoopCtx,
+    PersistedConfigReload,
 };
 use crate::custom_commands::ArgsRequirement;
 use crate::i18n::{t, Msg};

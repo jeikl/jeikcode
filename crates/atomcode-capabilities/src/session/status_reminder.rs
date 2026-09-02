@@ -204,10 +204,7 @@ mod tests {
     #[cfg(feature = "tools")]
     fn render_injects_session_long_keywords_when_present() {
         let prev = crate::tools::bash_runtime::session_long_keywords();
-        crate::tools::bash_runtime::set_live_long_keywords(vec![
-            "ninja".into(),
-            "webpack".into(),
-        ]);
+        crate::tools::bash_runtime::set_live_long_keywords(vec!["ninja".into(), "webpack".into()]);
         let dt = Local
             .with_ymd_and_hms(2026, 6, 15, 9, 0, 0)
             .single()

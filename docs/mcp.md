@@ -97,6 +97,7 @@ TUI 里等价的是 `/mcp login <server>` / `/mcp logout <server>`。token 存 `
 | `disabled` | 两者 | `true` 时该 server 完全跳过 |
 | `trust` | 两者 | `true` ⇒ 该 server 所有工具免审批 |
 | `autoApprove` | 两者 | 按工具名白名单免审批（别名 `auto_approve`） |
+| `scope` | 两者 | `project`（默认，无状态单例，随 JeikCode 退出回收）或 `session`（有状态、按会话隔离；工具目录来自短探测缓存，首次 `call_tool` 才起进程；删除会话或 JeikCode 退出时回收） |
 
 `auth` 子字段：`type`（`"oauth"`）、`provider`、`issuer`、`resource`、`client_id`、`client_secret_env`、`scopes`、`bearer`、`header`。省略 `issuer` 时客户端先请求 MCP server，从 `WWW-Authenticate` 发现 resource metadata；省略 `client_id` 时尝试动态客户端注册（RFC 7591），授权服务器不支持则报错要求预注册 ID。
 
@@ -118,6 +119,8 @@ TUI 里等价的是 `/mcp login <server>` / `/mcp logout <server>`。token 存 `
 单个 server 失败不拖垮进程；失败通过 `McpConnectEvent::Failed` 进入会话区，并保留在 `/mcp` 列表里显示为 `failed: <error>`。
 
 MCP 总开关：`CodingRuntimeConfig.mcp` 默认 `true`；`atomcode-clix` 提供 `--no-mcp`。主 CLI 没有全局关闭开关，按 server 用 `"disabled": true`。
+
+`scope=session` 的工具目录来自短生命周期只读探测缓存（启动 / `/mcp reload` / WebUI 刷新）。未 spawn 的会话读探测缓存，已 spawn 的会话以活连接 `tools/list` 为准。每个会话在第一次 `call_tool` 时才起独立进程。切会话 / lease Drop 不杀进程；删除会话杀该会话的进程；JeikCode 进程退出回收全部 session MCP。热重载按 server 做 config diff：command/args/env/url 等没变则保留活进程，变了只回收那一台。默认 `scope=project` 仍是无状态单例，随进程退出回收。
 
 > **缓存红线**：MCP 工具定义属于 provider 请求的缓存前缀，所以连接在首轮之前发起、工具集不在会话中途原地变更；`/mcp reload` 是重建（新前缀世代），不是原地改。
 

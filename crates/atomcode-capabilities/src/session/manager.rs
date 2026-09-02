@@ -3028,13 +3028,11 @@ impl SessionManager {
             v: u32,
             keywords: &'a [String],
         }
-        let bytes = serde_json::to_vec(&File {
-            v: 1,
-            keywords,
-        })
-        .map_err(|e| SessionStoreError::Corrupt {
-            kind: "bash keywords",
-            message: e.to_string(),
+        let bytes = serde_json::to_vec(&File { v: 1, keywords }).map_err(|e| {
+            SessionStoreError::Corrupt {
+                kind: "bash keywords",
+                message: e.to_string(),
+            }
         })?;
         atomic_write(&self.bashkw_path(id)?, &bytes)
     }
@@ -6899,17 +6897,24 @@ mod tests {
         .unwrap();
         let inflight = SessionSnapshot::new(vec![
             Message::user("completed"),
-            Message::assistant("waiting on approval", vec![atomcode_kernel::tool::ToolCall {
-                id: "c1".into(),
-                name: "write_file".into(),
-                arguments: "{}".into(),
-            }]),
+            Message::assistant(
+                "waiting on approval",
+                vec![atomcode_kernel::tool::ToolCall {
+                    id: "c1".into(),
+                    name: "write_file".into(),
+                    arguments: "{}".into(),
+                }],
+            ),
         ]);
         mgr.save_inflight_snapshot(id, &inflight, false).unwrap();
 
         let (loaded, pending) = mgr.load_native_session_for_resume(&lease).unwrap();
         assert_eq!(pending, None);
-        assert_eq!(loaded.snapshot.messages.len(), 3, "dangling tool is backfilled");
+        assert_eq!(
+            loaded.snapshot.messages.len(),
+            3,
+            "dangling tool is backfilled"
+        );
         assert_eq!(loaded.snapshot.messages[1].text, "waiting on approval");
         assert_eq!(
             loaded.snapshot.messages[2].tool_call_id.as_deref(),

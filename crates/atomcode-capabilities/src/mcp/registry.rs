@@ -168,6 +168,11 @@ pub struct McpRegistry {
     /// initialize must not insert a freshly connected client after shutdown
     /// already drained the server map.
     transport_lifecycle: Arc<Mutex<()>>,
+    /// Session-scoped registries stay catalog-ready from the shared schema
+    /// cache and only spawn a transport on the first `call_tool`.
+    lazy_connect: bool,
+    pending_configs: Arc<std::sync::RwLock<BTreeMap<String, McpServerConfig>>>,
+    lazy_connect_locks: Arc<Mutex<BTreeMap<String, Arc<Mutex<()>>>>>,
 }
 
 impl McpRegistry {
@@ -190,6 +195,9 @@ impl McpRegistry {
             tool_cache: Arc::new(RwLock::new(BTreeMap::new())),
             tool_discovery_lock: Arc::new(Mutex::new(())),
             transport_lifecycle: Arc::new(Mutex::new(())),
+            lazy_connect: false,
+            pending_configs: Arc::new(std::sync::RwLock::new(BTreeMap::new())),
+            lazy_connect_locks: Arc::new(Mutex::new(BTreeMap::new())),
         }
     }
 
@@ -214,6 +222,9 @@ impl McpRegistry {
                 tool_cache: Arc::new(RwLock::new(BTreeMap::new())),
                 tool_discovery_lock: Arc::new(Mutex::new(())),
                 transport_lifecycle: Arc::new(Mutex::new(())),
+                lazy_connect: false,
+                pending_configs: Arc::new(std::sync::RwLock::new(BTreeMap::new())),
+                lazy_connect_locks: Arc::new(Mutex::new(BTreeMap::new())),
             },
             rx,
         )
@@ -380,7 +391,7 @@ impl McpRegistry {
     /// `is_project_trusted_local` mirror), but partitions on the capabilities-local
     /// `McpConfigSource` (a distinct type from core's). Untrusted => project-source
     /// servers are withheld.
-    fn partition_by_trust(
+    pub(crate) fn partition_by_trust(
         configs: Vec<McpServerConfig>,
         project_dir: &std::path::Path,
     ) -> (Vec<McpServerConfig>, Vec<McpServerConfig>) {
@@ -444,8 +455,9 @@ impl McpRegistry {
     }
 
     /// Build one registry containing only the requested ownership scope. Project
-    /// registries are process-wide cached; session registries are leased from
-    /// SessionMcpPool and die with their last runtime owner.
+    /// registries are process-wide cached. The eager Session path is the
+    /// short-lived schema probe; live session registries use
+    /// [`Self::from_config_lazy_session`].
     pub(crate) fn from_config_background_for_scope(
         project_dir: &std::path::Path,
         event_tx: Option<mpsc::UnboundedSender<McpConnectEvent>>,
@@ -650,6 +662,290 @@ impl McpRegistry {
         registry
     }
 
+    /// Session-owned registry: catalog-ready from the shared schema cache,
+    /// no process until the first tool call.
+    pub(crate) fn from_config_lazy_session(project_dir: &std::path::Path) -> Self {
+        let mut registry = Self::new();
+        registry.lazy_connect = true;
+
+        let configs = match load_mcp_config(project_dir) {
+            Ok(c) => c,
+            Err(e) => {
+                let message = format!("Failed to load config: {}", e);
+                registry
+                    .status_overrides
+                    .write()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .insert("config".to_string(), ServerStatus::Failed(message));
+                registry.finish_initial_connections();
+                return registry;
+            }
+        };
+
+        let configs: Vec<_> = configs
+            .into_iter()
+            .filter(|config| config.scope == super::config::McpScope::Session)
+            .collect();
+        let (configs, blocked) = Self::partition_by_trust(configs, project_dir);
+        for b in &blocked {
+            registry
+                .status_overrides
+                .write()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .insert(b.name.clone(), ServerStatus::BlockedUntrusted);
+        }
+        for config in &configs {
+            registry.apply_trust_from_config(config);
+        }
+        {
+            let mut names = match registry.configured_servers.write() {
+                Ok(names) => names,
+                Err(poisoned) => poisoned.into_inner(),
+            };
+            names.extend(configs.iter().map(|config| config.name.clone()));
+        }
+        {
+            let mut pending = match registry.pending_configs.write() {
+                Ok(pending) => pending,
+                Err(poisoned) => poisoned.into_inner(),
+            };
+            for config in configs {
+                pending.insert(config.name.clone(), config);
+            }
+        }
+        registry.finish_initial_connections();
+        registry
+    }
+
+    pub(crate) fn server_instructions_snapshot(
+        &self,
+    ) -> std::collections::BTreeMap<String, String> {
+        self.server_instructions
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
+    }
+
+    /// Overlay a probe snapshot without touching any live session transport.
+    pub(crate) async fn hydrate_session_schema(
+        &self,
+        snapshot: &super::schema_cache::SessionMcpSchemaSnapshot,
+    ) {
+        let live: std::collections::HashSet<String> =
+            self.servers.read().await.keys().cloned().collect();
+        {
+            let mut cache = self.tool_cache.write().await;
+            let mut by_server: BTreeMap<String, Vec<McpToolInfo>> = BTreeMap::new();
+            for tool in &snapshot.tools {
+                by_server
+                    .entry(tool.server_name.clone())
+                    .or_default()
+                    .push(tool.clone());
+            }
+            for (name, tools) in by_server {
+                if !live.contains(&name) {
+                    cache.insert(name, tools);
+                }
+            }
+        }
+        {
+            let mut instructions = self
+                .server_instructions
+                .write()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            for (name, value) in &snapshot.instructions {
+                if !live.contains(name) {
+                    instructions.insert(name.clone(), value.clone());
+                }
+            }
+        }
+        {
+            let mut overrides = self
+                .status_overrides
+                .write()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            for (name, status) in &snapshot.statuses {
+                if live.contains(name) {
+                    continue;
+                }
+                match status {
+                    ServerStatus::Connected
+                    | ServerStatus::Failed(_)
+                    | ServerStatus::BlockedUntrusted => {
+                        overrides.insert(name.clone(), status.clone());
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+
+    /// Diff `scope=session` configs against a fresh probe snapshot.
+    /// Unchanged live processes stay up; only added/removed/identity-changed
+    /// servers are recycled. Probe cache never overwrites a live catalog.
+    pub(crate) async fn apply_session_config_diff(
+        &self,
+        snapshot: &super::schema_cache::SessionMcpSchemaSnapshot,
+    ) {
+        let new_by_name: BTreeMap<String, McpServerConfig> = snapshot
+            .configs
+            .iter()
+            .cloned()
+            .map(|config| (config.name.clone(), config))
+            .collect();
+        let old_by_name = self
+            .pending_configs
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone();
+        let live: std::collections::HashSet<String> =
+            self.servers.read().await.keys().cloned().collect();
+
+        let removed: Vec<String> = old_by_name
+            .keys()
+            .filter(|name| !new_by_name.contains_key(*name))
+            .cloned()
+            .collect();
+        let changed: Vec<String> = new_by_name
+            .iter()
+            .filter(|(name, new_config)| {
+                old_by_name
+                    .get(*name)
+                    .is_some_and(|old| old.spawn_identity() != new_config.spawn_identity())
+            })
+            .map(|(name, _)| name.clone())
+            .collect();
+        let retained_live: Vec<String> = live
+            .iter()
+            .filter(|name| {
+                new_by_name.contains_key(*name)
+                    && old_by_name.get(*name).is_some_and(|old| {
+                        new_by_name.get(*name).is_some_and(|new_config| {
+                            old.spawn_identity() == new_config.spawn_identity()
+                        })
+                    })
+            })
+            .cloned()
+            .collect();
+
+        let mut to_recycle: Vec<String> = removed.iter().chain(changed.iter()).cloned().collect();
+        to_recycle.sort();
+        let recycle_locks: Vec<_> = {
+            let mut locks = Vec::with_capacity(to_recycle.len());
+            for name in &to_recycle {
+                locks.push(self.lazy_connect_lock(name).await);
+            }
+            locks
+        };
+        let mut recycle_guards = Vec::with_capacity(recycle_locks.len());
+        for lock in &recycle_locks {
+            recycle_guards.push(lock.lock().await);
+        }
+
+        {
+            let mut pending = self
+                .pending_configs
+                .write()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            pending.clear();
+            pending.extend(new_by_name.clone());
+        }
+        {
+            let mut configured = self
+                .configured_servers
+                .write()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            configured.clear();
+            configured.extend(new_by_name.keys().cloned());
+        }
+        for config in new_by_name.values() {
+            self.apply_trust_from_config(config);
+        }
+
+        for name in removed {
+            self.drop_server(&name, false).await;
+        }
+        for name in &changed {
+            self.drop_server(name, true).await;
+        }
+        drop(recycle_guards);
+
+        for name in retained_live {
+            self.refresh_connected_server_catalog(&name).await;
+        }
+        self.hydrate_session_schema(snapshot).await;
+    }
+
+    async fn drop_server(&self, name: &str, keep_configured: bool) {
+        let _transport_lifecycle = self.transport_lifecycle.lock().await;
+        let client = {
+            let mut servers = self.servers.write().await;
+            servers.remove(name)
+        };
+        if let Some(client) = client {
+            client.shutdown().await;
+        }
+        self.tool_cache.write().await.remove(name);
+        self.server_timeouts_ms.write().await.remove(name);
+        self.server_call_limits.write().await.remove(name);
+        self.failed_servers.write().await.remove(name);
+        self.status_overrides
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .remove(name);
+        self.server_instructions
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .remove(name);
+        if !keep_configured {
+            self.pending_configs
+                .write()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .remove(name);
+            self.configured_servers
+                .write()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .remove(name);
+        }
+    }
+
+    async fn refresh_connected_server_catalog(&self, server_name: &str) {
+        self.tool_cache.write().await.remove(server_name);
+        let _ = self.list_tools_for_server(server_name).await;
+    }
+
+    async fn lazy_connect_lock(&self, server_name: &str) -> Arc<Mutex<()>> {
+        let mut locks = self.lazy_connect_locks.lock().await;
+        locks
+            .entry(server_name.to_string())
+            .or_insert_with(|| Arc::new(Mutex::new(())))
+            .clone()
+    }
+
+    /// Spawn the session-owned transport on first use. No-op when already live
+    /// or when this registry is the eager project/probe path.
+    pub async fn ensure_server_connected(&self, server_name: &str) -> Result<()> {
+        if self.servers.read().await.contains_key(server_name) {
+            return Ok(());
+        }
+        if !self.lazy_connect {
+            anyhow::bail!("MCP server '{}' not found", server_name);
+        }
+        let lock = self.lazy_connect_lock(server_name).await;
+        let _guard = lock.lock().await;
+        if self.servers.read().await.contains_key(server_name) {
+            return Ok(());
+        }
+        let config = self
+            .pending_configs
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .get(server_name)
+            .cloned()
+            .ok_or_else(|| anyhow::anyhow!("MCP server '{}' is not configured", server_name))?;
+        self.add_server(config).await
+    }
+
     /// Load MCP configuration and connect to all servers (blocking).
     /// Prefer `from_config_background` for non-blocking startup.
     pub async fn from_config(project_dir: &std::path::Path) -> Self {
@@ -814,13 +1110,23 @@ impl McpRegistry {
         if let Some(tools) = self.cached_tools_for_connected_servers().await {
             return tools;
         }
-        self.discover_all_tools().await
+        let discovered = self.discover_all_tools().await;
+        if self.lazy_connect {
+            self.cached_tools_snapshot().await
+        } else {
+            discovered
+        }
     }
 
     /// Force-refresh all available tools from all connected servers.
     pub async fn list_all_tools(&self) -> Vec<McpToolInfo> {
         let _discovery = self.tool_discovery_lock.lock().await;
-        self.discover_all_tools().await
+        let discovered = self.discover_all_tools().await;
+        if self.lazy_connect {
+            self.cached_tools_snapshot().await
+        } else {
+            discovered
+        }
     }
 
     async fn discover_all_tools(&self) -> Vec<McpToolInfo> {
@@ -970,6 +1276,9 @@ impl McpRegistry {
         tool_name: &str,
         arguments: serde_json::Value,
     ) -> Result<String> {
+        if self.lazy_connect {
+            self.ensure_server_connected(server_name).await?;
+        }
         // Take a stable client snapshot, then release the registry lock before the
         // potentially slow transport call. Reload/add-server writes must not wait
         // for an MCP tool execution to finish or time out.
@@ -1153,6 +1462,9 @@ impl McpRegistry {
             tool_cache: self.tool_cache.clone(),
             tool_discovery_lock: self.tool_discovery_lock.clone(),
             transport_lifecycle: self.transport_lifecycle.clone(),
+            lazy_connect: self.lazy_connect,
+            pending_configs: self.pending_configs.clone(),
+            lazy_connect_locks: self.lazy_connect_locks.clone(),
         })
     }
 }

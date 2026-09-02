@@ -78,7 +78,10 @@ fn handle_uninstall(ids: &[u32]) -> Result<()> {
         let entry = match entries.iter().find(|e| e.id == id) {
             Some(e) => e,
             None => {
-                eprintln!("❌ 未找到 ID 为 {id} 的服务（有效范围: 1-{}）", entries.len());
+                eprintln!(
+                    "❌ 未找到 ID 为 {id} 的服务（有效范围: 1-{}）",
+                    entries.len()
+                );
                 fail_count += 1;
                 continue;
             }

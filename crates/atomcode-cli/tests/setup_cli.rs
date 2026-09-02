@@ -25,16 +25,30 @@ fn setup_succeeds_in_empty_dir() {
         String::from_utf8_lossy(&output.stdout),
     );
     let stdout = String::from_utf8_lossy(&output.stdout);
-    let ok = stdout.contains("Setup 完成") || stdout.contains("Setup complete") || stdout.contains("安装完成");
+    let ok = stdout.contains("Setup 完成")
+        || stdout.contains("Setup complete")
+        || stdout.contains("安装完成");
     assert!(
         ok,
         "stdout did not contain a setup-success marker:\n{stdout}"
     );
-    assert!(user.path().join("config.toml").exists(), "config.toml must be created");
-    assert!(user.path().join("prompts/init.yaml").exists(), "prompts/init.yaml must be created");
-    assert!(user.path().join("thesaurus/computer_science.txt").exists(), "thesaurus must be created");
+    assert!(
+        user.path().join("config.toml").exists(),
+        "config.toml must be created"
+    );
+    assert!(
+        user.path().join("prompts/init.yaml").exists(),
+        "prompts/init.yaml must be created"
+    );
+    assert!(
+        user.path().join("thesaurus/computer_science.txt").exists(),
+        "thesaurus must be created"
+    );
     let cfg = std::fs::read_to_string(user.path().join("config.toml")).unwrap();
-    assert!(cfg.contains("language = \"zh-CN\""), "default language should be zh-CN: {cfg}");
+    assert!(
+        cfg.contains("language = \"zh-CN\""),
+        "default language should be zh-CN: {cfg}"
+    );
 }
 
 #[test]

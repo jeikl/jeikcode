@@ -388,9 +388,7 @@ mod tests {
         let view = atomcode_daemon::legacy_convert::CatalogSessionView {
             snapshot: SessionSnapshot::new(vec![Message::user(format!(
                 "帮我看下端口\n\n{}",
-                atomcode_capabilities::reminder::system_reminder(
-                    "Current date: 2026-09-01 (Tue)"
-                )
+                atomcode_capabilities::reminder::system_reminder("Current date: 2026-09-01 (Tue)")
             ))]),
             meta: atomcode_capabilities::session::SessionMeta::new(
                 "reminder-tail-session",

@@ -155,10 +155,7 @@ mod tests {
             system_reminder("Current date: 2026-09-01 (Tue)"),
             system_reminder("暂存长bash列表：ninja")
         );
-        assert_eq!(
-            strip_injected_reminders_for_display(&raw),
-            "帮我看下端口"
-        );
+        assert_eq!(strip_injected_reminders_for_display(&raw), "帮我看下端口");
         assert_eq!(
             strip_injected_reminders_for_display("just the question"),
             "just the question"

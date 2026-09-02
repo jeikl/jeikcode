@@ -2486,7 +2486,10 @@ mod tests {
         let view = hub.join().unwrap();
         assert_eq!(view.binding.session_id, "session-b");
         assert_eq!(view.snapshot.messages[0].text, "history-b");
-        assert!(view.replay.is_empty(), "view projection must not keep A's replay");
+        assert!(
+            view.replay.is_empty(),
+            "view projection must not keep A's replay"
+        );
         assert_eq!(
             hub.running_session_id().as_deref(),
             Some("session-a"),

@@ -233,6 +233,14 @@ impl Modal for SessionPicker {
                             id.as_str(),
                         ) {
                             Ok(()) => {
+                                let id_for_mcp = id.clone();
+                                if let Ok(handle) = tokio::runtime::Handle::try_current() {
+                                    handle.spawn(async move {
+                                        atomcode_capabilities::mcp::SessionMcpPool::global()
+                                            .retire_session_id(&id_for_mcp)
+                                            .await;
+                                    });
+                                }
                                 let name = session.name.clone();
                                 self.sessions.remove(idx);
                                 self.confirm_delete = None;
@@ -775,8 +783,11 @@ pub(crate) fn replay_session(
                         renderer.render(UiLine::Error(m.text.clone()));
                     }
                 } else {
-                    if let Some(reasoning) =
-                        m.reasoning.as_deref().map(str::trim).filter(|s| !s.is_empty())
+                    if let Some(reasoning) = m
+                        .reasoning
+                        .as_deref()
+                        .map(str::trim)
+                        .filter(|s| !s.is_empty())
                     {
                         let (title, body) = crate::think::reasoning_summary(reasoning);
                         let header = title.unwrap_or_else(|| {
@@ -805,48 +816,48 @@ pub(crate) fn replay_session(
                     // collapsed showed no batch header, so gating on raw
                     // `tool_calls.len()` would over-group and diverge from live.
                     if atomcode_kernel::agent::distinct_tool_call_count(&m.tool_calls) > 1 {
-                    // A multi-call assistant step ran as one parallel batch live.
-                    // Rebuild the grouped "Running N calls" header + child rows
-                    // (with folded result suffixes) instead of N standalone tool
-                    // rows, and remember the call ids so their individual tool
-                    // RESULT rows are suppressed below — matching the compact live
-                    // batch view the user saw before the resume.
-                    let (header, children) = crate::event_loop::build_replay_tool_batch(
-                        &m.tool_calls,
-                        &result_of,
-                        &state.todo_titles,
-                    );
-                    for tc in &m.tool_calls {
-                        if !tc.id.is_empty() {
-                            batched_result_ids.insert(tc.id.clone());
-                        }
-                    }
-                    renderer.render(UiLine::ToolGroupRender {
-                        batch_id: format!("replay-batch-{i}"),
-                        header,
-                        children,
-                    });
-                } else {
-                    for tc in &m.tool_calls {
-                        // todowrite → no inline block; the persistent panel is the sole
-                        // view. Suppress the (successful) tool RESULT below by remembering
-                        // the call id. Mirror the live path: only a PARSEABLE call is
-                        // suppressed — a bad one falls through to a normal tool row so its
-                        // error still shows.
-                        if tc.name == "todowrite"
-                            && atomcode_capabilities::tools::todo::parse_todos(&tc.arguments)
-                                .is_ok()
-                        {
+                        // A multi-call assistant step ran as one parallel batch live.
+                        // Rebuild the grouped "Running N calls" header + child rows
+                        // (with folded result suffixes) instead of N standalone tool
+                        // rows, and remember the call ids so their individual tool
+                        // RESULT rows are suppressed below — matching the compact live
+                        // batch view the user saw before the resume.
+                        let (header, children) = crate::event_loop::build_replay_tool_batch(
+                            &m.tool_calls,
+                            &result_of,
+                            &state.todo_titles,
+                        );
+                        for tc in &m.tool_calls {
                             if !tc.id.is_empty() {
-                                todowrite_call_ids.insert(tc.id.clone());
+                                batched_result_ids.insert(tc.id.clone());
                             }
-                            continue;
                         }
-                        renderer.render(UiLine::ToolCall {
-                            name: crate::event_loop::display_tool_name(&tc.name),
-                            detail: format_tool_detail(&tc.name, &tc.arguments),
+                        renderer.render(UiLine::ToolGroupRender {
+                            batch_id: format!("replay-batch-{i}"),
+                            header,
+                            children,
                         });
-                    }
+                    } else {
+                        for tc in &m.tool_calls {
+                            // todowrite → no inline block; the persistent panel is the sole
+                            // view. Suppress the (successful) tool RESULT below by remembering
+                            // the call id. Mirror the live path: only a PARSEABLE call is
+                            // suppressed — a bad one falls through to a normal tool row so its
+                            // error still shows.
+                            if tc.name == "todowrite"
+                                && atomcode_capabilities::tools::todo::parse_todos(&tc.arguments)
+                                    .is_ok()
+                            {
+                                if !tc.id.is_empty() {
+                                    todowrite_call_ids.insert(tc.id.clone());
+                                }
+                                continue;
+                            }
+                            renderer.render(UiLine::ToolCall {
+                                name: crate::event_loop::display_tool_name(&tc.name),
+                                detail: format_tool_detail(&tc.name, &tc.arguments),
+                            });
+                        }
                     }
                 }
             }
@@ -1900,18 +1911,22 @@ mod tests {
             "thinking body missing: {:?}",
             rec.lines
         );
-        assert!(
-            rec.lines
-                .iter()
-                .any(|line| matches!(line, UiLine::AssistantText(t) if t == "partial answer"))
-        );
-        assert!(rec.lines.iter().any(|line| matches!(line, UiLine::ToolCall { .. })));
-        assert!(rec.lines.iter().any(|line| matches!(line, UiLine::ToolResult { .. })));
-        assert!(
-            rec.lines
-                .iter()
-                .any(|line| matches!(line, UiLine::Error(t) if t.contains("rate limited")))
-        );
+        assert!(rec
+            .lines
+            .iter()
+            .any(|line| matches!(line, UiLine::AssistantText(t) if t == "partial answer")));
+        assert!(rec
+            .lines
+            .iter()
+            .any(|line| matches!(line, UiLine::ToolCall { .. })));
+        assert!(rec
+            .lines
+            .iter()
+            .any(|line| matches!(line, UiLine::ToolResult { .. })));
+        assert!(rec
+            .lines
+            .iter()
+            .any(|line| matches!(line, UiLine::Error(t) if t.contains("rate limited"))));
     }
 }
 #[tokio::test]

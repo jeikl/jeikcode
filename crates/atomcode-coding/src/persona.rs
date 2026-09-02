@@ -1358,9 +1358,7 @@ mod tests {
             "persona must tell the model not to pass bash timeout: {p}"
         );
         assert!(
-            p.contains("no keyboard")
-                && p.contains("--no-pager")
-                && p.contains("silent_kill_secs"),
+            p.contains("no keyboard") && p.contains("--no-pager") && p.contains("silent_kill_secs"),
             "persona must warn against blocking/pager bash and name idle kill: {p}"
         );
     }

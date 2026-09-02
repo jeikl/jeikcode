@@ -664,7 +664,11 @@ mod tests {
             "{}",
             page2.content
         );
-        assert!(page2.content.contains("\"offset\":3001"), "{}", page2.content);
+        assert!(
+            page2.content.contains("\"offset\":3001"),
+            "{}",
+            page2.content
+        );
 
         let page3 = ReadFileTool::default()
             .execute(r#"{"file_path":"notes.txt","offset":3001}"#, &ctx(d.path()))
@@ -772,11 +776,7 @@ mod tests {
 
         assert!(!r.is_error, "{}", r.content);
         assert!(r.content.contains("350\tl350"), "{}", r.content);
-        assert!(
-            !r.content.contains("Continue reading"),
-            "{}",
-            r.content
-        );
+        assert!(!r.content.contains("Continue reading"), "{}", r.content);
     }
 
     #[tokio::test]

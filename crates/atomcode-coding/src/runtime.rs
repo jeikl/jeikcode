@@ -10527,7 +10527,6 @@ mod tests {
         assert_eq!(runtime.task.await.unwrap(), exit);
     }
 
-
     #[tokio::test]
     async fn native_start_returns_provider_error_without_degraded_handle() {
         assert!(matches!(
@@ -12460,7 +12459,6 @@ mod tests {
         manager.acquire_lease(id).unwrap();
     }
 
-
     #[tokio::test]
     #[serial_test::serial(atomcode_home)]
     async fn prepared_resume_rejects_a_lease_for_another_session() {
@@ -12639,8 +12637,6 @@ mod tests {
         .await
         .expect("runtime drop did not release the session lease");
     }
-
-
 
     async fn mutating_rewind_runtime(
         fail_second_build: bool,
@@ -12972,7 +12968,6 @@ mod tests {
         runtime.handle.shutdown().await.unwrap();
     }
 
-
     #[tokio::test]
     async fn failed_sessionless_restore_rolls_back_to_the_original_snapshot() {
         let factory = Arc::new(FailSecondBuildFactory {
@@ -13011,7 +13006,6 @@ mod tests {
             .all(|message| message.text != "replacement prompt"));
         runtime.handle.shutdown().await.unwrap();
     }
-
 
     #[tokio::test]
     #[serial_test::serial(atomcode_home)]

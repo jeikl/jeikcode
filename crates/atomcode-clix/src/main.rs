@@ -1078,11 +1078,7 @@ fn coverage_priority(path: &str) -> i32 {
 /// Recipe bookkeeping that rarely needs a second pass once the first pass already reported
 /// on real recipe code (conanfile / patches / tests).
 fn is_coverage_scaffold_file(path: &str) -> bool {
-    let base = path
-        .rsplit('/')
-        .next()
-        .unwrap_or(path)
-        .to_ascii_lowercase();
+    let base = path.rsplit('/').next().unwrap_or(path).to_ascii_lowercase();
     matches!(
         base.as_str(),
         "notes.md"
@@ -1384,10 +1380,7 @@ mod tests {
         got.sort();
         assert_eq!(
             got,
-            vec![
-                "pkg/conanfile.py".to_string(),
-                "pkg/notes.md".to_string()
-            ]
+            vec!["pkg/conanfile.py".to_string(), "pkg/notes.md".to_string()]
         );
     }
 
@@ -1640,7 +1633,9 @@ base_url = "https://openrouter.ai/api/v1"
         assert!(!is_signing_gateway(
             "https://api-ai.gitcode.com/v1/chat/completions"
         ));
-        assert!(!is_signing_gateway("https://pre-llm-api-cce.atomgit.com/v1"));
+        assert!(!is_signing_gateway(
+            "https://pre-llm-api-cce.atomgit.com/v1"
+        ));
         assert!(!is_signing_gateway("https://openrouter.ai/api/v1"));
         assert!(!is_signing_gateway("https://api.deepseek.com/v1"));
         assert!(!is_signing_gateway(

@@ -95,7 +95,7 @@ impl ReviewAgentConfig {
             progress: None,
             no_web: false,
             graph_max_indexed_files: usize::MAX, // no degrade by default (bare-CLI behavior)
-            skill_dirs: Vec::new(), // no skills by default (bare-CLI behavior)
+            skill_dirs: Vec::new(),              // no skills by default (bare-CLI behavior)
         }
     }
 

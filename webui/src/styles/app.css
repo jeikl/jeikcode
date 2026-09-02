@@ -2223,6 +2223,18 @@ body {
   opacity: 0.4;
   cursor: default;
 }
+.session-select-delete-progress,
+.session-select-delete-error {
+  padding: 4px 4px 6px;
+  font-size: 12px;
+  line-height: 1.4;
+}
+.session-select-delete-progress {
+  color: var(--app-muted-foreground, var(--text-muted, #8a8a8a));
+}
+.session-select-delete-error {
+  color: var(--app-error-foreground, #e07070);
+}
 
 /* Project selector — dropdown above the session list to browse other projects. */
 .sidebar-project {

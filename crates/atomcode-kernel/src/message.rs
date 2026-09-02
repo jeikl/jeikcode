@@ -495,8 +495,7 @@ impl Conversation {
 
         // Append one synthetic result per unique dangling call id (append-only).
         for id in missing {
-            self.messages
-                .push(Message::tool_result(id, content, true));
+            self.messages.push(Message::tool_result(id, content, true));
         }
     }
 
@@ -541,7 +540,10 @@ impl Conversation {
             rebuilt.push(message);
 
             let mut resolved = std::collections::HashSet::new();
-            while input.peek().is_some_and(|message| message.role == Role::Tool) {
+            while input
+                .peek()
+                .is_some_and(|message| message.role == Role::Tool)
+            {
                 let result = input.next().expect("peeked tool result must exist");
                 if let Some(id) = result.tool_call_id.as_ref() {
                     if pending.iter().any(|pending_id| pending_id == id)
@@ -1634,7 +1636,11 @@ mod tests {
         };
         let report = c.apply_plan(plan, floor);
         assert!(report.committed, "drain of post-floor history must commit");
-        assert_eq!(&c.messages[..floor], &prefix[..], "frozen user prefix survives");
+        assert_eq!(
+            &c.messages[..floor],
+            &prefix[..],
+            "frozen user prefix survives"
+        );
     }
 
     // Draining a middle range with a summary: messages shrink, ONE synthetic
@@ -2049,7 +2055,11 @@ mod tests {
         assert_eq!(msgs[4].role, Role::Assistant);
         assert_eq!(msgs[5].tool_call_id.as_deref(), Some("reuse"));
         assert_eq!(msgs[5].text, "current");
-        assert_eq!(msgs.len(), 6, "early, late, and duplicate results are dropped");
+        assert_eq!(
+            msgs.len(),
+            6,
+            "early, late, and duplicate results are dropped"
+        );
     }
 
     // ── BLOCKER 2 — rewrites respect the sacred floor ────────────────────────

@@ -33,6 +33,10 @@ import {
   thisTabOwnsTurn,
   shouldLockSendAsDetached,
   isWatchTurnActivationEvent,
+  liveSubmitKeepsTurn,
+  liveSyncOwnsViewedSession,
+  toolResultClearsUserInput,
+  transcriptLatestUserInputIsResolved,
 } from './chatTerminal.ts';
 
 test('legacy done and stopped are natural completions that preserve queued messages', () => {
@@ -144,6 +148,20 @@ test('in-flight cache is kept over stale disk history while a turn is active', (
     },
   ];
   assert.equal(transcriptHasInFlightAssistant(cache), true);
+  assert.equal(
+    transcriptHasInFlightAssistant([
+      { role: 'assistant', parts: [{ kind: 'text', text: '已经结束的回复' }] },
+    ]),
+    false,
+    'completed assistant text is not in-flight',
+  );
+  assert.equal(
+    transcriptHasInFlightAssistant([{ role: 'assistant', parts: [] }]),
+    true,
+    'empty assistant shell is still waiting for tokens',
+  );
+  assert.equal(liveSubmitKeepsTurn('started'), true);
+  assert.equal(liveSubmitKeepsTurn('steered'), true);
   assert.equal(
     shouldKeepCachedTranscript({
       cacheLen: 2,
@@ -295,6 +313,52 @@ test('a live user-input terminal clears only its matching prompt', () => {
   assert.equal(resolveUserInputRequest(current, 42), null);
   assert.equal(resolveUserInputRequest(current, 41), current);
   assert.equal(resolveUserInputRequest(null, 42), null);
+  assert.equal(toolResultClearsUserInput('request_user_input'), true);
+  assert.equal(toolResultClearsUserInput('bash'), false);
+  assert.equal(
+    transcriptLatestUserInputIsResolved([
+      {
+        role: 'assistant',
+        parts: [{
+          kind: 'tool',
+          tool: { name: 'request_user_input', status: 'completed' },
+        }],
+      },
+    ]),
+    true,
+  );
+  assert.equal(
+    transcriptLatestUserInputIsResolved([
+      {
+        role: 'assistant',
+        parts: [{
+          kind: 'tool',
+          tool: { name: 'request_user_input', status: 'pending' },
+        }],
+      },
+    ]),
+    false,
+  );
+  assert.equal(liveSyncOwnsViewedSession({
+    sync: true,
+    viewedSessionId: 'abc',
+    liveSessionId: null,
+  }), true);
+  assert.equal(liveSyncOwnsViewedSession({
+    sync: true,
+    viewedSessionId: 'abc',
+    liveSessionId: 'abc',
+  }), true);
+  assert.equal(liveSyncOwnsViewedSession({
+    sync: true,
+    viewedSessionId: 'abc',
+    liveSessionId: 'other',
+  }), false);
+  assert.equal(liveSyncOwnsViewedSession({
+    sync: false,
+    viewedSessionId: 'abc',
+    liveSessionId: null,
+  }), false);
 });
 
 test('prefix cache estimate reuses prior request prompt on warm paths', () => {

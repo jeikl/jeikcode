@@ -8875,6 +8875,11 @@ impl<W: Write + Send> Renderer for RetainedRenderer<W> {
                 bot_rule_dashes,
                 t0.elapsed().as_micros()
             );
+            // `render_diff` wraps dirty frames in DECSET 2026. Echoed
+            // `CSI ? 2026 h` wedges crossterm's Unix parser, so keys
+            // (including Ctrl+C) never reach the event loop mid-bash.
+            // Unstick after the paint, not only at bash start/end.
+            self.unstick_input_parser();
         }
         let _ = self.out.flush();
     }

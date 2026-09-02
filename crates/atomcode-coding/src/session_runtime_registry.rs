@@ -222,7 +222,15 @@ fn activity_from_runtime_event(
         | CodingRuntimeEvent::Agent(AgentEvent::ToolStarted { .. })
         | CodingRuntimeEvent::Agent(AgentEvent::ToolResult { .. })
         | CodingRuntimeEvent::Agent(AgentEvent::Reasoning(_)) => RuntimeActivity::Running,
-        CodingRuntimeEvent::Request(_) => RuntimeActivity::WaitingApproval,
+        CodingRuntimeEvent::Request(request) => {
+            if request.kind
+                == atomcode_capabilities::tools::request_user_input::REQUEST_USER_INPUT_KIND
+            {
+                RuntimeActivity::WaitingUserInput
+            } else {
+                RuntimeActivity::WaitingApproval
+            }
+        }
         CodingRuntimeEvent::TurnFinished(TurnCompletion::Completed { .. })
         | CodingRuntimeEvent::TurnFinished(TurnCompletion::SnapshotUnavailable { .. }) => {
             RuntimeActivity::Ready
@@ -783,5 +791,31 @@ mod tests {
             }
             other => panic!("expected InputAccepted, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn request_user_input_activity_is_not_approval() {
+        use crate::runtime::RuntimeRequest;
+        let user_input = crate::runtime::CodingRuntimeEvent::Request(RuntimeRequest {
+            id: 1,
+            kind: atomcode_capabilities::tools::request_user_input::REQUEST_USER_INPUT_KIND
+                .into(),
+            payload: serde_json::json!({}),
+            snapshot: None,
+        });
+        assert_eq!(
+            activity_from_runtime_event(&user_input, RuntimeActivity::Running),
+            RuntimeActivity::WaitingUserInput
+        );
+        let approval = crate::runtime::CodingRuntimeEvent::Request(RuntimeRequest {
+            id: 2,
+            kind: "approval".into(),
+            payload: serde_json::json!({}),
+            snapshot: None,
+        });
+        assert_eq!(
+            activity_from_runtime_event(&approval, RuntimeActivity::Running),
+            RuntimeActivity::WaitingApproval
+        );
     }
 }

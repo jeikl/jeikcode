@@ -1214,7 +1214,8 @@ fn log_truncate(value: &str, max: usize) -> String {
 ///
 /// A `PermissionRequest` is still pending when no later `ToolCallResult` (or
 /// terminal) has closed that `call_id`. A `UserInputRequest` is pending until
-/// the turn ends (no separate resolve event on the chat bus).
+/// a later `request_user_input` tool result or the turn ends — TUI/live can
+/// answer or decline without a dedicated chat-bus resolve event.
 fn pending_interactive_from_replay(events: &[ChatEvent]) -> (Option<ChatEvent>, Option<ChatEvent>) {
     let mut last_permission: Option<ChatEvent> = None;
     let mut last_user_input: Option<ChatEvent> = None;
@@ -1222,8 +1223,11 @@ fn pending_interactive_from_replay(events: &[ChatEvent]) -> (Option<ChatEvent>, 
     let mut turn_terminal = false;
     for event in events {
         match event {
-            ChatEvent::ToolCallResult { id, .. } => {
+            ChatEvent::ToolCallResult { id, name, .. } => {
                 resolved_call_ids.insert(id.clone());
+                if name == "request_user_input" {
+                    last_user_input = None;
+                }
             }
             ChatEvent::Done { .. } | ChatEvent::Stopped | ChatEvent::Error { .. } => {
                 turn_terminal = true;
@@ -10357,5 +10361,34 @@ mod channel_mode_tests {
         let (perm, user) = pending_interactive_from_replay(&events);
         assert!(perm.is_none());
         assert!(user.is_none());
+    }
+
+    #[test]
+    fn pending_interactive_from_replay_clears_user_input_after_tool_result() {
+        let events = vec![
+            ChatEvent::UserInputRequest {
+                session_id: "s1".into(),
+                request_id: 7,
+                payload: serde_json::json!({
+                    "header": "Choose",
+                    "question": "merge?",
+                    "mode": "single",
+                    "options": [],
+                }),
+            },
+            ChatEvent::ToolCallResult {
+                id: "call-7".into(),
+                name: "request_user_input".into(),
+                success: true,
+                output: "No answer was provided. Proceed with your own best judgment; only ask again if you are truly blocked.".into(),
+                duration_ms: 1,
+            },
+        ];
+        let (perm, user) = pending_interactive_from_replay(&events);
+        assert!(perm.is_none());
+        assert!(
+            user.is_none(),
+            "declined/answered request_user_input must not restore a card while TUI keeps chatting"
+        );
     }
 }

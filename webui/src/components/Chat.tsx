@@ -107,14 +107,18 @@ import {
   reduceChatRecovery,
   reduceLiveLifecycle,
   resolveUserInputRequest,
+  toolResultClearsUserInput,
+  transcriptLatestUserInputIsResolved,
   restoreLiveSnapshot,
   keepCanvasOnEmptyLiveSnapshot,
   stayOnNewSessionLanding,
   shouldReuseLiveStream,
   resumeTurnStartedAt,
   transcriptHasInFlightAssistant,
+  liveSubmitKeepsTurn,
   shouldKeepCachedTranscript,
   thisTabOwnsTurn,
+  liveSyncOwnsViewedSession,
   shouldLockSendAsDetached,
   isWatchTurnActivationEvent,
   resolveTokenCache,
@@ -1136,7 +1140,7 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
           });
           onPermission(pending.permission as PermissionRequestEvent);
         }
-        if (pending.user_input) {
+        if (pending.user_input && !transcriptLatestUserInputIsResolved(messagesRef.current)) {
           setUserInputReq(pending.user_input);
         }
       })
@@ -1718,7 +1722,13 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
 
         let nextHint: string | null = null;
         const currentCached = messageCacheRef.current.get(loadId);
-        const isLiveSession = liveSessionIdRef.current === loadId;
+        const isLiveSession =
+          liveSessionIdRef.current === loadId ||
+          liveSyncOwnsViewedSession({
+            sync: syncRef.current,
+            viewedSessionId: loadId,
+            liveSessionId: liveSessionIdRef.current,
+          });
         if (sessionResult.status === 'fulfilled' && sessionResult.value && Array.isArray(sessionResult.value.messages)) {
           const preferred = sessionResult.value.preferred_model;
           if (preferred) {
@@ -2371,8 +2381,12 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
           pushCommandNotice(t('sync.reconnectTerminalUnknown'));
         }
         setLivePending(null);
-        setUserInputReq(null);
       }
+      // Always drop the structured-input card on snapshot. A declined
+      // `request_user_input` (TUI Ctrl+C / "No answer was provided") used to
+      // survive keepCanvas reconnects and lock this tab while TUI kept chatting.
+      setUserInputReq(null);
+      transitionChatRecovery({ type: 'active_check_succeeded', active: false });
       setHistoryHint(null);
       if (e.provider && !providerPinnedRef.current) {
         setProvider(e.provider);
@@ -2385,6 +2399,7 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
         activeIdRef.current = e.session_id;
         loadedForRef.current = e.session_id;
         onSessionId(e.session_id);
+        restorePendingInteractive(e.session_id, sessionGenerationRef.current);
       }
       return;
     }
@@ -3510,6 +3525,9 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
         });
         // 工具已执行完 → 其审批必已解决，清掉 /chat 残留的同 call_id 审批卡片。
         onPermissionResolved?.(event.id);
+        if (toolResultClearsUserInput(event.name)) {
+          setUserInputReq(null);
+        }
         // Tool output is folded into the next provider usage event. Do not bump
         // prompt locally — that inflates the footer and poisons session snapshots.
         break;
@@ -3794,7 +3812,17 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
           setPendingSteers((pending) => pending.map((item) => (
             item.id === pendingSteer.id ? { ...item, confirmed: true } : item
           )));
-          if (!liveLifecycleRef.current.running) restorePendingSteers(false);
+        }
+        // Receipt is authoritative: the runtime has the input. A stale
+        // `running=false` (TUI froze and stopped publishing state events)
+        // used to call restorePendingSteers and swallow the message.
+        if (liveSubmitKeepsTurn(receipt.disposition)) {
+          liveLifecycleRef.current = { running: true, terminalConsumed: false };
+          setBusyAndClock(true);
+          if (activeIdRef.current) {
+            backgroundRunningSessionsRef.current.add(activeIdRef.current);
+            onLiveRunningChange?.(activeIdRef.current, true);
+          }
         }
       } catch (error) {
         // Roll back the optimistic append — the send never reached the server.

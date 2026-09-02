@@ -592,6 +592,9 @@ const NONINTERACTIVE_CLI_ENV: &[(&str, &str)] = &[
     ("SYSTEMD_PAGER", "cat"),
     ("LESS", "FRX"),
     ("GIT_TERMINAL_PROMPT", "0"),
+    // Git Credential Manager (Windows/macOS) otherwise opens a GUI or
+    // console prompt that steals the TUI. Fail closed instead of hanging.
+    ("GCM_INTERACTIVE", "never"),
     ("DEBIAN_FRONTEND", "noninteractive"),
     ("AWS_PAGER", ""),
     ("COMPOSER_NO_INTERACTION", "1"),

@@ -177,16 +177,17 @@ export function userMessageAlreadyOnCanvas(
 type InFlightPart = {
   kind: string;
   text?: string;
-  tool?: { status?: string };
+  tool?: { status?: string; name?: string };
 };
 
-/** Trailing assistant still has streaming text, reasoning, or a running tool. */
+/** Trailing assistant still has a running tool, or an empty shell waiting for tokens. */
 export function transcriptHasInFlightAssistant(
   messages: Array<{ role: string; parts: InFlightPart[] }>,
 ): boolean {
   for (let i = messages.length - 1; i >= 0; i--) {
     const message = messages[i];
     if (message.role !== 'assistant') continue;
+    if (message.parts.length === 0) return true;
     return message.parts.some((part) => {
       if (
         part.kind === 'tool' &&
@@ -194,12 +195,17 @@ export function transcriptHasInFlightAssistant(
       ) {
         return true;
       }
-      if (part.kind === 'text' && !!part.text) return true;
-      if (part.kind === 'reasoning' && !!part.text) return true;
       return false;
     });
   }
   return false;
+}
+
+/** A successful `/live/message` receipt means the runtime accepted the input.
+ *  Never roll the optimistic bubble back just because the tab's busy flag
+ *  missed a `state.running` event (frozen TUI → WebUI looks idle). */
+export function liveSubmitKeepsTurn(disposition: 'started' | 'steered'): boolean {
+  return disposition === 'started' || disposition === 'steered';
 }
 
 /** Disk history is turn-boundary stale. Keep the tab's in-flight canvas. */
@@ -221,6 +227,18 @@ export function thisTabOwnsTurn(input: {
   isLocalTurn: boolean;
 }): boolean {
   return input.isLiveSession || input.isLocalTurn;
+}
+
+/** `/webui` + TUI share one live runtime. Until the snapshot binds
+ * `liveSessionId`, treat the viewed session as ours so `/chat/active`
+ * cannot lock the composer as a foreign occupant. */
+export function liveSyncOwnsViewedSession(input: {
+  sync: boolean;
+  viewedSessionId: string;
+  liveSessionId: string | null;
+}): boolean {
+  if (!input.sync) return false;
+  return input.liveSessionId == null || input.liveSessionId === input.viewedSessionId;
 }
 
 /** Only a foreign `/chat` owner should lock the composer as “occupied”. */
@@ -376,6 +394,31 @@ export function resolveUserInputRequest<T extends { request_id: number }>(
   resolvedRequestId: number,
 ): T | null {
   return current?.request_id === resolvedRequestId ? null : current;
+}
+
+/** TUI/live can answer or decline `request_user_input` without a matching
+ * `user_input_resolved` on the `/chat` bus. The tool result is the close. */
+export function toolResultClearsUserInput(name?: string): boolean {
+  return name === 'request_user_input';
+}
+
+/** Latest `request_user_input` tool on the canvas already has a result
+ * ("No answer was provided", a real answer, etc.). `/chat/pending` must
+ * not resurrect the card while TUI keeps chatting. */
+export function transcriptLatestUserInputIsResolved(
+  messages: Array<{ role: string; parts: InFlightPart[] }>,
+): boolean {
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const message = messages[i];
+    if (message.role !== 'assistant') continue;
+    for (let j = message.parts.length - 1; j >= 0; j--) {
+      const part = message.parts[j];
+      if (part.kind !== 'tool' || part.tool?.name !== 'request_user_input') continue;
+      const status = part.tool?.status;
+      return status !== 'pending' && status !== 'waiting_approval';
+    }
+  }
+  return false;
 }
 
 /** Tracks prefix-cache estimation across successive provider usage events. */

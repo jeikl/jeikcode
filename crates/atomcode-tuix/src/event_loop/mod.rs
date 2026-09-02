@@ -8165,47 +8165,54 @@ fn yield_overlays_for_blocking_prompt(app: &mut App, ctx: &mut LoopCtx) {
     }
 }
 
-/// OS-level interrupt (SIGINT on Unix) while a blocking prompt is up. Routes
-/// through the same key handlers as a literal Ctrl+C so approval/user-input
-/// prompts stay responsive when the keyboard path is wedged.
-fn handle_interactive_interrupt(
+/// OS-level Ctrl+C / SIGINT. The keyboard reader is often wedged here
+/// (git live-tail echoing `CSI ? 2026 h` into stdin, pager stealing the TTY),
+/// so this must NOT be routed through the in-app prompt key handlers —
+/// those silently decline `request_user_input` ("No answer was provided")
+/// while the TUI still looks frozen. Cancel the turn instead.
+fn handle_os_interrupt(
     app: &mut App,
     ctx: &mut LoopCtx,
     renderer: &mut dyn Renderer,
 ) -> Result<()> {
-    use crossterm::event::KeyModifiers;
-    match blocking_prompt_phase(&app.state).unwrap_or(app.state.phase) {
-        UiPhase::Approval => handle_approval_key(
-            app,
-            ctx,
-            renderer,
-            KeyCode::Char('c'),
-            KeyModifiers::CONTROL,
-        ),
-        UiPhase::UserInput => handle_user_input_key(
-            app,
-            ctx,
-            renderer,
-            KeyCode::Char('c'),
-            KeyModifiers::CONTROL,
-        ),
-        UiPhase::RoundCap => handle_round_cap_key(
-            app,
-            ctx,
-            renderer,
-            KeyCode::Char('c'),
-            KeyModifiers::CONTROL,
-        ),
-        _ => Ok(()),
+    if cancel_local_shell_if_running(ctx)
+        && !matches!(app.state.phase, UiPhase::Streaming)
+    {
+        crate::tuix_trace!("KEY", "os interrupt -> cancel local shell");
+        return Ok(());
+    }
+    let streaming = matches!(app.state.phase, UiPhase::Streaming);
+    if blocking_prompt_active(&app.state) || streaming {
+        crate::tuix_trace!(
+            "KEY",
+            "os interrupt -> Cancel (phase={:?})",
+            app.state.phase
+        );
+        let send_ok = cancel_active_turn(ctx);
+        if send_ok {
+            app.interrupt_drain_pending = true;
+        }
+        clear_capturing_modal_on_cancel(app);
+        restore_cancelled_message_to_buf(app, renderer, ctx);
+        app.state.approval_panel = None;
+        app.state.user_input_panel = None;
+        app.state.user_input_batch = None;
+        app.state.round_cap_panel = None;
+        Ok(())
+    } else {
+        crate::tuix_trace!("KEY", "os interrupt -> Shutdown");
+        arm_shutdown_watchdog(ctx);
+        Ok(())
     }
 }
 
 /// Reclaim the TTY from the event-loop thread and unstick crossterm's Unix
 /// parser. The reader may already be spinning inside `event::poll` on echoed
 /// `CSI ? 2026 h` / `CSI ? 25 h` bytes, so a Recover command queued to that
-/// thread would never run. Termios reclaim happens here; the DA1 query is
-/// serialized through the render worker so it cannot interleave with a 2026
-/// envelope. The Recover command is still sent so a live reader traces it.
+/// thread would never run until stdin is flushed. Termios `enable_raw_mode`
+/// stays on the reader thread (`Recover`) — calling it here while `poll` is
+/// in flight deadlocks crossterm on Linux. The DA1 query is serialized
+/// through the render worker so it cannot interleave with a 2026 envelope.
 fn reclaim_tty_input(ctx: &LoopCtx, renderer: &mut dyn Renderer, reason: &'static str) {
     crate::tuix_trace!(
         "TTY",
@@ -8215,7 +8222,11 @@ fn reclaim_tty_input(ctx: &LoopCtx, renderer: &mut dyn Renderer, reason: &'stati
         crate::trace::loop_key_seq()
     );
     #[cfg(unix)]
-    crate::signal_restore::reclaim_input(reason);
+    {
+        crate::signal_restore::ignore_job_control_signals();
+        crate::signal_restore::claim_foreground_tty();
+        crate::signal_restore::flush_unread_input();
+    }
     renderer.unstick_input_parser();
     if let Some(reader) = ctx.reader.as_ref() {
         reader.recover_tty(reason);
@@ -8719,17 +8730,16 @@ pub async fn run_loop(mut ctx: LoopCtx, renderer: &mut dyn Renderer) -> Result<E
                 );
             }
 
-            // ── OS SIGINT while a blocking prompt is up, or `!cmd` ──
-            // Keep this off during Streaming: 5c37b2f90 only used SIGINT as
-            // the approval-prompt fallback so a ready signal arm cannot steal
-            // the loop from arrow keys. Streaming Ctrl+C stays on the keyboard
-            // path (`handle_streaming_key`).
-            Some(()) = sigint.recv(), if input_priority || ctx.local_shell_cancel.is_some() => {
-                if input_priority {
-                    handle_interactive_interrupt(&mut app, &mut ctx, renderer)?;
-                } else {
-                    let _ = cancel_local_shell_if_running(&mut ctx);
-                }
+            // ── OS SIGINT: prompt, `!cmd`, or a wedged Streaming keyboard ──
+            // Raw mode normally delivers Ctrl+C as a key. When git/pager
+            // re-enables ISIG or the crossterm parser is wedged, the key
+            // never arrives — this arm is the only escape. Also armed in
+            // Streaming so a frozen bash/git turn is cancellable.
+            Some(()) = sigint.recv(), if input_priority
+                || ctx.local_shell_cancel.is_some()
+                || matches!(app.state.phase, UiPhase::Streaming) =>
+            {
+                handle_os_interrupt(&mut app, &mut ctx, renderer)?;
             }
 
             // ── Deferred-render trailing edge ──
@@ -9142,27 +9152,7 @@ pub async fn run_loop(mut ctx: LoopCtx, renderer: &mut dyn Renderer) -> Result<E
             // 2-press confirm because if we got here, the user has no
             // working keyboard route to confirm with anyway.
             Some(()) = win_ctrl_c.recv() => {
-                if cancel_local_shell_if_running(&mut ctx)
-                    && !matches!(app.state.phase, UiPhase::Streaming)
-                {
-                    crate::tuix_trace!("KEY", "windows ctrl_c signal -> cancel local shell");
-                } else if input_priority {
-                    handle_interactive_interrupt(&mut app, &mut ctx, renderer)?;
-                } else if matches!(app.state.phase, UiPhase::Streaming) {
-                    // In Streaming phase, Ctrl+C should cancel the
-                    // running turn (matching keyboard-path behaviour)
-                    // rather than shut down the whole application.
-                    crate::tuix_trace!("KEY", "windows ctrl_c signal -> Cancel (streaming)");
-                    let send_ok = cancel_active_turn(&mut ctx);
-                    if send_ok {
-                        app.interrupt_drain_pending = true;
-                    }
-                    clear_capturing_modal_on_cancel(&mut app);
-                    restore_cancelled_message_to_buf(&mut app, renderer, &ctx);
-                } else {
-                    crate::tuix_trace!("KEY", "windows ctrl_c signal -> Shutdown");
-                    arm_shutdown_watchdog(&mut ctx);
-                }
+                handle_os_interrupt(&mut app, &mut ctx, renderer)?;
             }
 
             // ── Deferred-render trailing edge ──

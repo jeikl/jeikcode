@@ -945,9 +945,12 @@ fn parse_css_styles(path: &Path, source: &str) -> Option<(Vec<SymbolNode>, Vec<R
                 }
                 i = j;
             } else if ch == '@' {
-                let s = &line[i..];
-                if s.starts_with("@keyframes") {
-                    let mut j = i + "@keyframes".len();
+                // `i` is a *char* index into `chars`. Never slice `line[i..]` —
+                // a preceding multi-byte char (e.g. `·` U+00B7 at bytes 9..11)
+                // makes `i` land mid-character and panic `atomcode init`.
+                const KEYFRAMES: &[char] = &['@', 'k', 'e', 'y', 'f', 'r', 'a', 'm', 'e', 's'];
+                if chars[i..].starts_with(KEYFRAMES) {
+                    let mut j = i + KEYFRAMES.len();
                     while j < chars.len() && chars[j].is_whitespace() {
                         j += 1;
                     }
@@ -3929,6 +3932,40 @@ export function CouponPanel() {
         assert!(
             names.contains(&"mobile-only".to_string()),
             "media-nested: {names:?}"
+        );
+    }
+
+    #[test]
+    fn css_at_rule_after_multibyte_does_not_panic() {
+        let d = tempfile::tempdir().unwrap();
+        // Char index of `@` is 10; `·` occupies bytes 9..11. The old
+        // `&line[i..]` panicked: "start byte index 10 is not a char boundary".
+        // Also cover a non-keyframes at-rule after CJK so `@media` cannot
+        // take the same slice path.
+        let src = concat!(
+            "123456789·@keyframes fadeIn { from { opacity: 0; } }\n",
+            "/* 分隔 · */ @media (max-width: 600px) { .mobile-ok { display: none; } }\n",
+            ".nav::before { content: \"·\"; } @keyframes spin { to { transform: rotate(360deg); } }\n",
+        );
+        std::fs::write(d.path().join("dot.css"), src).unwrap();
+        let g = build_graph(d.path());
+        let names: Vec<String> = g
+            .nodes
+            .values()
+            .filter(|n| n.kind == SymbolKind::UiElement)
+            .map(|n| n.name.clone())
+            .collect();
+        assert!(
+            names.contains(&"fadeIn".to_string()),
+            "keyframes after ·: {names:?}"
+        );
+        assert!(
+            names.contains(&"spin".to_string()),
+            "keyframes after content ·: {names:?}"
+        );
+        assert!(
+            names.contains(&"mobile-ok".to_string()),
+            "class inside @media after CJK: {names:?}"
         );
     }
 

@@ -230,23 +230,19 @@ impl Screen {
         let cold_start = self.physical_dirty;
         if self.physical_dirty {
             // Cold-start the physical terminal: per-row CUP+EL across
-            // every screen row, then `\x1b[H` to home. The subsequent
-            // diff patches put cells's content back. This costs ~8
-            // bytes per row plus the home — only paid when callers
-            // explicitly signal that physical state is unknown via
-            // `invalidate()`. Without this, body rows whose cells go
-            // from "long content" (last frame) to "short content"
-            // (this frame, with `prev_cells` blanked by invalidate)
-            // leave the long row's tail on the physical terminal
-            // forever — the cell-diff sees `cells=blank == prev=blank`
-            // for the trailing columns and emits no patch, so the
-            // stale glyphs survive.
+            // every screen row. The subsequent diff patches put cells'
+            // content back, and the park CUP at the end of this method
+            // re-anchors the caret at the input box.
+            //
+            // Do NOT emit `\x1b[H` (cursor home) here. VS Code / xterm.js
+            // show a phantom caret at (1,1) when DECTCEM is off — which
+            // is the "光标跳到终端页签顶上" bug during bash / invalidate.
+            // The park CUP below is the only cursor move we want visible.
             let h = self.cells.len();
-            body.reserve(h * 8 + 4);
+            body.reserve(h * 8);
             for row in 1..=h {
                 let _ = write!(&mut body, "\x1b[{};1H\x1b[K", row);
             }
-            body.extend_from_slice(b"\x1b[H");
             self.physical_dirty = false;
         }
         // JediTerm: per-row tight repaint (one CUP+EL + contiguous run per
@@ -838,6 +834,30 @@ mod tests {
         assert!(
             out.ends_with("\x1b[?25h\x1b[?2026l"),
             "cold-start frame must close with show+ESU: {:?}",
+            out
+        );
+    }
+
+    /// Cold-start used to finish the wipe with `\x1b[H` (cursor home).
+    /// VS Code / xterm.js then show a phantom caret at the top of the
+    /// terminal tab when DECTCEM is off — the bash "光标跳到顶上" bug.
+    /// Park CUP at the end of `render_diff` is the only cursor move
+    /// we want; the wipe must not home.
+    #[test]
+    fn invalidate_cold_start_does_not_home_cursor() {
+        let mut s = Screen::new(10, 3);
+        s.set_cursor(3, 2);
+        s.invalidate();
+        let bytes = s.render_diff();
+        let out = String::from_utf8_lossy(&bytes);
+        assert!(
+            !out.contains("\x1b[H"),
+            "cold-start must not emit cursor-home: {:?}",
+            out
+        );
+        assert!(
+            out.contains("\x1b[3;2H"),
+            "cold-start must park at the input cell, not home: {:?}",
             out
         );
     }

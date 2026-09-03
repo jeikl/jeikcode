@@ -212,10 +212,11 @@ impl Tool for BashTool {
             cmd.env("PYTHONUTF8", "1");
             cmd.env("PYTHONIOENCODING", "utf-8");
         }
-        // No console-window flash per command on Windows: in headless/daemon mode (e.g.
-        // the WeChat clawbot bridge) there's no console to inherit, so each cmd.exe would
-        // otherwise allocate a NEW console window on the desktop. No-op off Windows.
-        super::suppress_console_window(&mut cmd);
+        // Detach from the TUI's console on Windows (CREATE_NO_WINDOW |
+        // DETACHED_PROCESS). CREATE_NO_WINDOW alone still lets a TUI child
+        // inherit CONOUT$ and steal raw mode / home the caret. Unix uses
+        // setsid + TIOCNOTTY just below. No-op off Windows.
+        crate::process_utils::detach_from_console(&mut cmd);
         cmd.current_dir(&ctx.working_dir)
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::piped())

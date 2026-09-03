@@ -22,6 +22,26 @@ pub fn suppress_console_window(cmd: &mut tokio::process::Command) {
     cmd.creation_flags(CREATE_NO_WINDOW);
 }
 
+/// Unix `setsid` + `TIOCNOTTY` equivalent: the child must not inherit the
+/// TUI's console. `CREATE_NO_WINDOW` alone only suppresses a *new* window
+/// when the parent is console-less (daemon); a TUI parent still hands the
+/// child the same `CONOUT$`, so `jeikclaw doctor` / Node / Python can
+/// `SetConsoleMode` / `SetConsoleCursorPosition(0,0)` and the TUI loses
+/// raw mode — keys die, caret jumps to the top of the 终端 tab.
+///
+/// `CREATE_NEW_CONSOLE` gives the child its own independent console so it
+/// does not inherit the TUI's console, while `CREATE_NO_WINDOW` ensures no
+/// console window is visibly popped up.
+#[cfg(target_os = "windows")]
+pub fn detach_from_console(cmd: &mut tokio::process::Command) {
+    const CREATE_NO_WINDOW: u32 = 0x08000000;
+    const CREATE_NEW_CONSOLE: u32 = 0x00000010;
+    cmd.creation_flags(CREATE_NO_WINDOW | CREATE_NEW_CONSOLE);
+}
+
+#[cfg(not(target_os = "windows"))]
+pub fn detach_from_console(_cmd: &mut tokio::process::Command) {}
+
 #[cfg(not(target_os = "windows"))]
 pub fn suppress_console_window(_cmd: &mut tokio::process::Command) {}
 
@@ -662,6 +682,18 @@ mod tests {
         }
         suppress_console_window(&mut cmd);
         let status = cmd.status().await.expect("spawn after suppress");
+        assert!(status.success());
+    }
+
+    #[tokio::test]
+    async fn detach_from_console_keeps_command_spawnable() {
+        let prog = if cfg!(windows) { "cmd" } else { "true" };
+        let mut cmd = tokio::process::Command::new(prog);
+        if cfg!(windows) {
+            cmd.args(["/C", "exit 0"]);
+        }
+        detach_from_console(&mut cmd);
+        let status = cmd.status().await.expect("spawn after detach");
         assert!(status.success());
     }
 

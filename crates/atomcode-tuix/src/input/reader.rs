@@ -377,6 +377,15 @@ fn run(
                 // `recover_tty_if_needed` would no-op and leave keys dead.
                 #[cfg(unix)]
                 crate::signal_restore::reclaim_input(reason);
+                // Windows: a bash child that inherited CONOUT$ can flip
+                // the console out of raw / VT-input mode. Re-arm here on
+                // the reader thread (enable_raw_mode while poll() is in
+                // flight deadlocks crossterm on both OS).
+                #[cfg(windows)]
+                {
+                    crate::tuix_trace!("TTY", "stage={} action=win_reclaim", reason);
+                    let _ = crossterm::terminal::enable_raw_mode();
+                }
             }
             Ok((ReaderCommand::Shutdown, _)) => return,
             Err(TryRecvError::Disconnected) => return,

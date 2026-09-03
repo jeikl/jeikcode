@@ -1441,6 +1441,30 @@ impl<W: Write + Send> RetainedRenderer<W> {
         buf.drain(..cut);
     }
 
+    /// Re-anchor the physical caret after an out-of-band CUP write.
+    ///
+    /// Direct stdout CUPs (inflight strip rewrite, body append, batch
+    /// child update) leave the hardware cursor on the last patched row.
+    /// VS Code / xterm.js then show a phantom caret there — and after a
+    /// cold-start `\x1b[H` that phantom sits at row 1, i.e. the top of
+    /// the terminal tab. Keys look dead because they echo at the home
+    /// cell instead of the input box. Jump back to the last parked
+    /// input-box cell without waiting for the 5ms coalesce paint.
+    fn park_physical_cursor(&mut self) {
+        use std::fmt::Write as _;
+        let mut seq = String::from("\x1b[?25l");
+        if let Some((r, c)) = self.screen.peek_cursor() {
+            let _ = write!(&mut seq, "\x1b[{};{}H", r, c);
+        }
+        // Inflight paints hide the caret so it can't blink on the strip
+        // (`paint_footer`'s `suppress_cursor`). Everywhere else the input
+        // box is editable — restore DECTCEM so type-ahead stays visible.
+        if self.inflight_tool.is_none() {
+            seq.push_str("\x1b[?25h");
+        }
+        let _ = self.out.write_all(seq.as_bytes());
+    }
+
     fn live_tail_preview_lines(buf: &str) -> Vec<&str> {
         let mut lines: Vec<&str> = buf.lines().collect();
         if lines.len() > Self::LIVE_TAIL_MAX_LINES {
@@ -1471,7 +1495,15 @@ impl<W: Write + Send> RetainedRenderer<W> {
         rows
     }
 
-    fn render_inflight_tool(&mut self, icon: &str, name: &str, detail: &str, meta: &str) {
+    /// Paint the live tool strip. Returns `true` when the caller should
+    /// mark the frame dirty so the 5ms coalesce `render_diff` runs.
+    ///
+    /// Same-height in-place rewrites already parked the physical cursor
+    /// and must NOT dirty: a follow-up `render_diff` wraps DECSET 2026 /
+    /// DECTCEM (`CSI ? 2026 h`, `CSI ? 25 l`) which, echoed into stdin,
+    /// wedges crossterm's Unix parser for the rest of the bash — the
+    /// "参数出来了键盘就死 / 光标跳到顶上" report.
+    fn render_inflight_tool(&mut self, icon: &str, name: &str, detail: &str, meta: &str) -> bool {
         // Spinner ticks fire at ~80ms cadence and re-call this fn with a
         // new icon glyph each time. The OLD implementation truncated
         // `body_lines` and called `push_body_prefixed` → `push_body_row`
@@ -1651,7 +1683,7 @@ impl<W: Write + Send> RetainedRenderer<W> {
             );
             self.body_lines.truncate(self.body_lines.len() - remove);
             self.inflight_tool_rows = 0;
-            return;
+            return true;
         }
 
         let bottom = self.body_bottom_row();
@@ -1681,6 +1713,12 @@ impl<W: Write + Send> RetainedRenderer<W> {
                 let bytes = serialize_row(row);
                 let _ = self.out.write_all(&bytes);
             }
+            // Direct CUPs above left the hardware cursor on the strip
+            // (often row 1 when the viewport is short). Re-anchor NOW —
+            // do not wait for the 5ms coalesce paint, and do NOT dirty:
+            // a follow-up `render_diff` would emit `CSI ? 2026 h` /
+            // `CSI ? 25 l` on every live-tail chunk and wedge stdin.
+            self.park_physical_cursor();
             // DO NOT erase the footer here. This used to emit
             // `\x1b[{bottom+1};1H\x1b[0J` (ED 0) to wipe everything below
             // the inflight strip — i.e. the whole input box — on EVERY
@@ -1709,7 +1747,8 @@ impl<W: Write + Send> RetainedRenderer<W> {
             // sentinel switch.)
             let first_0idx = (first as usize).saturating_sub(1);
             self.screen.invalidate_rows_from(first_0idx);
-            self.dirty = true;
+            self.inflight_tool_rows = n;
+            return false;
         } else {
             // First render or row-count mismatch — fall back to scroll-push.
             // Drop any prior inflight rows from model state; push new rows
@@ -1733,6 +1772,7 @@ impl<W: Write + Send> RetainedRenderer<W> {
             }
         }
         self.inflight_tool_rows = n;
+        true
     }
 
     /// Build prefixed rows where the first-row body has mixed styling:
@@ -5888,6 +5928,7 @@ impl<W: Write + Send> RetainedRenderer<W> {
         let bytes = serialize_row(row);
         let _ = self.out.write_all(&bytes);
         let _ = self.out.write_all(b"\n");
+        self.park_physical_cursor();
         // ED 0 above blanked the physical terminal from `target_1idx`
         // down — but `screen.prev_cells` still holds whatever was there
         // last frame. Without resyncing, the next `render_diff` may
@@ -7272,6 +7313,10 @@ impl<W: Write + Send> Renderer for RetainedRenderer<W> {
         // whole transcript (see `body_log`). No-op for transient variants
         // and while replaying.
         self.log_body_event(&line);
+        // Most lines need the 5ms coalesce paint. Live-tail / spinner
+        // in-place rewrites park the caret themselves and must NOT
+        // dirty — see `render_inflight_tool`.
+        let mut coalesce_paint = true;
         match line {
             // ── footer-only variants ──
             UiLine::InputPrompt {
@@ -7357,7 +7402,10 @@ impl<W: Write + Send> Renderer for RetainedRenderer<W> {
                 // so the user gets a time anchor on long bashes.
                 if let Some((_id, name, detail)) = self.inflight_tool.clone() {
                     let meta = spinner_meta_suffix(&label);
-                    self.render_inflight_tool(frame, &name, &detail, meta);
+                    // Footer (input / status) still changed on StreamingBox,
+                    // so keep the coalesce paint even when the strip rewrite
+                    // itself was in-place.
+                    let _ = self.render_inflight_tool(frame, &name, &detail, meta);
                 } else {
                     let cells = self.build_spinner_body_row(frame, &label);
                     self.push_or_update_live_spinner(cells);
@@ -7366,7 +7414,7 @@ impl<W: Write + Send> Renderer for RetainedRenderer<W> {
             UiLine::Spinner { frame, label } => {
                 if let Some((_id, name, detail)) = self.inflight_tool.clone() {
                     let meta = spinner_meta_suffix(&label);
-                    self.render_inflight_tool(frame, &name, &detail, meta);
+                    coalesce_paint = self.render_inflight_tool(frame, &name, &detail, meta);
                 } else {
                     let cells = self.build_spinner_body_row(frame, &label);
                     self.push_or_update_live_spinner(cells);
@@ -7577,7 +7625,7 @@ impl<W: Write + Send> Renderer for RetainedRenderer<W> {
                 // Initial paint — no spinner tick has fired yet so no
                 // elapsed-time suffix to forward. The next Spinner /
                 // StreamingBox tick (~80ms later) supplies the meta.
-                self.render_inflight_tool(initial, &name, &detail, "");
+                let _ = self.render_inflight_tool(initial, &name, &detail, "");
             }
             UiLine::ToolCallLiveTail { call_id, chunk } => {
                 let matches = self
@@ -7600,7 +7648,7 @@ impl<W: Write + Send> Renderer for RetainedRenderer<W> {
                     self.inflight_icon.clone()
                 };
                 let meta = self.inflight_meta.clone();
-                self.render_inflight_tool(&icon, &name, &detail, &meta);
+                coalesce_paint = self.render_inflight_tool(&icon, &name, &detail, &meta);
             }
             UiLine::ToolCallCommit { call_id } => {
                 // Only commit if the inflight_tool matches the expected call_id,
@@ -7762,6 +7810,7 @@ impl<W: Write + Send> Renderer for RetainedRenderer<W> {
                 let _ = self.out.write_all(seq.as_bytes());
                 let bytes = serialize_row(&new_row);
                 let _ = self.out.write_all(&bytes);
+                self.park_physical_cursor();
             }
             UiLine::ToolGroupSummary { text } => {
                 // Mark the batch summary as a ToolResult anchor —
@@ -8337,8 +8386,12 @@ impl<W: Write + Send> Renderer for RetainedRenderer<W> {
         // paint, no emit. The event loop's 5ms tick (via
         // flush_deferred) will coalesce any further state
         // changes that arrive in the same window into a single
-        // paint+emit pass.
-        self.dirty = true;
+        // paint+emit pass. In-place live-tail / spinner rewrites
+        // skip this: they already parked the caret and a follow-up
+        // DECSET-2026 paint would wedge the keyboard.
+        if coalesce_paint {
+            self.dirty = true;
+        }
     }
 
     fn flush(&mut self) {
@@ -9003,7 +9056,10 @@ impl<W: Write + Send> Renderer for RetainedRenderer<W> {
                 use std::fmt::Write;
                 let _ = write!(seq, "\x1b[{};1H\x1b[K", row);
             }
-            seq.push_str("\x1b[H");
+            // No `\x1b[H` (cursor home): the following paint parks the
+            // caret at the input box. Homing here is what VS Code shows
+            // as a phantom caret on the 终端 tab during a resize/bash
+            // invalidate.
             crate::tuix_trace!("RSZ", "wipe=perrow rows={} bytes={}", rows, seq.len());
             let _ = self.out.write_all(seq.as_bytes());
         }
@@ -12127,6 +12183,68 @@ mod tests {
             vterm.cursor_visible(),
             "terminal cursor must be visible again after the inflight tool \
              commits — `inflight_tool.is_none()` flips the gate back"
+        );
+    }
+
+    /// Regression: live bash output CUPed to the inflight strip and
+    /// left the hardware cursor there (or at `\x1b[H` home after a
+    /// later invalidate). VS Code showed the caret on the 终端 tab
+    /// and keys appeared dead. In-place live-tail must re-park at the
+    /// input cell immediately and must NOT emit DECSET 2026 / home.
+    #[test]
+    fn retained_inflight_live_tail_parks_cursor_at_input_not_home() {
+        let (mut r, buf) = new_capturing(80, 24);
+        r.render(UiLine::InputPrompt {
+            buf: String::new(),
+            cursor_byte: 0,
+            menu: None,
+            status: status_basic(),
+            attachments: Vec::new(),
+        });
+        r.render(UiLine::ToolCallInFlight {
+            id: "call_1".into(),
+            name: "Bash".into(),
+            detail: "jeikclaw doctor --repair".into(),
+            hint: None,
+        });
+        r.flush_deferred();
+        // First live-tail chunk grows the strip (fallback push). Second
+        // chunk of the SAME line count takes the in-place path under test.
+        r.render(UiLine::ToolCallLiveTail {
+            call_id: "call_1".into(),
+            chunk: "Gateway service config".into(),
+        });
+        r.flush_deferred();
+        let parked = r.screen.peek_cursor().expect("input caret after first paint");
+        buf.lock().unwrap().clear();
+
+        r.render(UiLine::ToolCallLiveTail {
+            call_id: "call_1".into(),
+            chunk: " — still running".into(),
+        });
+        let bytes = buf.lock().unwrap().clone();
+        let out = String::from_utf8_lossy(&bytes);
+        let park = format!("\x1b[{};{}H", parked.0, parked.1);
+        assert!(
+            out.contains(&park),
+            "live-tail inplace must CUP back to the input cell {park:?}: {out:?}"
+        );
+        assert!(
+            !out.contains("\x1b[H"),
+            "live-tail inplace must not home the caret: {out:?}"
+        );
+        assert!(
+            !out.contains("\x1b[?2026h"),
+            "live-tail inplace must not wrap DECSET 2026 (wedges stdin): {out:?}"
+        );
+
+        let mut vterm = crate::test_term::VirtualTerminal::new(80, 24);
+        drain_into_vterm(&buf, &mut vterm);
+        let (row, col) = vterm.cursor();
+        assert_eq!(
+            (row + 1, col + 1),
+            parked,
+            "physical caret must sit on the input cell after live-tail, not row 1"
         );
     }
 
@@ -21874,7 +21992,7 @@ mod tests {
     }
 
     #[test]
-    fn welcome_wide_has_mascot_and_pinned_login() {
+    fn welcome_wide_has_mascot_and_pinned_provider() {
         let (mut r, _c) = new_counting(100, 30);
         r.caps.colors = true;
         r.caps.unicode_symbols = true;
@@ -21882,7 +22000,7 @@ mod tests {
         r.push_welcome("GLM-5.2", "~/proj");
         let text = body_text(&r);
         assert!(text.contains('▀'), "mascot half-blocks must be present");
-        assert!(text.contains("/login"), "pinned /login must be present");
+        assert!(text.contains("/provider"), "pinned /provider must be present");
         assert!(
             text.contains("Tips for getting started") || text.contains("上手提示"),
             "tips heading present"
@@ -21896,7 +22014,7 @@ mod tests {
         r.push_welcome("GLM-5.2", "~/proj");
         let text = body_text(&r);
         assert!(!text.contains('▀'), "no mascot when colors are disabled");
-        assert!(text.contains("/login"), "tips still present without color");
+        assert!(text.contains("/provider"), "tips still present without color");
     }
 
     #[test]
@@ -21916,7 +22034,7 @@ mod tests {
             !text.contains('▀'),
             "no mascot on a non-modern emulator (FinalShell-like)"
         );
-        assert!(text.contains("/login"), "tips still present");
+        assert!(text.contains("/provider"), "tips still present");
     }
 
     #[test]
@@ -21991,8 +22109,8 @@ mod tests {
             "resize (body_log replay) must not re-roll tips"
         );
         assert!(
-            before.iter().any(|c| c == "/login"),
-            "pinned /login present"
+            before.iter().any(|c| c == "/provider"),
+            "pinned /provider present"
         );
     }
 
@@ -22048,7 +22166,7 @@ mod tests {
         );
         assert!(!text.contains('\u{2580}') && !text.contains('\u{2584}'));
         assert!(
-            text.contains("/login"),
+            text.contains("/provider"),
             "tips still present without a mascot"
         );
     }
@@ -22094,7 +22212,7 @@ mod tests {
         r.push_welcome("GLM-5.2", "~/proj");
         let collides = r.body_lines.iter().any(|row| {
             let s: String = row.iter().map(|c| c.ch).collect();
-            s.contains("GLM-5.2") && s.contains("/login")
+            s.contains("GLM-5.2") && s.contains("/provider")
         });
         assert!(
             !collides,

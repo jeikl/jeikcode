@@ -130,6 +130,9 @@ struct LiveInner {
     next_sequence: u64,
     event_tx: broadcast::Sender<SequencedSessionEvent>,
     pending_request_id: Option<RequestId>,
+    /// Recent agent-observation fingerprints. An observer echoing the journal
+    /// back (A,B,A,B…) is dropped before it can peg a core.
+    recent_runtime_keys: VecDeque<String>,
 }
 
 impl std::fmt::Debug for LiveInner {
@@ -161,6 +164,7 @@ impl LiveInner {
             next_sequence: 0,
             event_tx,
             pending_request_id: None,
+            recent_runtime_keys: VecDeque::new(),
         }
     }
 
@@ -214,6 +218,38 @@ impl LiveInner {
         self.journal.push_back(event.clone());
         let _ = self.event_tx.send(event.clone());
         event
+    }
+}
+
+fn clip_key(prefix: &str, value: &str) -> String {
+    let mut out = String::with_capacity(prefix.len() + 128);
+    out.push_str(prefix);
+    for (i, ch) in value.chars().enumerate() {
+        if i >= 192 {
+            out.push('…');
+            break;
+        }
+        out.push(ch);
+    }
+    out
+}
+
+fn consecutive_runtime_key(event: &crate::runtime::CodingRuntimeEvent) -> Option<String> {
+    use crate::runtime::CodingRuntimeEvent;
+    use atomcode_kernel::event::AgentEvent;
+    match event {
+        CodingRuntimeEvent::Agent(AgentEvent::TextDelta(text)) => Some(clip_key("td:", text)),
+        CodingRuntimeEvent::Agent(AgentEvent::Reasoning(text)) => Some(clip_key("rd:", text)),
+        CodingRuntimeEvent::Agent(AgentEvent::ToolStarted { call }) => {
+            Some(format!("ts:{}:{}", call.id, call.name))
+        }
+        CodingRuntimeEvent::Agent(AgentEvent::ToolProgress { call_id, message }) => {
+            Some(format!("tp:{call_id}:{}", clip_key("", message)))
+        }
+        CodingRuntimeEvent::Agent(AgentEvent::ToolResult { result }) => {
+            Some(format!("tr:{}:{}", result.call_id, clip_key("", &result.content)))
+        }
+        _ => None,
     }
 }
 
@@ -499,6 +535,17 @@ impl SessionRuntimeRegistry {
                 | crate::runtime::CodingRuntimeEvent::RuntimeStopped(_)
         ) {
             inner.journal.clear();
+            inner.recent_runtime_keys.clear();
+        }
+        if let Some(key) = consecutive_runtime_key(&event) {
+            if inner.recent_runtime_keys.iter().any(|seen| seen == &key) {
+                return false;
+            }
+            const RECENT_KEY_CAP: usize = 64;
+            if inner.recent_runtime_keys.len() >= RECENT_KEY_CAP {
+                inner.recent_runtime_keys.pop_front();
+            }
+            inner.recent_runtime_keys.push_back(key);
         }
         inner.push_runtime(generation, event);
         true
@@ -851,6 +898,55 @@ mod tests {
             other => panic!("expected TextDelta, got {other:?}"),
         }
         assert_eq!(got.activity, RuntimeActivity::Running);
+    }
+
+    #[tokio::test]
+    async fn push_runtime_event_drops_consecutive_duplicate_agent_observations() {
+        use atomcode_kernel::event::AgentEvent;
+        let reg = SessionRuntimeRegistry::new();
+        reg.open_or_attach("s".into(), PathBuf::from("/p")).unwrap();
+        let (_replay, mut rx) = reg.subscribe(&"s".into(), None).unwrap();
+        let delta = crate::runtime::CodingRuntimeEvent::Agent(AgentEvent::TextDelta(
+            "正在查看 grok-build".into(),
+        ));
+        assert!(reg.push_runtime_event(&"s".into(), 1, delta.clone()));
+        assert!(
+            !reg.push_runtime_event(&"s".into(), 1, delta),
+            "observer echo of the same TextDelta must not re-fanout"
+        );
+        let first = rx.recv().await.expect("first fan-out");
+        assert!(matches!(
+            first.runtime,
+            Some(crate::runtime::CodingRuntimeEvent::Agent(AgentEvent::TextDelta(_)))
+        ));
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(30), rx.recv())
+                .await
+                .is_err(),
+            "duplicate must not reach subscribers"
+        );
+        assert!(reg.push_runtime_event(
+            &"s".into(),
+            1,
+            crate::runtime::CodingRuntimeEvent::Agent(AgentEvent::TextDelta("下一句".into())),
+        ));
+    }
+
+    #[tokio::test]
+    async fn push_runtime_event_breaks_alternating_observer_echo() {
+        use atomcode_kernel::event::AgentEvent;
+        let reg = SessionRuntimeRegistry::new();
+        reg.open_or_attach("s".into(), PathBuf::from("/p")).unwrap();
+        let a = crate::runtime::CodingRuntimeEvent::Agent(AgentEvent::TextDelta(
+            "正在查看并发与锁".into(),
+        ));
+        let b = crate::runtime::CodingRuntimeEvent::Agent(AgentEvent::TextDelta(
+            "正在查看 FileOperationLockManager".into(),
+        ));
+        assert!(reg.push_runtime_event(&"s".into(), 1, a.clone()));
+        assert!(reg.push_runtime_event(&"s".into(), 1, b.clone()));
+        assert!(!reg.push_runtime_event(&"s".into(), 1, a));
+        assert!(!reg.push_runtime_event(&"s".into(), 1, b));
     }
 
     #[tokio::test]

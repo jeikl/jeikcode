@@ -19850,6 +19850,12 @@ fn publish_live_runtime_event(
     ctx: &LoopCtx,
     event: &bg_runtime::RuntimeEventPayload,
 ) -> Result<(), String> {
+    // Observers consume the registry/hub fan-out. Re-publishing the same
+    // observation (especially after `/webui` binds the unique runtime) feeds
+    // it back into the journal and tight-loops identical text/tool rows.
+    if ctx.runtime.is_shared_observer() {
+        return Ok(());
+    }
     let Some(binding) = &ctx.live_binding else {
         // No hub binding — still fan out so WebUI/--host can follow via registry.
         publish_registry_runtime_event(ctx, ctx.foreground_runtime_id, event);

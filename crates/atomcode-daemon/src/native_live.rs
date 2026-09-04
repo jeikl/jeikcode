@@ -468,21 +468,38 @@ pub fn publish(
     binding: &LiveBinding,
     event: atomcode_coding::SequencedRuntimeEvent,
 ) -> Result<(), HubError> {
-    dual_write_runtime_event_to_registry(
-        event.generation,
-        event.event.clone(),
-        &binding.session_id,
-        &binding.working_dir,
-    );
-    hub().publish(binding, event)
+    let generation = event.generation;
+    let cloned = event.event.clone();
+    // Dual-write only after the hub accepts the observation. A stale/duplicate
+    // publish (observer echoing the journal back) must not re-fanout to the
+    // registry — that is the TUI/WebUI instant replay loop.
+    let result = hub().publish(binding, event);
+    if result.is_ok() {
+        dual_write_runtime_event_to_registry(
+            generation,
+            cloned,
+            &binding.session_id,
+            &binding.working_dir,
+        );
+    }
+    result
 }
 
 pub fn publish_unsequenced(
     binding: &LiveBinding,
     event: atomcode_coding::CodingRuntimeEvent,
 ) -> Result<(), HubError> {
-    dual_write_runtime_event_to_registry(0, event.clone(), &binding.session_id, &binding.working_dir);
-    hub().publish_unsequenced(binding, event)
+    let cloned = event.clone();
+    let result = hub().publish_unsequenced(binding, event);
+    if result.is_ok() {
+        dual_write_runtime_event_to_registry(
+            0,
+            cloned,
+            &binding.session_id,
+            &binding.working_dir,
+        );
+    }
+    result
 }
 
 pub fn join() -> Result<LiveJoin, HubError> {

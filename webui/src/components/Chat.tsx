@@ -122,6 +122,9 @@ import {
   shouldLockSendAsDetached,
   isWatchTurnActivationEvent,
   shouldIgnoreLiveReplayAfterIdleSnapshot,
+  idleFlagAfterLiveSnapshot,
+  shouldClearIdleLiveSnapshotOnUser,
+  shouldKeepLiveBusyAcrossIdleSnapshot,
   resolveTokenCache,
   formatCacheHitRate,
   createTokenCacheState,
@@ -2362,31 +2365,50 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
       liveSessionIdRef.current = e.session_id || null;
       const loaded = sessionMessagesToDisplay(e.messages).map(m => ({ ...m, ts: m.ts ?? Date.now() }));
       atBottomRef.current = true;
+      const canvasInFlight = transcriptHasInFlightAssistant(messagesRef.current);
+      const turnLive =
+        liveLifecycleRef.current.running
+        || busyRef.current
+        || pendingSelfEchoRef.current.length > 0
+        || canvasInFlight;
       const queueDisposition = liveSnapshotQueueDisposition(
-        liveLifecycleRef.current.running || busyRef.current,
+        turnLive,
         queuedRef.current.length,
       );
       const lifecycle = reduceLiveLifecycle(liveLifecycleRef.current, { type: 'snapshot' });
       liveLifecycleRef.current = lifecycle.state;
       const restored = restoreLiveSnapshot(loaded);
-      liveIdleSnapshotRef.current = !transcriptHasInFlightAssistant(loaded);
+      const viewingOther =
+        !!activeIdRef.current && !!e.session_id && activeIdRef.current !== e.session_id;
+      const keepCanvas = keepCanvasOnEmptyLiveSnapshot(
+        restored.messages.length,
+        messagesRef.current.length,
+        !viewingOther,
+      );
+      liveIdleSnapshotRef.current = idleFlagAfterLiveSnapshot({
+        snapshotHasInFlight: transcriptHasInFlightAssistant(loaded),
+        keepCanvas,
+        canvasHasInFlight: canvasInFlight,
+        turnLive,
+      });
       onLiveRunningChange?.(e.session_id || null, restored.running);
       if (e.session_id && restored.messages.length > 0) {
         messageCacheRef.current.set(e.session_id, restored.messages);
       }
-      const viewingOther =
-        !!activeIdRef.current && !!e.session_id && activeIdRef.current !== e.session_id;
       if (viewingOther) {
         return;
       }
-      const keepCanvas = keepCanvasOnEmptyLiveSnapshot(
-        restored.messages.length,
-        messagesRef.current.length,
-        true,
-      );
       if (!keepCanvas) {
-        setMessages(restored.messages.length > 0 ? restored.messages : []);
-        setBusyAndClock(restored.running);
+        const next = restored.messages.length > 0 ? restored.messages : [];
+        messagesRef.current = next;
+        setMessages(next);
+        if (!shouldKeepLiveBusyAcrossIdleSnapshot({
+          keepCanvas,
+          canvasInFlight,
+          turnLive,
+        })) {
+          setBusyAndClock(restored.running);
+        }
         if (queueDisposition.discardQueued) {
           setQueued([]);
           pushCommandNotice(t('sync.reconnectTerminalUnknown'));
@@ -2494,9 +2516,15 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
     // 门控：仅当"当前查看的会话"就是实时会话时，才把实时输出渲染进画布。否则用户
     // 从侧栏打开了另一个历史会话，实时事件不应串进该页面（串进去刷新还会消失）。
     // `state` 仍要上报侧栏转圈：切走后 live 任务还在跑。
+    const canvasInFlightNow = transcriptHasInFlightAssistant(messagesRef.current);
+    const turnLiveNow =
+      liveLifecycleRef.current.running
+      || busyRef.current
+      || pendingSelfEchoRef.current.length > 0
+      || canvasInFlightNow;
     if (e.type === 'state') {
       const sid = liveSessionIdRef.current;
-      const ignoreStaleRunning = e.running && liveIdleSnapshotRef.current;
+      const ignoreStaleRunning = e.running && liveIdleSnapshotRef.current && !turnLiveNow;
       if (sid) {
         if (e.running && !ignoreStaleRunning) backgroundRunningSessionsRef.current.add(sid);
         else backgroundRunningSessionsRef.current.delete(sid);
@@ -2511,15 +2539,21 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
     ) {
       return;
     }
-    if (shouldIgnoreLiveReplayAfterIdleSnapshot(liveIdleSnapshotRef.current, e.type)) {
+    if (shouldIgnoreLiveReplayAfterIdleSnapshot(liveIdleSnapshotRef.current, e.type, turnLiveNow)) {
       return;
     }
 
     switch (e.type) {
             case 'user': {
         const alreadyOnCanvas = userMessageAlreadyOnCanvas(messagesRef.current, e.text);
-        if (liveIdleSnapshotRef.current && alreadyOnCanvas) {
-          break;
+        if (liveIdleSnapshotRef.current) {
+          if (!shouldClearIdleLiveSnapshotOnUser({
+            alreadyOnCanvas,
+            canvasInFlight: canvasInFlightNow,
+            turnLive: turnLiveNow,
+          })) {
+            break;
+          }
         }
         liveIdleSnapshotRef.current = false;
         const lifecycle = reduceLiveLifecycle(liveLifecycleRef.current, {
@@ -2559,8 +2593,11 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
       }
 
       case 'state': {
-        if (e.running && liveIdleSnapshotRef.current) {
+        if (e.running && liveIdleSnapshotRef.current && !turnLiveNow) {
           break;
+        }
+        if (e.running) {
+          liveIdleSnapshotRef.current = false;
         }
         if (!e.running) {
           liveIdleSnapshotRef.current = false;
@@ -3792,6 +3829,8 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
       //    case via `pendingSelfEchoRef`.
       const steering = busyRef.current;
       setBusyAndClock(true);
+      liveIdleSnapshotRef.current = false;
+      liveLifecycleRef.current = { running: true, terminalConsumed: false };
       if (activeIdRef.current) localTurnSessionsRef.current.add(activeIdRef.current);
       const now = Date.now();
       const pendingSteer: PendingLiveSteer = {
@@ -3804,19 +3843,23 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
       const turnIndex = nextTurnNavIndex();
       const turnOrdinal = nextTurnNavOrdinal();
       rememberTurnOutline(text, turnIndex, turnOrdinal);
-      setMessages((prev) => [
-        ...prev,
-        {
-          role: 'user',
-          parts: [{ kind: 'text', text }],
-          images: images.length ? images : undefined,
-          ts: now,
-          pendingSteerId: pendingSteer.id,
-          sourceIndex: turnIndex,
-          turnNavOrdinal: turnOrdinal,
-        },
-        { role: 'assistant', parts: [], pendingSteerId: pendingSteer.id },
-      ]);
+      setMessages((prev) => {
+        const next = [
+          ...prev,
+          {
+            role: 'user' as const,
+            parts: [{ kind: 'text' as const, text }],
+            images: images.length ? images : undefined,
+            ts: now,
+            pendingSteerId: pendingSteer.id,
+            sourceIndex: turnIndex,
+            turnNavOrdinal: turnOrdinal,
+          },
+          { role: 'assistant' as const, parts: [], pendingSteerId: pendingSteer.id },
+        ];
+        messagesRef.current = next;
+        return next;
+      });
       // Register before the HTTP round-trip. A very fast round boundary can
       // emit `steered` on SSE before the submit response reaches this tab.
       setPendingSteers((pending) => [...pending, pendingSteer]);
@@ -3842,6 +3885,7 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
         // used to call restorePendingSteers and swallow the message.
         if (liveSubmitKeepsTurn(receipt.disposition)) {
           liveLifecycleRef.current = { running: true, terminalConsumed: false };
+          liveIdleSnapshotRef.current = false;
           setBusyAndClock(true);
           if (activeIdRef.current) {
             backgroundRunningSessionsRef.current.add(activeIdRef.current);

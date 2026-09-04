@@ -257,12 +257,18 @@ export function shouldLockSendAsDetached(_input: {
  * painted a stop button and blinking cursor on already-finished sessions. */
 /** After an idle `/live` snapshot, leftover journal events of a finished turn
  *  must not be painted again. A new `user` that is not already on the canvas
- *  (or `state.running=true` that is not stale) starts the next turn. */
+ *  (or `state.running=true` that is not stale) starts the next turn.
+ *
+ *  `turnLive` is the current-turn exception: this tab just submitted, the
+ *  canvas already has an empty in-flight assistant, or lifecycle.running is
+ *  true. Without it, an idle snapshot followed by our own user echo (already
+ *  on the canvas) would swallow every later text/tool event until refresh. */
 export function shouldIgnoreLiveReplayAfterIdleSnapshot(
   idleSnapshot: boolean,
   eventType: string,
+  turnLive = false,
 ): boolean {
-  if (!idleSnapshot) return false;
+  if (!idleSnapshot || turnLive) return false;
   switch (eventType) {
     case 'text':
     case 'reasoning':
@@ -275,6 +281,40 @@ export function shouldIgnoreLiveReplayAfterIdleSnapshot(
     default:
       return false;
   }
+}
+
+/** Snapshot of a finished transcript must not arm the leftover-journal gate
+ *  when we are keeping an in-flight canvas or already know a turn is live. */
+export function idleFlagAfterLiveSnapshot(input: {
+  snapshotHasInFlight: boolean;
+  keepCanvas: boolean;
+  canvasHasInFlight: boolean;
+  turnLive: boolean;
+}): boolean {
+  if (input.turnLive) return false;
+  if (input.keepCanvas) return !input.canvasHasInFlight;
+  return !input.snapshotHasInFlight;
+}
+
+/** Own `/live` echo is already on the canvas. Still leave idle-snapshot mode
+ *  when that echo belongs to the turn we just started. */
+export function shouldClearIdleLiveSnapshotOnUser(input: {
+  alreadyOnCanvas: boolean;
+  canvasInFlight: boolean;
+  turnLive: boolean;
+}): boolean {
+  if (!input.alreadyOnCanvas) return true;
+  return input.canvasInFlight || input.turnLive;
+}
+
+/** Idle hub snapshots report `running: false`. Do not drop a busy cursor that
+ *  this tab already armed for an in-flight send. */
+export function shouldKeepLiveBusyAcrossIdleSnapshot(input: {
+  keepCanvas: boolean;
+  canvasInFlight: boolean;
+  turnLive: boolean;
+}): boolean {
+  return input.keepCanvas || input.canvasInFlight || input.turnLive;
 }
 
 export function isWatchTurnActivationEvent(type: string): boolean {

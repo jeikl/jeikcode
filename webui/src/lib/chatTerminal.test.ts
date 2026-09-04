@@ -34,6 +34,9 @@ import {
   shouldLockSendAsDetached,
   isWatchTurnActivationEvent,
   shouldIgnoreLiveReplayAfterIdleSnapshot,
+  idleFlagAfterLiveSnapshot,
+  shouldClearIdleLiveSnapshotOnUser,
+  shouldKeepLiveBusyAcrossIdleSnapshot,
   liveSubmitKeepsTurn,
   liveSyncOwnsViewedSession,
   toolResultClearsUserInput,
@@ -209,6 +212,75 @@ test('idle live snapshot ignores leftover journal content until a new turn', () 
   assert.equal(shouldIgnoreLiveReplayAfterIdleSnapshot(true, 'user'), false);
   assert.equal(shouldIgnoreLiveReplayAfterIdleSnapshot(true, 'state'), false);
   assert.equal(shouldIgnoreLiveReplayAfterIdleSnapshot(false, 'text'), false);
+  assert.equal(
+    shouldIgnoreLiveReplayAfterIdleSnapshot(true, 'text', true),
+    false,
+    'a live in-flight turn must still stream after an idle snapshot',
+  );
+});
+
+test('idle snapshot gate yields to an in-flight send on this tab', () => {
+  assert.equal(
+    idleFlagAfterLiveSnapshot({
+      snapshotHasInFlight: false,
+      keepCanvas: false,
+      canvasHasInFlight: true,
+      turnLive: true,
+    }),
+    false,
+  );
+  assert.equal(
+    idleFlagAfterLiveSnapshot({
+      snapshotHasInFlight: false,
+      keepCanvas: true,
+      canvasHasInFlight: true,
+      turnLive: false,
+    }),
+    false,
+  );
+  assert.equal(
+    idleFlagAfterLiveSnapshot({
+      snapshotHasInFlight: false,
+      keepCanvas: false,
+      canvasHasInFlight: false,
+      turnLive: false,
+    }),
+    true,
+  );
+  assert.equal(
+    shouldClearIdleLiveSnapshotOnUser({
+      alreadyOnCanvas: true,
+      canvasInFlight: true,
+      turnLive: false,
+    }),
+    true,
+    'own optimistic echo must reopen the live turn',
+  );
+  assert.equal(
+    shouldClearIdleLiveSnapshotOnUser({
+      alreadyOnCanvas: true,
+      canvasInFlight: false,
+      turnLive: false,
+    }),
+    false,
+    'leftover journal user of a finished turn stays idle',
+  );
+  assert.equal(
+    shouldKeepLiveBusyAcrossIdleSnapshot({
+      keepCanvas: false,
+      canvasInFlight: true,
+      turnLive: false,
+    }),
+    true,
+  );
+  assert.equal(
+    shouldKeepLiveBusyAcrossIdleSnapshot({
+      keepCanvas: false,
+      canvasInFlight: false,
+      turnLive: false,
+    }),
+    false,
+  );
 });
 
 test('idle watch does not activate on leftover user or runtime_info events', () => {

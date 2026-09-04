@@ -125,6 +125,7 @@ import {
   idleFlagAfterLiveSnapshot,
   shouldClearIdleLiveSnapshotOnUser,
   shouldKeepLiveBusyAcrossIdleSnapshot,
+  liveContentDeltaAlreadyOnParts,
   resolveTokenCache,
   formatCacheHitRate,
   createTokenCacheState,
@@ -1655,8 +1656,10 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
       setActiveTodos(null);
       activeTodosRef.current = null;
       if (cached && cached.length > 0) {
+        messagesRef.current = cached;
         setMessages(cached);
       } else {
+        messagesRef.current = [];
         setMessages([]);
       }
 
@@ -2717,6 +2720,9 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
       if (prev.length === 0) return prev;
       const last = prev[prev.length - 1];
       if (last.role !== 'assistant') return prev;
+      if (liveContentDeltaAlreadyOnParts(last.parts, { type: 'text', content })) {
+        return prev;
+      }
       const parts = last.parts.slice();
       const tail = parts[parts.length - 1];
       if (tail && tail.kind === 'text') {
@@ -3495,6 +3501,9 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
           if (prev.length === 0) return prev;
           const last = prev[prev.length - 1];
           if (last.role !== 'assistant') return prev;
+          if (liveContentDeltaAlreadyOnParts(last.parts, { type: 'reasoning', content: event.content })) {
+            return prev;
+          }
           return [
             ...prev.slice(0, -1),
             { ...last, parts: appendReasoningPart(last.parts, event.content) },
@@ -3535,6 +3544,9 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
           if (prev.length === 0) return prev;
           const last = prev[prev.length - 1];
           if (last.role !== 'assistant') return prev;
+          if (liveContentDeltaAlreadyOnParts(last.parts, { type: 'tool_output', id: callId, chunk: event.chunk })) {
+            return prev;
+          }
           let parts = appendToolOutput(last.parts, callId, event.chunk);
           if (callId) {
             parts = parts.map((p) => {

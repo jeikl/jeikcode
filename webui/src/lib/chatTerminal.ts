@@ -317,6 +317,73 @@ export function shouldKeepLiveBusyAcrossIdleSnapshot(input: {
   return input.keepCanvas || input.canvasInFlight || input.turnLive;
 }
 
+const SUBSTANTIAL_REPLAY_DELTA = 8;
+
+function collapseWs(value: string): string {
+  return value.replace(/\s+/g, '');
+}
+
+/**
+ * True when `incoming` is a journal/replay chunk already painted on the
+ * assistant. Sidebar leave → new session → return reconnects `/live`, which
+ * snapshot-paints the turn and then replays the same TextDelta/Reasoning
+ * window; appending those chunks duplicated 思考过程 / 「正在查看」 blocks.
+ *
+ * Short streaming tokens (1–4 chars) are not treated as duplicates just
+ * because the character appeared earlier in the turn.
+ */
+export function assistantDeltaAlreadyPainted(existing: string, incoming: string): boolean {
+  if (!incoming) return true;
+  if (!existing) return false;
+  if (existing.endsWith(incoming)) return true;
+  if (incoming.length < SUBSTANTIAL_REPLAY_DELTA) return false;
+  if (existing.includes(incoming) || existing.startsWith(incoming)) return true;
+  const painted = collapseWs(existing);
+  const chunk = collapseWs(incoming);
+  return chunk.length >= SUBSTANTIAL_REPLAY_DELTA && painted.includes(chunk);
+}
+
+type ReplayPart = {
+  kind: string;
+  text?: string;
+  tool?: { id?: string; output?: string };
+};
+
+function joinedKindText(parts: ReplayPart[], kind: string): string {
+  let out = '';
+  for (const part of parts) {
+    if (part.kind === kind && part.text) out += part.text;
+  }
+  return out;
+}
+
+/** Skip `/live` journal replay that would re-append text, reasoning, or tool
+ *  stdout already restored from snapshot/cache after a session switch. */
+export function liveContentDeltaAlreadyOnParts(
+  parts: ReplayPart[],
+  event: { type: string; content?: string; chunk?: string; id?: string },
+): boolean {
+  switch (event.type) {
+    case 'text':
+      return assistantDeltaAlreadyPainted(joinedKindText(parts, 'text'), event.content ?? '');
+    case 'reasoning':
+      return assistantDeltaAlreadyPainted(
+        joinedKindText(parts, 'reasoning'),
+        event.content ?? '',
+      );
+    case 'tool_output': {
+      const chunk = event.chunk ?? '';
+      if (!chunk) return true;
+      const row = event.id
+        ? parts.find((part) => part.kind === 'tool' && part.tool?.id === event.id)
+        : [...parts].reverse().find((part) => part.kind === 'tool');
+      return assistantDeltaAlreadyPainted(row?.tool?.output ?? '', chunk);
+    }
+    default:
+      return false;
+  }
+}
+
 export function isWatchTurnActivationEvent(type: string): boolean {
   switch (type) {
     case 'text':

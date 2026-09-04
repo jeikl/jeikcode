@@ -37,6 +37,8 @@ import {
   idleFlagAfterLiveSnapshot,
   shouldClearIdleLiveSnapshotOnUser,
   shouldKeepLiveBusyAcrossIdleSnapshot,
+  assistantDeltaAlreadyPainted,
+  liveContentDeltaAlreadyOnParts,
   liveSubmitKeepsTurn,
   liveSyncOwnsViewedSession,
   toolResultClearsUserInput,
@@ -279,6 +281,47 @@ test('idle snapshot gate yields to an in-flight send on this tab', () => {
       canvasInFlight: false,
       turnLive: false,
     }),
+    false,
+  );
+});
+
+test('returning to a session does not re-append snapshot/journal text', () => {
+  const painted =
+    '正在检索上下文组装与思考内容处理相关的代码与提交记录。\n正在查看 ContextManager 及各端思考内容与上下文拼接逻辑。';
+  assert.equal(
+    assistantDeltaAlreadyPainted(painted, '正在查看 ContextManager 及各端思考内容与上下文拼接逻辑。'),
+    true,
+  );
+  assert.equal(
+    assistantDeltaAlreadyPainted(painted, '正在对比 v4.6.1 之前、4.6.1、4.6.7 的具体源码实现。'),
+    false,
+  );
+  assert.equal(assistantDeltaAlreadyPainted(painted, '的'), false);
+  assert.equal(
+    liveContentDeltaAlreadyOnParts(
+      [
+        { kind: 'reasoning', text: '核对版本标签' },
+        { kind: 'text', text: painted },
+      ],
+      { type: 'reasoning', content: '核对版本标签' },
+    ),
+    true,
+  );
+  assert.equal(
+    liveContentDeltaAlreadyOnParts(
+      [
+        { kind: 'reasoning', text: '核对版本标签' },
+        { kind: 'text', text: painted },
+      ],
+      { type: 'text', content: '正在检索上下文组装与思考内容处理相关的代码与提交记录。' },
+    ),
+    true,
+  );
+  assert.equal(
+    liveContentDeltaAlreadyOnParts(
+      [{ kind: 'text', text: painted }],
+      { type: 'text', content: '正在查看 Claude 协议和 OpenAI 协议中上下文组装顺序与思考拼接逻辑。' },
+    ),
     false,
   );
 });

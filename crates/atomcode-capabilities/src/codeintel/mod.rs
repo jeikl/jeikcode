@@ -56,6 +56,22 @@ pub fn codeintel_tool_names() -> &'static [&'static str] {
     codeintel_unified_tool_names()
 }
 
+/// Returned by `repo_map` / `code_explore` when the workspace has no
+/// `.atomcode/codegraph` index. Steers the model to `list_directory` and
+/// leaves first-index (`jeikcode init`) as a user decision.
+pub fn no_codegraph_tool_guidance() -> &'static str {
+    "当前目录下没有代码图谱索引（`.atomcode/codegraph` 不存在或为空）。\n\
+     \n\
+     请先用 `list_directory` 查看项目结构，判断当前工作目录是：\n\
+     - 一个普通的单一项目仓库，还是\n\
+     - 多项目仓库的综合文件夹，或普通系统目录（例如 `/`、`/root`、`~`）。\n\
+     \n\
+     如果是后一类大范围目录：不要再调用 `code_explore` 或 `repo_map`，改用 \
+     `list_directory` / `glob` / `grep` / `read_file` 等替代工具。在这种范围内建索引会产生极致噪音和大量延迟。\n\
+     \n\
+     是否执行 `jeikcode init` 由用户决定，不要自行建索引，也不要催促或代替用户执行 init。"
+}
+
 /// Register codeintel tools using default mode (or environment ATOMCODE_CODEINTEL_MODE).
 pub fn register_codeintel_tools(reg: &mut ToolRegistry) {
     let env_mode = std::env::var("ATOMCODE_CODEINTEL_MODE").ok();
@@ -332,5 +348,17 @@ mod tests {
             Path::new("atomcode/crates/atomcode-tuix/src/lib.rs"),
             abs_scope
         ));
+    }
+
+    #[test]
+    fn no_codegraph_guidance_steers_to_list_directory_not_auto_init() {
+        let g = no_codegraph_tool_guidance();
+        assert!(g.contains("list_directory"), "{g}");
+        assert!(g.contains("code_explore") && g.contains("repo_map"), "{g}");
+        assert!(g.contains("jeikcode init"), "{g}");
+        assert!(
+            g.contains("由用户决定") && !g.contains("Run `jeikcode init .` to build one"),
+            "must leave init to the user, not instruct the model to build: {g}"
+        );
     }
 }

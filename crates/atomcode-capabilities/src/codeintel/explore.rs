@@ -608,12 +608,7 @@ impl Tool for CodeExploreTool {
         let graph = self.index.get_scoped(&root, scope_path.as_deref());
         let t_index = t_index_start.elapsed();
         if graph.node_count() == 0 && !super::has_nonempty_codegraph(&root) {
-            return ok(
-                "No code graph index for this workspace. Run `jeikcode init .` to build one. \
-                 Automatic indexing only refreshes an existing non-empty `.atomcode/codegraph`; \
-                 it never creates a first index."
-                    .to_string(),
-            );
+            return ok(super::no_codegraph_tool_guidance().to_string());
         }
 
         // Query-result cache: look up AFTER get_scoped (fingerprint + last_stats

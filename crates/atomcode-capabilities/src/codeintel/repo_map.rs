@@ -277,17 +277,13 @@ fn build_repo_map(
 ) -> String {
     // Fully index-backed: the shared CodeGraph is the single source of truth.
     // `index.get(target_dir)` incrementally refreshes an existing
-    // `.atomcode/codegraph`. A workspace without an index is not walked —
-    // the user must run `jeikcode init .` for a first build.
+    // `.atomcode/codegraph`. A workspace without an index is not walked.
     let graph = index.get(target_dir);
     let files: Vec<PathBuf> = graph.file_symbols.keys().cloned().collect();
     if files.is_empty() {
         if !super::has_nonempty_codegraph(working_dir) && !super::has_nonempty_codegraph(target_dir)
         {
-            return "No code graph index for this workspace. Run `jeikcode init .` to build one. \
-                    Automatic indexing only refreshes an existing non-empty `.atomcode/codegraph`; \
-                    it never creates a first index."
-                .to_string();
+            return super::no_codegraph_tool_guidance().to_string();
         }
         return "(no indexed source files found in target directory)".to_string();
     }

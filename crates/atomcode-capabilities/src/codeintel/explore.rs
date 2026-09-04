@@ -607,6 +607,14 @@ impl Tool for CodeExploreTool {
         let t_index_start = std::time::Instant::now();
         let graph = self.index.get_scoped(&root, scope_path.as_deref());
         let t_index = t_index_start.elapsed();
+        if graph.node_count() == 0 && !super::has_nonempty_codegraph(&root) {
+            return ok(
+                "No code graph index for this workspace. Run `jeikcode init .` to build one. \
+                 Automatic indexing only refreshes an existing non-empty `.atomcode/codegraph`; \
+                 it never creates a first index."
+                    .to_string(),
+            );
+        }
 
         // Query-result cache: look up AFTER get_scoped (fingerprint + last_stats
         // must reflect this restat) but BEFORE scoring / rendering. HIT skips
@@ -3759,7 +3767,7 @@ mod tests {
         std::fs::create_dir(d.path().join("src")).unwrap();
         std::fs::write(d.path().join("src/hot.rs"), "pub fn cached_symbol() {}\n").unwrap();
         let idx = Arc::new(CodeIndex::new());
-        let _ = idx.get(d.path());
+        let _ = idx.build(d.path());
         let tool = CodeExploreTool::new(idx);
         let ctx = ToolContext {
             working_dir: d.path().to_path_buf(),
@@ -3805,7 +3813,7 @@ mod tests {
         std::fs::create_dir(d.path().join("src")).unwrap();
         std::fs::write(d.path().join("src/hot.rs"), "pub fn cached_symbol() {}\n").unwrap();
         let idx = Arc::new(CodeIndex::new());
-        let _ = idx.get(d.path());
+        let _ = idx.build(d.path());
         let tool = CodeExploreTool::new(idx);
         let ctx = ToolContext {
             working_dir: d.path().to_path_buf(),

@@ -659,6 +659,8 @@ pub enum Msg<'a> {
     },
     CmdNoProviders,
     CmdSessionListLoading,
+    /// Opening a catalog session as a UI view (not a runtime reconfigure).
+    CmdSessionViewLoading,
     CmdNoSessions,
     CmdUnknownCommand {
         name: &'a str,

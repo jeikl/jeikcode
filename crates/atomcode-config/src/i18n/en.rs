@@ -566,6 +566,8 @@ pub(super) fn en(msg: Msg<'_>) -> Cow<'static, str> {
             "  No providers configured.\n".into(),
         Msg::CmdSessionListLoading =>
             "  Loading sessions…\n".into(),
+        Msg::CmdSessionViewLoading =>
+            "  Opening session…\n".into(),
         Msg::CmdNoSessions =>
             "  No previous sessions found. Start a conversation first.\n".into(),
         Msg::CmdUnknownCommand { name } =>

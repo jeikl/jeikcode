@@ -1116,6 +1116,28 @@ pub fn load_catalog_session_view_in_project(
     load_catalog_session_view_in_project_root(&SessionManager::sessions_root(), project_bucket, id)
 }
 
+/// Load a session transcript for UI display without taking the exclusive runtime
+/// lease. TUI `/sessions`, WebUI/observe view switches, and live hub projection
+/// must use this path: viewing is not execution.
+pub fn load_catalog_session_view_any_project(
+    id: &str,
+) -> anyhow::Result<Option<CatalogSessionView>> {
+    load_catalog_session_view_any_project_in_root(&SessionManager::sessions_root(), id)
+}
+
+pub(crate) fn load_catalog_session_view_any_project_in_root(
+    sessions_root: &std::path::Path,
+    id: &str,
+) -> anyhow::Result<Option<CatalogSessionView>> {
+    let scan = SessionManager::scan_catalog(sessions_root);
+    report_catalog_diagnostics(&scan.diagnostics);
+    let Some(entry) = scan.entries.iter().find(|entry| entry.id == id) else {
+        reject_matching_catalog_diagnostic(&scan.diagnostics, id)?;
+        return Ok(None);
+    };
+    Ok(Some(load_catalog_session_view_in_root(sessions_root, entry)?))
+}
+
 /// Resolve one exact catalog location, converge it to native ownership under an
 /// exclusive lease, and return that same guard for transfer into CodingRuntime.
 pub fn prepare_catalog_session_resume_in_project(
@@ -1258,17 +1280,33 @@ fn load_catalog_session_view_in_root(
                 meta.owner
             )
         }
-        // Pre-owner native sessions have a valid meta + snapshot but no
-        // presentation sidecar. Resolve that historical state through the same
-        // lease-protected convergence seam used by runtime startup, so readers
-        // only ever receive a complete owner=native aggregate.
-        let lease = manager.acquire_lease(&entry.id)?;
-        let adopted = converge_session(&manager, &lease)?;
-        return Ok(CatalogSessionView {
-            snapshot: adopted.snapshot,
-            presentation: adopted.presentation,
-            meta: adopted.meta,
-        });
+        // Pre-owner native sessions may lack a presentation sidecar. Prefer
+        // lease-protected convergence when the session is idle (adopts the
+        // aggregate). If another runtime already holds the lease, fall back to
+        // a read-only view so TUI/WebUI/observe can still switch.
+        match manager.acquire_lease(&entry.id) {
+            Ok(lease) => {
+                let adopted = converge_session(&manager, &lease)?;
+                return Ok(CatalogSessionView {
+                    snapshot: adopted.snapshot,
+                    presentation: adopted.presentation,
+                    meta: adopted.meta,
+                });
+            }
+            Err(SessionStoreError::SessionInUse { .. }) => {
+                let snapshot = manager.load_snapshot(&entry.id)?;
+                let presentation =
+                    optional_store(manager.read_presentation(&entry.id))?.unwrap_or_default();
+                let mut display_meta = meta;
+                display_meta.auto_name_from_messages(&snapshot.messages);
+                return Ok(CatalogSessionView {
+                    snapshot,
+                    presentation,
+                    meta: display_meta,
+                });
+            }
+            Err(error) => return Err(error.into()),
+        }
     }
 
     let bytes = manager.read_legacy_bytes(&entry.id)?;
@@ -1867,6 +1905,38 @@ mod tests {
 
         drop(prepared);
         assert!(first.acquire_lease(id).is_ok());
+    }
+
+    #[test]
+    fn catalog_view_load_succeeds_while_another_runtime_holds_the_lease() {
+        let root = tempfile::tempdir().unwrap();
+        let bucket = "aaaaaaaaaaaaaaaa";
+        let id = "view-while-busy";
+        let manager = SessionManager::with_root(root.path().join(bucket));
+        let lease = manager.acquire_lease(id).unwrap();
+        let snapshot =
+            atomcode_kernel::message::SessionSnapshot::new(vec![KernelMessage::user("hello")]);
+        let mut meta = SessionMeta::new(id, "/proj", 1);
+        meta.owner = StorageOwner::Native;
+        meta.message_count = 1;
+        manager
+            .commit_native_import(
+                &lease,
+                Some(&snapshot),
+                Some(&PresentationFile::default()),
+                &meta,
+            )
+            .unwrap();
+
+        let view = load_catalog_session_view_in_project_root(root.path(), bucket, id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(view.snapshot.messages[0].text, "hello");
+        assert!(matches!(
+            manager.acquire_lease(id),
+            Err(atomcode_capabilities::session::SessionStoreError::SessionInUse { .. })
+        ));
+        drop(lease);
     }
 
     #[test]

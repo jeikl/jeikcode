@@ -536,23 +536,24 @@ pub async fn resume_session(
     }
     let project_bucket =
         atomcode_capabilities::session::SessionManager::project_hash(&binding.working_dir);
-    let prepared = match crate::legacy_convert::prepare_catalog_session_resume_in_project(
+    // View-only: never take the exclusive runtime lease. Another TUI / WebUI /
+    // observe client (or this process's own CodingRuntime) may already own it.
+    let view = match crate::legacy_convert::load_catalog_session_view_in_project(
         &project_bucket,
         &session_id,
     ) {
-        Ok(Some(prepared)) => prepared,
-        _ => crate::legacy_convert::prepare_catalog_session_resume_any_project(&session_id)
+        Ok(Some(view)) => view,
+        _ => crate::legacy_convert::load_catalog_session_view_any_project(&session_id)
             .map_err(|error| HubError::RuntimeRejected(error.to_string()))?
             .ok_or_else(|| {
                 HubError::RuntimeRejected(format!("session {session_id:?} not found in catalog"))
             })?,
     };
-    let target_dir = PathBuf::from(&prepared.view.meta.working_dir);
+    let target_dir = PathBuf::from(&view.meta.working_dir);
     // OpenCode model: switching the live WebUI/TUI *view* never reconfigures the
     // bound CodingRuntime. Execution stays on its session; the hub only projects
     // another transcript. (Provider reload still refuses ActiveTurn.)
-    let _lease = prepared.lease;
-    hub().switch_view_only(session_id, target_dir, prepared.view.snapshot)
+    hub().switch_view_only(session_id, target_dir, view.snapshot)
 }
 
 /// Move the bound runtime to a fresh staged session. This is the only safe way

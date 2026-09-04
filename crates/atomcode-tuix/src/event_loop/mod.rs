@@ -19652,8 +19652,8 @@ fn handle_runtime_event(
                 return;
             }
             ctx.pending_session_resume_preparation = None;
-            let prepared = match result {
-                Ok(prepared) => prepared,
+            let view = match result {
+                Ok(view) => view,
                 Err(error) => {
                     renderer.render(UiLine::Error(
                         crate::i18n::t(crate::i18n::Msg::SessionLoadFailed { error: &error })
@@ -19663,10 +19663,9 @@ fn handle_runtime_event(
                     return;
                 }
             };
-            let prepared_working_dir = std::path::Path::new(&prepared.view.meta.working_dir);
-            if prepared.project_bucket != expected.project_bucket
-                || atomcode_capabilities::pathnorm::path_case_key(prepared_working_dir)
-                    != atomcode_capabilities::pathnorm::path_case_key(&expected.working_dir)
+            let prepared_working_dir = std::path::Path::new(&view.meta.working_dir);
+            if atomcode_capabilities::pathnorm::path_case_key(prepared_working_dir)
+                != atomcode_capabilities::pathnorm::path_case_key(&expected.working_dir)
             {
                 let error = format!(
                     "selected session moved outside project {} while resume was preparing",
@@ -19679,8 +19678,8 @@ fn handle_runtime_event(
                 renderer.flush();
                 return;
             }
-            let project_bucket = prepared.project_bucket;
-            let session = match Session::from_catalog_view(prepared.view) {
+            let project_bucket = expected.project_bucket;
+            let session = match Session::from_catalog_view(view) {
                 Ok(session) => session,
                 Err(error) => {
                     let message = error.to_string();
@@ -19697,7 +19696,6 @@ fn handle_runtime_event(
                 state,
                 renderer,
                 session,
-                prepared.lease,
                 expected.working_dir,
                 project_bucket,
             ) {

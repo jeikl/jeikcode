@@ -140,9 +140,16 @@ impl SessionPicker {
         state: &mut UiState,
         renderer: &mut dyn Renderer,
     ) -> bool {
-        let is_current = self.chosen_session().is_some_and(|session| {
-            session.id == current_session.id && session.project_bucket == current_project_bucket
-        });
+        // Session ids are globally unique. Matching on id alone lets `/sessions`
+        // replay the live transcript even when the picker row's catalog bucket
+        // differs from the current working-dir hash (e.g. after `/cd`, or when
+        // a background runner from another project is merged into the list).
+        // Requiring the bucket as well re-entered the exclusive-lease path and
+        // failed with "already in use by another runtime" against our own runtime.
+        let _ = current_project_bucket;
+        let is_current = self
+            .chosen_session()
+            .is_some_and(|session| session.id == current_session.id);
         if !is_current {
             return false;
         }
@@ -350,13 +357,13 @@ impl Modal for SessionPicker {
                 let preparation = pending.clone();
                 tokio::spawn(async move {
                     let result = tokio::task::spawn_blocking(move || {
-                        atomcode_daemon::legacy_convert::prepare_catalog_session_resume_in_project(
+                        atomcode_daemon::legacy_convert::load_catalog_session_view_in_project(
                             &preparation.project_bucket,
                             &preparation.session_id,
                         )
                         .map_err(|error| error.to_string())
-                        .and_then(|prepared| {
-                            prepared.ok_or_else(|| {
+                        .and_then(|view| {
+                            view.ok_or_else(|| {
                                 format!("session {} not found", preparation.session_id)
                             })
                         })
@@ -376,7 +383,7 @@ impl Modal for SessionPicker {
                     });
                 });
                 renderer.render(UiLine::CommandOutput(
-                    crate::i18n::t(crate::i18n::Msg::CmdSessionTransitionPending).into_owned(),
+                    crate::i18n::t(crate::i18n::Msg::CmdSessionViewLoading).into_owned(),
                 ));
                 renderer.flush();
                 Ok(ModalAction::Close)
@@ -1297,15 +1304,15 @@ mod tests {
         let other_picker = SessionPicker::open(vec![same_id_other_bucket]);
         let mut other_renderer = Rec::default();
         assert!(
-            !other_picker.replay_selected_current_session(
+            other_picker.replay_selected_current_session(
                 &current,
                 &current_bucket,
                 &mut state,
                 &mut other_renderer,
             ),
-            "session identity is project bucket plus id, not id alone"
+            "session ids are globally unique: same id is the current session even across catalog buckets"
         );
-        assert_eq!(other_renderer.reset_count, 0);
+        assert_eq!(other_renderer.reset_count, 1);
     }
 
     #[test]

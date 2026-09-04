@@ -1427,6 +1427,13 @@ pub fn disk_cache_path(root: &Path) -> PathBuf {
     super::index_db::disk_cache_path_db(root)
 }
 
+/// True when `{root}/.atomcode/codegraph/index.v1.db` exists and contains at
+/// least one file unit. Empty or missing graphs must not be auto-created —
+/// the user runs `jeikcode init` for a first index.
+pub fn has_nonempty_codegraph(root: &Path) -> bool {
+    load_disk_cache(&super::canonical(root)).is_some()
+}
+
 fn top_component_str<'a>(p: &'a Path, root: &Path) -> Option<&'a str> {
     p.strip_prefix(root)
         .ok()?
@@ -3081,8 +3088,17 @@ impl CodeIndex {
     }
 
     /// Cached graph lookup with no progress callbacks (tests / internal).
+    ///
+    /// Query-time: incrementally refreshes an **existing** non-empty
+    /// `.atomcode/codegraph` index. Does **not** create a first index — that
+    /// requires [`init_workspace_index`] / `jeikcode init`.
     pub fn get(&self, root: &Path) -> Arc<CodeGraph> {
         self.reconcile_workspace(root, None, &|_| {}, ReparseBudget::Query)
+    }
+
+    /// Explicit first/full reconcile (same budget as `jeikcode init`).
+    pub fn build(&self, root: &Path) -> Arc<CodeGraph> {
+        self.reconcile_workspace(root, None, &|_| {}, ReparseBudget::Unlimited)
     }
 
     /// Like [`get`], but restat/discover only under `focus` (a `code_explore`
@@ -3473,7 +3489,23 @@ impl CodeIndex {
                 }
             }
 
-            // No on-disk index at all — first-ever build for this workspace.
+            // No on-disk index at all. Query/prewarm must not walk the tree
+            // (home/`/` would be hundreds of GB). Only explicit `jeikcode init`
+            // (`ReparseBudget::Unlimited`) creates a first index.
+            if !matches!(budget, ReparseBudget::Unlimited) {
+                on_progress(
+                    "Code graph: no index yet — run `jeikcode init .` to build one. \
+                     Auto-index only refreshes an existing non-empty `.atomcode/codegraph`.",
+                );
+                let mut guard = match self.inner.lock() {
+                    Ok(g) => g,
+                    Err(p) => p.into_inner(),
+                };
+                guard.building = false;
+                self.cv.notify_all();
+                return Arc::new(CodeGraph::new());
+            }
+
             on_progress("Code graph: no SQLite index, walking workspace...");
             let files = collect_files(&root);
             let fp = fingerprint(&files);
@@ -4004,12 +4036,52 @@ export function CouponPanel() {
     }
 
     #[test]
+    fn query_get_does_not_create_codegraph_when_missing() {
+        let d = tempfile::tempdir().unwrap();
+        std::fs::write(d.path().join("a.rs"), "pub fn hello() {}\n").unwrap();
+        let idx = CodeIndex::new();
+        let g = idx.get(d.path());
+        assert_eq!(
+            g.node_count(),
+            0,
+            "query-time get() must not invent a first index"
+        );
+        assert!(
+            !d.path().join(".atomcode").join("codegraph").exists(),
+            "missing codegraph must not be auto-created; user runs `jeikcode init`"
+        );
+        assert!(!has_nonempty_codegraph(d.path()));
+        crate::codeintel::prewarm_code_index(d.path());
+        assert!(
+            !d.path().join(".atomcode").exists(),
+            "prewarm must be a no-op when codegraph is missing"
+        );
+    }
+
+    #[test]
+    fn query_get_incrementally_refreshes_existing_codegraph() {
+        let d = tempfile::tempdir().unwrap();
+        std::fs::write(d.path().join("old.rs"), "pub fn old_sym() {}\n").unwrap();
+        init_workspace_index(d.path(), false, &|_| {}).expect("init");
+        assert!(has_nonempty_codegraph(d.path()));
+
+        std::fs::write(d.path().join("new.rs"), "pub fn brand_new() {}\n").unwrap();
+        let idx = CodeIndex::new();
+        let g = idx.get(d.path());
+        assert!(!g.find_by_name("old_sym").is_empty());
+        assert!(
+            !g.find_by_name("brand_new").is_empty(),
+            "existing non-empty codegraph must still ingest new files incrementally"
+        );
+    }
+
+    #[test]
     fn new_file_create_is_ingested_without_git() {
         // Create (not just modify/delete) must be incremental even with no VCS.
         let d = tempfile::tempdir().unwrap();
         std::fs::write(d.path().join("old.rs"), "pub fn old_sym() {}\n").unwrap();
         let idx = CodeIndex::new();
-        let g1 = idx.get(d.path());
+        let g1 = idx.build(d.path());
         assert!(!g1.find_by_name("old_sym").is_empty());
         assert!(g1.find_by_name("brand_new").is_empty());
 
@@ -4068,7 +4140,7 @@ export function CouponPanel() {
             .status();
 
         let idx = CodeIndex::new();
-        let g1 = idx.get(root);
+        let g1 = idx.build(root);
         assert!(!g1.find_by_name("old_sym").is_empty());
         assert!(g1.find_by_name("new_sym").is_empty());
 
@@ -4235,7 +4307,7 @@ public class OrderController
         let f = d.path().join("a.rs");
         std::fs::write(&f, "fn one() {}\n").unwrap();
         let idx = CodeIndex::new();
-        let g1 = idx.get(d.path());
+        let g1 = idx.build(d.path());
         assert!(g1.find_by_name("two").is_empty());
         std::fs::write(&f, "fn one() {}\nfn two() {}\n").unwrap();
         let g2 = idx.get(d.path());
@@ -4283,7 +4355,7 @@ public class OrderController
         let d = tempfile::tempdir().unwrap();
         std::fs::write(d.path().join("a.rs"), "fn one() {}\n").unwrap();
         let idx = CodeIndex::new();
-        let g1 = idx.get(d.path());
+        let g1 = idx.build(d.path());
         let g2 = idx.get(d.path());
         assert!(
             Arc::ptr_eq(&g1, &g2),
@@ -4338,7 +4410,7 @@ public class OrderController
         for _ in 0..8 {
             let idx = idx.clone();
             let root = d.path().to_path_buf();
-            handles.push(std::thread::spawn(move || idx.get(&root)));
+            handles.push(std::thread::spawn(move || idx.build(&root)));
         }
         let graphs: Vec<_> = handles.into_iter().map(|h| h.join().unwrap()).collect();
         for g in &graphs[1..] {
@@ -4370,7 +4442,7 @@ public class OrderController
         std::fs::write(&target, "fn old_name() {}\n").unwrap();
 
         let idx = CodeIndex::new();
-        let g1 = idx.get(d.path());
+        let g1 = idx.build(d.path());
         assert!(g1.find_by_name("old_name").into_iter().next().is_some());
         assert!(g1.find_by_name("stable_0").into_iter().next().is_some());
         assert!(g1.find_by_name("new_name").is_empty());
@@ -4404,7 +4476,7 @@ public class OrderController
         std::fs::write(d.path().join("keep.rs"), "fn keep() {}\n").unwrap();
         std::fs::write(d.path().join("gone.rs"), "fn gone() {}\n").unwrap();
         let idx = CodeIndex::new();
-        let g1 = idx.get(d.path());
+        let g1 = idx.build(d.path());
         assert!(g1.find_by_name("gone").into_iter().next().is_some());
         std::fs::remove_file(d.path().join("gone.rs")).unwrap();
         let g2 = idx.get(d.path());
@@ -4449,7 +4521,7 @@ public class OrderController
         )
         .unwrap();
         let idx = CodeIndex::new();
-        let g1 = idx.get(d.path());
+        let g1 = idx.build(d.path());
         let run = g1.find_by_name("run").into_iter().next().unwrap();
         let compute = g1.find_by_name("compute").into_iter().next().unwrap();
         assert!(g1
@@ -4643,7 +4715,7 @@ public class OrderController
         std::fs::write(root.join("b.rs"), "pub fn beta() {}").unwrap();
 
         let index = CodeIndex::new();
-        let g = index.get(root);
+        let g = index.build(root);
         assert_eq!(g.node_count(), 2);
         assert!(!g.find_by_name("alpha").is_empty());
         assert!(!g.find_by_name("beta").is_empty());
@@ -4693,7 +4765,7 @@ public class OrderController
             .unwrap();
         }
         let idx = CodeIndex::new();
-        let _ = idx.get(d.path());
+        let _ = idx.build(d.path());
 
         // Poison in-memory keys with forward slashes (the SQLite/JSON round-trip
         // bug that made every file look new).
@@ -4776,7 +4848,7 @@ public class OrderController
         std::fs::write(b.join("b.rs"), "fn beta() {}\n").unwrap();
 
         let idx = CodeIndex::new();
-        let g1 = idx.get(d.path());
+        let g1 = idx.build(d.path());
         assert!(g1.find_by_name("alpha").into_iter().next().is_some());
         assert!(g1.find_by_name("beta").into_iter().next().is_some());
 
@@ -4802,7 +4874,7 @@ public class OrderController
     }
 
     #[test]
-    fn query_time_first_build_caps_reparse() {
+    fn query_time_does_not_first_build() {
         let d = tempfile::tempdir().unwrap();
         let n = MAX_REPARSE_PER_QUERY + 12;
         for i in 0..n {
@@ -4813,17 +4885,13 @@ public class OrderController
             .unwrap();
         }
         let idx = CodeIndex::new();
-        let _ = idx.get(d.path());
-        let stats = idx.last_stats(d.path()).unwrap();
-        let units = idx.inner.lock().unwrap().units.len();
+        let g = idx.get(d.path());
+        assert_eq!(g.node_count(), 0);
         assert!(
-            stats.reparsed <= MAX_REPARSE_PER_QUERY,
-            "query-time must not re-tree-sitter the whole workspace: {stats:?}"
+            idx.inner.lock().unwrap().units.is_empty(),
+            "query-time must not create a first index; run `jeikcode init`"
         );
-        assert!(
-            units <= MAX_REPARSE_PER_QUERY,
-            "capped first build must not persist the deferred files as indexed: {units}"
-        );
+        assert!(!d.path().join(".atomcode").join("codegraph").exists());
     }
 
     #[test]
@@ -4861,10 +4929,11 @@ public class OrderController
             .unwrap();
         }
         let idx = CodeIndex::new();
-        let _ = idx.get(d.path());
-        assert!(
-            idx.inner.lock().unwrap().units.len() <= MAX_REPARSE_PER_QUERY,
-            "precondition: query-time index is truncated"
+        let g = idx.get(d.path());
+        assert_eq!(
+            g.node_count(),
+            0,
+            "query-time get() must not create a truncated first index"
         );
 
         let report = init_workspace_index(d.path(), true, &|_| {}).expect("init --force");
@@ -4894,6 +4963,16 @@ public class OrderController
         }
         std::fs::write(focus.join("hot.rs"), "pub fn focused_sym() {}\n").unwrap();
 
+        init_workspace_index(d.path(), false, &|_| {}).expect("init");
+        for i in 0..(MAX_REPARSE_PER_QUERY + 12) {
+            std::fs::write(
+                other.join(format!("o{i:03}.rs")),
+                format!("pub fn other_{i}() {{ /* dirty */ }}\n"),
+            )
+            .unwrap();
+        }
+        std::fs::write(focus.join("hot.rs"), "pub fn focused_sym() { /* dirty */ }\n").unwrap();
+
         let idx = CodeIndex::new();
         let g = idx.get_scoped(d.path(), Some(&focus));
         assert!(
@@ -4906,13 +4985,15 @@ public class OrderController
     fn unparseable_sibling_is_tombstoned_not_rediscovered() {
         let d = tempfile::tempdir().unwrap();
         std::fs::write(d.path().join("keep.rs"), "pub fn keep() {}\n").unwrap();
-        std::fs::write(d.path().join("empty.json"), "").unwrap();
+        // Non-empty but unparseable: zero-byte files are skipped by the walker,
+        // so they never become tombstones.
+        std::fs::write(d.path().join("empty.json"), "{").unwrap();
 
         let idx = CodeIndex::new();
-        let _ = idx.get(d.path());
+        let _ = idx.build(d.path());
         assert!(
             idx.inner.lock().unwrap().units.len() >= 2,
-            "empty.json must stay in units as a tombstone"
+            "unparseable json must stay in units as a tombstone"
         );
 
         let _ = idx.get(d.path());

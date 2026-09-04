@@ -363,19 +363,17 @@ fn adopt_session_as_view(
     Ok(())
 }
 
-/// Open a catalog session as the TUI view. The catalog lease is dropped: the
-/// target runner acquires its own ownership. The current runtime is never asked
-/// to reconfigure.
+/// Open a catalog session as the TUI view. Viewing never takes the exclusive
+/// runtime lease — another TUI / WebUI / observe client may already hold it.
+/// The current runtime is never asked to reconfigure.
 pub(crate) fn open_catalog_session_view(
     ctx: &mut LoopCtx,
     state: &mut crate::state::UiState,
     renderer: &mut dyn Renderer,
     session: Session,
-    lease: atomcode_capabilities::session::SessionLease,
     _working_dir: PathBuf,
     _project_bucket: String,
 ) -> Result<(), String> {
-    drop(lease);
     adopt_session_as_view(ctx, state, session)?;
     crate::modals::session_picker::replay_session(renderer, state, &ctx.current_session, true);
     let short_id = ctx.current_session.short_id().to_string();

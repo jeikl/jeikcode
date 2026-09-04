@@ -23,7 +23,10 @@ pub mod symbols;
 
 pub use explore::CodeExploreTool;
 pub use graph::{CodeGraph, Edge, EdgeKind, SymbolId, SymbolKind, SymbolNode, Visibility};
-pub use index::{build_graph, disk_cache_path, init_workspace_index, CodeIndex, IndexReport};
+pub use index::{
+    build_graph, disk_cache_path, has_nonempty_codegraph, init_workspace_index, CodeIndex,
+    IndexReport,
+};
 pub use index_db::DISK_CACHE_REL_DB;
 pub use lang::Lang;
 pub use repo_map::RepoMapTool;
@@ -91,8 +94,16 @@ pub fn notify_code_index_file_changed(path: &Path, content: Option<&str>) {
 /// Asynchronously prewarms the shared code index for `root` on a detached background thread.
 /// Completely non-blocking to startup, LLM streaming, and TUI events, ensuring cold-start
 /// queries execute in milliseconds.
+///
+/// Only runs when `{root}/.atomcode/codegraph` already has a non-empty index.
+/// Missing or empty graphs are never auto-created — the user must run
+/// `jeikcode init .` for a first index. Incremental refresh of an existing
+/// index stays in the background.
 pub fn prewarm_code_index(root: &Path) {
     let root_buf = canonical(root);
+    if !has_nonempty_codegraph(&root_buf) {
+        return;
+    }
     let index = shared_code_index();
     std::thread::Builder::new()
         .name("codeintel-prewarm".to_string())

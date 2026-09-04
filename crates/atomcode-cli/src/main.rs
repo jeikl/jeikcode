@@ -2348,7 +2348,8 @@ async fn run() -> Result<i32> {
             dangerously_skip_permissions: cli.dangerously_skip_permissions,
         });
 
-        // Eagerly prewarm the CodeIntel index for the active working directory in background
+        // Incremental refresh only when `.atomcode/codegraph` already exists and
+        // is non-empty. Missing graphs are never auto-created (no walk of `~` / `/`).
         atomcode_capabilities::codeintel::prewarm_code_index(&working_dir);
 
         // Headless mode: -p / --prompt-file triggers non-interactive execution.

@@ -276,15 +276,19 @@ fn build_repo_map(
     mode: &str,
 ) -> String {
     // Fully index-backed: the shared CodeGraph is the single source of truth.
-    // `index.get(target_dir)` triggers an INCREMENTAL index of the target
-    // directory on first use (fast multi-threaded unit sync — the same update
-    // `atomcode init` produces), so a `path:` pointing at a never-indexed
-    // directory is indexed on the spot, exactly like every other index-backed
-    // tool (code_explore). The graph is rooted at `target_dir`,
-    // so every indexed file lives inside it — no disk walk, no filter needed.
+    // `index.get(target_dir)` incrementally refreshes an existing
+    // `.atomcode/codegraph`. A workspace without an index is not walked —
+    // the user must run `jeikcode init .` for a first build.
     let graph = index.get(target_dir);
     let files: Vec<PathBuf> = graph.file_symbols.keys().cloned().collect();
     if files.is_empty() {
+        if !super::has_nonempty_codegraph(working_dir) && !super::has_nonempty_codegraph(target_dir)
+        {
+            return "No code graph index for this workspace. Run `jeikcode init .` to build one. \
+                    Automatic indexing only refreshes an existing non-empty `.atomcode/codegraph`; \
+                    it never creates a first index."
+                .to_string();
+        }
         return "(no indexed source files found in target directory)".to_string();
     }
 
@@ -661,6 +665,7 @@ mod tests {
         .unwrap();
 
         let index = Arc::new(CodeIndex::new());
+        let _ = index.build(root);
         let map_output = build_repo_map(&index, root, root, 10, "full");
         assert!(map_output.contains("CODEBASE ARCHITECTURE MAP"));
         assert!(map_output.contains("DIRECTORY TREE"));
@@ -684,6 +689,7 @@ mod tests {
         std::fs::write(root.join("b.rs"), "pub fn b() {}\n").unwrap();
 
         let index = Arc::new(CodeIndex::new());
+        let _ = index.build(root);
         let map_output = build_repo_map(&index, root, root, 10, "tree");
         assert!(map_output.contains("DIRECTORY TREE"));
         assert!(!map_output.contains("SYMBOL DETAIL"));
@@ -707,6 +713,7 @@ mod tests {
         std::fs::write(root.join("crates/core/src/util.rs"), "pub fn util() {}\n").unwrap();
 
         let index = Arc::new(CodeIndex::new());
+        let _ = index.build(root);
         let map_output = build_repo_map(&index, root, root, 10, "tree");
         // Top-level file names appear verbatim; no root count summary.
         assert!(map_output.contains("main.rs"));
@@ -738,6 +745,7 @@ mod tests {
         std::fs::write(root.join("src/lib.rs"), "pub fn b() {}\n").unwrap();
 
         let index = Arc::new(CodeIndex::new());
+        let _ = index.build(root);
         let map_output = build_repo_map(&index, root, root, 10, "tree");
         assert!(map_output.contains("src/"));
         assert!(map_output.contains("(1 file"));
@@ -756,6 +764,7 @@ mod tests {
             std::fs::create_dir(r.join(".git")).unwrap();
         }
         let index = Arc::new(CodeIndex::new());
+        let _ = index.build(root);
         let map_output = build_repo_map(&index, root, root, 10, "tree");
         assert!(
             map_output.contains("Multi-repo workspace"),
@@ -771,6 +780,7 @@ mod tests {
         std::fs::write(root.join("a.rs"), "pub fn a() {}\n").unwrap();
 
         let index = Arc::new(CodeIndex::new());
+        let _ = index.build(root);
         let map_output = build_repo_map(&index, root, root, 10, "symbols");
         assert!(map_output.contains("SYMBOL DETAIL"));
         assert!(!map_output.contains("DIRECTORY TREE"));

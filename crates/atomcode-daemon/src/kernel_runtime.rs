@@ -216,6 +216,8 @@ pub fn spawn_native_runtime_for_session_deferred_with_preprocessor(
                 *output_sequence = output_sequence.wrapping_add(1);
                 result
             };
+        let working_dir = cfg.working_dir.clone();
+        let session_id = id.clone();
         let bootstrap = if cfg.model.is_empty() {
             atomcode_coding::ProviderBootstrap::Unavailable(
                 atomcode_coding::ProviderUnavailableReason::NotConfigured,
@@ -245,6 +247,105 @@ pub fn spawn_native_runtime_for_session_deferred_with_preprocessor(
         .await;
         let (runtime, _) = match runtime {
             Ok(runtime) => runtime,
+            Err(error)
+                if matches!(
+                    error,
+                    atomcode_coding::RuntimeStartError::SessionInUse { .. }
+                ) || error.to_string().contains("already in use") =>
+            {
+                if let Some(handle) =
+                    crate::native_live::wait_for_existing_runner_handle(&session_id).await
+                {
+                    state_tx.send_replace(atomcode_coding::DeferredRuntimeState::Ready(
+                        handle.clone(),
+                    ));
+                    let reg = atomcode_coding::session_runtime_registry::SessionRuntimeRegistry::global();
+                    let _ = reg.open_or_attach(session_id.clone(), working_dir.clone());
+                    let _ = reg.bind_handle(&session_id, handle.clone(), None);
+                    if let Ok((_, mut rx)) = reg.subscribe(&session_id, None) {
+                        loop {
+                            tokio::select! {
+                                control = control_rx.recv() => {
+                                    match control {
+                                        None | Some(atomcode_coding::DriverCommand::Shutdown) => {
+                                            return;
+                                        }
+                                        Some(control) => {
+                                            let _ = handle.dispatch(control);
+                                        }
+                                    }
+                                }
+                                seq = rx.recv() => match seq {
+                                    Ok(sequenced) => {
+                                        if let Some(event) = sequenced.runtime {
+                                            if send_event(
+                                                &event_tx,
+                                                &mut output_sequence,
+                                                sequenced.generation,
+                                                event,
+                                            )
+                                            .is_err()
+                                            {
+                                                return;
+                                            }
+                                        }
+                                    }
+                                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {}
+                                    Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                                        while let Some(control) = control_rx.recv().await {
+                                            if matches!(
+                                                control,
+                                                atomcode_coding::DriverCommand::Shutdown
+                                            ) {
+                                                return;
+                                            }
+                                            let _ = handle.dispatch(control);
+                                        }
+                                        return;
+                                    }
+                                },
+                            }
+                        }
+                    }
+                    while let Some(control) = control_rx.recv().await {
+                        if matches!(control, atomcode_coding::DriverCommand::Shutdown) {
+                            return;
+                        }
+                        let _ = handle.dispatch(control);
+                    }
+                    return;
+                }
+                let message = error.to_string();
+                state_tx.send_replace(atomcode_coding::DeferredRuntimeState::Failed(
+                    message.clone(),
+                ));
+                let _ = send_event(
+                    &event_tx,
+                    &mut output_sequence,
+                    0,
+                    CodingRuntimeEvent::Agent(atomcode_kernel::event::AgentEvent::Error {
+                        message: message.clone(),
+                        http_status: None,
+                        code: None,
+                    }),
+                );
+                while let Some(control) = control_rx.recv().await {
+                    if matches!(control, atomcode_coding::DriverCommand::Shutdown) {
+                        break;
+                    }
+                    let _ = send_event(
+                        &event_tx,
+                        &mut output_sequence,
+                        0,
+                        CodingRuntimeEvent::Agent(atomcode_kernel::event::AgentEvent::Error {
+                            message: format!("runtime unavailable: {message}"),
+                            http_status: None,
+                            code: None,
+                        }),
+                    );
+                }
+                return;
+            }
             Err(error) => {
                 let message = error.to_string();
                 state_tx.send_replace(atomcode_coding::DeferredRuntimeState::Failed(
@@ -285,6 +386,11 @@ pub fn spawn_native_runtime_for_session_deferred_with_preprocessor(
             ..
         } = runtime;
         state_tx.send_replace(atomcode_coding::DeferredRuntimeState::Ready(handle.clone()));
+        {
+            let reg = atomcode_coding::session_runtime_registry::SessionRuntimeRegistry::global();
+            let _ = reg.open_or_attach(session_id.clone(), working_dir);
+            let _ = reg.bind_handle(&session_id, handle.clone(), None);
+        }
         loop {
             tokio::select! {
                 control = control_rx.recv() => {
@@ -561,11 +667,13 @@ mod tests {
             .await
             .unwrap()
             .unwrap();
-        assert!(matches!(
-            &*second_state.borrow(),
-            atomcode_coding::DeferredRuntimeState::Failed(message)
-                if message.contains("already in use")
-        ));
+        assert!(
+            matches!(
+                *second_state.borrow(),
+                atomcode_coding::DeferredRuntimeState::Ready(_)
+            ),
+            "a second view must attach the unique runtime instead of failing occupancy"
+        );
 
         first_tx
             .send(atomcode_coding::DriverCommand::Shutdown)

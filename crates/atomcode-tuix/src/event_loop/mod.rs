@@ -2286,6 +2286,9 @@ pub struct ReadyRuntimeControl {
     event_tx: std::sync::Arc<
         std::sync::Mutex<Option<mpsc::UnboundedSender<bg_runtime::RuntimeEventPayload>>>,
     >,
+    /// Observer of the unique session runtime. `Shutdown` only detaches this
+    /// view; it must not kill the shared CodingRuntime.
+    shared: bool,
 }
 
 #[derive(Default)]
@@ -2362,6 +2365,7 @@ impl ReadyRuntimeControl {
             handle,
             queue: std::sync::Arc::new(std::sync::Mutex::new(ReadyRuntimeQueue::default())),
             event_tx: std::sync::Arc::new(std::sync::Mutex::new(None)),
+            shared: false,
         }
     }
 
@@ -2369,10 +2373,19 @@ impl ReadyRuntimeControl {
         handle: CodingRuntimeHandle,
         event_tx: mpsc::UnboundedSender<bg_runtime::RuntimeEventPayload>,
     ) -> Self {
+        Self::with_event_tx_shared(handle, event_tx, false)
+    }
+
+    fn with_event_tx_shared(
+        handle: CodingRuntimeHandle,
+        event_tx: mpsc::UnboundedSender<bg_runtime::RuntimeEventPayload>,
+        shared: bool,
+    ) -> Self {
         Self {
             handle,
             queue: std::sync::Arc::new(std::sync::Mutex::new(ReadyRuntimeQueue::default())),
             event_tx: std::sync::Arc::new(std::sync::Mutex::new(Some(event_tx))),
+            shared,
         }
     }
 
@@ -2468,6 +2481,15 @@ impl ReadyRuntimeControl {
                     }
                 }
                 ReadyRuntimeRequest::Dispatch(command) => {
+                    if self.shared
+                        && matches!(command, atomcode_coding::DriverCommand::Shutdown)
+                    {
+                        *self
+                            .event_tx
+                            .lock()
+                            .expect("runtime delivery event sender poisoned") = None;
+                        continue;
+                    }
                     if self.handle.dispatch(command).is_err() {
                         self.report_delivery_failure("command");
                     }
@@ -2801,6 +2823,24 @@ impl RuntimeControl {
         event_tx: mpsc::UnboundedSender<bg_runtime::RuntimeEventPayload>,
     ) -> Self {
         Self::Ready(ReadyRuntimeControl::with_event_tx(handle, event_tx))
+    }
+
+    /// Same as [`Self::ready_with_event_tx`], but leaving this view must not
+    /// shut down the unique session runtime (TUI/WebUI observer).
+    pub fn ready_observer_with_event_tx(
+        handle: CodingRuntimeHandle,
+        event_tx: mpsc::UnboundedSender<bg_runtime::RuntimeEventPayload>,
+    ) -> Self {
+        Self::Ready(ReadyRuntimeControl::with_event_tx_shared(
+            handle, event_tx, true,
+        ))
+    }
+
+    pub(crate) fn is_shared_observer(&self) -> bool {
+        match self {
+            Self::Ready(ready) => ready.shared,
+            Self::Deferred(_) => false,
+        }
     }
 
     pub fn deferred(
@@ -19877,6 +19917,14 @@ fn publish_registry_runtime_event(
 
     let reg = SessionRuntimeRegistry::global();
     let _ = reg.open_or_attach(session_id.clone(), working_dir);
+    let handle = if runtime_id == ctx.foreground_runtime_id {
+        ctx.runtime.active_handle_for_registry()
+    } else {
+        ctx.bg_manager.handle_for_runtime(runtime_id)
+    };
+    if let Some(handle) = handle {
+        let _ = reg.bind_handle(&session_id, handle, Some(runtime_id.as_u64()));
+    }
     let _ = reg.push_runtime_event(&session_id, generation, coding);
 }
 

@@ -2858,6 +2858,13 @@ body {
 }
 .mcp-refresh-btn:disabled { cursor: default; opacity: 0.7; }
 .mcp-refresh-btn.spinning svg { animation: spin 0.8s linear infinite; }
+.mcp-reloaded-hint {
+  margin-right: auto;
+  padding: 0 6px;
+  font-size: 11px;
+  color: var(--app-success-foreground, var(--app-primary-foreground));
+  opacity: 0.85;
+}
 .mcp-menu-row {
   display: flex;
   flex-direction: column;

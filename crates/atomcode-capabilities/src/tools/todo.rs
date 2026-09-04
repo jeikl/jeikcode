@@ -757,15 +757,18 @@ impl Tool for TodoTool {
         String::new()
     }
     async fn execute(&self, args: &str, _ctx: &ToolContext) -> ToolResult {
-        let Ok(v) = serde_json::from_str::<serde_json::Value>(args) else {
+        let Ok(mut v) = serde_json::from_str::<serde_json::Value>(args) else {
             return err("todowrite: invalid JSON arguments.".to_string());
         };
+        crate::tools::repair::decode_lenient_array_field(&mut v, "actions", false);
+        crate::tools::repair::decode_lenient_array_field(&mut v, "todos", false);
+        let args = v.to_string();
         let mut list = self.lock_live().clone();
 
         // Legacy full-list replace (resume / old transcripts). Prefer `actions`.
         // `actions` wins if both fields are present (same as the fold).
         if v.get("actions").and_then(|a| a.as_array()).is_none() && v.get("todos").is_some() {
-            return match parse_todos(args) {
+            return match parse_todos(&args) {
                 Ok(todos) => {
                     *self.lock_live() = todos.clone();
                     ok(render_todos_numbered(&todos, false))
@@ -788,7 +791,7 @@ impl Tool for TodoTool {
             Err(e) => return err(with_current_list(e, &list)),
         };
 
-        match try_apply_todo_args(&mut list, args) {
+        match try_apply_todo_args(&mut list, &args) {
             Ok(ApplyOutcome::Unchanged) => ok(format!(
                 "No change — already in that state. Do not retry.\n\n{}",
                 render_todos_numbered(&list, false)

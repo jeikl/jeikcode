@@ -29,7 +29,10 @@ struct Args {
     #[serde(alias = "pat")]
     pattern: String,
     /// Files / dirs / globs to search. Defaults to the working directory.
-    #[serde(default)]
+    #[serde(
+        default,
+        deserialize_with = "crate::tools::repair::deserialize_lenient_string_list"
+    )]
     paths: Vec<String>,
     /// Optional language override (else inferred from each file's extension).
     #[serde(default)]

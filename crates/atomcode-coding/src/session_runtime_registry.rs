@@ -51,6 +51,15 @@ impl RuntimeActivity {
     pub fn is_idle_releasable(self) -> bool {
         matches!(self, Self::Stopped | Self::Failed | Self::Ready)
     }
+
+    /// A bound runner is mid-turn. `Starting` is only "row exists" (view
+    /// subscribe / deferred spawn) and must not spin WebUI `/chat/active`.
+    pub fn is_live_turn(self) -> bool {
+        matches!(
+            self,
+            Self::Running | Self::WaitingApproval | Self::WaitingUserInput
+        )
+    }
 }
 
 /// Outcome of [`SessionRuntimeRegistry::open_or_attach`].
@@ -295,6 +304,20 @@ impl SessionRuntimeRegistry {
             .collect()
     }
 
+    /// Session ids whose **bound** runner is actually in a turn.
+    ///
+    /// `open_or_attach` / `subscribe_or_empty` leave handle-less `Starting`
+    /// (or `InputAccepted` → `Running`) rows. Those are views, not occupancy.
+    pub fn live_turn_session_ids(&self) -> Vec<SessionKey> {
+        self.entries
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .values()
+            .filter(|e| e.handle.is_some() && e.meta.activity.is_live_turn())
+            .map(|e| e.meta.session_id.clone())
+            .collect()
+    }
+
     pub fn live_count(&self) -> usize {
         self.entries.read().unwrap_or_else(|e| e.into_inner()).len()
     }
@@ -467,6 +490,16 @@ impl SessionRuntimeRegistry {
         if let crate::runtime::CodingRuntimeEvent::TurnFinished(_) = &event {
             inner.pending_request_id = None;
         }
+        // Snapshot already has the completed turn. Replaying TextDelta / ToolStart
+        // on top of it duplicates the last assistant (text + tools) after a
+        // sidebar session switch reconnects `/live?session_id=`.
+        if matches!(
+            &event,
+            crate::runtime::CodingRuntimeEvent::TurnFinished(_)
+                | crate::runtime::CodingRuntimeEvent::RuntimeStopped(_)
+        ) {
+            inner.journal.clear();
+        }
         inner.push_runtime(generation, event);
         true
     }
@@ -610,6 +643,13 @@ impl SessionRuntimeRegistry {
         }
     }
 
+    /// Drop the registry row without shutting the runtime down. Used when the
+    /// bound handle has already been freshed onto a new session id.
+    pub fn detach(&self, key: &SessionKey) -> bool {
+        let mut guard = self.entries.write().unwrap_or_else(|e| e.into_inner());
+        guard.remove(key).is_some()
+    }
+
     pub fn shutdown_all(&self) {
         let mut guard = self.entries.write().unwrap_or_else(|e| e.into_inner());
         for (_, entry) in guard.drain() {
@@ -745,6 +785,51 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn turn_finished_clears_delta_journal_so_reconnect_does_not_duplicate() {
+        use atomcode_kernel::event::AgentEvent;
+        let reg = SessionRuntimeRegistry::new();
+        reg.open_or_attach("s".into(), PathBuf::from("/p")).unwrap();
+        assert!(reg.push_runtime_event(
+            &"s".into(),
+            1,
+            crate::runtime::CodingRuntimeEvent::Agent(AgentEvent::TextDelta("hi".into())),
+        ));
+        assert!(reg.push_runtime_event(
+            &"s".into(),
+            1,
+            crate::runtime::CodingRuntimeEvent::TurnFinished(
+                crate::runtime::TurnCompletion::SnapshotUnavailable {
+                    turn_id: 1,
+                    reason: atomcode_kernel::event::StopReason::Stopped,
+                    error: crate::runtime::RuntimeSnapshotError {
+                        message: "done".into(),
+                    },
+                    stats: crate::runtime::RuntimeTurnStats {
+                        last_usage: None,
+                        duration: std::time::Duration::from_millis(1),
+                        turn_count: 1,
+                        tool_call_count: 0,
+                    },
+                },
+            ),
+        ));
+        let (replay, _rx) = reg.subscribe(&"s".into(), None).unwrap();
+        assert!(
+            replay.iter().all(|event| !matches!(
+                event.runtime,
+                Some(crate::runtime::CodingRuntimeEvent::Agent(
+                    AgentEvent::TextDelta(_)
+                ))
+            )),
+            "completed-turn deltas must not be replayed on the next live join"
+        );
+        assert!(replay.iter().any(|event| matches!(
+            event.runtime,
+            Some(crate::runtime::CodingRuntimeEvent::TurnFinished(_))
+        )));
+    }
+
+    #[tokio::test]
     async fn push_runtime_event_fans_out_text_delta_to_subscribers() {
         use atomcode_kernel::event::AgentEvent;
         let reg = SessionRuntimeRegistry::new();
@@ -791,6 +876,28 @@ mod tests {
             }
             other => panic!("expected InputAccepted, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn view_only_rows_are_not_live_turns() {
+        assert!(!RuntimeActivity::Starting.is_live_turn());
+        assert!(!RuntimeActivity::Ready.is_live_turn());
+        assert!(!RuntimeActivity::Reconfiguring.is_live_turn());
+        assert!(RuntimeActivity::Running.is_live_turn());
+        assert!(RuntimeActivity::WaitingApproval.is_live_turn());
+        assert!(RuntimeActivity::WaitingUserInput.is_live_turn());
+
+        let reg = SessionRuntimeRegistry::new();
+        reg.open_or_attach("a".into(), PathBuf::from("/p")).unwrap();
+        assert!(
+            reg.live_turn_session_ids().is_empty(),
+            "subscribe/open_or_attach Starting must not occupy /chat/active"
+        );
+        reg.set_activity(&"a".into(), RuntimeActivity::Running);
+        assert!(
+            reg.live_turn_session_ids().is_empty(),
+            "InputAccepted without a bound handle must not occupy /chat/active"
+        );
     }
 
     #[test]

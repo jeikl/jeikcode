@@ -109,7 +109,14 @@ fn repair_stringified_structured_fields(args: &str, schema: &serde_json::Value) 
         if !wants_array && !wants_object {
             continue;
         }
-        let Ok(decoded) = serde_json::from_str::<serde_json::Value>(raw) else {
+        let Ok(decoded) = serde_json::from_str::<serde_json::Value>(raw)
+            .or_else(|_| serde_json::from_str(&repair_json(raw)))
+        else {
+            // `string[]` fields (ast_grep `paths`, …): a bare path is a 1-element list.
+            if wants_array && schema_items_are_strings(property_schema) && !raw.trim().is_empty() {
+                arguments.insert(name.clone(), serde_json::Value::Array(vec![raw.into()]));
+                changed = true;
+            }
             continue;
         };
         if (wants_array && decoded.is_array()) || (wants_object && decoded.is_object()) {
@@ -354,6 +361,99 @@ fn collect_schema_types(
                 collect_schema_types(branch, types, depth + 1);
             }
         }
+    }
+}
+
+fn schema_items_are_strings(property_schema: &serde_json::Value) -> bool {
+    let Some(items) = property_schema.get("items") else {
+        return false;
+    };
+    let mut types = std::collections::BTreeSet::new();
+    collect_schema_types(items, &mut types, 0);
+    types.contains("string") && !types.contains("object") && !types.contains("array")
+}
+
+/// Decode one stringified JSON layer for a top-level field whose public schema is
+/// an array. Hidden compatibility — never advertised:
+/// - `"[{...}]"` / `[...]` with raw newlines (via `repair_json`)
+/// - a single object → one-element array
+/// - when `wrap_plain_string`, a bare string (`"src/a.rs"`) → `["src/a.rs"]`
+pub(crate) fn decode_lenient_array_field(
+    root: &mut serde_json::Value,
+    field: &str,
+    wrap_plain_string: bool,
+) {
+    let Some(obj) = root.as_object_mut() else {
+        return;
+    };
+    let Some(raw) = obj.get(field).cloned() else {
+        return;
+    };
+    match raw {
+        serde_json::Value::Array(_) => {}
+        serde_json::Value::Object(_) => {
+            obj.insert(field.to_string(), serde_json::Value::Array(vec![raw]));
+        }
+        serde_json::Value::String(s) => {
+            let t = s.trim();
+            if t.is_empty() {
+                obj.insert(field.to_string(), serde_json::Value::Array(vec![]));
+                return;
+            }
+            let parsed = serde_json::from_str::<serde_json::Value>(t)
+                .or_else(|_| serde_json::from_str(&repair_json(t)));
+            match parsed {
+                Ok(v) if v.is_array() => {
+                    obj.insert(field.to_string(), v);
+                }
+                Ok(v) if v.is_object() => {
+                    obj.insert(field.to_string(), serde_json::Value::Array(vec![v]));
+                }
+                _ if wrap_plain_string => {
+                    obj.insert(field.to_string(), serde_json::json!([s]));
+                }
+                _ => {}
+            }
+        }
+        _ => {}
+    }
+}
+
+/// `string[]` serde helper: array, single string, or stringified JSON array.
+pub(crate) fn deserialize_lenient_string_list<'de, D>(d: D) -> Result<Vec<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    use serde::Deserialize;
+    let value = Option::<serde_json::Value>::deserialize(d)?;
+    match value {
+        None | Some(serde_json::Value::Null) => Ok(Vec::new()),
+        Some(serde_json::Value::Array(items)) => items
+            .into_iter()
+            .map(|v| match v {
+                serde_json::Value::String(s) => Ok(s),
+                other => Ok(other.to_string().trim_matches('"').to_string()),
+            })
+            .collect(),
+        Some(serde_json::Value::String(s)) => {
+            let t = s.trim();
+            if t.is_empty() {
+                return Ok(Vec::new());
+            }
+            let parsed = serde_json::from_str::<serde_json::Value>(t)
+                .or_else(|_| serde_json::from_str(&repair_json(t)));
+            match parsed {
+                Ok(serde_json::Value::Array(items)) => items
+                    .into_iter()
+                    .map(|v| match v {
+                        serde_json::Value::String(s) => Ok(s),
+                        other => Ok(other.to_string().trim_matches('"').to_string()),
+                    })
+                    .collect(),
+                _ => Ok(vec![s]),
+            }
+        }
+        Some(_) => Ok(Vec::new()),
     }
 }
 
@@ -2007,6 +2107,42 @@ mod middleware_tests {
             c.arguments
         );
         assert_eq!(value["todos"][0]["content"], "build");
+    }
+
+    #[test]
+    fn wraps_plain_string_as_one_element_array_when_items_are_strings() {
+        let paths_schema = json!({
+            "type": "object",
+            "properties": {
+                "paths": { "type": "array", "items": { "type": "string" } }
+            }
+        });
+        let mw = RepairToolArgsMiddleware;
+        let mut c = call("ast_grep", r#"{"paths":"src/main.rs"}"#);
+        mw.repair_call("ast_grep", &paths_schema, &mut c);
+        let value: serde_json::Value = serde_json::from_str(&c.arguments).unwrap();
+        assert_eq!(
+            value["paths"],
+            json!(["src/main.rs"]),
+            "bare path string must become a 1-element array: {}",
+            c.arguments
+        );
+    }
+
+    #[test]
+    fn decodes_stringified_array_with_raw_newlines_via_repair_json() {
+        let mw = RepairToolArgsMiddleware;
+        let inner = "[{ \"content\": \"line1\nline2\", \"status\": \"pending\" }]";
+        let args = serde_json::json!({ "todos": inner }).to_string();
+        let mut c = call("todowrite", &args);
+        mw.repair_call("todowrite", &schema(), &mut c);
+        let value: serde_json::Value = serde_json::from_str(&c.arguments).unwrap();
+        assert!(
+            value["todos"].is_array(),
+            "inner newlines must be repaired then decoded: {}",
+            c.arguments
+        );
+        assert_eq!(value["todos"][0]["content"], "line1\nline2");
     }
 
     #[test]

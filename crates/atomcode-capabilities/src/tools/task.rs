@@ -288,7 +288,10 @@ struct SubTask {
     difficulty: String,
     /// Worker-only: working-dir-relative globs the worker may WRITE within. Required for
     /// `worker`; ignored for `explore` (read-only). Enforced by `WorkerScopeGate`.
-    #[serde(default)]
+    #[serde(
+        default,
+        deserialize_with = "crate::tools::repair::deserialize_lenient_string_list"
+    )]
     scope: Vec<String>,
 }
 
@@ -656,10 +659,17 @@ parallel workers NON-OVERLAPPING scopes."
 /// mismatch would let a file-editing worker with control-char args skip the approval
 /// gate.
 fn parse_task_args(args: &str) -> Result<Args, serde_json::Error> {
-    match serde_json::from_str::<Args>(args) {
-        Ok(a) => Ok(a),
-        Err(_) => serde_json::from_str::<Args>(&super::repair::repair_json(args)),
+    let mut value: serde_json::Value = match serde_json::from_str(args) {
+        Ok(v) => v,
+        Err(_) => serde_json::from_str(&super::repair::repair_json(args))?,
+    };
+    super::repair::decode_lenient_array_field(&mut value, "tasks", false);
+    if let Some(arr) = value.get_mut("tasks").and_then(|x| x.as_array_mut()) {
+        for task in arr {
+            super::repair::decode_lenient_array_field(task, "scope", true);
+        }
     }
+    serde_json::from_value(value)
 }
 
 /// A one-line preview of what a child is about to do this round — the tool name plus a

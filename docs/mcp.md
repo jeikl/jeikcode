@@ -120,7 +120,7 @@ TUI 里等价的是 `/mcp login <server>` / `/mcp logout <server>`。token 存 `
 
 MCP 总开关：`CodingRuntimeConfig.mcp` 默认 `true`；`atomcode-clix` 提供 `--no-mcp`。主 CLI 没有全局关闭开关，按 server 用 `"disabled": true`。
 
-`scope=session` 的工具目录来自短生命周期只读探测缓存（启动 / `/mcp reload` / WebUI 刷新）。未 spawn 的会话读探测缓存，已 spawn 的会话以活连接 `tools/list` 为准。每个会话在第一次 `call_tool` 时才起独立进程。切会话 / lease Drop 不杀进程；删除会话杀该会话的进程；JeikCode 进程退出回收全部 session MCP。热重载按 server 做 config diff：command/args/env/url 等没变则保留活进程，变了只回收那一台。默认 `scope=project` 仍是无状态单例，随进程退出回收。
+`scope=session` 的工具目录来自短生命周期只读探测缓存（启动 / `/mcp reload` / WebUI 刷新）。未 spawn 的会话读探测缓存，已 spawn 的会话以活连接 `tools/list` 为准。每个会话在第一次 `call_tool` 时才起独立进程。切会话 / lease Drop 不杀进程；删除会话杀该会话的进程；JeikCode 进程退出回收全部 session MCP。热重载按 server 做 config diff：command/args/env/url 等没变则保留活进程，变了只回收那一台。默认 `scope=project` 仍是无状态单例，随进程退出回收。浏览器类 MCP（`chrome-devtools-mcp` / `js-reverse-mcp` 等）默认共用 `~/.cache/chrome-devtools-mcp/chrome-profile`，多 session 并行时请在 `args` 里自行加上 `--isolated` 或独立 `--userDataDir`。
 
 > **缓存红线**：MCP 工具定义属于 provider 请求的缓存前缀，所以连接在首轮之前发起、工具集不在会话中途原地变更；`/mcp reload` 是重建（新前缀世代），不是原地改。
 

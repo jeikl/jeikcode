@@ -33,6 +33,7 @@ import {
   thisTabOwnsTurn,
   shouldLockSendAsDetached,
   isWatchTurnActivationEvent,
+  shouldIgnoreLiveReplayAfterIdleSnapshot,
   liveSubmitKeepsTurn,
   liveSyncOwnsViewedSession,
   toolResultClearsUserInput,
@@ -196,8 +197,18 @@ test('in-flight cache is kept over stale disk history while a turn is active', (
   );
   assert.equal(
     shouldLockSendAsDetached({ turnActive: true, thisTabOwnsTurn: false }),
-    true,
+    false,
+    'observers are never occupancy-locked from sending',
   );
+});
+
+test('idle live snapshot ignores leftover journal content until a new turn', () => {
+  assert.equal(shouldIgnoreLiveReplayAfterIdleSnapshot(true, 'text'), true);
+  assert.equal(shouldIgnoreLiveReplayAfterIdleSnapshot(true, 'tool_start'), true);
+  assert.equal(shouldIgnoreLiveReplayAfterIdleSnapshot(true, 'reasoning'), true);
+  assert.equal(shouldIgnoreLiveReplayAfterIdleSnapshot(true, 'user'), false);
+  assert.equal(shouldIgnoreLiveReplayAfterIdleSnapshot(true, 'state'), false);
+  assert.equal(shouldIgnoreLiveReplayAfterIdleSnapshot(false, 'text'), false);
 });
 
 test('idle watch does not activate on leftover user or runtime_info events', () => {
@@ -249,36 +260,35 @@ test('reconnect snapshot discards an unresolved queue when terminal replay is un
   });
 });
 
-test('detached and unknown chat recovery states block sends and queue draining', () => {
+test('viewing a session never occupancy-locks send or stop', () => {
   let state = reduceChatRecovery('ready', {
     type: 'session_switch',
     hasSession: true,
   });
-  assert.equal(state, 'checking');
-  assert.deepEqual(chatRecoveryPolicy(state), {
-    allowSend: false,
-    allowQueueDrain: false,
-    allowStop: true,
-  });
+  assert.equal(state, 'ready');
+  assert.equal(chatRecoveryPolicy(state).allowSend, true);
 
   state = reduceChatRecovery(state, { type: 'active_check_failed' });
-  assert.equal(state, 'terminal_unknown');
-  assert.equal(chatRecoveryPolicy(state).allowSend, false);
+  assert.equal(state, 'ready');
+  assert.equal(chatRecoveryPolicy(state).allowSend, true);
 
   state = reduceChatRecovery(state, { type: 'stop_failed' });
   assert.equal(state, 'terminal_unknown');
+  assert.equal(chatRecoveryPolicy(state).allowSend, true);
+  assert.equal(chatRecoveryPolicy(state).allowStop, true);
   state = reduceChatRecovery(state, { type: 'stop_succeeded' });
   assert.equal(state, 'ready');
 });
 
-test('detached active chat unlocks only after stop success or an authoritative terminal', () => {
+test('observing a live turn still allows send (interrupt) and stop', () => {
   let state = reduceChatRecovery('checking', {
     type: 'active_check_succeeded',
     active: true,
   });
   assert.equal(state, 'detached_active');
-  assert.equal(chatRecoveryPolicy(state).allowSend, false);
-  assert.equal(chatRecoveryPolicy(state).allowQueueDrain, false);
+  assert.equal(chatRecoveryPolicy(state).allowSend, true);
+  assert.equal(chatRecoveryPolicy(state).allowStop, true);
+  assert.equal(chatRecoveryPolicy(state).allowQueueDrain, true);
 
   state = reduceChatRecovery(state, { type: 'authoritative_terminal' });
   assert.equal(state, 'ready');
@@ -289,14 +299,10 @@ test('detached active chat unlocks only after stop success or an authoritative t
   });
 });
 
-test('sync cannot replace an active or unresolved non-sync transport', () => {
-  assert.deepEqual(syncAttachDisposition(true, 'ready'), {
-    allowed: false,
-    reason: 'active_chat',
-  });
+test('sync attach is always allowed for an observer view', () => {
+  assert.deepEqual(syncAttachDisposition(true, 'ready'), { allowed: true });
   assert.deepEqual(syncAttachDisposition(false, 'terminal_unknown'), {
-    allowed: false,
-    reason: 'unresolved_chat',
+    allowed: true,
   });
   assert.deepEqual(syncAttachDisposition(false, 'ready'), { allowed: true });
 });

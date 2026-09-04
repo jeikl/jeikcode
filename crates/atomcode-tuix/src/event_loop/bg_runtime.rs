@@ -653,6 +653,22 @@ impl BgRuntimeManager {
             .collect()
     }
 
+    /// Bound CodingRuntime handle for a parked background runner, if Ready.
+    pub fn handle_for_runtime(
+        &self,
+        runtime_id: RuntimeId,
+    ) -> Option<atomcode_coding::CodingRuntimeHandle> {
+        self.backgrounds
+            .slots
+            .iter()
+            .find(|slot| slot.runtime_id == runtime_id)
+            .and_then(|slot| {
+                slot.endpoint
+                    .as_ref()
+                    .and_then(|ep| ep.native.active_handle_for_registry())
+            })
+    }
+
     pub fn session_id_for_runtime(&self, runtime_id: RuntimeId) -> Option<String> {
         if self.foreground.runtime_id == runtime_id {
             return Some(self.foreground.session.id.clone());

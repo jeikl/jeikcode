@@ -89,8 +89,18 @@ pub fn parse_args(args: &str) -> Result<UserInputRequest, String> {
 /// array (batch) or the flat single-question shape (legacy). The bool is `is_batch`
 /// — the caller uses it to pick the wire shape. Clamps a batch to `MAX_QUESTIONS`.
 pub fn parse_batch(args: &str) -> Result<(Vec<UserInputRequest>, bool), String> {
-    let val: serde_json::Value = serde_json::from_str(args)
+    let mut val: serde_json::Value = serde_json::from_str(args)
         .map_err(|e| format!("invalid request_user_input arguments: {e}"))?;
+    crate::tools::repair::decode_lenient_array_field(&mut val, "questions", false);
+    crate::tools::repair::decode_lenient_array_field(&mut val, "options", false);
+    if let Some(arr) = val
+        .get_mut("questions")
+        .and_then(serde_json::Value::as_array_mut)
+    {
+        for q in arr.iter_mut() {
+            crate::tools::repair::decode_lenient_array_field(q, "options", false);
+        }
+    }
     if let Some(qs) = val.get("questions").and_then(serde_json::Value::as_array) {
         if qs.is_empty() {
             return Err("request_user_input: `questions` must be a non-empty array".into());
@@ -110,7 +120,7 @@ pub fn parse_batch(args: &str) -> Result<(Vec<UserInputRequest>, bool), String> 
         let is_batch = out.len() > 1;
         Ok((out, is_batch))
     } else {
-        Ok((vec![parse_args(args)?], false))
+        Ok((vec![parse_args(&val.to_string())?], false))
     }
 }
 

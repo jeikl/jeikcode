@@ -230,8 +230,8 @@ export function thisTabOwnsTurn(input: {
 }
 
 /** `/webui` + TUI share one live runtime. Until the snapshot binds
- * `liveSessionId`, treat the viewed session as ours so `/chat/active`
- * cannot lock the composer as a foreign occupant. */
+ * `liveSessionId`, treat the viewed session as ours so the composer
+ * sends/stops against that unique session. */
 export function liveSyncOwnsViewedSession(input: {
   sync: boolean;
   viewedSessionId: string;
@@ -241,17 +241,42 @@ export function liveSyncOwnsViewedSession(input: {
   return input.liveSessionId == null || input.liveSessionId === input.viewedSessionId;
 }
 
-/** Only a foreign `/chat` owner should lock the composer as “occupied”. */
-export function shouldLockSendAsDetached(input: {
+/**
+ * Occupancy never locks an observer. Any view of the unique session can
+ * send (steer / interrupt) and stop; `/chat/active` only drives the spinner.
+ */
+export function shouldLockSendAsDetached(_input: {
   turnActive: boolean;
   thisTabOwnsTurn: boolean;
 }): boolean {
-  return input.turnActive && !input.thisTabOwnsTurn;
+  return false;
 }
 
 /** Events that prove a turn is actually streaming. Idle `/chat/watch` must not
  * upgrade to busy on `runtime_info` / leftover `user` replay / tokens — that
  * painted a stop button and blinking cursor on already-finished sessions. */
+/** After an idle `/live` snapshot, leftover journal events of a finished turn
+ *  must not be painted again. A new `user` that is not already on the canvas
+ *  (or `state.running=true` that is not stale) starts the next turn. */
+export function shouldIgnoreLiveReplayAfterIdleSnapshot(
+  idleSnapshot: boolean,
+  eventType: string,
+): boolean {
+  if (!idleSnapshot) return false;
+  switch (eventType) {
+    case 'text':
+    case 'reasoning':
+    case 'tool_start':
+    case 'tool_output':
+    case 'tool_progress':
+    case 'tool_result':
+    case 'tokens':
+      return true;
+    default:
+      return false;
+  }
+}
+
 export function isWatchTurnActivationEvent(type: string): boolean {
   switch (type) {
     case 'text':
@@ -310,10 +335,9 @@ export interface ChatRecoveryPolicy {
 }
 
 /**
- * `/chat` has cancellation and active-operation discovery, but no stream
- * reattach protocol. Keep that recovery boundary explicit: until discovery or
- * cancellation proves the old operation is gone, neither direct sends nor
- * queued auto-sends are safe.
+ * Switching views is observation, not occupancy. Discovery of a live turn
+ * arms stop; it never blocks send — any observer can interrupt the unique
+ * session. `terminal_unknown` keeps the stop alias after a transport drop.
  */
 export function reduceChatRecovery(
   _current: ChatRecoveryState,
@@ -321,10 +345,11 @@ export function reduceChatRecovery(
 ): ChatRecoveryState {
   switch (event.type) {
     case 'session_switch':
-      return event.hasSession ? 'checking' : 'ready';
+      return 'ready';
     case 'active_check_succeeded':
       return event.active ? 'detached_active' : 'ready';
     case 'active_check_failed':
+      return 'ready';
     case 'transport_lost':
     case 'stop_failed':
       return 'terminal_unknown';
@@ -338,7 +363,14 @@ export function chatRecoveryPolicy(state: ChatRecoveryState): ChatRecoveryPolicy
   if (state === 'ready') {
     return { allowSend: true, allowQueueDrain: true, allowStop: false };
   }
-  return { allowSend: false, allowQueueDrain: false, allowStop: true };
+  // checking / detached_active / terminal_unknown: observer can still
+  // interrupt the unique session. Queue drain stays off only after a
+  // dropped /chat transport so a stale queue cannot double-submit.
+  return {
+    allowSend: true,
+    allowQueueDrain: state !== 'terminal_unknown',
+    allowStop: true,
+  };
 }
 
 export type SyncAttachDisposition =
@@ -346,13 +378,9 @@ export type SyncAttachDisposition =
   | { allowed: false; reason: 'active_chat' | 'unresolved_chat' };
 
 export function syncAttachDisposition(
-  chatRunning: boolean,
-  recoveryState: ChatRecoveryState,
+  _chatRunning: boolean,
+  _recoveryState: ChatRecoveryState,
 ): SyncAttachDisposition {
-  if (chatRunning) return { allowed: false, reason: 'active_chat' };
-  if (recoveryState !== 'ready') {
-    return { allowed: false, reason: 'unresolved_chat' };
-  }
   return { allowed: true };
 }
 

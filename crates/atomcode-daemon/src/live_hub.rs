@@ -387,6 +387,21 @@ impl LiveViewHub {
         state.execution_session_id().map(str::to_string)
     }
 
+    /// Handle of the bound execution runtime (not the current VIEW identity).
+    pub fn execution_handle(&self) -> Result<atomcode_coding::CodingRuntimeHandle, HubError> {
+        let state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+        let binding = state.binding.as_ref().ok_or(HubError::Unbound)?;
+        binding
+            .control
+            .handle()
+            .ok_or(HubError::RuntimeUnavailable)
+    }
+
+    pub fn execution_working_dir(&self) -> Option<PathBuf> {
+        let state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+        state.execution_working_dir()
+    }
+
     /// `(execution_session_id, snapshot_is_empty)` for live-stream routing.
     pub fn execution_view_info(&self) -> Option<(String, bool)> {
         let state = self.state.lock().unwrap_or_else(|error| error.into_inner());
@@ -949,6 +964,43 @@ impl LiveViewHub {
             changed,
             projection_error,
         })
+    }
+
+    /// Fresh the bound *execution* runtime without requiring the current VIEW
+    /// identity to match. Used when deleting the execution session while the
+    /// hub is projecting a different catalog session.
+    pub async fn fresh_execution_session(&self) -> Result<(), HubError> {
+        if self.turn_in_progress() {
+            return Err(HubError::ActiveTurn);
+        }
+        let handle = {
+            let state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+            let binding = state.binding.as_ref().ok_or(HubError::Unbound)?;
+            binding
+                .control
+                .handle()
+                .ok_or(HubError::RuntimeUnavailable)?
+        };
+        let changed = handle
+            .fresh_session()
+            .await
+            .map_err(map_session_transition_error)?;
+        let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+        if let Some(session_id) = changed.session_id.clone() {
+            state.execution_session_id = Some(session_id.clone());
+            if let Some(stashed) = state.stashed_execution.as_mut() {
+                stashed.session_id = session_id;
+                stashed.working_dir = changed.working_dir.clone();
+                stashed.snapshot = None;
+                stashed.snapshot_error = None;
+                stashed.replay.clear();
+                stashed.pending_requests.clear();
+                stashed.pending_web_steers.clear();
+                stashed.turn_active = false;
+                stashed.last_runtime_sequence = None;
+            }
+        }
+        Ok(())
     }
 
     pub async fn change_directory(

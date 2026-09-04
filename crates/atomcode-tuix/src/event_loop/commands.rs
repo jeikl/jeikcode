@@ -183,6 +183,94 @@ fn spawn_runtime(
     (runtime_id, spawned.endpoint, session)
 }
 
+/// Observe an in-process unique runtime instead of taking a second lease.
+fn attach_observer_runtime(
+    ctx: &mut LoopCtx,
+    session: Session,
+) -> Option<(bg_runtime::RuntimeId, super::RuntimeEndpoint, Session)> {
+    let handle = atomcode_daemon::native_live::existing_runner_handle(&session.id)?;
+    let runtime_id = ctx.bg_manager.allocate_runtime_id();
+    let (event_tx, event_rx) = tokio::sync::mpsc::unbounded_channel();
+    let control =
+        super::RuntimeControl::ready_observer_with_event_tx(handle.clone(), event_tx.clone());
+    let key = session.id.clone();
+    let working_dir = if session.working_dir.as_os_str().is_empty() {
+        ctx.working_dir.clone()
+    } else {
+        session.working_dir.clone()
+    };
+    let reg = atomcode_coding::session_runtime_registry::SessionRuntimeRegistry::global();
+    let _ = reg.open_or_attach(key.clone(), working_dir);
+    let _ = reg.bind_handle(&key, handle.clone(), Some(runtime_id.as_u64()));
+    tokio::spawn(async move {
+        let Ok((_, mut rx)) = reg.subscribe(&key, None) else {
+            return;
+        };
+        loop {
+            match rx.recv().await {
+                Ok(sequenced) => {
+                    let Some(runtime) = sequenced.runtime else {
+                        continue;
+                    };
+                    let envelope = atomcode_coding::SequencedRuntimeEvent {
+                        generation: sequenced.generation,
+                        sequence: sequenced.sequence,
+                        event: runtime,
+                    };
+                    if event_tx
+                        .send(bg_runtime::RuntimeEventPayload::SequencedNative(envelope))
+                        .is_err()
+                    {
+                        break;
+                    }
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+            }
+        }
+    });
+    bg_runtime::spawn_event_forwarder(runtime_id, event_rx, ctx.runtime_event_tx.clone());
+    Some((
+        runtime_id,
+        super::RuntimeEndpoint { native: control },
+        session,
+    ))
+}
+
+fn attach_or_spawn_runtime(
+    ctx: &mut LoopCtx,
+    session: Session,
+) -> (bg_runtime::RuntimeId, super::RuntimeEndpoint, Session) {
+    if let Some(attached) = attach_observer_runtime(ctx, session.clone()) {
+        return attached;
+    }
+    spawn_runtime(ctx, session)
+}
+
+fn bind_observer_foreground(
+    ctx: &mut LoopCtx,
+    state: &mut crate::state::UiState,
+    runtime_id: bg_runtime::RuntimeId,
+    endpoint: super::RuntimeEndpoint,
+    session: Session,
+) {
+    let busy = endpoint
+        .native
+        .active_handle_for_registry()
+        .is_some_and(|handle| {
+            matches!(
+                handle.status().phase,
+                atomcode_coding::RuntimePhase::InTurn
+                    | atomcode_coding::RuntimePhase::WaitingApproval
+            )
+        });
+    bind_spawned_foreground(ctx, state, runtime_id, endpoint, session);
+    if busy {
+        state.on_submit();
+    }
+    sync_session_runtime_registry(ctx, state);
+}
+
 /// Synchronise the current foreground session into `BgRuntimeManager`.
 ///
 /// Mid-turn session state (including conversations where the agent is
@@ -314,7 +402,7 @@ fn adopt_session_as_view(
             .into_owned());
         }
         let old_replay_events = foreground_turn_replay_events(state);
-        let (runtime_id, endpoint, session) = spawn_runtime(ctx, session);
+        let (runtime_id, endpoint, session) = attach_or_spawn_runtime(ctx, session);
         let old_state = foreground_state_from_ui(state);
         ctx.bg_manager
             .background_current_with_replay(
@@ -331,7 +419,7 @@ fn adopt_session_as_view(
                 }
                 other => format!("{other:?}"),
             })?;
-        bind_spawned_foreground(ctx, state, runtime_id, endpoint, session);
+        bind_observer_foreground(ctx, state, runtime_id, endpoint, session);
         crate::tuix_trace!(
             "FOC",
             "stage=session_switch_end mode=spawn_and_park session={} runtime={} phase={:?}",
@@ -341,18 +429,21 @@ fn adopt_session_as_view(
         );
         return Ok(());
     }
-    // Empty idle view: shut down disposable home runner and open the target.
-    let _ = ctx
-        .runtime
-        .dispatch_when_ready(atomcode_coding::DriverCommand::Shutdown);
-    let (runtime_id, endpoint, session) = spawn_runtime(ctx, session);
+    // Empty idle view: shut down a disposable home runner only. An observer
+    // of the unique session must not kill that runtime on the way out.
+    if !ctx.runtime.is_shared_observer() {
+        let _ = ctx
+            .runtime
+            .dispatch_when_ready(atomcode_coding::DriverCommand::Shutdown);
+    }
+    let (runtime_id, endpoint, session) = attach_or_spawn_runtime(ctx, session);
     ctx.bg_manager.set_foreground_runtime(
         runtime_id,
         endpoint.clone(),
         session.clone(),
         working_dir,
     );
-    bind_spawned_foreground(ctx, state, runtime_id, endpoint, session);
+    bind_observer_foreground(ctx, state, runtime_id, endpoint, session);
     crate::tuix_trace!(
         "FOC",
         "stage=session_switch_end mode=replace_empty session={} runtime={} phase={:?}",

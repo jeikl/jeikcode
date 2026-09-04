@@ -121,6 +121,7 @@ import {
   liveSyncOwnsViewedSession,
   shouldLockSendAsDetached,
   isWatchTurnActivationEvent,
+  shouldIgnoreLiveReplayAfterIdleSnapshot,
   resolveTokenCache,
   formatCacheHitRate,
   createTokenCacheState,
@@ -1369,6 +1370,8 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
     // 停在 detached_active(false),输入框被锁住。
     transitionChatRecovery({ type: 'authoritative_terminal' });
     backgroundRunningSessionsRef.current.delete(loadId);
+    localTurnSessionsRef.current.delete(loadId);
+    onLiveRunningChange?.(loadId, false);
     setHistoryHint(null);
     setBusyAndClock(false);
     busyRef.current = false;
@@ -1522,10 +1525,9 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
    * sidebar spinner or arm the stop button. */
   const liveIdleSnapshotRef = useRef(false);
   function attachedToLiveRuntime(): boolean {
-    return (
-      syncRef.current &&
-      (!liveSessionIdRef.current || liveSessionIdRef.current === activeIdRef.current)
-    );
+    // Sync views the unique session as an observer. Send/stop always go
+    // through /live for the session on screen — never a second runtime.
+    return syncRef.current && activeIdRef.current != null;
   }
   // 是否已为「当前会话」上报过乐观侧栏条目。每次切换/新建会话时复位，
   // 避免同一会话第二条消息（尤其 sync 路径本地不落消息）重复上报、改写标题。
@@ -1668,9 +1670,9 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
           !cached &&
           !stayOnNewSessionLanding({ sessionId, activeSession }),
       );
-      // Sync mode only mirrors the currently viewed transcript. It does not
-      // rebind the live runtime. Returning to the execution session reuses the
-      // open /live stream so we do not snapshot-replace in-flight bash/text.
+      // View switch is observation of that session's unique runtime.
+      // Reuse the open /live SSE only when we are already watching it;
+      // otherwise subscribe `/live?session_id=` so send/stop hit this session.
       if (
         sync &&
         sessionId &&
@@ -1679,9 +1681,9 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
           sessionId,
           liveSessionId: liveSessionIdRef.current,
           streamOpen: liveAbortRef.current != null && !liveAbortRef.current.signal.aborted,
-        }) &&
-        liveSessionIdRef.current === sessionId
+        })
       ) {
+        liveSessionIdRef.current = sessionId;
         startLiveStream();
       }
     }
@@ -1828,11 +1830,20 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
             setQueued([]);
             if (!ownsTurn && (!currentCached || currentCached.length === 0)) {
               nextHint = t('chat.detachedActive');
-              pushCommandNotice(t('chat.detachedActive'));
             }
             startDetachedHistoryPoll(projectHash, loadId, loadGeneration, {
               localReattach: ownsTurn,
             });
+          } else if (!active) {
+            // Sidebar switch used a stale local/background running flag. The
+            // daemon is idle — drop the stop square so the composer can send.
+            localTurnSessionsRef.current.delete(loadId);
+            backgroundRunningSessionsRef.current.delete(loadId);
+            if (!abortRef.current) {
+              liveLifecycleRef.current = createLiveLifecycleState();
+              setBusyAndClock(false);
+            }
+            if (requestIdRef.current === loadId) requestIdRef.current = null;
           } else if (requestIdRef.current === loadId) {
             requestIdRef.current = null;
           }
@@ -2107,7 +2118,7 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
           }
         },
         controller.signal,
-        liveSessionIdRef.current,
+        activeIdRef.current ?? liveSessionIdRef.current,
         () => {
           // Heartbeat for the staleness watchdog (any byte incl. keepalive ping).
           lastLiveActivityRef.current = Date.now();
@@ -2489,6 +2500,7 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
       if (sid) {
         if (e.running && !ignoreStaleRunning) backgroundRunningSessionsRef.current.add(sid);
         else backgroundRunningSessionsRef.current.delete(sid);
+        if (!e.running) localTurnSessionsRef.current.delete(sid);
       }
       onLiveRunningChange?.(sid, ignoreStaleRunning ? false : e.running);
     }
@@ -2499,9 +2511,16 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
     ) {
       return;
     }
+    if (shouldIgnoreLiveReplayAfterIdleSnapshot(liveIdleSnapshotRef.current, e.type)) {
+      return;
+    }
 
     switch (e.type) {
             case 'user': {
+        const alreadyOnCanvas = userMessageAlreadyOnCanvas(messagesRef.current, e.text);
+        if (liveIdleSnapshotRef.current && alreadyOnCanvas) {
+          break;
+        }
         liveIdleSnapshotRef.current = false;
         const lifecycle = reduceLiveLifecycle(liveLifecycleRef.current, {
           type: 'input_accepted',
@@ -2608,7 +2627,12 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
       }
       default: {
         const mapped = liveToSSE(e);
-        if (mapped) handleEvent(mapped);
+        if (mapped) {
+          if (mapped.type === 'text' || mapped.type === 'reasoning') {
+            ensureAssistantBubbleForWatch();
+          }
+          handleEvent(mapped);
+        }
         // 工具结果到达即代表该工具的审批已被处理（本端或对端 TUI 批准后工具已执行），
         // 清掉与之对应的残留审批卡片（call_id 匹配才清，避免误删尚未处理的其它请求）。
         if (e.type === 'tool_result') {
@@ -4099,15 +4123,35 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
         const detached = abortRef.current === null;
         await stopChat(requestAlias);
         if (detached && requestIdRef.current === requestAlias) {
-          transitionChatRecovery({ type: 'stop_succeeded' });
-          requestIdRef.current = null;
-          if (!attachedToLiveRuntime()) setBusyAndClock(false);
+          const projectHash = activeSession?.project_hash;
+          const loadGeneration = sessionGenerationRef.current;
+          // Drop stale occupancy before the next sidebar switch rehydrates from
+          // backgroundRunningSessionsRef / extraRunningIds. `/chat/stop` on a
+          // handle-less Starting row is a no-op; the composer must still idle.
+          if (projectHash && activeIdRef.current === requestAlias) {
+            settleToIdleWatch(projectHash, requestAlias, loadGeneration);
+          } else {
+            transitionChatRecovery({ type: 'stop_succeeded' });
+            requestIdRef.current = null;
+            backgroundRunningSessionsRef.current.delete(requestAlias);
+            localTurnSessionsRef.current.delete(requestAlias);
+            onLiveRunningChange?.(requestAlias, false);
+            stopDetachedHistoryPoll();
+            if (!attachedToLiveRuntime()) setBusyAndClock(false);
+          }
           setQueued([]);
           onPermissionResolved?.(null);
           pushCommandNotice(t('chat.detachedStopped'));
         }
       } else if (attachedToLiveRuntime()) {
         await postLiveStop(liveSessionIdRef.current ?? sessionId ?? activeIdRef.current);
+        const sid = liveSessionIdRef.current ?? sessionId ?? activeIdRef.current;
+        if (sid) {
+          localTurnSessionsRef.current.delete(sid);
+          backgroundRunningSessionsRef.current.delete(sid);
+        }
+        liveLifecycleRef.current = createLiveLifecycleState();
+        setBusyAndClock(false);
       }
     } catch (error) {
       setQueued([]);

@@ -323,6 +323,8 @@ export function Sidebar({
   const [mcpStatus, setMcpStatus] = useState<McpStatusInfo | null>(null);
   const [mcpLoading, setMcpLoading] = useState(false);
   const [mcpReloading, setMcpReloading] = useState(false);
+  const [mcpReloaded, setMcpReloaded] = useState(false);
+  const mcpReloadedTimerRef = useRef<number | null>(null);
   // Bounds the connecting-state poll loop (see the poll effect below).
   const mcpPollAttemptsRef = useRef(0);
   const [mcpMenuOpen, setMcpMenuOpen] = useState(false);
@@ -716,12 +718,32 @@ export function Sidebar({
     e?.stopPropagation();
     if (mcpReloading) return;
     setMcpReloading(true);
+    setMcpReloaded(false);
     setMcpLoading(true);
+    setMcpStatus((cur) =>
+      cur
+        ? {
+            ...cur,
+            servers: cur.servers.map((srv) =>
+              srv.status === 'connected' ? { ...srv, status: 'connecting' } : srv,
+            ),
+          }
+        : cur,
+    );
     try {
       await postMcpReload();
       mcpPollAttemptsRef.current = 0;
-      const status = await getMcpStatus();
+      let status = await getMcpStatus();
       setMcpStatus(status);
+      for (let attempt = 0; attempt < 6; attempt++) {
+        if (!(status.servers ?? []).some((srv) => srv.status === 'connecting')) break;
+        await new Promise((resolve) => window.setTimeout(resolve, 400));
+        status = await getMcpStatus();
+        setMcpStatus(status);
+      }
+      setMcpReloaded(true);
+      if (mcpReloadedTimerRef.current != null) window.clearTimeout(mcpReloadedTimerRef.current);
+      mcpReloadedTimerRef.current = window.setTimeout(() => setMcpReloaded(false), 2500);
     } catch {
       setMcpStatus((cur) => cur ?? { servers: [] });
     } finally {
@@ -991,6 +1013,9 @@ export function Sidebar({
           >
             <div class="mcp-menu-header">
               <span class="group-by-menu-title">{t('sidebar.mcp')}</span>
+              {mcpReloaded && !mcpReloading && (
+                <span class="mcp-reloaded-hint">{t('sidebar.mcpReloaded')}</span>
+              )}
               <button
                 type="button"
                 class={'mcp-refresh-btn' + (mcpReloading ? ' spinning' : '')}

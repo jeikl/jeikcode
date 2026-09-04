@@ -157,7 +157,13 @@ impl Tool for ParallelEditTool {
         String::new()
     }
     async fn execute(&self, args: &str, ctx: &ToolContext) -> ToolResult {
-        let a: Args = match serde_json::from_str(args) {
+        let a: Args = match serde_json::from_str::<serde_json::Value>(args)
+            .map(|mut v| {
+                crate::tools::repair::decode_lenient_array_field(&mut v, "files", false);
+                serde_json::from_value(v)
+            })
+            .and_then(|r| r)
+        {
             Ok(a) => a,
             Err(e) => {
                 return err(format!(

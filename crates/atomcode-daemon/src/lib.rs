@@ -3744,88 +3744,35 @@ async fn delete_session(
             )
             .into_response();
         }
-        // A displayed session can still be the runtime's idle binding, which
-        // keeps its lease for the whole binding lifetime. Do not bypass that
-        // lease: ask the single runtime owner to transition to a fresh staged
-        // session first. Active turns fail closed as SESSION_IN_USE.
-        let current_binding = match crate::native_live::binding()
-            .ok()
-            .filter(|binding| binding.session_id == id)
-        {
-            Some(binding) => {
-                let sessions_root = NativeSessionManager::sessions_root();
-                match run_session_catalog_io(move || catalog_scan_in_root(&sessions_root)).await {
-                    Ok(scan)
-                        if binding_targets_catalog_location(
-                            &scan.entries,
-                            &binding,
-                            &hash,
-                            &id,
-                        ) =>
-                    {
-                        Some(binding)
-                    }
-                    Ok(_) => None,
-                    Err(error) => {
-                        tracing::warn!(
-                            project_bucket = %hash,
-                            session_id = %id,
-                            error = %error,
-                            "failed to resolve current session catalog location before delete"
-                        );
-                        None
-                    }
-                }
+        // ViewBinding (WebUI/TUI 正在看哪个会话) is not ownership. Release the
+        // idle execution runtime or registry runner that actually holds the
+        // lease. Active turns stay fail-closed as SESSION_IN_USE.
+        match crate::native_live::release_idle_session_for_delete(&id).await {
+            Ok(()) => {}
+            Err(crate::live_hub::HubError::ActiveTurn) => {
+                return delete_session_api_error(
+                    StatusCode::CONFLICT,
+                    "SESSION_IN_USE",
+                    "This session has an active turn. Stop it, then try again.",
+                )
+                .into_response();
             }
-            None => None,
-        };
-        if let Some(binding) = current_binding {
-            match crate::native_live::fresh_session(&binding).await {
-                Ok(outcome) => {
-                    if let Some(error) = outcome.projection_error {
-                        // The runtime already moved to `outcome.changed` and
-                        // released the old lease. Its SessionChanged event also
-                        // repairs the live projection asynchronously, so the
-                        // lease-protected delete can safely continue.
-                        tracing::warn!(
-                            project_bucket = %hash,
-                            session_id = %id,
-                            replacement_session_id = ?outcome.changed.session_id,
-                            error = ?error,
-                            "current session was released but its live projection is still pending"
-                        );
-                    }
-                }
-                Err(error) => match error {
-                    crate::live_hub::HubError::ActiveTurn => {
-                        return delete_session_api_error(
-                            StatusCode::CONFLICT,
-                            "SESSION_IN_USE",
-                            "This session has an active turn. Stop it, then try again.",
-                        )
-                        .into_response();
-                    }
-                    // Another transition won the race after the exact binding
-                    // was observed. Do not fresh its replacement; continue to
-                    // lease-protected deletion. If the requested session is
-                    // still owned, acquire_lease returns SESSION_IN_USE.
-                    crate::live_hub::HubError::StaleBinding
-                    | crate::live_hub::HubError::RuntimeGenerationChanged { .. } => {}
-                    error => {
-                        tracing::warn!(
-                            project_bucket = %hash,
-                            session_id = %id,
-                            error = ?error,
-                            "failed to release current session before delete"
-                        );
-                        return delete_session_api_error(
-                            StatusCode::INTERNAL_SERVER_ERROR,
-                            "DELETE_FAILED",
-                            "Failed to release the current session before deleting it.",
-                        )
-                        .into_response();
-                    }
-                },
+            Err(crate::live_hub::HubError::StaleBinding)
+            | Err(crate::live_hub::HubError::RuntimeGenerationChanged { .. })
+            | Err(crate::live_hub::HubError::Unbound) => {}
+            Err(error) => {
+                tracing::warn!(
+                    project_bucket = %hash,
+                    session_id = %id,
+                    error = ?error,
+                    "failed to release current session before delete"
+                );
+                return delete_session_api_error(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "DELETE_FAILED",
+                    "Failed to release the current session before deleting it.",
+                )
+                .into_response();
             }
         }
 
@@ -6197,7 +6144,7 @@ async fn stop_chat(
 
 /// GET /chat/active - Return list of session IDs currently generating
 async fn active_chat_sessions(State(state): State<AppState>) -> impl IntoResponse {
-    use atomcode_coding::session_runtime_registry::{RuntimeActivity, SessionRuntimeRegistry};
+    use atomcode_coding::session_runtime_registry::SessionRuntimeRegistry;
     use std::collections::HashSet;
 
     let mut ids: HashSet<String> = state
@@ -6209,16 +6156,12 @@ async fn active_chat_sessions(State(state): State<AppState>) -> impl IntoRespons
     if let Some(live_id) = crate::native_live::live_running_session_id() {
         ids.insert(live_id);
     }
-    for entry in SessionRuntimeRegistry::global().list_all() {
-        if matches!(
-            entry.activity,
-            RuntimeActivity::Running
-                | RuntimeActivity::WaitingApproval
-                | RuntimeActivity::WaitingUserInput
-                | RuntimeActivity::Starting
-        ) {
-            ids.insert(entry.session_id);
-        }
+    // Registry `Starting` / handle-less rows are view subscriptions (GET /live
+    // `subscribe_or_empty`, InputAccepted before bind). They are not occupancy —
+    // including them made WebUI keep a stop square and sidebar spinner after the
+    // background turn had already finished, then rehydrate on every session switch.
+    for id in SessionRuntimeRegistry::global().live_turn_session_ids() {
+        ids.insert(id);
     }
     Json(ids.into_iter().collect::<Vec<_>>())
 }

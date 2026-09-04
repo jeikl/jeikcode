@@ -157,6 +157,52 @@ pub fn session_draft_working_dir(session_id: &str) -> Option<PathBuf> {
         .cloned()
 }
 
+fn runtime_start_is_session_in_use(error: &atomcode_coding::RuntimeStartError) -> bool {
+    matches!(error, atomcode_coding::RuntimeStartError::SessionInUse { .. })
+        || error.to_string().contains("already in use")
+}
+
+/// In-process handle of the unique runtime for `session_id`, if any view
+/// already owns it. Does not spawn and does not acquire a lease.
+pub fn existing_runner_handle(
+    session_id: &str,
+) -> Option<atomcode_coding::CodingRuntimeHandle> {
+    let reg = atomcode_coding::session_runtime_registry::SessionRuntimeRegistry::global();
+    if let Some(handle) = reg.handle(&session_id.to_string()) {
+        return Some(handle);
+    }
+    if hub().execution_session_id().as_deref() == Some(session_id) {
+        if let Ok(handle) = hub().execution_handle() {
+            let dir = hub()
+                .execution_working_dir()
+                .unwrap_or_else(|| PathBuf::from("."));
+            let _ = reg.open_or_attach(session_id.to_string(), dir);
+            let _ = reg.bind_handle(&session_id.to_string(), handle.clone(), None);
+            return Some(handle);
+        }
+    }
+    None
+}
+
+/// Attach an in-process owner of `session_id` to the registry. Does not spawn
+/// and does not acquire a lease.
+fn try_attach_existing_runner(session_id: &str, working_dir: &Path) -> bool {
+    let _ = working_dir;
+    existing_runner_handle(session_id).is_some()
+}
+
+pub async fn wait_for_existing_runner_handle(
+    session_id: &str,
+) -> Option<atomcode_coding::CodingRuntimeHandle> {
+    for _ in 0..120 {
+        if let Some(handle) = existing_runner_handle(session_id) {
+            return Some(handle);
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    None
+}
+
 /// Spawn (or attach) a CodingRuntime into the L2 registry without claiming the
 /// LiveHub binding — used when the hub/TUI is already bound to another session.
 pub async fn ensure_registry_runner(
@@ -166,8 +212,7 @@ pub async fn ensure_registry_runner(
     mode: RuntimeMode,
     session_id: String,
 ) -> Result<(), String> {
-    let reg = atomcode_coding::session_runtime_registry::SessionRuntimeRegistry::global();
-    if reg.handle(&session_id).is_some() {
+    if try_attach_existing_runner(&session_id, &working_dir) {
         return Ok(());
     }
 
@@ -195,9 +240,23 @@ pub async fn ensure_registry_runner(
         }
     };
 
-    let (runtime, _) = crate::start_native_runtime_with_session(runtime_config, session_mode)
+    let (runtime, _) = match crate::start_native_runtime_with_session(runtime_config, session_mode)
         .await
-        .map_err(|error| error.to_string())?;
+    {
+        Ok(runtime) => runtime,
+        Err(error) if runtime_start_is_session_in_use(&error) => {
+            if wait_for_existing_runner_handle(&session_id)
+                .await
+                .is_some()
+            {
+                return Ok(());
+            }
+            return Err(format!(
+                "waiting for the unique session runtime to accept observers: {error}"
+            ));
+        }
+        Err(error) => return Err(error.to_string()),
+    };
     let CodingRuntime {
         handle,
         mut events,
@@ -212,6 +271,7 @@ pub async fn ensure_registry_runner(
         .wait_mcp_ready(atomcode_capabilities::mcp::CONNECT_TIMEOUT)
         .await;
 
+    let reg = atomcode_coding::session_runtime_registry::SessionRuntimeRegistry::global();
     let _ = reg.open_or_attach(session_id.clone(), working_dir.clone());
     let _ = reg.bind_handle(&session_id, handle.clone(), None);
 
@@ -254,13 +314,16 @@ pub fn prefer_registry_live_stream(requested_session_id: &str) -> bool {
 /// Observe / submit against a session that is not the bound execution runtime
 /// via the registry, never by rebinding or erroring the embedded runtime.
 pub fn should_use_registry_for_session(session_id: &str) -> bool {
-    if prefer_registry_live_stream(session_id) || is_session_draft(session_id) {
+    if is_session_draft(session_id) {
         return true;
     }
-    if let Some(embedded) = embedded_binding() {
-        return embedded.session_id != session_id;
+    // Hub VIEW identity is not ownership. Compare against the execution session
+    // (not the stale embedded LiveBinding copy, which is not updated by
+    // switch_view_only).
+    if hub().execution_session_id().as_deref() == Some(session_id) {
+        return false;
     }
-    false
+    prefer_registry_live_stream(session_id)
 }
 
 /// Route `/live?session_id=` to the registry when the hub identity was only
@@ -378,14 +441,39 @@ pub fn resolve_pending_kind_via_registry(
     Ok(id)
 }
 
+/// Dual-write execution observations onto the **execution** session's registry
+/// row (never the current VIEW identity after `switch_view_only`) and bind the
+/// live handle so WebUI can attach instead of spawning a second runtime.
+fn dual_write_runtime_event_to_registry(
+    generation: u64,
+    event: atomcode_coding::CodingRuntimeEvent,
+    fallback_session_id: &str,
+    fallback_working_dir: &Path,
+) {
+    let session_id = hub()
+        .execution_session_id()
+        .unwrap_or_else(|| fallback_session_id.to_string());
+    let working_dir = hub()
+        .execution_working_dir()
+        .unwrap_or_else(|| fallback_working_dir.to_path_buf());
+    let reg = atomcode_coding::session_runtime_registry::SessionRuntimeRegistry::global();
+    let _ = reg.open_or_attach(session_id.clone(), working_dir);
+    if let Ok(handle) = hub().execution_handle() {
+        let _ = reg.bind_handle(&session_id, handle, None);
+    }
+    let _ = reg.push_runtime_event(&session_id, generation, event);
+}
+
 pub fn publish(
     binding: &LiveBinding,
     event: atomcode_coding::SequencedRuntimeEvent,
 ) -> Result<(), HubError> {
-    // Dual-write: hub (bound view) + registry (any view of this session).
-    let reg = atomcode_coding::session_runtime_registry::SessionRuntimeRegistry::global();
-    let _ = reg.open_or_attach(binding.session_id.clone(), binding.working_dir.clone());
-    let _ = reg.push_runtime_event(&binding.session_id, event.generation, event.event.clone());
+    dual_write_runtime_event_to_registry(
+        event.generation,
+        event.event.clone(),
+        &binding.session_id,
+        &binding.working_dir,
+    );
     hub().publish(binding, event)
 }
 
@@ -393,9 +481,7 @@ pub fn publish_unsequenced(
     binding: &LiveBinding,
     event: atomcode_coding::CodingRuntimeEvent,
 ) -> Result<(), HubError> {
-    let reg = atomcode_coding::session_runtime_registry::SessionRuntimeRegistry::global();
-    let _ = reg.open_or_attach(binding.session_id.clone(), binding.working_dir.clone());
-    let _ = reg.push_runtime_event(&binding.session_id, 0, event.clone());
+    dual_write_runtime_event_to_registry(0, event.clone(), &binding.session_id, &binding.working_dir);
     hub().publish_unsequenced(binding, event)
 }
 
@@ -565,6 +651,93 @@ pub async fn fresh_session(
     hub().fresh_session(expected).await
 }
 
+/// How an in-process owner of `session_id` should be released before catalog delete.
+///
+/// ViewBinding must not appear here: switching TUI/WebUI onto a session is not
+/// ownership. Only the execution runtime or a registry runner holds the lease.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SessionDeleteRelease {
+    /// Session is in a turn or waiting for approval / user input.
+    BlockedBusy,
+    /// Bound CodingRuntime currently executes this idle session — `fresh_session`.
+    FreshExecution,
+    /// A non-execution idle registry runner holds the lease — shut it down.
+    ShutdownRegistry,
+    /// No in-process owner; catalog delete can take the lease itself.
+    FilesOnly,
+}
+
+pub(crate) fn session_delete_release(
+    session_id: &str,
+    execution_session_id: Option<&str>,
+    execution_busy: bool,
+    registry_activity: Option<atomcode_coding::session_runtime_registry::RuntimeActivity>,
+) -> SessionDeleteRelease {
+    use atomcode_coding::session_runtime_registry::RuntimeActivity;
+    if execution_session_id == Some(session_id) {
+        if execution_busy || registry_activity.is_some_and(RuntimeActivity::is_busy) {
+            return SessionDeleteRelease::BlockedBusy;
+        }
+        return SessionDeleteRelease::FreshExecution;
+    }
+    match registry_activity {
+        Some(activity) if activity.is_busy() => SessionDeleteRelease::BlockedBusy,
+        Some(_) => SessionDeleteRelease::ShutdownRegistry,
+        None => SessionDeleteRelease::FilesOnly,
+    }
+}
+
+/// Release an idle in-process owner of `session_id` so catalog delete can take
+/// the exclusive lease. Busy turns stay fail-closed as [`HubError::ActiveTurn`].
+///
+/// A view-only switch onto this session is not enough to call `fresh_session`
+/// on the bound runtime — that runtime may still be executing a different
+/// session, which is what made idle WebUI deletes report SESSION_IN_USE.
+pub async fn release_idle_session_for_delete(session_id: &str) -> Result<(), HubError> {
+    let key = session_id.to_string();
+    let reg = atomcode_coding::session_runtime_registry::SessionRuntimeRegistry::global();
+    // A view-only `open_or_attach` row has no handle and holds no lease.
+    let activity = reg.handle(&key).and_then(|_| reg.activity(&key));
+    let execution_id = hub().execution_session_id();
+    let execution_busy = hub().turn_in_progress();
+    match session_delete_release(
+        session_id,
+        execution_id.as_deref(),
+        execution_busy,
+        activity,
+    ) {
+        SessionDeleteRelease::BlockedBusy => Err(HubError::ActiveTurn),
+        SessionDeleteRelease::FreshExecution => {
+            if let Ok(binding) = hub().binding() {
+                if binding.session_id == session_id {
+                    let outcome = hub().fresh_session(&binding).await?;
+                    if let Some(error) = outcome.projection_error {
+                        tracing::warn!(
+                            session_id,
+                            replacement_session_id = ?outcome.changed.session_id,
+                            error = ?error,
+                            "current session was released but its live projection is still pending"
+                        );
+                    }
+                    let _ = reg.detach(&key);
+                    return Ok(());
+                }
+            }
+            hub().fresh_execution_session().await?;
+            let _ = reg.detach(&key);
+            Ok(())
+        }
+        SessionDeleteRelease::ShutdownRegistry => {
+            if let Some(handle) = reg.handle(&key) {
+                let _ = handle.shutdown().await;
+            }
+            let _ = reg.force_remove(&key);
+            Ok(())
+        }
+        SessionDeleteRelease::FilesOnly => Ok(()),
+    }
+}
+
 pub async fn change_directory(
     working_dir: PathBuf,
 ) -> Result<atomcode_coding::SessionChanged, HubError> {
@@ -646,13 +819,16 @@ pub async fn ensure_headless_runtime(
     requested_session_id: Option<String>,
 ) -> Result<LiveJoin, String> {
     if let Some(binding) = embedded_binding() {
+        let owner_id = hub()
+            .execution_session_id()
+            .unwrap_or_else(|| binding.session_id.clone());
         if requested_session_id
             .as_deref()
-            .is_some_and(|requested| requested != binding.session_id)
+            .is_some_and(|requested| requested != owner_id)
         {
             return Err(format!(
                 "embedded runtime is bound to session {:?}, requested {:?}",
-                binding.session_id,
+                owner_id,
                 requested_session_id.as_deref().unwrap_or_default()
             ));
         }
@@ -897,6 +1073,43 @@ mod tests {
             false,
             true,
         ));
+    }
+
+    #[test]
+    fn delete_release_ignores_view_and_blocks_only_busy_execution() {
+        use super::{session_delete_release, SessionDeleteRelease};
+        use atomcode_coding::session_runtime_registry::RuntimeActivity;
+
+        // Viewing an idle catalog session is not ownership.
+        assert_eq!(
+            session_delete_release("view-a", Some("exec-b"), false, None),
+            SessionDeleteRelease::FilesOnly
+        );
+        // Idle registry runner on a viewed-but-not-executing session: shut it down.
+        assert_eq!(
+            session_delete_release("view-a", Some("exec-b"), false, Some(RuntimeActivity::Ready)),
+            SessionDeleteRelease::ShutdownRegistry
+        );
+        // Busy registry runner still blocks.
+        assert_eq!(
+            session_delete_release(
+                "view-a",
+                Some("exec-b"),
+                false,
+                Some(RuntimeActivity::Running)
+            ),
+            SessionDeleteRelease::BlockedBusy
+        );
+        // Execution session idle: fresh the bound runtime.
+        assert_eq!(
+            session_delete_release("exec-b", Some("exec-b"), false, Some(RuntimeActivity::Ready)),
+            SessionDeleteRelease::FreshExecution
+        );
+        // Execution session busy: refuse even if the UI composer looks idle.
+        assert_eq!(
+            session_delete_release("exec-b", Some("exec-b"), true, Some(RuntimeActivity::Ready)),
+            SessionDeleteRelease::BlockedBusy
+        );
     }
 
     #[test]

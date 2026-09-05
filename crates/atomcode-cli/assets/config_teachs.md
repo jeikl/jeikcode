@@ -50,9 +50,9 @@ JeikCode 采用分层解耦的 Provider 体系，支持 **内置预设提供商*
 
 ### 2.2 自定义提供商底层协议（Custom Protocols）
 对于自建网关、中转站或未在内置列表中的供应商，可通过以下标准协议接入：
-1. **`openai-compatible` / `openai`**：标准 OpenAI Chat Completions 协议（`POST /chat/completions`）。
-2. **`responses-compatible` / `responses` / `openai-responses`**：OpenAI 新一代 Responses 协议（`POST /v1/responses`）。
-3. **`anthropic-compatible` / `anthropic` / `claude`**：Anthropic Messages 协议（`POST /v1/messages`）。
+1. **`openai-compatible` / `openai`**：标准 OpenAI Chat Completions 协议（`POST /chat/completions`）。`base_url` 写成含 `/v1` 的前缀。
+2. **`responses-compatible` / `responses` / `openai-responses`**：OpenAI 新一代 Responses 协议（`POST /v1/responses`）。`base_url` 同样写成含 `/v1` 的前缀。
+3. **`anthropic-compatible` / `anthropic` / `claude`**：Anthropic Messages 协议。`base_url` 按自定义前缀拼接：未带版本时自动补 `/v1/messages`；已带 `/v1`、`/v2`、`/v3`、`/v1beta` 等版本段时接到对应的 `/vx/messages`；若已写到 `/messages` 则原样使用。
 4. **`ollama`**：Ollama 本地原生流式接口（`POST /api/chat`）。
 
 ---

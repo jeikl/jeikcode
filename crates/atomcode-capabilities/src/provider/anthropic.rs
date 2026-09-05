@@ -42,8 +42,9 @@ use std::time::Duration;
 #[derive(Clone)]
 pub struct AnthropicConfig {
     pub api_key: String,
-    /// API host root (no path), e.g. `https://api.anthropic.com`. The adapter appends
-    /// `/v1/messages`.
+    /// API prefix. A host root (`https://api.anthropic.com`) gets `/v1/messages`.
+    /// A custom version suffix (`/v1`, `/v2`, `/v3`, `/v1beta`, …) gets `/messages`
+    /// on that version. A URL that already ends with `/messages` is used as-is.
     pub base_url: String,
     pub model: String,
     pub context_window: u32,
@@ -136,7 +137,7 @@ impl AnthropicProvider {
             message: format!("http client build failed: {e}"),
             ..Default::default()
         })?;
-        let url = format!("{}/v1/messages", cfg.base_url.trim_end_matches('/'));
+        let url = messages_endpoint_url(&cfg.base_url);
         Ok(Self {
             cfg,
             client,
@@ -384,6 +385,40 @@ async fn open_stream(
                 return Err(open_error(e));
             }
         }
+    }
+}
+
+/// Resolve the Anthropic Messages endpoint from a configured `base_url`.
+///
+/// - no version segment → `{base}/v1/messages`
+/// - custom `/vN…` suffix (`/v1`, `/v2`, `/v1beta`, …) → `{base}/messages`
+/// - already ends with `/messages` → used as-is
+fn messages_endpoint_url(base_url: &str) -> String {
+    let base = base_url.trim().trim_end_matches('/');
+    if base.ends_with("/messages") {
+        return base.to_string();
+    }
+    if ends_with_api_version(base) {
+        format!("{base}/messages")
+    } else {
+        format!("{base}/v1/messages")
+    }
+}
+
+/// Last path segment looks like an API version: `v1`, `v2`, `v3`, `v1beta`.
+fn ends_with_api_version(base: &str) -> bool {
+    let Some(segment) = base.rsplit('/').next() else {
+        return false;
+    };
+    let Some(rest) = segment.strip_prefix('v') else {
+        return false;
+    };
+    let mut chars = rest.chars();
+    match chars.next() {
+        Some(c) if c.is_ascii_digit() => {
+            chars.all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
+        }
+        _ => false,
     }
 }
 
@@ -1075,6 +1110,50 @@ mod tests {
         roles(out)
             .windows(2)
             .any(|w| w[0] == "user" && w[1] == "user")
+    }
+
+    #[test]
+    fn messages_endpoint_url_joins_default_or_custom_version() {
+        assert_eq!(
+            messages_endpoint_url("https://api.anthropic.com"),
+            "https://api.anthropic.com/v1/messages"
+        );
+        assert_eq!(
+            messages_endpoint_url("https://api.anthropic.com/"),
+            "https://api.anthropic.com/v1/messages"
+        );
+        assert_eq!(
+            messages_endpoint_url("http://127.0.0.1:8046"),
+            "http://127.0.0.1:8046/v1/messages"
+        );
+        assert_eq!(
+            messages_endpoint_url("http://127.0.0.1:8046/v1"),
+            "http://127.0.0.1:8046/v1/messages"
+        );
+        assert_eq!(
+            messages_endpoint_url("http://127.0.0.1:8046/v1/"),
+            "http://127.0.0.1:8046/v1/messages"
+        );
+        assert_eq!(
+            messages_endpoint_url("http://127.0.0.1:8046/v2"),
+            "http://127.0.0.1:8046/v2/messages"
+        );
+        assert_eq!(
+            messages_endpoint_url("https://gateway.example/anthropic/v3"),
+            "https://gateway.example/anthropic/v3/messages"
+        );
+        assert_eq!(
+            messages_endpoint_url(" https://gateway.example/anthropic/v1beta "),
+            "https://gateway.example/anthropic/v1beta/messages"
+        );
+        assert_eq!(
+            messages_endpoint_url("http://127.0.0.1:8046/custom/messages"),
+            "http://127.0.0.1:8046/custom/messages"
+        );
+        assert_eq!(
+            messages_endpoint_url("http://127.0.0.1:8046/api"),
+            "http://127.0.0.1:8046/api/v1/messages"
+        );
     }
 
     #[test]

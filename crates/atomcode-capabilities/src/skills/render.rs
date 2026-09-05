@@ -30,7 +30,7 @@ pub const PER_SKILL_DESC_CAP: usize = 1024;
 
 /// First line of the rendered block; the injection hook matches this prefix to
 /// reconcile the block in place across `--resume`.
-pub const CATALOG_HEADER: &str = "=== AVAILABLE SKILLS ===";
+pub const CATALOG_HEADER: &str = "=== AVAILABLE SKILLS (*.md) ===";
 
 const GUIDANCE: &str = "Skills are reusable instruction templates for specific tasks. The names listed below are the only skill names you may pass directly to `use_skill`; never invent or guess a skill name from memory, task type, or common workflows. Match a task only against descriptions actually shown below. If a task clearly matches a shown skill's description — not only when the user names the skill — you MUST load that exact skill with `use_skill` and follow it BEFORE doing the work, INCLUDING before asking clarifying questions, exploring, or planning. If this catalog says skills were omitted, call `list_skills` before using an omitted or otherwise unlisted name, and use only an exact name it returns. If no available skill matches, proceed normally. If `use_skill` reports a missing skill, do not guess another name; briefly note it and continue with the best fallback. Announce in one line which skill you're using. If several shown skills match, use the minimal set that covers the request.";
 

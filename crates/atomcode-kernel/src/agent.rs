@@ -851,7 +851,7 @@ impl AutoRespond {
 pub struct Agent {
     provider: Arc<dyn LlmProvider>,
     tools: MountedTools,
-    persona: String,
+    persona: Vec<String>,
     middlewares: Vec<Arc<dyn ToolMiddleware>>,
     hooks: Arc<dyn LifecycleHooks>,
     max_rounds: Option<u32>,
@@ -1096,7 +1096,7 @@ enum PromptKind {
 struct RunningAgent {
     provider: Arc<dyn LlmProvider>,
     tools: MountedTools,
-    persona: String,
+    persona: Vec<String>,
     middlewares: Vec<Arc<dyn ToolMiddleware>>,
     hooks: Arc<dyn LifecycleHooks>,
     rt: RequestCtx,
@@ -1382,8 +1382,10 @@ impl RunningAgent {
                 // seeding hooks treat it as fresh; the kernel must agree, or the
                 // session would run with hook injections but NO persona.
                 let mut c = Conversation::new();
-                if !self.persona.is_empty() {
-                    c.push(Message::system(self.persona.clone()));
+                for p in &self.persona {
+                    if !p.is_empty() {
+                        c.push(Message::system(p.clone()));
+                    }
                 }
                 c
             }
@@ -1391,8 +1393,10 @@ impl RunningAgent {
             // default → neutral kernel.
             None => {
                 let mut c = Conversation::new();
-                if !self.persona.is_empty() {
-                    c.push(Message::system(self.persona.clone()));
+                for p in &self.persona {
+                    if !p.is_empty() {
+                        c.push(Message::system(p.clone()));
+                    }
                 }
                 c
             }
@@ -3913,7 +3917,7 @@ impl RunningAgent {
 pub struct AgentBuilder {
     provider: Option<Arc<dyn LlmProvider>>,
     tools: Option<MountedTools>,
-    persona: String,
+    persona: Vec<String>,
     middlewares: Vec<Arc<dyn ToolMiddleware>>,
     /// Composable lifecycle hooks, accumulated in REGISTRATION ORDER. `.build()`
     /// wraps this Vec in a `HookChain` (which fans out per the documented contract);
@@ -3977,7 +3981,7 @@ impl Default for AgentBuilder {
         Self {
             provider: None,
             tools: None,
-            persona: String::new(),
+            persona: Vec::new(),
             middlewares: Vec::new(),
             hooks: Vec::new(),
             max_rounds: None,
@@ -4040,7 +4044,11 @@ impl AgentBuilder {
         self
     }
     pub fn persona(mut self, s: impl Into<String>) -> Self {
-        self.persona = s.into();
+        self.persona = vec![s.into()];
+        self
+    }
+    pub fn personas(mut self, list: impl IntoIterator<Item = impl Into<String>>) -> Self {
+        self.persona = list.into_iter().map(Into::into).collect();
         self
     }
     /// Register a `ToolMiddleware`. Middlewares run in REGISTRATION ORDER — the

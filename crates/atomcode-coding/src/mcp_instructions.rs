@@ -8,15 +8,14 @@ use atomcode_capabilities::mcp::McpRegistry;
 use atomcode_kernel::hook::LifecycleHooks;
 use atomcode_kernel::message::Conversation;
 
-pub const MCP_INSTRUCTIONS_HEADER: &str = "<mcp-server-instructions>";
+pub const MCP_INSTRUCTIONS_HEADER: &str = "=== MCP SERVER INSTRUCTIONS ===";
 
-/// Injects the connected servers' current instructions into the session's frozen
-/// user prefix at `session_start` and `turn_start`.
+/// Injects the connected servers' current instructions into the session's
+/// independent system block (Block 4) at `session_start` and `turn_start`.
 ///
-/// Lands after the skill catalog, before the first real query. User-owned MCP
-/// guidance sits inside `sacred_floor`, so compaction cannot drain it.
-/// Unchanged bytes keep the prompt-cache prefix intact; the user's latest query
-/// stays the final message.
+/// Lands after the skill catalog (Block 3), before project instructions (Block 5).
+/// User-owned MCP guidance sits inside `sacred_floor`, so compaction cannot drain it.
+/// Service-level independent hot reload: MCP changes do not bust Block 1, 2, or 3.
 pub(crate) struct McpInstructionsHook {
     registries: Vec<Arc<McpRegistry>>,
     mounted_tools: Arc<RwLock<Vec<String>>>,
@@ -53,12 +52,16 @@ impl McpInstructionsHook {
         // remains structurally complete.
         let instructions = truncate_combined_instructions(instructions.join("\n\n"));
         Some(format!(
-            "<{MCP_SERVER_INSTRUCTIONS_TAG}>\n{instructions}\n</{MCP_SERVER_INSTRUCTIONS_TAG}>"
+            "{MCP_INSTRUCTIONS_HEADER}\n<{MCP_SERVER_INSTRUCTIONS_TAG}>\n{instructions}\n</{MCP_SERVER_INSTRUCTIONS_TAG}>"
         ))
     }
 
     fn refresh_in_place(&self, convo: &mut Conversation) {
-        convo.reconcile_frozen_user_block(MCP_INSTRUCTIONS_HEADER, self.render_instructions());
+        // Clean up legacy frozen user blocks from earlier versions if resuming
+        convo.reconcile_frozen_user_block(MCP_INSTRUCTIONS_HEADER, None);
+        convo.reconcile_frozen_user_block("<mcp-server-instructions>", None);
+        // Reconcile as independent system block (Block 4)
+        convo.reconcile_system_block(MCP_INSTRUCTIONS_HEADER, self.render_instructions());
     }
 }
 
@@ -87,7 +90,7 @@ impl LifecycleHooks for McpInstructionsHook {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use atomcode_kernel::message::Message;
+    use atomcode_kernel::message::{Message, Role};
 
     fn convo_with_persona() -> Conversation {
         let mut c = Conversation::default();
@@ -105,6 +108,16 @@ mod tests {
         let mut convo = convo_with_persona();
         hook.refresh_in_place(&mut convo);
         assert_eq!(convo.messages.len(), 2);
+
+        // Test with actual instructions
+        let mut convo2 = convo_with_persona();
+        convo2.reconcile_system_block(
+            MCP_INSTRUCTIONS_HEADER,
+            Some(format!("{MCP_INSTRUCTIONS_HEADER}\n<mcp-server-instructions>\nTool guide\n</mcp-server-instructions>")),
+        );
+        assert_eq!(convo2.messages.len(), 3);
+        assert_eq!(convo2.messages[1].role, Role::System);
+        assert!(convo2.messages[1].text.starts_with(MCP_INSTRUCTIONS_HEADER));
     }
 
     #[test]

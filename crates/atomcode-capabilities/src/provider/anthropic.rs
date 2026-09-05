@@ -444,18 +444,24 @@ fn build_request_body(
     );
     body.insert("stream".into(), json!(true));
 
-    let (system, mut msgs) = format_messages(messages, cfg.thinking);
-    if let Some(s) = system {
-        // Prompt-cache breakpoint #1: frozen system. Next request that keeps this
-        // system byte-identical reads it from cache.
-        body.insert(
-            "system".into(),
-            json!([{
+    let (system_blocks, mut msgs) = format_messages(messages, cfg.thinking);
+    if !system_blocks.is_empty() {
+        // Prompt-cache breakpoints: Anthropic allows at most 4 breakpoints per request.
+        // We set cache_control on Block 1 (idx 0) and Block 2 (idx 1).
+        // Along with tools (last tool) and last history message, this precisely utilizes
+        // the 4-breakpoint budget: [Tools, Block 1, Block 2, Last Message].
+        let mut sys_values: Vec<Value> = Vec::with_capacity(system_blocks.len());
+        for (idx, text) in system_blocks.into_iter().enumerate() {
+            let mut block = json!({
                 "type": "text",
-                "text": s,
-                "cache_control": { "type": "ephemeral" },
-            }]),
-        );
+                "text": text,
+            });
+            if idx == 0 || idx == 1 {
+                block["cache_control"] = json!({ "type": "ephemeral" });
+            }
+            sys_values.push(block);
+        }
+        body.insert("system".into(), json!(sys_values));
     }
     apply_message_cache_breakpoint(&mut msgs);
     body.insert("messages".into(), json!(msgs));
@@ -543,23 +549,19 @@ fn apply_message_cache_breakpoint(messages: &mut [Value]) {
     }
 }
 
-/// Split kernel messages into the Anthropic top-level `system` string (joined leading
+/// Split kernel messages into the Anthropic top-level `system` text blocks (all non-empty
 /// System messages) and the wire `messages[]` (User/Assistant/Tool mapped to content
 /// blocks; consecutive Tool results folded into one `user` message).
-fn format_messages(messages: &[Message], echo_thinking: bool) -> (Option<String>, Vec<Value>) {
-    // Leading System messages lift to the top-level `system` (joined). Anthropic has no
+fn format_messages(messages: &[Message], echo_thinking: bool) -> (Vec<String>, Vec<Value>) {
+    // Leading System messages lift to the top-level `system` block array. Anthropic has no
     // system message ROLE on the wire.
-    let system_text: String = messages
+    let system_blocks: Vec<String> = messages
         .iter()
         .filter(|m| m.role == Role::System)
-        .map(|m| m.text.as_str())
-        .collect::<Vec<_>>()
-        .join("\n\n");
-    let system = if system_text.is_empty() {
-        None
-    } else {
-        Some(system_text)
-    };
+        .map(|m| m.text.trim())
+        .filter(|t| !t.is_empty())
+        .map(|s| s.to_string())
+        .collect();
 
     let mut out: Vec<Value> = Vec::with_capacity(messages.len());
     let mut i = 0;
@@ -608,7 +610,7 @@ fn format_messages(messages: &[Message], echo_thinking: bool) -> (Option<String>
     // stack. Merge every consecutive `role:"user"` run into one (others — OpenAI/Ollama —
     // tolerate adjacency, so they don't need this).
     let out = merge_consecutive_user(out);
-    (system, out)
+    (system_blocks, out)
 }
 
 /// Merge consecutive `role:"user"` wire entries into ONE. Text-only neighbors join into a
@@ -1256,9 +1258,9 @@ mod tests {
         ];
         let (system, out) = format_messages(&msgs, false);
         assert_eq!(
-            system.as_deref(),
-            Some("be terse"),
-            "leading System lifts to top-level system"
+            system,
+            vec!["be terse".to_string()],
+            "leading System lifts to top-level system blocks"
         );
         // text-only user → content STRING (prefix-cache parity with no-block path).
         assert_eq!(out[0], json!({"role":"user","content":"hi"}));
@@ -1469,6 +1471,31 @@ mod tests {
         assert!(body.get("tools").is_none(), "empty tools omitted");
         assert!(body.get("tool_choice").is_none(), "Auto omits tool_choice");
         assert!(body.get("thinking").is_none(), "thinking off by default");
+    }
+
+    #[test]
+    fn multi_segment_system_has_two_cache_breakpoints() {
+        let c = cfg();
+        let body = build_request_body(
+            "claude-opus-4-8",
+            &[
+                Message::system("block1"),
+                Message::system("block2"),
+                Message::system("block3"),
+                Message::user("hi"),
+            ],
+            &[],
+            &ChatOptions::default(),
+            &c,
+        );
+        let sys = body["system"].as_array().expect("system is array");
+        assert_eq!(sys.len(), 3);
+        assert_eq!(sys[0]["text"], "block1");
+        assert_eq!(sys[0]["cache_control"]["type"], "ephemeral");
+        assert_eq!(sys[1]["text"], "block2");
+        assert_eq!(sys[1]["cache_control"]["type"], "ephemeral");
+        assert_eq!(sys[2]["text"], "block3");
+        assert!(sys[2].get("cache_control").is_none());
     }
 
     #[test]

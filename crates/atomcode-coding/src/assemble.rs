@@ -3,7 +3,6 @@
 use crate::config::CodingAgentConfig;
 use crate::discipline::VerifyCadenceHook;
 use crate::execution_policy::TurnExecutionPolicy;
-use crate::persona::coding_persona_with_language;
 use atomcode_capabilities::codeintel::{codeintel_tool_names, register_codeintel_tools};
 
 use atomcode_capabilities::provider::{OpenAiCompatConfig, OpenAiCompatProvider};
@@ -99,22 +98,22 @@ fn build_coding_agent_from_tools(
                                              // when the tool + hook aren't mounted (and vice-versa). The `todowrite` TOOL
                                              // itself is registered on the same env gate in `atomcode-capabilities`.
     let todo_enabled = crate::persona::todo_switch_enabled_for(cfg.todo.enabled);
-    let mut persona = coding_persona_with_language(
+    let (mut block_1, block_2) = crate::persona::coding_persona_blocks_with_language(
         &cfg.model,
         cfg.preferred_language,
         todo_enabled,
         crate::persona::request_user_input_switch_enabled(),
     );
     if let Some(warning) = startup_warning {
-        persona.push_str("\n\n<system-reminder>");
-        persona.push_str(&warning);
-        persona.push_str("</system-reminder>");
+        block_1.push_str("\n\n<system-reminder>");
+        block_1.push_str(&warning);
+        block_1.push_str("</system-reminder>");
     }
     let turn_execution_policy = Arc::new(TurnExecutionPolicy::new());
     let builder = Agent::builder()
         .provider(provider)
         .tools(tools)
-        .persona(persona)
+        .personas([block_1, block_2])
         // Repair model-produced arguments before approval inspects them.
         .middleware(Arc::new(RepairToolArgsMiddleware))
         .middleware(turn_execution_policy.clone());

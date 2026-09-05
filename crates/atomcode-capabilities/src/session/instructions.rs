@@ -18,13 +18,19 @@ use std::path::{Path, PathBuf};
 /// Project-root filenames checked IN ORDER for the project tier; the FIRST existing wins.
 /// Includes the ecosystem names (`AGENTS.md`, `CLAUDE.md`) so a repo's existing agent
 /// instructions are honored (matches v1).
+/// Project-root filenames checked IN ORDER for the project tier; the FIRST existing wins.
+/// AGENTS.md takes first precedence.
 const PROJECT_NAMES: [&str; 5] = [
-    ".atomcode.md",
-    "ATOMCODE.md",
     "AGENTS.md",
     "CLAUDE.md",
+    ".atomcode.md",
+    "ATOMCODE.md",
     "claude.md",
 ];
+
+/// Header for Block 5: Authoritative Project Instructions & Knowledge
+pub const INSTRUCTIONS_HEADER: &str =
+    "=== AUTHORITATIVE PROJECT INSTRUCTIONS & KNOWLEDGE (*.md) ===";
 
 /// Additive knowledge pack: first existing path wins per pack; packs do not replace each other.
 struct KnowledgePack {
@@ -92,33 +98,36 @@ pub fn render_instructions(home: &Path, project: &Path) -> String {
     let global = home.join("ATOMCODE.md");
     if let Some(body) = read_tier(&global) {
         out.push(format!(
-            "=== GLOBAL INSTRUCTIONS ({}) ===\n{body}",
-            global.display()
+            "=== GLOBAL INSTRUCTIONS (ATOMCODE.md) ===\n{body}"
         ));
     }
     if let Some(proj) = project_file(project) {
         if let Some(body) = read_tier(&proj) {
+            let filename = proj
+                .file_name()
+                .and_then(|f| f.to_str())
+                .unwrap_or("AGENTS.md");
             out.push(format!(
-                "=== PROJECT INSTRUCTIONS ({}) ===\n{body}",
-                proj.display()
+                "=== PROJECT INSTRUCTIONS ({filename}) ===\n{body}"
             ));
         }
     }
     let user = project.join(".atomcode.user.md");
     if let Some(body) = read_tier(&user) {
         out.push(format!(
-            "=== USER INSTRUCTIONS ({}) ===\n{body}",
-            user.display()
+            "=== USER INSTRUCTIONS (.atomcode.user.md) ===\n{body}"
         ));
     }
     for pack in KNOWLEDGE_PACKS {
         if let Some(path) = first_existing(project, pack.candidates) {
             if let Some(body) = read_tier(&path) {
+                let filename = path
+                    .file_name()
+                    .and_then(|f| f.to_str())
+                    .unwrap_or("knowledge.md");
                 out.push(format!(
-                    "=== {} ({}) ===\n{}\n\n{body}",
-                    pack.header,
-                    path.display(),
-                    pack.hint
+                    "=== {} ({filename}) ===\n{}\n\n{body}",
+                    pack.header, pack.hint
                 ));
             }
         }
@@ -135,7 +144,7 @@ they do not describe or override the host application or active configured model
 (Safety, approval, and destructive-action gates are not overridable here.) \
 DOMAIN GLOSSARY / BUSINESS RULES / DB WORDS (if present) are project knowledge packs: \
 use them for term expansion, policy, and schema mapping; they do not override safety gates.";
-    format!("{PREAMBLE}\n\n{}", out.join("\n\n"))
+    format!("{INSTRUCTIONS_HEADER}\n\n{PREAMBLE}\n\n{}", out.join("\n\n"))
 }
 
 /// The first existing project-tier file (precedence order), if any.
@@ -311,5 +320,17 @@ mod tests {
         let out = render_instructions(&d.path().join("nohome"), &proj);
         assert!(out.contains("nested-rules"));
         assert!(!out.contains("root-rules-should-lose"));
+    }
+
+    #[test]
+    fn agents_md_wins_over_atomcode_md() {
+        let d = tempfile::tempdir().unwrap();
+        let proj = d.path();
+        fs::write(proj.join("AGENTS.md"), "agents first").unwrap();
+        fs::write(proj.join(".atomcode.md"), "atomcode second").unwrap();
+        let out = render_instructions(&d.path().join("nohome"), proj);
+        assert!(out.contains("agents first"));
+        assert!(!out.contains("atomcode second"));
+        assert!(out.starts_with(INSTRUCTIONS_HEADER));
     }
 }

@@ -35,7 +35,11 @@ impl SkillCatalogHook {
 #[async_trait]
 impl LifecycleHooks for SkillCatalogHook {
     async fn session_start(&self, convo: &mut Conversation, _resumed: bool) {
-        convo.reconcile_frozen_user_block(CATALOG_HEADER, self.catalog.clone());
+        // Clean up any legacy frozen user block if resuming from an older snapshot
+        convo.reconcile_frozen_user_block(CATALOG_HEADER, None);
+        convo.reconcile_frozen_user_block("=== AVAILABLE SKILLS ===", None);
+        // Reconcile as independent system block (Block 3)
+        convo.reconcile_system_block(CATALOG_HEADER, self.catalog.clone());
     }
 }
 
@@ -57,11 +61,10 @@ mod tests {
         let mut c = convo_with_persona();
         hook.session_start(&mut c, false).await;
         assert_eq!(c.messages[0].text, "PERSONA");
-        assert_eq!(c.messages[1].role, Role::User);
-        assert!(c.messages[1].synthetic, "catalog is a frozen user prefix");
+        assert_eq!(c.messages[1].role, Role::System);
         assert!(
             c.messages[1].text.starts_with(CATALOG_HEADER),
-            "catalog after persona"
+            "catalog as system block after persona"
         );
         assert_eq!(c.messages[2].role, Role::User, "before the user message");
         assert!(!c.messages[2].synthetic);
@@ -85,8 +88,7 @@ mod tests {
         c.push(Message::user("hi"));
         hook.session_start(&mut c, true).await;
         assert_eq!(c.messages.len(), 3, "reconciled in place, no growth");
-        assert_eq!(c.messages[1].role, Role::User);
-        assert!(c.messages[1].synthetic);
+        assert_eq!(c.messages[1].role, Role::System);
         assert!(c.messages[1].text.contains("- fresh: v"));
         assert!(!c.messages[1].text.contains("stale"));
     }
@@ -99,7 +101,9 @@ mod tests {
         c.push(Message::system(format!("{CATALOG_HEADER}\n- gone: x")));
         c.push(Message::user("hi"));
         hook.session_start(&mut c, true).await;
-        assert_eq!(c.messages.len(), 2, "stale catalog pruned");
+        assert_eq!(c.messages.len(), 2, "stale block pruned");
+        assert_eq!(c.messages[0].text, "PERSONA");
+        assert_eq!(c.messages[1].text, "hi");
         assert!(c
             .messages
             .iter()

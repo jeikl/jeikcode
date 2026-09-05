@@ -1,23 +1,18 @@
-//! `SessionContextHook` — injects the per-session "context block" (environment + project
-//! instructions + domain glossary + git snapshot) as ONE leading `Role::System` message.
+//! `SessionContextHook` — injects Block 5 (Authoritative Project Instructions & Knowledge)
+//! and Block 6 (Session Baseline) as independent leading `Role::System` messages.
 //!
 //! ## Hot-reload (every user turn)
 //!
-//! On **each** user message (`turn_start`), env + GLOBAL/PROJECT/USER instructions +
-//! DOMAIN GLOSSARY are re-read from disk and the SESSION CONTEXT system message is
-//! rewritten in place. Edit `AGENTS.md` / `.atomcode/glossary.md` mid-session and the
-//! next send picks them up without restart.
+//! On **each** user message (`turn_start`), GLOBAL/PROJECT/USER instructions +
+//! DOMAIN GLOSSARY are re-read from disk and Block 5 is reconciled in place.
+//! Edit `AGENTS.md` / `.atomcode/glossary.md` mid-session and the next send picks them
+//! up without restart.
 //!
 //! - Unchanged files → re-render is byte-identical → prefix cache still holds.
-//! - Changed instruction/glossary bytes → prefix cache invalidates for that turn (intended).
-//! - **Git section stays frozen** at session-start (or resume) snapshot: live `git status`
+//! - Changed instruction/glossary bytes → Block 5 invalidates, but earlier blocks (1-4)
+//!   remain cached!
+//! - **Block 6 (Baseline + Git snapshot) stays 100% frozen** at session-start: live `git status`
 //!   drifts every commit and would bust the cache every turn if refreshed.
-//!
-//! Fresh sessions inject the full block at `session_start`; resume refreshes
-//! instructions the same way while preserving the saved git section.
-//!
-//! The wire adapter coalesces persona + this block + memory into a single system message
-//! (commit `3956f9fc`). Identified by [`CONTEXT_HEADER`]. `/cd` is a NEW SESSION.
 
 use super::instructions::render_instructions;
 use async_trait::async_trait;
@@ -25,17 +20,18 @@ use atomcode_kernel::hook::LifecycleHooks;
 use atomcode_kernel::message::{Conversation, Message, Role};
 use std::path::PathBuf;
 
-/// First line of the rendered block — how refresh/resume locate it for in-place rewrite.
-const CONTEXT_HEADER: &str = "=== SESSION CONTEXT ===";
+/// Header for Block 5: Authoritative Project Instructions & Knowledge
+pub const INSTRUCTIONS_HEADER: &str = super::instructions::INSTRUCTIONS_HEADER;
 
-/// Separator + marker that begins the git sub-section (always the LAST section, joined onto
-/// the base with a blank line). On resume / turn hot-reload the saved git bytes — from this
-/// marker to the end — are spliced back verbatim so the frozen snapshot survives while
-/// env/instructions refresh.
+/// Header for Block 6: Session Baseline (environment + git snapshot)
+pub const BASELINE_HEADER: &str = "=== SESSION BASELINE ===";
+
+/// Legacy context header from monolithic format (for backward-compatible resume)
+pub const LEGACY_CONTEXT_HEADER: &str = "=== SESSION CONTEXT ===";
+
+/// Separator marker for git sub-section when migrating legacy blocks
 const GIT_SECTION_SEP: &str = "\n\n=== GIT STATUS";
 
-/// Injects environment + project-instructions + git-status context; hot-reloads instruction
-/// tiers on every user turn.
 /// Header for optional client-supplied system text (OpenAI/Anthropic compat API).
 /// Appended after AGENTS / glossary / db packs so it sits at the bottom of the
 /// instruction stack without overriding project knowledge.
@@ -47,7 +43,7 @@ pub struct SessionContextHook {
     /// [`crate::paths::config_dir`]; the env honors `$ATOMCODE_HOME` there.
     home: PathBuf,
     /// Optional client system prompt (e.g. from OpenAI/Anthropic `messages[].role=system`).
-    /// Appended after project instructions + knowledge packs, before the frozen git section.
+    /// Appended after project instructions + knowledge packs.
     extra_append: Option<String>,
 }
 
@@ -82,27 +78,35 @@ impl SessionContextHook {
         self
     }
 
-    /// Render the full context block. Always non-empty (the env sub-section is
-    /// unconditional), so the session always carries a context message.
-    fn render(&self) -> String {
-        match self.git_snapshot() {
-            Some(git) => format!("{}\n\n{}", self.render_base(), git),
-            None => self.render_base(),
+    /// Render Block 5: Authoritative Project Instructions & Knowledge (if any).
+    /// Returns None if no instructions or client extras are present.
+    pub fn render_instructions_block(&self) -> Option<String> {
+        let mut instr = render_instructions(&self.home, &self.working_dir);
+        if let Some(extra) = &self.extra_append {
+            if instr.is_empty() {
+                instr = format!("{INSTRUCTIONS_HEADER}\n\n{CLIENT_SYSTEM_HEADER}\n{extra}");
+            } else {
+                instr.push_str(&format!("\n\n{CLIENT_SYSTEM_HEADER}\n{extra}"));
+            }
+        }
+        if instr.trim().is_empty() {
+            None
+        } else {
+            Some(instr)
         }
     }
 
-    /// The NON-git portion — header + env + project instructions (+ glossary) + optional
-    /// client system append. Re-read from disk on every call (hot-reload).
-    fn render_base(&self) -> String {
-        let mut out = vec![CONTEXT_HEADER.to_string(), self.env_block()];
-        let instr = render_instructions(&self.home, &self.working_dir);
-        if !instr.is_empty() {
-            out.push(instr);
+    /// Render Block 6: Session Baseline (CWD + Platform + Shell + Git snapshot).
+    pub fn render_baseline(&self) -> String {
+        match self.git_snapshot() {
+            Some(git) => format!("{BASELINE_HEADER}\n{}\n\n{git}", self.env_block()),
+            None => format!("{BASELINE_HEADER}\n{}", self.env_block()),
         }
-        if let Some(extra) = &self.extra_append {
-            out.push(format!("{CLIENT_SYSTEM_HEADER}\n{extra}"));
-        }
-        out.join("\n\n")
+    }
+
+    /// Helper for legacy callers and tests.
+    pub fn render(&self) -> String {
+        self.render_baseline()
     }
 
     fn env_block(&self) -> String {
@@ -176,63 +180,58 @@ impl SessionContextHook {
         }
         Some(String::from_utf8_lossy(&out.stdout).into_owned())
     }
-
-    /// Re-read instruction/glossary files from disk and rewrite the SESSION CONTEXT
-    /// system message in place. Git section (if any) is preserved from the saved block.
-    ///
-    /// Used by resume and by every `turn_start` (hot-reload).
-    fn refresh_instructions_in_place(&self, convo: &mut Conversation) {
-        // Scope to the leading system run so a later user/assistant echo of the header
-        // cannot suppress or overwrite the real block.
-        let leading = convo
-            .messages
-            .iter()
-            .take_while(|m| m.role == Role::System)
-            .count();
-        match convo.messages[..leading]
-            .iter()
-            .position(|m| m.text.starts_with(CONTEXT_HEADER))
-        {
-            Some(i) => {
-                let saved = &convo.messages[i].text;
-                let refreshed = match saved.rfind(GIT_SECTION_SEP) {
-                    // Splice frozen git bytes (marker → end) onto a freshly rendered base.
-                    // `+ 2` skips the "\n\n" the separator carries so the join isn't doubled.
-                    Some(sep) => format!("{}\n\n{}", self.render_base(), &saved[sep + 2..]),
-                    None => self.render_base(),
-                };
-                convo.messages[i] = Message::system(refreshed);
-            }
-            // Legacy session or missing block — insert after leading system run.
-            None => convo
-                .messages
-                .insert(leading, Message::system(self.render())),
-        }
-    }
 }
 
 #[async_trait]
 impl LifecycleHooks for SessionContextHook {
     async fn session_start(&self, convo: &mut Conversation, resumed: bool) {
         if !resumed {
-            // FRESH: land right after the leading-system run (persona, and any context hook
-            // registered before this one), before the first user message.
-            let at = convo
-                .messages
-                .iter()
-                .take_while(|m| m.role == Role::System)
-                .count();
-            convo.messages.insert(at, Message::system(self.render()));
+            // FRESH: Reconcile Block 5 (instructions) and Block 6 (baseline)
+            convo.reconcile_system_block(INSTRUCTIONS_HEADER, self.render_instructions_block());
+            convo.reconcile_system_block(BASELINE_HEADER, Some(self.render_baseline()));
             return;
         }
-        // RESUME: hot-refresh instructions/glossary; freeze saved git section.
-        self.refresh_instructions_in_place(convo);
+
+        // RESUME:
+        // 1. Hot-reload instructions (Block 5)
+        convo.reconcile_system_block(INSTRUCTIONS_HEADER, self.render_instructions_block());
+
+        // 2. Baseline (Block 6): Check if BASELINE_HEADER exists
+        let leading = convo
+            .messages
+            .iter()
+            .take_while(|m| m.role == Role::System)
+            .count();
+
+        let has_baseline = convo.messages[..leading]
+            .iter()
+            .any(|m| m.text.starts_with(BASELINE_HEADER));
+
+        if !has_baseline {
+            // Check for legacy CONTEXT_HEADER ("=== SESSION CONTEXT ===")
+            let legacy_pos = convo.messages[..leading]
+                .iter()
+                .position(|m| m.text.starts_with(LEGACY_CONTEXT_HEADER));
+
+            if let Some(i) = legacy_pos {
+                let saved = &convo.messages[i].text;
+                let git_section = saved.rfind(GIT_SECTION_SEP).map(|sep| &saved[sep + 2..]);
+                let baseline = match git_section {
+                    Some(git) => format!("{BASELINE_HEADER}\n{}\n\n{git}", self.env_block()),
+                    None => self.render_baseline(),
+                };
+                convo.messages.remove(i);
+                convo.reconcile_system_block(BASELINE_HEADER, Some(baseline));
+            } else {
+                convo.reconcile_system_block(BASELINE_HEADER, Some(self.render_baseline()));
+            }
+        }
     }
 
     async fn turn_start(&self, convo: &mut Conversation) {
-        // Every user send: re-read GLOBAL / PROJECT / USER / DOMAIN GLOSSARY from disk.
-        // Git stays frozen (see module docs).
-        self.refresh_instructions_in_place(convo);
+        // Every user send: re-read instructions & knowledge from disk.
+        // Block 6 (Baseline + Git) stays 100% frozen!
+        convo.reconcile_system_block(INSTRUCTIONS_HEADER, self.render_instructions_block());
     }
 }
 
@@ -266,7 +265,7 @@ mod tests {
         let ctx = &convo.messages[1];
         assert_eq!(ctx.role, Role::System);
         assert!(
-            ctx.text.starts_with(CONTEXT_HEADER),
+            ctx.text.starts_with(BASELINE_HEADER),
             "block leads with the header"
         );
         assert!(
@@ -285,6 +284,7 @@ mod tests {
         let mut convo = Conversation::new();
         convo.push(Message::system("persona"));
         hook.session_start(&mut convo, false).await;
+        assert_eq!(convo.messages.len(), 3);
         let ctx = &convo.messages[1].text;
         let agents_pos = ctx.find("project-rule-A").expect("AGENTS body present");
         let client_pos = ctx
@@ -298,6 +298,10 @@ mod tests {
             ctx.contains(CLIENT_SYSTEM_HEADER),
             "client system header present: {ctx}"
         );
+        assert!(
+            ctx.starts_with(INSTRUCTIONS_HEADER),
+            "instructions header present: {ctx}"
+        );
     }
 
     #[tokio::test]
@@ -306,7 +310,7 @@ mod tests {
         let bare = tempfile::tempdir().unwrap();
         let h1 = SessionContextHook::with_home(bare.path(), bare.path().join("nohome"));
         assert!(
-            !h1.render().contains("GIT STATUS"),
+            !h1.render_baseline().contains("GIT STATUS"),
             "no git section outside a repo"
         );
 
@@ -315,7 +319,7 @@ mod tests {
         git_init(repo.path());
         let h2 = SessionContextHook::with_home(repo.path(), repo.path().join("nohome"));
         assert!(
-            h2.render().contains("=== GIT STATUS"),
+            h2.render_baseline().contains("=== GIT STATUS"),
             "git section inside a repo"
         );
     }
@@ -325,8 +329,12 @@ mod tests {
         let d = tempfile::tempdir().unwrap();
         std::fs::write(d.path().join("AGENTS.md"), "project rule X").unwrap();
         let hook = SessionContextHook::with_home(d.path(), d.path().join("nohome"));
-        assert!(hook.render().contains("PROJECT INSTRUCTIONS"));
-        assert!(hook.render().contains("project rule X"));
+        let instr = hook
+            .render_instructions_block()
+            .expect("instructions rendered");
+        assert!(instr.contains("PROJECT INSTRUCTIONS"));
+        assert!(instr.contains("project rule X"));
+        assert!(instr.starts_with(INSTRUCTIONS_HEADER));
     }
 
     fn git_commit(dir: &std::path::Path, msg: &str) {
@@ -341,50 +349,46 @@ mod tests {
 
     #[tokio::test]
     async fn resume_freezes_git_but_refreshes_instructions() {
-        // Not a git repo → the live render carries no git section; the ONLY git section is the
-        // frozen one already in the saved block.
         let d = tempfile::tempdir().unwrap();
         // The user edited project instructions AFTER the session was saved.
         std::fs::write(d.path().join("AGENTS.md"), "new project rule Z").unwrap();
         let hook = SessionContextHook::with_home(d.path(), d.path().join("nohome"));
-        // Saved block: a stale env/base + a frozen git section from an earlier HEAD.
-        let saved = format!(
-            "{CONTEXT_HEADER}\n\nWorking directory: /old\n\n=== GIT STATUS (snapshot at session start, not live) ===\nHEAD: oldsha frozen commit"
+        // Saved block: a frozen baseline from an earlier HEAD.
+        let saved_baseline = format!(
+            "{BASELINE_HEADER}\nWorking directory: /old\nPlatform: windows\nShell: bash\n\n=== GIT STATUS (snapshot at session start, not live) ===\nHEAD: oldsha frozen commit"
         );
         let mut convo = Conversation::new();
         convo.push(Message::system("persona"));
-        convo.push(Message::system(saved));
+        convo.push(Message::system(saved_baseline));
         convo.push(Message::user("earlier turn"));
         hook.session_start(&mut convo, true).await;
-        assert_eq!(convo.messages.len(), 3, "no growth on resume");
-        let block = &convo.messages[1].text;
-        assert!(
-            block.contains("new project rule Z"),
-            "project instructions re-rendered from disk on resume: {block}"
+        assert_eq!(
+            convo.messages.len(),
+            4,
+            "instructions reconciled into leading system run"
         );
+        let instr_block = &convo.messages[1].text;
         assert!(
-            block.contains("HEAD: oldsha frozen commit"),
-            "saved git section frozen (not refreshed): {block}"
+            instr_block.contains("new project rule Z"),
+            "project instructions re-rendered from disk on resume: {instr_block}"
         );
+        let baseline_block = &convo.messages[2].text;
         assert!(
-            !block.contains("Working directory: /old"),
-            "env re-rendered (stale env replaced): {block}"
+            baseline_block.contains("HEAD: oldsha frozen commit"),
+            "saved git section frozen (not refreshed): {baseline_block}"
         );
-        assert_eq!(convo.messages[2].text, "earlier turn", "history untouched");
+        assert_eq!(convo.messages[3].text, "earlier turn", "history untouched");
     }
 
     #[tokio::test]
     async fn resume_git_frozen_across_head_move_keeps_prefix_byte_stable() {
-        // The core cache guarantee: even when the repo's HEAD moves between save and resume,
-        // the resumed block is BYTE-IDENTICAL to the saved one (git frozen) so the cached
-        // prefix survives.
         let repo = tempfile::tempdir().unwrap();
         git_init(repo.path());
         std::fs::write(repo.path().join("a.txt"), "1").unwrap();
         git_commit(repo.path(), "first");
         let hook = SessionContextHook::with_home(repo.path(), repo.path().join("nohome"));
-        let saved = hook.render(); // captures HEAD #1
-                                   // HEAD moves after the save.
+        let saved = hook.render_baseline(); // captures HEAD #1
+        // HEAD moves after the save.
         std::fs::write(repo.path().join("b.txt"), "2").unwrap();
         git_commit(repo.path(), "second");
         let mut convo = Conversation::new();
@@ -400,7 +404,7 @@ mod tests {
 
     #[tokio::test]
     async fn resume_inserts_when_absent() {
-        // Snapshot predates the context hook → insert after the leading system run.
+        // Snapshot predates the context hook → insert baseline into system run.
         let d = tempfile::tempdir().unwrap();
         let hook = SessionContextHook::with_home(d.path(), d.path().join("nohome"));
         let mut convo = Conversation::new();
@@ -409,10 +413,30 @@ mod tests {
         hook.session_start(&mut convo, true).await;
         assert_eq!(convo.messages.len(), 3);
         assert!(
-            convo.messages[1].text.starts_with(CONTEXT_HEADER),
+            convo.messages[1].text.starts_with(BASELINE_HEADER),
             "lands after persona"
         );
         assert_eq!(convo.messages[2].text, "earlier turn");
+    }
+
+    #[tokio::test]
+    async fn resume_migrates_legacy_session_context() {
+        let d = tempfile::tempdir().unwrap();
+        std::fs::write(d.path().join("AGENTS.md"), "project rule legacy").unwrap();
+        let hook = SessionContextHook::with_home(d.path(), d.path().join("nohome"));
+        let legacy_saved = format!(
+            "{LEGACY_CONTEXT_HEADER}\nWorking directory: /legacy\nPlatform: windows\nShell: cmd.exe\n\n=== GIT STATUS (snapshot at session start, not live) ===\nHEAD: legacy-sha"
+        );
+        let mut convo = Conversation::new();
+        convo.push(Message::system("persona"));
+        convo.push(Message::system(legacy_saved));
+        convo.push(Message::user("hi"));
+        hook.session_start(&mut convo, true).await;
+        assert_eq!(convo.messages.len(), 4);
+        assert!(convo.messages[1].text.starts_with(INSTRUCTIONS_HEADER));
+        assert!(convo.messages[1].text.contains("project rule legacy"));
+        assert!(convo.messages[2].text.starts_with(BASELINE_HEADER));
+        assert!(convo.messages[2].text.contains("HEAD: legacy-sha"));
     }
 
     #[tokio::test]
@@ -426,6 +450,7 @@ mod tests {
         let mut convo = Conversation::new();
         convo.push(Message::system("persona"));
         hook.session_start(&mut convo, false).await;
+        assert_eq!(convo.messages.len(), 3); // persona, instructions, baseline
         assert!(convo.messages[1].text.contains("rule-v1"));
         assert!(convo.messages[1].text.contains("term-v1"));
 
@@ -446,8 +471,8 @@ mod tests {
         );
         assert_eq!(
             convo.messages.len(),
-            3,
-            "no extra messages; in-place rewrite"
+            4,
+            "no extra messages; in-place rewrite (persona, instructions, baseline, user)"
         );
     }
 
@@ -456,16 +481,17 @@ mod tests {
         let d = tempfile::tempdir().unwrap();
         std::fs::write(d.path().join("AGENTS.md"), "a").unwrap();
         let hook = SessionContextHook::with_home(d.path(), d.path().join("nohome"));
-        let saved = format!(
-            "{CONTEXT_HEADER}\n\nWorking directory: /x\n\n=== GIT STATUS (snapshot at session start, not live) ===\nHEAD: frozen-abc"
-        );
         let mut convo = Conversation::new();
         convo.push(Message::system("persona"));
-        convo.push(Message::system(saved));
+        hook.session_start(&mut convo, false).await;
+        let frozen_baseline = format!(
+            "{BASELINE_HEADER}\nWorking directory: /x\nPlatform: windows\nShell: bash\n\n=== GIT STATUS (snapshot at session start, not live) ===\nHEAD: frozen-abc"
+        );
+        convo.messages[2] = Message::system(frozen_baseline);
         convo.push(Message::user("hi"));
         hook.turn_start(&mut convo).await;
         assert!(
-            convo.messages[1].text.contains("HEAD: frozen-abc"),
+            convo.messages[2].text.contains("HEAD: frozen-abc"),
             "git must stay frozen across turn hot-reload"
         );
         assert!(convo.messages[1].text.contains("PROJECT INSTRUCTIONS"));

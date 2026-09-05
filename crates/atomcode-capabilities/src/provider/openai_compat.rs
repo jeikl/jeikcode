@@ -87,6 +87,11 @@ pub struct OpenAiCompatConfig {
     /// every construction site — including ACP/review/clix and coding assembly —
     /// is correct without extra wiring.
     pub supports_vision: bool,
+    /// Whether to coalesce consecutive system messages into a single system message.
+    /// Default `false` (native multi-system messages supported by modern OpenAI API,
+    /// enabling prefix prompt caching per block). Set to `true` for older legacy gateways
+    /// that only accept a single system message.
+    pub coalesce_system: bool,
 }
 
 /// Canonical native-stack heuristic for whether a model name looks vision-capable.
@@ -144,6 +149,7 @@ impl OpenAiCompatConfig {
             user_agent: None,
             skip_tls_verify: false,
             supports_vision,
+            coalesce_system: false,
         }
     }
 }
@@ -892,13 +898,18 @@ fn format_messages(
     messages: &[Message],
     policy: ReasoningPolicy,
     supports_vision: bool,
+    coalesce_system: bool,
 ) -> Vec<Value> {
     let mut out = Vec::with_capacity(messages.len());
     for m in messages {
         match m.role {
-            // Coalesce consecutive system messages into ONE wire entry — many
-            // OpenAI-compatible models accept only a single system message.
-            Role::System => super::push_system_coalesced(&mut out, &m.text),
+            Role::System => {
+                if coalesce_system {
+                    super::push_system_coalesced(&mut out, &m.text);
+                } else if !m.text.trim().is_empty() {
+                    out.push(json!({ "role": "system", "content": m.text }));
+                }
+            }
             Role::User => {
                 if m.images.is_empty() || !supports_vision {
                     // Text-only (no images), OR a vision-incapable target: `content`
@@ -1036,7 +1047,7 @@ fn build_request_body(
     body.insert("model".into(), json!(model));
     body.insert(
         "messages".into(),
-        json!(format_messages(messages, policy, cfg.supports_vision)),
+        json!(format_messages(messages, policy, cfg.supports_vision, cfg.coalesce_system)),
     );
     body.insert("stream".into(), json!(true));
     body.insert("stream_options".into(), json!({ "include_usage": true }));
@@ -1990,7 +2001,7 @@ mod tests {
             Message::assistant("ans", vec![]),
             Message::tool_result("call_1", "result text", false),
         ];
-        let out = format_messages(&msgs, ReasoningPolicy::Exclude, true);
+        let out = format_messages(&msgs, ReasoningPolicy::Exclude, true, false);
         assert_eq!(out[0], json!({"role":"system","content":"sys"}));
         assert_eq!(out[1], json!({"role":"user","content":"hi"}));
         assert_eq!(out[2]["role"], "assistant");
@@ -2004,17 +2015,12 @@ mod tests {
 
     #[test]
     fn coalesces_consecutive_system_messages_into_one() {
-        // The kernel's neutral history can carry persona + memory.md as TWO leading
-        // System messages; many OpenAI-compatible models / chat templates accept only a
-        // SINGLE system message (extra ones error or silently honor just the first,
-        // dropping memory). They must merge into ONE system wire entry (blank-line
-        // joined), never two.
         let msgs = vec![
             Message::system("persona"),
             Message::system("MEMORY\n- fact"),
             Message::user("hi"),
         ];
-        let out = format_messages(&msgs, ReasoningPolicy::Exclude, true);
+        let out = format_messages(&msgs, ReasoningPolicy::Exclude, true, true);
         let systems = out.iter().filter(|v| v["role"] == "system").count();
         assert_eq!(
             systems, 1,
@@ -2029,10 +2035,29 @@ mod tests {
     }
 
     #[test]
+    fn uncoalesced_system_messages_stay_separate_on_wire() {
+        let msgs = vec![
+            Message::system("persona"),
+            Message::system("MEMORY\n- fact"),
+            Message::user("hi"),
+        ];
+        let out = format_messages(&msgs, ReasoningPolicy::Exclude, true, false);
+        let systems = out.iter().filter(|v| v["role"] == "system").count();
+        assert_eq!(
+            systems, 2,
+            "uncoalesced system messages must remain separate: {out:?}"
+        );
+        assert_eq!(out[0], json!({"role":"system","content":"persona"}));
+        assert_eq!(out[1], json!({"role":"system","content":"MEMORY\n- fact"}));
+        assert_eq!(out[2], json!({"role":"user","content":"hi"}));
+        assert_eq!(out.len(), 3);
+    }
+
+    #[test]
     fn user_without_images_stays_a_content_string() {
         // Byte-identical to the pre-multimodal path → a no-image conversation's prefix
         // cache is unperturbed.
-        let out = format_messages(&[Message::user("hi")], ReasoningPolicy::Exclude, true);
+        let out = format_messages(&[Message::user("hi")], ReasoningPolicy::Exclude, true, false);
         assert_eq!(out[0], json!({"role":"user","content":"hi"}));
     }
 
@@ -2046,7 +2071,7 @@ mod tests {
                 data: "QUJD".into(),
             }],
         );
-        let out = format_messages(&[m], ReasoningPolicy::Exclude, true);
+        let out = format_messages(&[m], ReasoningPolicy::Exclude, true, false);
         let c = &out[0]["content"];
         assert!(c.is_array(), "multimodal content must be an array: {c}");
         assert_eq!(c[0], json!({"type":"text","text":"look"}));
@@ -2069,7 +2094,7 @@ mod tests {
                 data: "QUJD".into(),
             }],
         );
-        let out = format_messages(&[m], ReasoningPolicy::Exclude, false);
+        let out = format_messages(&[m], ReasoningPolicy::Exclude, false, false);
         let c = &out[0]["content"];
         assert!(
             c.is_string(),
@@ -2106,7 +2131,7 @@ mod tests {
                 data: "eHl6".into(),
             }],
         );
-        let out = format_messages(&[m], ReasoningPolicy::Exclude, true);
+        let out = format_messages(&[m], ReasoningPolicy::Exclude, true, false);
         let c = out[0]["content"].as_array().unwrap();
         assert_eq!(c.len(), 1, "no text part when text is empty");
         assert_eq!(c[0]["type"], "image_url");
@@ -2125,7 +2150,7 @@ mod tests {
             }],
         );
         assert_eq!(
-            format_messages(&[m], ReasoningPolicy::Exclude, true)[0],
+            format_messages(&[m], ReasoningPolicy::Exclude, true, false)[0],
             json!({"role":"user","content":""})
         );
     }
@@ -2140,7 +2165,7 @@ mod tests {
                 data: "QUJD".into(),
             }],
         );
-        let out = format_messages(&[m], ReasoningPolicy::Exclude, true);
+        let out = format_messages(&[m], ReasoningPolicy::Exclude, true, false);
         assert_eq!(
             out[0]["content"][1]["image_url"]["url"],
             "data:application/octet-stream;base64,QUJD"
@@ -2157,7 +2182,7 @@ mod tests {
                 arguments: "{\"path\":\"a\"}".into(),
             }],
         );
-        let out = format_messages(&[m], ReasoningPolicy::Exclude, true);
+        let out = format_messages(&[m], ReasoningPolicy::Exclude, true, false);
         let a = &out[0];
         assert_eq!(a["role"], "assistant");
         assert!(
@@ -2190,7 +2215,7 @@ mod tests {
                         .into(),
             }],
         );
-        let out = format_messages(&[m], ReasoningPolicy::Exclude, true);
+        let out = format_messages(&[m], ReasoningPolicy::Exclude, true, false);
         let args = out[0]["tool_calls"][0]["function"]["arguments"]
             .as_str()
             .unwrap();
@@ -2215,7 +2240,7 @@ mod tests {
                 arguments: "{\"path\":\"a\"}".into(),
             }],
         );
-        let out = format_messages(&[m], ReasoningPolicy::Exclude, true);
+        let out = format_messages(&[m], ReasoningPolicy::Exclude, true, false);
         assert_eq!(
             out[0]["tool_calls"][0]["function"]["arguments"],
             "{\"path\":\"a\"}"
@@ -2234,7 +2259,7 @@ mod tests {
                 arguments: "not json at all <tool_result>".into(),
             }],
         );
-        let out = format_messages(&[m], ReasoningPolicy::Exclude, true);
+        let out = format_messages(&[m], ReasoningPolicy::Exclude, true, false);
         let args = out[0]["tool_calls"][0]["function"]["arguments"]
             .as_str()
             .unwrap();
@@ -2249,7 +2274,7 @@ mod tests {
         let mut with = Message::assistant("ans", vec![]);
         with.reasoning = Some("because".into());
         let no = Message::assistant("ans2", vec![]);
-        let out = format_messages(&[with, no], ReasoningPolicy::Include, true);
+        let out = format_messages(&[with, no], ReasoningPolicy::Include, true, false);
         assert_eq!(out[0]["reasoning_content"], "because");
         assert_eq!(out[1]["reasoning_content"], REASONING_PLACEHOLDER);
     }
@@ -2258,7 +2283,7 @@ mod tests {
     fn reasoning_exclude_never_echoes() {
         let mut with = Message::assistant("ans", vec![]);
         with.reasoning = Some("because".into());
-        let out = format_messages(&[with], ReasoningPolicy::Exclude, true);
+        let out = format_messages(&[with], ReasoningPolicy::Exclude, true, false);
         assert!(out[0].get("reasoning_content").is_none());
     }
 
@@ -2501,8 +2526,8 @@ mod tests {
         let h1 = vec![Message::system("s"), Message::user("u1")];
         let mut h2 = h1.clone();
         h2.push(Message::assistant("a1", vec![]));
-        let f1 = format_messages(&h1, ReasoningPolicy::Exclude, true);
-        let f2 = format_messages(&h2, ReasoningPolicy::Exclude, true);
+        let f1 = format_messages(&h1, ReasoningPolicy::Exclude, true, false);
+        let f2 = format_messages(&h2, ReasoningPolicy::Exclude, true, false);
         for i in 0..f1.len() {
             assert_eq!(
                 serde_json::to_string(&f1[i]).unwrap(),
@@ -2521,6 +2546,7 @@ mod tests {
             ],
             ReasoningPolicy::Exclude,
             true,
+            false,
         );
         assert_eq!(out.len(), 2, "must not coalesce consecutive users");
         assert_eq!(

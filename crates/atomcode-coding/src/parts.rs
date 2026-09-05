@@ -54,7 +54,6 @@ use crate::execution_policy::TurnExecutionPolicy;
 use crate::mcp_instructions::McpInstructionsHook;
 #[cfg(test)]
 use crate::persona::coding_persona;
-use crate::persona::coding_persona_with_capabilities;
 use crate::plugin_hooks::PluginHookSource;
 use crate::rate_limit::RateLimitWindowSource;
 
@@ -1421,16 +1420,17 @@ pub fn assemble(
             .register(Arc::new(FetchOutputTool::new(store.clone())));
     }
 
+    let (block_1, block_2) = crate::persona::coding_persona_blocks_with_capabilities(
+        &cfg.model,
+        cfg.preferred_language,
+        parts.todo_enabled,
+        parts.request_user_input_enabled,
+        parts.review_provider.is_some(),
+    );
     let mut builder = Agent::builder()
         .provider(provider)
         .tools(parts.mount())
-        .persona(coding_persona_with_capabilities(
-            &cfg.model,
-            cfg.preferred_language,
-            parts.todo_enabled,
-            parts.request_user_input_enabled,
-            parts.review_provider.is_some(),
-        ))
+        .personas([block_1, block_2])
         // Repair model-produced arguments before any observer or policy gate reads them.
         // Approval must inspect the same bytes that the tool executes.
         .middleware(Arc::new(RepairToolArgsMiddleware));
@@ -1711,7 +1711,7 @@ fn persona_model(text: &str) -> Option<&str> {
     None
 }
 
-fn is_persona_message(message: &Message) -> bool {
+fn is_persona_block_1(message: &Message) -> bool {
     if message.role != Role::System {
         return false;
     }
@@ -1721,6 +1721,20 @@ fn is_persona_message(message: &Message) -> bool {
         || (message.text.contains(" running the ")
             && message.text.contains(" model.")
             && (message.text.contains("## PRECEDENCE:") || message.text.contains("## WORKFLOW:")))
+}
+
+fn is_persona_block_2(message: &Message) -> bool {
+    if message.role != Role::System {
+        return false;
+    }
+    message.text.starts_with(crate::persona::CRITICAL_PRECEDENCE_NOTICE)
+        || message.text.starts_with("⚡ CRITICAL PRECEDENCE")
+        || message.text.starts_with("# WORKFLOW & DISCIPLINE")
+        || (message.text.contains("## WORKFLOW:") && !is_persona_block_1(message))
+}
+
+fn is_persona_message(message: &Message) -> bool {
+    is_persona_block_1(message) || is_persona_block_2(message)
 }
 
 /// Legacy drivers persist conversation history without the separately supplied
@@ -1733,7 +1747,7 @@ fn reconcile_coding_persona(
     request_user_input_enabled: bool,
     review_enabled: bool,
 ) {
-    let persona = coding_persona_with_capabilities(
+    let (block_1, block_2) = crate::persona::coding_persona_blocks_with_capabilities(
         &cfg.model,
         cfg.preferred_language,
         todo_enabled,
@@ -1747,7 +1761,7 @@ fn reconcile_coding_persona(
     let previous_model = snapshot
         .messages
         .iter()
-        .find(|message| is_persona(message))
+        .find(|message| is_persona_block_1(message))
         .and_then(|message| persona_model(&message.text))
         .map(str::to_owned);
     let existing_transition = snapshot.messages.iter().find_map(|m| {
@@ -1758,14 +1772,32 @@ fn reconcile_coding_persona(
         }
         None
     });
+
+    let full_block_1 = if let Some(previous_model) =
+        previous_model.as_ref().filter(|previous| *previous != &cfg.model)
+    {
+        format!(
+            "{block_1}\n\n{MODEL_CHANGE_CONTEXT_PREFIX}\nThe active model changed from {previous_model} to {model}. From this point onward, {model} is the current model. Treat any earlier assistant claim about its model identity as historical context, not the current runtime identity.",
+            model = cfg.model
+        )
+    } else if let Some(retained) = &existing_transition {
+        format!("{block_1}\n\n{retained}")
+    } else {
+        block_1
+    };
+
     let already_current = snapshot
         .messages
         .first()
-        .is_some_and(|message| message.role == Role::System && message.text == persona)
+        .is_some_and(|message| message.role == Role::System && message.text == full_block_1)
+        && snapshot
+            .messages
+            .get(1)
+            .is_some_and(|message| message.role == Role::System && message.text == block_2)
         && snapshot
             .messages
             .iter()
-            .skip(1)
+            .skip(2)
             .all(|message| !is_persona(message))
         && snapshot
             .messages
@@ -1781,22 +1813,8 @@ fn reconcile_coding_persona(
         .messages
         .retain(|message| !is_persona(message) && !is_model_change(message));
 
-    // 如果发生了模型切换，将模型切换通知安全地作为系统前缀的一部分附加在 persona 末尾，
-    // 严禁作为独立 System 消息 push 到历史消息末尾（否则会导致中间插入 System 消息而被 Gemini/OpenAI/Claude 协议丢弃或报错导致 content 为空）
-    let full_persona = if let Some(previous_model) =
-        previous_model.filter(|previous| previous != &cfg.model)
-    {
-        format!(
-            "{persona}\n\n{MODEL_CHANGE_CONTEXT_PREFIX}\nThe active model changed from {previous_model} to {model}. From this point onward, {model} is the current model. Treat any earlier assistant claim about its model identity as historical context, not the current runtime identity.",
-            model = cfg.model
-        )
-    } else if let Some(retained) = existing_transition {
-        format!("{persona}\n\n{retained}")
-    } else {
-        persona
-    };
-
-    snapshot.messages.insert(0, Message::system(full_persona));
+    snapshot.messages.insert(0, Message::system(block_2));
+    snapshot.messages.insert(0, Message::system(full_block_1));
     snapshot.cache_epoch = snapshot.cache_epoch.saturating_add(1);
 }
 
@@ -1954,7 +1972,7 @@ mod tests {
         assert!(snapshot.messages[0]
             .text
             .contains("running the deepseek-v4-flash model"));
-        assert_eq!(snapshot.messages[1].text, "SESSION CONTEXT");
+        assert_eq!(snapshot.messages[2].text, "SESSION CONTEXT");
         assert_eq!(snapshot.cache_epoch, 1);
     }
 
@@ -1965,7 +1983,7 @@ mod tests {
 
         reconcile_coding_persona(&mut snapshot, &cfg, false, true, true);
 
-        assert!(!snapshot.messages[0].text.contains("## TASK TRACKING"));
+        assert!(!snapshot.messages[1].text.contains("## TASK TRACKING"));
         assert!(snapshot.messages[0]
             .text
             .contains("running the deepseek-v4-flash model"));
@@ -1979,12 +1997,14 @@ mod tests {
         // of what other tests may have set concurrently (we hold the serial lock, so this
         // is safe — no other test in this serial group can observe the removal).
         let _rui_guard = std::env::remove_var("ATOMCODE_REQUEST_USER_INPUT");
+        let (b1, b2) = crate::persona::coding_persona_blocks(
+            "old-model",
+            crate::persona::todo_switch_enabled(),
+            crate::persona::request_user_input_switch_enabled(),
+        );
         let mut snapshot = SessionSnapshot::new(vec![
-            Message::system(coding_persona(
-                "old-model",
-                crate::persona::todo_switch_enabled(),
-                crate::persona::request_user_input_switch_enabled(),
-            )),
+            Message::system(b1),
+            Message::system(b2),
             Message::system("SESSION CONTEXT"),
         ]);
 
@@ -2001,7 +2021,7 @@ mod tests {
             .iter()
             .filter(|message| is_persona_message(message))
             .count();
-        assert_eq!(personas, 1);
+        assert_eq!(personas, 2);
         assert!(snapshot.messages[0]
             .text
             .contains("running the deepseek-v4-flash model"));
@@ -2010,6 +2030,7 @@ mod tests {
             .contains(MODEL_CHANGE_CONTEXT_PREFIX));
         assert!(snapshot.messages[0].text.contains("old-model"));
         assert!(snapshot.messages[0].text.contains("deepseek-v4-flash"));
+        assert_eq!(snapshot.messages[2].text, "SESSION CONTEXT");
         assert_eq!(snapshot.cache_epoch, 1);
     }
 
@@ -2018,12 +2039,14 @@ mod tests {
     fn repeated_model_switch_keeps_one_current_transition_boundary() {
         atomcode_config::config::offline::reset_offline_verdict_for_test();
         let _rui_guard = std::env::remove_var("ATOMCODE_REQUEST_USER_INPUT");
+        let (b1, b2) = crate::persona::coding_persona_blocks(
+            "model-a",
+            crate::persona::todo_switch_enabled(),
+            crate::persona::request_user_input_switch_enabled(),
+        );
         let mut snapshot = SessionSnapshot::new(vec![
-            Message::system(coding_persona(
-                "model-a",
-                crate::persona::todo_switch_enabled(),
-                crate::persona::request_user_input_switch_enabled(),
-            )),
+            Message::system(b1),
+            Message::system(b2),
             Message::user("what model are you?"),
             Message::assistant("I am model-a", vec![]),
         ]);
@@ -2047,13 +2070,14 @@ mod tests {
         // the persona string (captured and reconciled).  We hold the serial lock, so this
         // is safe.
         let _rui_guard = std::env::remove_var("ATOMCODE_REQUEST_USER_INPUT");
-        let persona = coding_persona(
+        let (b1, b2) = crate::persona::coding_persona_blocks(
             "deepseek-v4-flash",
             crate::persona::todo_switch_enabled(),
             crate::persona::request_user_input_switch_enabled(),
         );
         let mut snapshot = SessionSnapshot::new(vec![
-            Message::system(persona.clone()),
+            Message::system(b1.clone()),
+            Message::system(b2.clone()),
             Message::system("SESSION CONTEXT"),
         ]);
 
@@ -2065,7 +2089,8 @@ mod tests {
             true,
         );
 
-        assert_eq!(snapshot.messages[0].text, persona);
+        assert_eq!(snapshot.messages[0].text, b1);
+        assert_eq!(snapshot.messages[1].text, b2);
         assert_eq!(snapshot.cache_epoch, 0);
     }
 

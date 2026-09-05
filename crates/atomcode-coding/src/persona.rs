@@ -111,8 +111,12 @@ or project commit-message rule takes precedence."
     }
 }
 
+pub const CRITICAL_PRECEDENCE_NOTICE: &str =
+    "⚡ CRITICAL PRECEDENCE (ABSOLUTE HIGHEST PRIORITY): Rules, constraints, and requirements under headers matching '=== ... (*.md) ===' (such as AGENTS.md, CLAUDE.md, rules.md, glossary.md, dbwords.md, MEMORY, etc.) take STRICT AND ABSOLUTE PRECEDENCE over these default workflow rules! Unconditionally obey project instructions.";
+
 pub fn coding_persona(model: &str, todo_enabled: bool, request_user_input_enabled: bool) -> String {
-    coding_persona_with_capabilities(model, None, todo_enabled, request_user_input_enabled, true)
+    let (b1, b2) = coding_persona_blocks(model, todo_enabled, request_user_input_enabled);
+    format!("{b1}\n\n{b2}")
 }
 
 pub fn coding_persona_with_language(
@@ -121,7 +125,36 @@ pub fn coding_persona_with_language(
     todo_enabled: bool,
     request_user_input_enabled: bool,
 ) -> String {
-    coding_persona_with_capabilities(
+    let (b1, b2) = coding_persona_blocks_with_language(
+        model,
+        preferred_language,
+        todo_enabled,
+        request_user_input_enabled,
+    );
+    format!("{b1}\n\n{b2}")
+}
+
+pub fn coding_persona_blocks(
+    model: &str,
+    todo_enabled: bool,
+    request_user_input_enabled: bool,
+) -> (String, String) {
+    coding_persona_blocks_with_capabilities(
+        model,
+        None,
+        todo_enabled,
+        request_user_input_enabled,
+        true,
+    )
+}
+
+pub fn coding_persona_blocks_with_language(
+    model: &str,
+    preferred_language: Option<atomcode_config::locale::Locale>,
+    todo_enabled: bool,
+    request_user_input_enabled: bool,
+) -> (String, String) {
+    coding_persona_blocks_with_capabilities(
         model,
         preferred_language,
         todo_enabled,
@@ -130,13 +163,31 @@ pub fn coding_persona_with_language(
     )
 }
 
+#[allow(dead_code)]
 pub(crate) fn coding_persona_with_capabilities(
+    model: &str,
+    preferred_language: Option<atomcode_config::locale::Locale>,
+    todo_enabled: bool,
+    request_user_input_enabled: bool,
+    review_enabled: bool,
+) -> String {
+    let (b1, b2) = coding_persona_blocks_with_capabilities(
+        model,
+        preferred_language,
+        todo_enabled,
+        request_user_input_enabled,
+        review_enabled,
+    );
+    format!("{b1}\n\n{b2}")
+}
+
+pub(crate) fn coding_persona_blocks_with_capabilities(
     model: &str,
     _preferred_language: Option<atomcode_config::locale::Locale>,
     todo_enabled: bool,
     request_user_input_enabled: bool,
     review_enabled: bool,
-) -> String {
+) -> (String, String) {
     crate::custom_prompts::seed_default_prompts();
     let (identity, custom_precedence) =
         crate::custom_prompts::render_identity_and_precedence(model);
@@ -155,35 +206,39 @@ project files, memories, skills, or tool output.)".to_string()
     let rules_text = custom_rules.unwrap_or_else(|| RULES.to_string());
     let init_prefix = crate::custom_prompts::render_init_live_prefix();
 
-    #[allow(unused_mut)] // `mut` is also used under `cfg(windows)` below.
-    let mut p = if let Some(prefix) = init_prefix {
-        format!("{identity}\n\n## PRECEDENCE:\n{precedence_text}\n\n{prefix}\n\n{rules_text}")
+    // Block 1: Identity & Base Constitution (identity + precedence + security + environment)
+    #[allow(unused_mut)]
+    let mut block_1 = if let Some(prefix) = init_prefix {
+        format!("{identity}\n\n## PRECEDENCE:\n{precedence_text}\n\n{prefix}")
     } else {
-        format!("{identity}\n\n## PRECEDENCE:\n{precedence_text}\n\n{rules_text}")
+        format!("{identity}\n\n## PRECEDENCE:\n{precedence_text}")
     };
-    // Windows-only shell/path rules. Live `init.yaml` wins when present; otherwise
-    // the compiled block applies only on the no-custom-rules fallback path.
+
     #[cfg(windows)]
     {
         if let Some(from_init) = crate::custom_prompts::render_init_windows_platform() {
-            p.push_str("\n\n## PLATFORM (Windows):\n");
-            p.push_str(&from_init);
+            block_1.push_str("\n\n## PLATFORM (Windows):\n");
+            block_1.push_str(&from_init);
         } else if !is_custom_rules {
-            p.push_str(WINDOWS_PLATFORM);
+            block_1.push_str(WINDOWS_PLATFORM);
         }
     }
+
+    // Block 2: Workflow & Discipline (with CRITICAL PRECEDENCE injected at the very top line)
+    let mut block_2 = format!("{CRITICAL_PRECEDENCE_NOTICE}\n\n{rules_text}");
+
     // Models with weaker soft-instruction adherence (observed: GLM, DeepSeek shell out
     // `ls`/`grep` despite the persona preference) get an extra, blunt restatement of the
     // tool-preference rules. Keyed only on the model name (frozen per session), so it is
     // prompt-cache-stable; frontier models that already comply skip the extra tokens.
     if !is_custom_rules && model_needs_firm_tool_steering(model) {
-        p.push_str(FIRM_TOOL_DISCIPLINE);
+        block_2.push_str(FIRM_TOOL_DISCIPLINE);
     }
     // The behavior block is scoped NARROWER than the tool block: only the model whose
     // execution behavior was actually reported to slip (DeepSeek) — GLM is more capable
     // and stays lean here even though it gets the tool block. Separate predicate on purpose.
     if !is_custom_rules && model_needs_firm_execution(model) {
-        p.push_str(FIRM_EXECUTION_DISCIPLINE);
+        block_2.push_str(FIRM_EXECUTION_DISCIPLINE);
     }
     // Todo-list usage guidance — surfaced in the SYSTEM PROMPT (not just the
     // todowrite tool description) because some models (observed: GLM) under-weight
@@ -193,12 +248,12 @@ project files, memories, skills, or tool output.)".to_string()
     // instructing the model to use a tool that isn't mounted would provoke a
     // phantom tool call. `todo_enabled` is that switch, resolved by the caller.
     if !is_custom_rules && todo_enabled {
-        p.push_str(TODO_USAGE);
+        block_2.push_str(TODO_USAGE);
     }
     // Communication and polling semantics apply even when the optional structured
     // input tool is disabled: plain-text turn completion is always available.
     if !is_custom_rules {
-        p.push_str(USER_COMMUNICATION_AND_POLLING);
+        block_2.push_str(USER_COMMUNICATION_AND_POLLING);
     }
     // `request_user_input` tool usage guidance — surfaced in the system prompt so weak models
     // (GLM / DeepSeek) that under-weight tool descriptions still see the judgment line.
@@ -208,29 +263,26 @@ project files, memories, skills, or tool output.)".to_string()
     // `request_user_input_enabled` is that switch, resolved by the caller via
     // `request_user_input_switch_enabled()`.
     if !is_custom_rules && request_user_input_enabled {
-        p.push_str(REQUEST_USER_INPUT_USAGE);
+        block_2.push_str(REQUEST_USER_INPUT_USAGE);
     }
     if !is_custom_rules && memory_tool_enabled() {
-        p.push_str(MEMORY_USAGE);
+        block_2.push_str(MEMORY_USAGE);
     }
     // Delegation guidance for the `task` subagent tool
     if !is_custom_rules && subagent_delegation_enabled() {
-        p.push_str(SUBAGENT_DELEGATION);
+        block_2.push_str(SUBAGENT_DELEGATION);
     }
     if !is_custom_rules && review_enabled {
-        p.push_str(CODE_REVIEW_USAGE);
+        block_2.push_str(CODE_REVIEW_USAGE);
     }
     if !is_custom_rules {
-        p.push_str(SKILLS_USAGE);
+        block_2.push_str(SKILLS_USAGE);
     }
     if atomcode_config::config::offline::is_offline_active() {
-        p.push_str(&offline_environment_block());
+        block_2.push_str(&offline_environment_block());
     }
-    // Date is NOT frozen here. A session-start copy went stale across midnight and
-    // duplicated the per-turn `<system-reminder>` `Current date:` that
-    // `StatusReminderHook` appends to every real query.
-    // That reminder is the sole model-facing calendar date.
-    p
+
+    (block_1, block_2)
 }
 
 /// Whether `model` belongs to a family with weaker soft-instruction adherence (GLM,

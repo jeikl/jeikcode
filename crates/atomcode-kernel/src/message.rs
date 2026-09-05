@@ -574,11 +574,12 @@ impl Conversation {
     /// the anchor — only the real prompt anchors the floor. (Carried from
     /// production `apply_compression`'s sacred carve-out, mapped to this flat Vec.)
     pub fn sacred_floor(&self) -> usize {
-        // A leading System message is part of the protected prefix.
-        let lead_system = usize::from(matches!(
-            self.messages.first().map(|m| &m.role),
-            Some(Role::System)
-        ));
+        // All leading System messages are part of the protected prefix.
+        let lead_system = self
+            .messages
+            .iter()
+            .take_while(|m| m.role == Role::System)
+            .count();
         // Find the FIRST REAL (non-synthetic) user message; the floor extends
         // through it (index + 1). If none exists, the floor is just the lead
         // system (or 0).
@@ -587,10 +588,72 @@ impl Conversation {
             .iter()
             .position(|m| m.role == Role::User && !m.synthetic)
         {
-            Some(idx) => idx + 1,
+            Some(idx) => (idx + 1).max(lead_system),
             None => lead_system,
         }
     }
+
+    /// Canonical ordering priority for multi-segment system blocks.
+    /// Block 3: Skills Catalog (`=== AVAILABLE SKILLS`)
+    /// Block 4: MCP Server Instructions (`=== MCP SERVER INSTRUCTIONS`)
+    /// Block 5: Authoritative Project Instructions & Knowledge (`=== AUTHORITATIVE PROJECT INSTRUCTIONS`)
+    /// Block 6: Session Baseline (`=== SESSION BASELINE`)
+    pub fn reconcile_system_block(&mut self, header: &str, block: Option<String>) {
+        let existing = self
+            .messages
+            .iter()
+            .enumerate()
+            .take_while(|(_, m)| m.role == Role::System)
+            .find(|(_, m)| m.text.starts_with(header))
+            .map(|(i, _)| i);
+
+        match (block, existing) {
+            (Some(text), Some(i)) => {
+                self.messages[i] = Message::system(text);
+            }
+            (Some(text), None) => {
+                let leading = self
+                    .messages
+                    .iter()
+                    .take_while(|m| m.role == Role::System)
+                    .count();
+                let target_order = system_block_order(header);
+                let insert_at = if target_order > 0 {
+                    self.messages[..leading]
+                        .iter()
+                        .position(|m| {
+                            let o = system_block_order(&m.text);
+                            o > 0 && o > target_order
+                        })
+                        .unwrap_or(leading)
+                } else {
+                    leading
+                };
+                self.messages.insert(insert_at, Message::system(text));
+            }
+            (None, Some(i)) => {
+                self.messages.remove(i);
+            }
+            (None, None) => {}
+        }
+    }
+}
+
+fn system_block_order(text: &str) -> u8 {
+    if text.starts_with("=== AVAILABLE SKILLS") {
+        3
+    } else if text.starts_with("=== MCP SERVER INSTRUCTIONS") {
+        4
+    } else if text.starts_with("=== AUTHORITATIVE PROJECT INSTRUCTIONS & KNOWLEDGE") {
+        5
+    } else if text.starts_with("=== SESSION BASELINE") {
+        6
+    } else {
+        0
+    }
+}
+
+impl Conversation {
 
     /// Index at which a frozen prefix injection (memory / skills / MCP) lands:
     /// after the leading System run and any already-injected synthetic User
@@ -1583,6 +1646,64 @@ mod tests {
         c4.push(Message::user("real task"));
         assert_eq!(c4.frozen_prefix_end(), 3);
         assert_eq!(c4.sacred_floor(), 4);
+
+        // 6 leading System blocks without real user message are 100% sacred floor protected.
+        let mut c5 = Conversation::new();
+        for i in 1..=6 {
+            c5.push(Message::system(format!("block_{i}")));
+        }
+        assert_eq!(c5.sacred_floor(), 6, "all 6 leading systems protected before user prompt");
+        c5.push(Message::user("first user"));
+        assert_eq!(c5.sacred_floor(), 7, "extends through first user");
+    }
+
+    #[test]
+    fn reconcile_system_block_in_place_and_ordered() {
+        let mut c = Conversation::new();
+        c.push(Message::system("Block 1: Persona"));
+        c.push(Message::system("Block 2: Rules"));
+
+        // Insert Block 5 first
+        c.reconcile_system_block(
+            "=== AUTHORITATIVE PROJECT INSTRUCTIONS & KNOWLEDGE",
+            Some("=== AUTHORITATIVE PROJECT INSTRUCTIONS & KNOWLEDGE (*.md) ===\nAGENTS.md".into()),
+        );
+        // Insert Block 6
+        c.reconcile_system_block(
+            "=== SESSION BASELINE",
+            Some("=== SESSION BASELINE ===\nCWD".into()),
+        );
+        // Now insert Block 3 (Skills) — must insert BEFORE Block 5 (order 3 < 5)
+        c.reconcile_system_block(
+            "=== AVAILABLE SKILLS",
+            Some("=== AVAILABLE SKILLS (*.md) ===\nskills".into()),
+        );
+        // Now insert Block 4 (MCP) — must insert BETWEEN Block 3 and Block 5 (3 < 4 < 5)
+        c.reconcile_system_block(
+            "=== MCP SERVER INSTRUCTIONS",
+            Some("=== MCP SERVER INSTRUCTIONS ===\nmcp".into()),
+        );
+
+        assert_eq!(c.messages.len(), 6);
+        assert!(c.messages[0].text.starts_with("Block 1"));
+        assert!(c.messages[1].text.starts_with("Block 2"));
+        assert!(c.messages[2].text.starts_with("=== AVAILABLE SKILLS"));
+        assert!(c.messages[3].text.starts_with("=== MCP SERVER INSTRUCTIONS"));
+        assert!(c.messages[4].text.starts_with("=== AUTHORITATIVE PROJECT INSTRUCTIONS"));
+        assert!(c.messages[5].text.starts_with("=== SESSION BASELINE"));
+
+        // Hot-reload Block 5 in place:
+        c.reconcile_system_block(
+            "=== AUTHORITATIVE PROJECT INSTRUCTIONS & KNOWLEDGE",
+            Some("=== AUTHORITATIVE PROJECT INSTRUCTIONS & KNOWLEDGE (*.md) ===\nAGENTS.md v2".into()),
+        );
+        assert_eq!(c.messages.len(), 6, "no growth on refresh");
+        assert!(c.messages[4].text.contains("v2"));
+
+        // Remove Block 4 (None):
+        c.reconcile_system_block("=== MCP SERVER INSTRUCTIONS", None);
+        assert_eq!(c.messages.len(), 5);
+        assert!(c.messages[3].text.starts_with("=== AUTHORITATIVE PROJECT INSTRUCTIONS"));
     }
 
     #[test]

@@ -72,10 +72,9 @@ impl Tool for RepoMapTool {
     }
 
     fn description(&self) -> &str {
-        "Generate a complete index-backed directory tree and architectural map of the repository, \
-         displaying module hierarchy and file layouts. \
-         When to use: When exploring an unfamiliar repository layout, architectural layers, or multi-module workspace structure. \
-         When NOT to use: Do NOT use when the target file or module is already known (use grep, read_file, or code_explore directly)."
+        "Generate a complete repository directory structure tree. \
+         Use to explore unfamiliar codebase architecture and layouts. \
+         Do not use when the target file or module structure is already known."
     }
 
     fn parameters_schema(&self) -> serde_json::Value {
@@ -84,15 +83,18 @@ impl Tool for RepoMapTool {
             "properties": {
                 "path": {
                     "type": "string",
-                    "description": "Target directory or workspace root to map. Defaults to current working directory."
+                    "default": ".",
+                    "description": "Target directory."
                 },
                 "max_files": {
                     "type": "integer",
-                    "description": "Maximum number of files whose symbols are rendered in full/symbols mode (default: 100, max: 300)."
+                    "default": 100,
+                    "description": "Maximum files to render symbols from in full or symbols mode (default: 100, max: 300)."
                 },
                 "mode": {
                     "type": "string",
                     "enum": ["tree", "full", "symbols"],
+                    "default": "tree",
                     "description": "Detail level: 'tree' (structure-only directory tree, default), 'full' (directory tree with budgeted symbol outlines), or 'symbols' (symbols only)."
                 }
             }

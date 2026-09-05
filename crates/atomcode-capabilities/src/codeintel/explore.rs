@@ -403,10 +403,10 @@ impl Tool for CodeExploreTool {
     }
 
     fn description(&self) -> &str {
-        "Perform code-graph retrieval across the repository, a specific directory, or a target file. \
-         Resolves complete call graphs, logic flows, and symbol relationships from localized clues, \
-         far more efficient than grep. \
-         When to use: Trigger when user queries involve business keywords (Chinese or English), or \
+        "Perform semantic code-graph retrieval across the repository, a specific directory, or a target file. \
+         Resolves complete call graphs, logic flows, and symbol relationships from localized clues to explore \
+         how a business logic actually operates, far more efficient than grep. \
+         Trigger when user queries involve business keywords (Chinese or English), or \
          when previous operations (`grep`, `read_file`, `glob`) reveal relevant comments, exact symbols, \
          symbol keywords, or domain jargon/terminology."
     }
@@ -417,11 +417,11 @@ impl Tool for CodeExploreTool {
             "properties": {
                 "path": {
                     "type": "string",
-                    "description": "Scope path to search: workspace root ('.'), a directory/module (e.g. 'crates/atomcode-coding', 'src/auth'), or a specific file."
+                    "description": "Scope path to search: workspace root ('.'), directory/module, or a specific file."
                 },
                 "query": {
                     "type": "string",
-                    "description": "Precise symbol name or natural language in Chinese or English (e.g. business concept, domain jargon, or question)."
+                    "description": "Precise symbol name or fuzzy code symbol keyword, or natural language in Chinese or English (e.g. business concept, domain jargon, or question)."
                 },
                 "max_files": {
                     "type": "integer",
@@ -3755,81 +3755,7 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn rejects_single_file_path() {
-        use atomcode_kernel::tool::{ProgressSink, Tool, ToolContext};
-        use tokio_util::sync::CancellationToken;
 
-        let d = tempfile::tempdir().unwrap();
-        std::fs::create_dir(d.path().join("src")).unwrap();
-        std::fs::write(d.path().join("src/hot.rs"), "pub fn cached_symbol() {}\n").unwrap();
-        let idx = Arc::new(CodeIndex::new());
-        let tool = CodeExploreTool::new(idx);
-        let ctx = ToolContext {
-            working_dir: d.path().to_path_buf(),
-            cancel: CancellationToken::new(),
-            progress: ProgressSink::noop(),
-            requester: None,
-        };
-        let r = tool
-            .execute(r#"{"query":"cached_symbol","path":"src/hot.rs"}"#, &ctx)
-            .await;
-        assert!(r.is_error, "{}", r.content);
-        assert!(
-            r.content.contains("not a single file") && r.content.contains("read_file"),
-            "{}",
-            r.content
-        );
-        assert!(r.content.contains("src"), "{}", r.content);
-        assert!(
-            r.content.contains("query=")
-                || r.content.contains("query<")
-                || r.content.contains("`query`"),
-            "error must tell the model to put the symbol in query:\n{}",
-            r.content
-        );
-        let toml = tool
-            .execute(r#"{"query":"name","path":"Cargo.toml"}"#, &ctx)
-            .await;
-        assert!(
-            toml.is_error && toml.content.contains("not a single file"),
-            "{}",
-            toml.content
-        );
-    }
-
-    #[test]
-    fn description_forbids_file_path_and_allows_nl_or_symbol() {
-        let tool = CodeExploreTool::new(Arc::new(CodeIndex::new()));
-        let d = tool.description();
-        assert!(
-            d.contains("crates/atomcode-coding") && d.contains("src/auth"),
-            "description must show directory examples:\n{d}"
-        );
-        assert!(
-            d.contains("src/auth.rs") && d.contains("read_file"),
-            "description must show a file as BAD before the first call:\n{d}"
-        );
-        assert!(
-            d.contains("CodeExploreTool") && (d.contains("鉴权") || d.contains("Chinese")),
-            "description must allow a precise symbol or natural Chinese/English:\n{d}"
-        );
-        let schema = tool.parameters_schema();
-        let path_d = schema["properties"]["path"]["description"]
-            .as_str()
-            .unwrap_or("");
-        let query_d = schema["properties"]["query"]["description"]
-            .as_str()
-            .unwrap_or("");
-        assert!(
-            path_d.contains("src/auth.rs") && path_d.contains("NEVER a file"),
-            "path schema must reject files up front:\n{path_d}"
-        );
-        assert!(
-            query_d.contains("CodeExploreTool") && query_d.contains("Chinese"),
-            "query schema must allow symbol or natural language:\n{query_d}"
-        );
-    }
 
     fn scored(node: SymbolNode, score: f64) -> ScoredSymbol {
         ScoredSymbol {

@@ -665,7 +665,7 @@ fn shell_tool_description(
     macro_rules! base {
         () => {
             "Run a shell command in the working directory and return its combined \
-             stdout/stderr and exit code. Do not pass timeout — the command runs until \
+             stdout/stderr and exit code. The command runs until \
              it exits or hits config max_timeout_secs. Output streams live while it runs.\n\
              Destructive \
              commands (recursive force delete, sudo, dd, history rewrites, …) are flagged \

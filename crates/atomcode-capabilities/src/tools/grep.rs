@@ -50,6 +50,8 @@ struct Args {
     /// a pattern with no `/` matches at any depth.
     #[serde(default)]
     glob: Option<String>,
+    #[serde(default, alias = "i", alias = "ignore_case")]
+    case_insensitive: bool,
 }
 
 #[async_trait]
@@ -59,8 +61,8 @@ impl Tool for GrepTool {
     }
     fn description(&self) -> &str {
         "Search file contents by regular expression or literal string. \
-         When to use: Searching for exact text, error strings, symbols, or regex patterns across files. \
-         When grep identifies a high-confidence code symbol, switch to `code_explore` to inspect its call graph and callers/callees."
+         Use to search for exact text, error strings, or symbols across files. \
+         When identifying a specific code symbol, switch to `code_explore`."
     }
     fn parameters_schema(&self) -> serde_json::Value {
         json!({
@@ -72,19 +74,27 @@ impl Tool for GrepTool {
                 },
                 "path": {
                     "type": "string",
+                    "default": ".",
                     "description": "Directory or file to search (default: working directory)."
                 },
                 "glob": {
                     "type": "string",
                     "description": "File glob pattern to restrict search (e.g. '*.rs', '*.{ts,tsx}')."
                 },
+                "case_insensitive": {
+                    "type": "boolean",
+                    "default": false,
+                    "description": "Case-insensitive matching (default: false)."
+                },
                 "max_results": {
                     "type": "integer",
-                    "description": "Maximum matching lines to return (default 200)."
+                    "default": 200,
+                    "description": "Maximum matching lines to return (default: 200)."
                 },
                 "context": {
                     "type": "integer",
-                    "description": "Lines of context before and after each match (default 0, max 10)."
+                    "default": 0,
+                    "description": "Lines of context before and after each match (default: 0, max: 10)."
                 }
             },
             "required": ["pattern"]
@@ -124,14 +134,14 @@ impl Tool for GrepTool {
         };
 
         // Smart-case + literal fallback, as a streaming ripgrep matcher.
-        let has_upper = a.pattern.chars().any(|c| c.is_uppercase());
+        let is_case_insensitive = a.case_insensitive || !a.pattern.chars().any(|c| c.is_uppercase());
         let matcher = match RegexMatcherBuilder::new()
-            .case_insensitive(!has_upper)
+            .case_insensitive(is_case_insensitive)
             .build(&a.pattern)
         {
             Ok(m) => m,
             Err(_) => match RegexMatcherBuilder::new()
-                .case_insensitive(!has_upper)
+                .case_insensitive(is_case_insensitive)
                 .build(&regex::escape(&a.pattern))
             {
                 Ok(m) => m,
@@ -900,5 +910,34 @@ mod tests {
             .await;
         assert!(!r4.is_error, "{}", r4.content);
         assert!(r4.content.contains("positionTracking"), "{}", r4.content);
+    }
+
+    #[tokio::test]
+    async fn case_insensitive_flag_overrides_uppercase_pattern() {
+        let d = tempfile::tempdir().unwrap();
+        std::fs::write(d.path().join("file.txt"), "hello world\n").unwrap();
+
+        // Pattern has uppercase; by default smart-case makes it case-sensitive:
+        let r1 = GrepTool
+            .execute(r#"{"pattern":"HELLO"}"#, &ctx(d.path()))
+            .await;
+        assert!(r1.content.contains("No matches found"));
+
+        // With case_insensitive: true, it matches:
+        let r2 = GrepTool
+            .execute(
+                r#"{"pattern":"HELLO","case_insensitive":true}"#,
+                &ctx(d.path()),
+            )
+            .await;
+        assert!(!r2.is_error, "{}", r2.content);
+        assert!(r2.content.contains("hello world"), "{}", r2.content);
+
+        // Alias "i" also works:
+        let r3 = GrepTool
+            .execute(r#"{"pattern":"HELLO","i":true}"#, &ctx(d.path()))
+            .await;
+        assert!(!r3.is_error, "{}", r3.content);
+        assert!(r3.content.contains("hello world"), "{}", r3.content);
     }
 }

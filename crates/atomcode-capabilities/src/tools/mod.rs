@@ -105,7 +105,7 @@ pub use parallel_edit::ParallelEditTool;
 pub use read::ReadFileTool;
 pub use repair::{repair_tool_args, RepairToolArgsMiddleware};
 pub use report_finding::{Finding, ReportFindingTool};
-pub use search_replace::SearchReplaceTool;
+pub use search_replace::{GlobalSearchReplaceTool, SearchReplaceTool};
 pub use sensitive_path::{path_is_sensitive, references_sensitive_path, SensitivePathGate};
 pub use task::TaskTool;
 pub use todo::{bind_todowrite, TodoLive, TodoTool};
@@ -140,7 +140,7 @@ pub fn coding_tool_names() -> &'static [&'static str] {
             "bash_kill_by_id",
             "grep",
             "glob",
-            "search_replace",
+            "global_search_replace",
             "todowrite",
             "jeikcode_config_guide",
             "jeikcode_config_reload",
@@ -162,7 +162,7 @@ pub fn coding_tool_names() -> &'static [&'static str] {
             "bash_kill_by_id",
             "grep",
             "glob",
-            "search_replace",
+            "global_search_replace",
             "todowrite",
             "jeikcode_config_guide",
             "jeikcode_config_reload",
@@ -195,7 +195,7 @@ pub fn register_coding_tools_with_vision(reg: &mut ToolRegistry, vision: bool) {
     reg.register(Arc::new(BashKillByIdTool));
     reg.register(Arc::new(GrepTool));
     reg.register(Arc::new(GlobTool));
-    reg.register(Arc::new(SearchReplaceTool));
+    reg.register(Arc::new(GlobalSearchReplaceTool));
     reg.register(Arc::new(JeikcodeConfigGuideTool::new()));
     reg.register(Arc::new(JeikcodeConfigReloadTool::new()));
     // Gate on ATOMCODE_TODO env var (0/false/off → skip; anything else or absent → register).
@@ -819,7 +819,7 @@ mod tests {
         "bash_kill_by_id",
         "grep",
         "glob",
-        "search_replace",
+        "global_search_replace",
         "todowrite",
         "jeikcode_config_guide",
         "jeikcode_config_reload",

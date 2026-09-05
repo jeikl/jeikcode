@@ -76,23 +76,15 @@ impl Tool for WebFetchTool {
         "web_fetch"
     }
     fn description(&self) -> &str {
-        "Fetch a web page over http(s) and return its content (HTML is converted to clean \
-         text, or to Markdown with `format:\"markdown\"` to keep headings/links/code). Use \
-         this tool when the user provides a specific http(s) URL to read, extract, or summarize; \
-         prefer it over running `curl` or `wget` through the shell because it handles page \
-         charset and rendering. Also use it after `web_search` to read a specific result. Do NOT \
-         call this tool if a more specific, dedicated skill (listed under AVAILABLE SKILLS in the user-prefix catalog) \
-         matches the URL or domain of the page you want to fetch (e.g., platform-specific issue trackers or document sites); \
-         instead, you MUST use the use_skill tool. Only http/https URLs are allowed; requests to localhost / private / \
-         cloud-metadata addresses are blocked. Returns the full page by default; pass `max_chars` to cap."
+        "Fetch a web page over http(s) and convert its content to Markdown. \
+         Use when user input contains a web link and explicitly requests answering based on its content, \
+         or when viewing content from links found during web search."
     }
     fn parameters_schema(&self) -> serde_json::Value {
         json!({
             "type": "object",
             "properties": {
-                "url": { "type": "string", "description": "The http(s) URL to fetch" },
-                "max_chars": { "type": "integer", "description": "Optional max characters to return. Omit to get the full page (recommended for code/docs)." },
-                "format": { "type": "string", "enum": ["text", "markdown"], "description": "HTML rendering: 'text' (default, plain) or 'markdown' (keeps headings/links/lists/code). Ignored for non-HTML." }
+                "url": { "type": "string", "description": "The http(s) URL to fetch." }
             },
             "required": ["url"]
         })

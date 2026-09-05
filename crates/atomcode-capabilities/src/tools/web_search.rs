@@ -129,17 +129,16 @@ impl Tool for WebSearchTool {
         "web_search"
     }
     fn description(&self) -> &str {
-        "Search the web for information — returns titles, URLs, and snippets. Use to find \
-         documentation, look up APIs, research libraries, or find information not available \
-         locally; then call `web_fetch` on a result URL to read it. `max_results` caps the \
-         list (default 8)."
+        "Search the web for information — returns titles, URLs, and snippets. \
+         Trigger when the user explicitly requests searching online for authoritative documentation, or when encountering unfamiliar external library APIs, latest error solutions, or tech developments not present in the local codebase. \
+         Prefer searching local code first when local project information can resolve the issue."
     }
     fn parameters_schema(&self) -> serde_json::Value {
         json!({
             "type": "object",
             "properties": {
                 "query": { "type": "string", "description": "Search query" },
-                "max_results": { "type": "integer", "description": "Max results (default 8)" }
+                "max_results": { "type": "integer", "default": 8, "description": "Max results (default 8)" }
             },
             "required": ["query"]
         })

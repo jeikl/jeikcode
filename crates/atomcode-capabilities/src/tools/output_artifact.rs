@@ -487,7 +487,7 @@ impl atomcode_kernel::tool::Tool for FetchOutputTool {
 
     fn description(&self) -> &str {
         "Fetch remaining chunks of a truncated tool output. \
-         When to use: When a previous tool output displayed a truncation marker with an `artifact_id`."
+         Trigger when a previous tool output displayed a truncation marker with an `artifact_id`."
     }
 
     fn read_only_hint(&self) -> bool {

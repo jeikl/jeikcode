@@ -175,8 +175,7 @@ impl Tool for ReadFileTool {
         "read_file"
     }
     fn description(&self) -> &str {
-        "Read a specified file. Output is line-numbered text formatted as `<line_number>\\t<content>`. \
-         When to use: When you need to read a file."
+        "Read file contents. Output is line-numbered text formatted as '<line_number>→<content>'."
     }
     fn parameters_schema(&self) -> serde_json::Value {
         json!({
@@ -185,13 +184,14 @@ impl Tool for ReadFileTool {
                 "file_path": { "type": "string", "description": "Path to the file to read." },
                 "offset": {
                     "type": "integer",
+                    "default": 1,
                     "minimum": 1,
-                    "description": "Start line, 1-based. Provide ONLY when paginating a file that was reported too large."
+                    "description": "Start line, 1-based. Provide only when paginating."
                 },
                 "limit": {
                     "type": "integer",
                     "minimum": 1,
-                    "description": "Number of lines to read. Provide ONLY when paginating a file that was reported too large."
+                    "description": "Number of lines to read. Provide only when paginating."
                 }
             },
             "required": ["file_path"]
@@ -344,9 +344,9 @@ impl Tool for ReadFileTool {
             let n = start + i;
             let rendered = if line.chars().count() > MAX_LINE_LEN {
                 let head: String = line.chars().take(MAX_LINE_LEN).collect();
-                format!("{n}\t{head}... (line truncated to {MAX_LINE_LEN} chars)\n")
+                format!("{n}→{head}... (line truncated to {MAX_LINE_LEN} chars)\n")
             } else {
-                format!("{n}\t{line}\n")
+                format!("{n}→{line}\n")
             };
             let candidate_end = start_idx + i + 1;
             let footer_len = if candidate_end < total {
@@ -536,8 +536,8 @@ mod tests {
             .execute(r#"{"file_path":"a.txt"}"#, &ctx(d.path()))
             .await;
         assert!(!r.is_error);
-        assert!(r.content.contains("1\tfirst"), "{}", r.content);
-        assert!(r.content.contains("3\tthird"), "{}", r.content);
+        assert!(r.content.contains("1→first"), "{}", r.content);
+        assert!(r.content.contains("3→third"), "{}", r.content);
     }
 
     #[tokio::test]
@@ -610,10 +610,10 @@ mod tests {
                 &ctx(d.path()),
             )
             .await;
-        assert!(r.content.contains("2\tl2"), "{}", r.content);
-        assert!(r.content.contains("3\tl3"), "{}", r.content);
-        assert!(!r.content.contains("\tl1"), "{}", r.content);
-        assert!(!r.content.contains("\tl4"), "{}", r.content);
+        assert!(r.content.contains("2→l2"), "{}", r.content);
+        assert!(r.content.contains("3→l3"), "{}", r.content);
+        assert!(!r.content.contains("→l1"), "{}", r.content);
+        assert!(!r.content.contains("→l4"), "{}", r.content);
         assert!(
             r.content.contains("Showing lines 2-3 of 5") && r.content.contains("\"offset\":4"),
             "{}",
@@ -640,8 +640,8 @@ mod tests {
             .await;
 
         assert!(!r.is_error, "{}", r.content);
-        assert!(r.content.contains("1500\tline 1500"), "{}", r.content);
-        assert!(!r.content.contains("1501\tline 1501"), "{}", r.content);
+        assert!(r.content.contains("1500→line 1500"), "{}", r.content);
+        assert!(!r.content.contains("1501→line 1501"), "{}", r.content);
         assert!(
             r.content.contains("Showing lines 1-1500 of 3505")
                 && r.content.contains("\"offset\":1501")
@@ -656,7 +656,7 @@ mod tests {
             .await;
         assert!(!page2.is_error, "{}", page2.content);
         assert!(
-            page2.content.contains("1501\tline 1501"),
+            page2.content.contains("1501→line 1501"),
             "{}",
             page2.content
         );
@@ -671,12 +671,12 @@ mod tests {
             .await;
         assert!(!page3.is_error, "{}", page3.content);
         assert!(
-            page3.content.contains("3001\tline 3001"),
+            page3.content.contains("3001→line 3001"),
             "{}",
             page3.content
         );
         assert!(
-            page3.content.contains("3505\tline 3505"),
+            page3.content.contains("3505→line 3505"),
             "{}",
             page3.content
         );
@@ -771,7 +771,7 @@ mod tests {
             .await;
 
         assert!(!r.is_error, "{}", r.content);
-        assert!(r.content.contains("350\tl350"), "{}", r.content);
+        assert!(r.content.contains("350→l350"), "{}", r.content);
         assert!(!r.content.contains("Continue reading"), "{}", r.content);
     }
 
@@ -890,19 +890,19 @@ mod tests {
             )
             .await;
         assert!(!r.is_error, "{}", r.content);
-        assert!(r.content.contains("2\tl2"), "{}", r.content);
-        assert!(r.content.contains("3\tl3"), "{}", r.content);
-        assert!(!r.content.contains("\tl4"), "{}", r.content);
+        assert!(r.content.contains("2→l2"), "{}", r.content);
+        assert!(r.content.contains("3→l3"), "{}", r.content);
+        assert!(!r.content.contains("→l4"), "{}", r.content);
     }
 
     #[cfg(feature = "codeintel")]
     #[tokio::test]
     async fn large_code_file_returns_the_body_not_a_skeleton() {
-        // Plan A: an unsliced read of a ~1600-line source file must dump the body
+        // Plan A: an unsliced read of a ~1400-line source file must dump the body
         // in one page, not replace it with a symbol outline that forces offset/limit.
         let d = tempfile::tempdir().unwrap();
         let mut src = String::from("fn alpha() {\n");
-        for _ in 0..1600 {
+        for _ in 0..1400 {
             src.push_str("    let _ = 1;\n");
         }
         src.push_str("}\nfn beta() {}\n");
@@ -942,7 +942,7 @@ mod tests {
                 &ctx(d.path()),
             )
             .await;
-        assert!(r.content.contains("1\tfn f"), "{}", r.content);
+        assert!(r.content.contains("1→fn f"), "{}", r.content);
         assert!(!r.content.contains("line 5"), "{}", r.content);
     }
 

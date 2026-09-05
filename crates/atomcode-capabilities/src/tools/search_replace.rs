@@ -1,4 +1,4 @@
-//! `search_replace` — bulk find-and-replace across many files (literal or regex),
+//! `global_search_replace` — bulk find-and-replace across many files (literal or regex),
 //! optionally scoped by a glob. Mutates the filesystem ⇒ always `Risky`. Neutral port of
 //! the production tool, minus the coding bookkeeping (file_history / file_store / LSP) —
 //! the L1 `ToolContext` has none of that. The (blocking) `ignore` walk + per-file reads
@@ -13,42 +13,40 @@ use serde::Deserialize;
 use serde_json::json;
 use std::path::{Path, PathBuf};
 
-pub struct SearchReplaceTool;
+pub struct GlobalSearchReplaceTool;
+pub type SearchReplaceTool = GlobalSearchReplaceTool;
 
 #[derive(Deserialize)]
 struct Args {
+    #[serde(alias = "pattern")]
     search: String,
+    #[serde(alias = "replacement")]
     replace: String,
     #[serde(default)]
     glob: Option<String>,
-    #[serde(default)]
+    #[serde(default, alias = "target_directory")]
     path: Option<String>,
     #[serde(default)]
     regex: bool,
 }
 
 #[async_trait]
-impl Tool for SearchReplaceTool {
+impl Tool for GlobalSearchReplaceTool {
     fn name(&self) -> &str {
-        "search_replace"
+        "global_search_replace"
     }
     fn description(&self) -> &str {
-        "Find and replace text across MANY files at once — replaces every occurrence in \
-         every matching file. Use for project-wide renames (a CSS class, an import, a \
-         config key, a string literal). For a single file, prefer `edit_file`. \
-         `regex:true` enables regex (with `$1`/`$2` capture groups in `replace`); the \
-         default is literal matching. `glob` limits scope (e.g. \"*.rs\", \"src/**/*.ts\"); \
-         `path` sets the search root (default: working directory)."
+        "Search and batch replace text with specified content across all matching files in a target directory or workspace."
     }
     fn parameters_schema(&self) -> serde_json::Value {
         json!({
             "type": "object",
             "properties": {
-                "search": { "type": "string", "description": "Text or regex pattern to find" },
-                "replace": { "type": "string", "description": "Replacement text (use $1, $2 for regex captures)" },
-                "glob": { "type": "string", "description": "File pattern to limit scope, e.g. \"*.rs\", \"src/**/*.ts\" (default: all files)" },
-                "path": { "type": "string", "description": "Directory to search in (default: working directory)" },
-                "regex": { "type": "boolean", "description": "Use regex matching (default: false = literal)" }
+                "search": { "type": "string", "description": "Text or regex pattern to find." },
+                "replace": { "type": "string", "description": "Replacement text (use $1, $2 for regex captures)." },
+                "glob": { "type": "string", "description": "File pattern to limit scope (e.g. *.rs, src/**/*.ts)." },
+                "path": { "type": "string", "default": ".", "description": "Directory scope for search and replace." },
+                "regex": { "type": "boolean", "default": false, "description": "Use regex matching." }
             },
             "required": ["search", "replace"]
         })
@@ -64,21 +62,30 @@ impl Tool for SearchReplaceTool {
         let a: Args = match serde_json::from_str(args) {
             Ok(a) => a,
             Err(e) => {
+                if let Ok(val) = serde_json::from_str::<serde_json::Value>(args) {
+                    if val.get("file_path").is_some() || val.get("old_string").is_some() || val.get("new_string").is_some() {
+                        return err(
+                            "global_search_replace is for project-wide batch replacements across multiple files. \
+                             To edit a single file, please use `edit_file` with `path` and `edits: [{old_string, new_string}]`."
+                                .to_string(),
+                        );
+                    }
+                }
                 return err(format!(
-                    "search_replace: invalid arguments: {e}. Expected {{\"search\":..., \"replace\":...}}."
-                ))
+                    "global_search_replace: invalid arguments: {e}. Expected {{\"search\":..., \"replace\":...}}."
+                ));
             }
         };
         if a.search.is_empty() {
             return err(
-                "search_replace: search is empty — an empty pattern would corrupt every file."
+                "global_search_replace: search is empty — an empty pattern would corrupt every file."
                     .to_string(),
             );
         }
         let root = resolve_path(a.path.as_deref().unwrap_or("."), &ctx.working_dir);
         if !root.exists() {
             return err(format!(
-                "search_replace: directory not found: {}",
+                "global_search_replace: directory not found: {}",
                 crate::pathnorm::to_display(&root)
             ));
         }
@@ -89,7 +96,7 @@ impl Tool for SearchReplaceTool {
         let re = if a.regex {
             match regex::Regex::new(&a.search) {
                 Ok(r) => Some(r),
-                Err(e) => return err(format!("search_replace: invalid regex '{}': {e}", a.search)),
+                Err(e) => return err(format!("global_search_replace: invalid regex '{}': {e}", a.search)),
             }
         } else {
             None
@@ -97,7 +104,7 @@ impl Tool for SearchReplaceTool {
         let glob_filter = match a.glob.as_deref() {
             Some(p) => match FileGlob::new(p) {
                 Ok(g) => Some(g),
-                Err(e) => return err(format!("search_replace: invalid glob '{p}': {e}")),
+                Err(e) => return err(format!("global_search_replace: invalid glob '{p}': {e}")),
             },
             None => None,
         };
@@ -288,7 +295,7 @@ mod tests {
         std::fs::write(d.path().join("a.txt"), "foo bar foo").unwrap();
         std::fs::write(d.path().join("b.txt"), "no match here").unwrap();
         std::fs::write(d.path().join("c.txt"), "foo").unwrap();
-        let r = SearchReplaceTool
+        let r = GlobalSearchReplaceTool
             .execute(r#"{"search":"foo","replace":"baz"}"#, &ctx(d.path()))
             .await;
         assert!(!r.is_error, "{}", r.content);
@@ -316,7 +323,7 @@ mod tests {
         let d = tempfile::tempdir().unwrap();
         std::fs::write(d.path().join("keep.md"), "color").unwrap();
         std::fs::write(d.path().join("x.css"), "color").unwrap();
-        let r = SearchReplaceTool
+        let r = GlobalSearchReplaceTool
             .execute(
                 r#"{"search":"color","replace":"colour","glob":"*.css"}"#,
                 &ctx(d.path()),
@@ -340,7 +347,7 @@ mod tests {
         // model) must still match a CRLF file, and the file must stay CRLF.
         let d = tempfile::tempdir().unwrap();
         std::fs::write(d.path().join("a.txt"), "alpha\r\nbeta\r\n").unwrap();
-        let r = SearchReplaceTool
+        let r = GlobalSearchReplaceTool
             .execute(
                 r#"{"search":"alpha\nbeta","replace":"ALPHA\nbeta"}"#,
                 &ctx(d.path()),
@@ -359,7 +366,7 @@ mod tests {
         // region must match it verbatim and NOT force the result to CRLF.
         let d = tempfile::tempdir().unwrap();
         std::fs::write(d.path().join("m.txt"), "head\r\nfoo\nbar\n").unwrap();
-        let r = SearchReplaceTool
+        let r = GlobalSearchReplaceTool
             .execute(
                 r#"{"search":"foo\nbar","replace":"foo\nBAR"}"#,
                 &ctx(d.path()),
@@ -376,7 +383,7 @@ mod tests {
     async fn empty_search_is_rejected() {
         let d = tempfile::tempdir().unwrap();
         std::fs::write(d.path().join("a.txt"), "abc").unwrap();
-        let r = SearchReplaceTool
+        let r = GlobalSearchReplaceTool
             .execute(r#"{"search":"","replace":"X"}"#, &ctx(d.path()))
             .await;
         assert!(
@@ -396,7 +403,7 @@ mod tests {
         // Literal mode must treat `$1` in the replacement verbatim (not a capture ref).
         let d = tempfile::tempdir().unwrap();
         std::fs::write(d.path().join("a.txt"), "key=val").unwrap();
-        let r = SearchReplaceTool
+        let r = GlobalSearchReplaceTool
             .execute(r#"{"search":"val","replace":"$1x"}"#, &ctx(d.path()))
             .await;
         assert!(!r.is_error, "{}", r.content);
@@ -410,7 +417,7 @@ mod tests {
     async fn regex_with_capture_groups() {
         let d = tempfile::tempdir().unwrap();
         std::fs::write(d.path().join("v.rs"), "let v1 = 1; let v2 = 2;").unwrap();
-        let r = SearchReplaceTool
+        let r = GlobalSearchReplaceTool
             .execute(
                 r#"{"search":"v(\\d)","replace":"w$1","regex":true}"#,
                 &ctx(d.path()),
@@ -428,7 +435,7 @@ mod tests {
         let d = tempfile::tempdir().unwrap();
         std::fs::write(d.path().join("a.txt"), "a.b a_b axb").unwrap();
         // "a.b" literal must match only "a.b", not "axb" (which `.` would match in regex).
-        let r = SearchReplaceTool
+        let r = GlobalSearchReplaceTool
             .execute(r#"{"search":"a.b","replace":"Z"}"#, &ctx(d.path()))
             .await;
         assert!(!r.is_error, "{}", r.content);
@@ -442,7 +449,7 @@ mod tests {
     async fn no_matches_reports_and_is_not_error() {
         let d = tempfile::tempdir().unwrap();
         std::fs::write(d.path().join("a.txt"), "nothing").unwrap();
-        let r = SearchReplaceTool
+        let r = GlobalSearchReplaceTool
             .execute(r#"{"search":"zzz","replace":"x"}"#, &ctx(d.path()))
             .await;
         assert!(!r.is_error, "{}", r.content);
@@ -452,7 +459,7 @@ mod tests {
     #[tokio::test]
     async fn invalid_regex_errors() {
         let d = tempfile::tempdir().unwrap();
-        let r = SearchReplaceTool
+        let r = GlobalSearchReplaceTool
             .execute(
                 r#"{"search":"(unclosed","replace":"x","regex":true}"#,
                 &ctx(d.path()),
@@ -468,7 +475,7 @@ mod tests {
         std::fs::create_dir(d.path().join("target")).unwrap();
         std::fs::write(d.path().join("target/gen.rs"), "foo").unwrap();
         std::fs::write(d.path().join("src.rs"), "foo").unwrap();
-        let r = SearchReplaceTool
+        let r = GlobalSearchReplaceTool
             .execute(r#"{"search":"foo","replace":"bar"}"#, &ctx(d.path()))
             .await;
         assert!(!r.is_error, "{}", r.content);
@@ -485,6 +492,19 @@ mod tests {
 
     #[test]
     fn risk_is_risky() {
-        assert_eq!(SearchReplaceTool.risk("{}"), RiskLevel::Risky);
+        assert_eq!(GlobalSearchReplaceTool.risk("{}"), RiskLevel::Risky);
+    }
+
+    #[tokio::test]
+    async fn single_file_args_redirect_to_edit_file() {
+        let d = tempfile::tempdir().unwrap();
+        let r = GlobalSearchReplaceTool
+            .execute(
+                r#"{"file_path":"foo.rs","old_string":"a","new_string":"b"}"#,
+                &ctx(d.path()),
+            )
+            .await;
+        assert!(r.is_error);
+        assert!(r.content.contains("To edit a single file, please use `edit_file`"), "{}", r.content);
     }
 }

@@ -22,8 +22,8 @@ fn unified_prompt_has_key_guidance() {
     let prompt = build_rules();
     assert!(prompt.contains("edit_file"), "Must guide edit mode format");
     assert!(
-        prompt.contains("search_replace"),
-        "Must guide search-replace editing"
+        prompt.contains("global_search_replace"),
+        "Must guide global search-replace editing"
     );
     assert!(
         prompt.contains("never with `bash`"),

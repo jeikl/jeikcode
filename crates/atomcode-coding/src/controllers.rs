@@ -441,6 +441,7 @@ pub(crate) fn summarize_for_goal(messages: &[Message], previous: Option<&str>) -
                 call.name.as_str(),
                 "write_file"
                     | "edit_file"
+                    | "global_search_replace"
                     | "search_replace"
                     | "parallel_edit_files"
                     | "create_file"
@@ -767,10 +768,29 @@ impl Tool for ScheduleWakeupTool {
         "schedule_wakeup"
     }
     fn description(&self) -> &str {
-        "Schedule when to resume work in a self-paced /loop. ONLY call inside a /loop.\n\nAfter this turn's work, if the task still needs another pass, call this to set the next wakeup; if the task is done or no longer needs to run, do NOT call it — the loop ends.\n\nThe runtime clamps delay_seconds to [60, 3600]."
+        "Schedule when to resume work in a self-paced /loop. ONLY call inside an active /loop."
     }
     fn parameters_schema(&self) -> serde_json::Value {
-        json!({"type":"object","properties":{"delay_seconds":{"type":"integer"},"reason":{"type":"string"},"prompt":{"type":"string"}},"required":["delay_seconds","reason","prompt"]})
+        json!({
+            "type": "object",
+            "properties": {
+                "delay_seconds": {
+                    "type": "integer",
+                    "minimum": 60,
+                    "maximum": 3600,
+                    "description": "Delay before resuming the loop in seconds."
+                },
+                "reason": {
+                    "type": "string",
+                    "description": "Reason for scheduling the next wakeup."
+                },
+                "prompt": {
+                    "type": "string",
+                    "description": "Instruction prompt for the next turn."
+                }
+            },
+            "required": ["delay_seconds", "reason", "prompt"]
+        })
     }
     async fn execute(&self, args: &str, _ctx: &ToolContext) -> ToolResult {
         if !self.active.load(Ordering::Acquire) {

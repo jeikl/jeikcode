@@ -16,266 +16,302 @@ tools:
   # ============================================================================
   - name: "read_file"
     category: "filesystem"
-    # 【中文】：读取指定文件内容，返回带行号的文本或图片数据。
-    description: "Read file contents with line numbers. Supports images for vision models."
+    # 【中文】：读取指定文件的内容。输出为带有行号的前缀文本，格式为 '<line_number>→<content>'。
+    description: "Read file contents. Output is line-numbered text formatted as '<line_number>→<content>'."
     parameters:
       file_path:
         type: "string"
         required: true
-        # 【中文】：目标文件路径
+        # 【中文】：待读取的目标文件路径。
         description: "Path to the file to read."
       offset:
         type: "integer"
         required: false
         default: 1
-        # 【中文】：起始行号（从 1 开始）
-        description: "Starting line number (1-based)."
+        # 【中文】：起始行号（从 1 开始）。仅在文件过大分页时提供。
+        description: "Start line, 1-based. Provide only when paginating."
       limit:
         type: "integer"
         required: false
-        # 【中文】：最大读取行数
-        description: "The number of lines to read. Only provide if the file is too large to read at once."
+        # 【中文】：读取行数。仅在文件过大分页时提供。
+        description: "Number of lines to read. Provide only when paginating."
     guidance: "Use read_file instead of `bash cat`."
 
   - name: "write_file"
     category: "filesystem"
-    # 【中文】：创建新文件或完全重写现有文件。
-    description: "Create a new file or completely overwrite an existing file."
+    # 【中文】：将完整内容写入文件，若文件已存在则全量覆写，不存在时则自动创建目录和文件。用于创建全新文件，或对现有文件进行完全重写。切勿在未事先使用 read_file 读取现有文件的情况下直接覆写，禁止用于局部代码修改。
+    description: "Write full content to a file, overwriting existing files or automatically creating directories and files if absent. Use for creating new files or full rewrites. Never overwrite without reading via `read_file` first, and do not use for partial edits."
     parameters:
       file_path:
         type: "string"
         required: true
-        # 【中文】：目标文件路径
+        # 【中文】：目标文件路径。
         description: "Target file path to write."
       content:
         type: "string"
         required: true
-        # 【中文】：完整文件内容
+        # 【中文】：写入文件的完整内容。
         description: "Full content to write."
     guidance: "Use write_file for new files or full rewrites; use edit_file for targeted edits."
 
   - name: "edit_file"
     category: "filesystem"
-    # 【中文】：在现有文件中做局部替换。schema 只声明 JSON 数组；字符串化数组由后台静默解码。
-    description: "Replace text in an existing file. Same-file multi-hunk uses a JSON-array `edits` field; independent files are parallel top-level calls."
+    # 【中文】：在现有文件中批量执行精确字符串替换用于修改文件内容。切勿在未先通过 read_file 查看目标文件的情况下调用。
+    description: "Perform exact string replacements in existing files to modify content. Do not call without reading the target file via `read_file` first."
     parameters:
       file_path:
         type: "string"
         required: true
-        # 【中文】：要修改的文件路径
+        # 【中文】：要修改的文件路径（支持 path 别名）
         description: "Path of the file to edit."
-      old_string:
-        type: "string"
-        required: false
-        # 【中文】：单 hunk：待替换片段。用 `edits` 时省略。
-        description: "Single-hunk text to find. Omit when using `edits`."
-      new_string:
-        type: "string"
-        required: false
-        # 【中文】：单 hunk：替换后的文本
-        description: "Single-hunk replacement text. Omit when using `edits`."
-      replace_all:
-        type: "boolean"
-        required: false
-        default: false
-        description: "Replace all occurrences (default false)."
       edits:
         type: "array"
-        required: false
-        # 【中文】：同一文件多 hunk。必须是 JSON 数组，不是字符串。内部按序串行，失败整笔回滚。
-        description: "JSON array of {old_string,new_string} hunks. Applied serially on one buffer; one write."
+        required: true
+        # 【中文】：填入每一处需要修改的数组对象
+        description: "Series of edits to apply in sequence."
         items:
           old_string:
             type: "string"
-            required: false
-            # 【中文】：定位用文本。缩进/空行/CRLF 差异由工具内部容忍，不必字节级复刻。
-            description: "Snippet to replace. Indent / blank-line / CRLF-LF drift is tolerated."
+            required: true
+            # 【中文】：待查找替换的原代码片段
+            description: "Exact text to find and replace."
           new_string:
             type: "string"
-            required: false
-            description: "Replacement snippet."
+            required: true
+            # 【中文】：替换后的新代码片段
+            description: "Replacement text."
           replace_all:
             type: "boolean"
             required: false
             default: false
-          start_line:
-            type: "integer"
-            required: false
-            # 【中文】：上次 read 的 1-based 行号提示，不是硬切。有 old_string 时文本优先。
-            description: "Optional 1-based hint from the last read. Not a hard splice when old_string is present."
-          end_line:
-            type: "integer"
-            required: false
-            description: "Optional 1-based hint. Range splice only when old_string is omitted."
-      start_line:
-        type: "integer"
-        required: false
-        description: "Optional 1-based hint (single-hunk). Same semantics as edits[].start_line."
-      end_line:
-        type: "integer"
-        required: false
-        description: "Optional 1-based hint (single-hunk)."
-    guidance: "Prefer unique old_string. Same file: one edits array. Other files: parallel edit_file. Never sed/awk."
+            # 【中文】：是否替换文件中所有匹配项（默认 false）
+            description: "Replace all occurrences of old_string (default false)."
+    guidance: "Read file with read_file first. Ensure old_string is unique or set replace_all=true. Same file: one edits array. Other files: parallel edit_file."
 
   - name: "list_directory"
     category: "filesystem"
-    # 【中文】：对已知的一个目录做 ls（gitignore 感知）。不是工作区总览——总览用 repo_map，二者不要并行。
-    description: "List one directory like ls (gitignore-aware). Not a workspace overview — that is repo_map. Do not pair the two."
+    # 【中文】：列出指定目录下的直接文件与子目录（感知 .gitignore）。用于检查某一个已知具体目录的直接子项，如果是初次探索工作区，建议并行配合 repomap工具 共同检索。
+    description: "List immediate files and subdirectories in a directory (respects .gitignore). Use to inspect direct children of a known directory. For initial workspace exploration, pair with repo_map."
     parameters:
-      path:
+      target_directory:
         type: "string"
         required: false
         default: "."
-        # 【中文】：要列出的那个目录（不是整仓）
-        description: "Directory to list (one dir you already know, not the whole workspace)."
+        # 【中文】：待列出的目录路径。
+        description: "Directory to list (default: working directory)."
       depth:
         type: "integer"
         required: false
         default: 1
-        # 【中文】：最大遍历深度。默认 1 = 本目录 + 直接子项。工作区树请用 repo_map。
-        description: "Max recursion depth (default 1, max 6). Workspace tree → repo_map."
+        # 【中文】：递归遍历的最大深度。
+        description: "Recursion depth (default 1, max 6)."
 
   - name: "glob"
     category: "filesystem"
-    # 【中文】：按通配符模式查找匹配的文件。
-    description: "Find files matching a glob pattern (e.g. `**/*.rs`)."
+    # 【中文】：跨目录查找匹配通配符模式的文件。用于按文件名、扩展名或目录结构定位文件路径。
+    description: "Find files matching a glob pattern across directories. Use to locate file paths by name, extension, or directory layout."
     parameters:
       pattern:
         type: "string"
         required: true
-        # 【中文】：通配符模式
-        description: "Glob pattern to search for."
+        # 【中文】：通配符模式。
+        description: "Glob pattern."
       path:
         type: "string"
         required: false
         default: "."
-        # 【中文】：搜索根目录
-        description: "Root directory to search in."
+        # 【中文】：匹配范围目录。
+        description: "Directory scope to match."
       limit:
         type: "integer"
         required: false
         default: 300
-        description: "Max paths to return (default 300, max 2000)."
+        # 【中文】：最多返回的文件路径数量。
+        description: "Maximum paths to return."
 
-  - name: "search_replace"
+  - name: "global_search_replace"
     category: "filesystem"
-    # 【中文】：跨多文件批量查找替换。单文件请用 edit_file。
-    description: "Find and replace across many files. For a single file, prefer edit_file."
+    # 【中文】：在指定目录或工作区下全局搜索并批量替换所有匹配文件中的文本为指定内容。
+    description: "Search and batch replace text with specified content across all matching files in a target directory or workspace."
     parameters:
       search:
         type: "string"
         required: true
+        # 【中文】：待查找的纯文本或正则表达式。
+        description: "Text or regex pattern to find."
       replace:
         type: "string"
         required: true
+        # 【中文】：替换文本（正则模式支持 $1、$2 引用捕获组）。
+        description: "Replacement text (use $1, $2 for regex captures)."
       glob:
         type: "string"
         required: false
+        # 【中文】：限定文件范围的通配符（如 *.rs, src/**/*.ts）。
+        description: "File pattern to limit scope (e.g. *.rs, src/**/*.ts)."
       path:
         type: "string"
         required: false
+        default: "."
+        # 【中文】：搜素和替换的目录范围。
+        description: "Directory scope for search and replace."
       regex:
         type: "boolean"
         required: false
         default: false
+        # 【中文】：是否启用正则匹配。
+        description: "Use regex matching."
 
   - name: "grep"
     category: "filesystem"
-    # 【中文】：使用正则表达式在文件内容中搜索。
-    description: "Search file contents across workspace with regex."
+    # 【中文】：通过正则表达式或字面字符串搜索文件内容。用于跨文件检索精确文本、报错或符号定义。定位到具体符号时建议换用 code_explore 查看调用关系。
+    description: "Search file contents by regular expression or literal string. Use to search for exact text, error strings, or symbols across files. When identifying a specific code symbol, switch to `code_explore`."
     parameters:
       pattern:
         type: "string"
         required: true
-        # 【中文】：搜索正则或关键词
-        description: "Regex pattern or keyword to search for."
+        # 【中文】：搜索文本或正则表达式。
+        description: "Regex pattern or exact text to search for."
       path:
         type: "string"
         required: false
-        # 【中文】：限定搜索的目录或文件
-        description: "Subdirectory or file scope."
+        default: "."
+        # 【中文】：搜索目录或文件。
+        description: "Directory or file to search (default: working directory)."
       glob:
         type: "string"
         required: false
-        # 【中文】：文件过滤器（如 `*.rs`）
-        description: "File filter pattern."
+        # 【中文】：文件通配过滤（如 `*.rs`）。
+        description: "File glob pattern to restrict search (e.g. '*.rs', '*.{ts,tsx}')."
+      case_insensitive:
+        type: "boolean"
+        required: false
+        default: false
+        # 【中文】：是否忽略大小写（默认 false）。
+        description: "Case-insensitive matching (default: false)."
       max_results:
         type: "integer"
         required: false
         default: 200
-        description: "Max matching lines (default 200)."
+        # 【中文】：最大匹配行数。
+        description: "Maximum matching lines to return (default: 200)."
       context:
         type: "integer"
         required: false
         default: 0
-        description: "Lines of context around each match (default 0, max 10)."
-    guidance: "Smart-case: case-insensitive unless the pattern contains an uppercase letter. No case_insensitive flag."
+        # 【中文】：匹配行附带的上下文行数。
+        description: "Lines of context before and after each match (default: 0, max: 10)."
 
   - name: "open_file"
     category: "filesystem"
-    # 【中文】：在系统 GUI 默认程序中打开或预览文件。
+    # 【中文】：在操作系统默认程序中打开或预览本地文件。
     description: "Open/preview a local file in default system GUI."
     parameters:
       path:
         type: "string"
         required: true
-        # 【中文】：文件路径
+        # 【中文】：目标文件路径。
         description: "Path to open."
 
   - name: "bash"
     category: "system"
-    # 【中文】：在终端执行命令。不要传 timeout；空闲杀与硬上限由 [tools.bash] 控制。
-    description: "Run a shell command. Do NOT pass timeout. Output streams live until exit, idle-kill, or max_timeout_secs."
+    # 【中文】：在工作目录下执行终端命令，返回标准输出和退出码。用于 git、编译构建、包管理、跑测试和后台进程。文件读写与修改请用专用文件工具，禁止用 shell 命令修改文件。
+    description: "Run a shell command in the working directory and return its combined stdout/stderr and exit code. Output streams live while it runs. Prefer dedicated tools over bash for file operations. Reserve bash for real shell work — git, builds, package managers, running test suites, system inspection, dev servers, background processes."
     parameters:
       command:
         type: "string"
         required: true
-        # 【中文】：命令行指令
+        # 【中文】：执行的命令行指令。
         description: "Command string to run."
       shell:
         type: "string"
         required: false
         default: "default"
-        # 【中文】：解释器。Windows 上 powershell / cmd；default 为 Git Bash 或 cmd。
-        description: "Interpreter: default | powershell | cmd (Windows). Do not nest powershell -Command inside default."
-    guidance: "Never use bash for file reads/writes. Never pass timeout."
+        # 【中文】：解释器：default | powershell | cmd。
+        description: "Interpreter: default | powershell | cmd (Windows)."
+
+  - name: "long_bash_keyword_actions"
+    category: "system"
+    # 【中文】：添加或删除被视作长任务超时的 Bash 命令关键字（如 mvn、cargo、ninja 等），提升其超时限制以避免被判定为空闲而终止。当慢速编译构建、测试命令因超时挂起需加入白名单时触发。禁止用于常驻服务或后台守护进程。
+    description: "Add or remove command keywords treated as long-running batch jobs (e.g. `mvn`, `cargo`, `ninja`) to prevent idle timeouts. Trigger when whitelisting slow build or test commands. Do not use for resident services or background daemons."
+    parameters:
+      action:
+        type: "string"
+        required: true
+        enum: ["add", "delete"]
+        # 【中文】：执行操作：add（添加关键字）、delete（删除关键字）
+        description: "Action to perform: 'add' to register a keyword, 'delete' to remove it."
+      keyword:
+        type: "string"
+        required: true
+        # 【中文】：命令前缀关键字词元（例如 'mvn', 'cargo', 'ninja'）
+        description: "Command keyword token (e.g. 'mvn', 'cargo', 'ninja')."
+      global:
+        type: "boolean"
+        required: false
+        default: false
+        # 【中文】：是否全局持久化到 config.toml（默认 false，仅当前会话生效）
+        description: "Persist in config.toml for all future sessions (default false, current session only)."
+
+  - name: "bash_kill_by_id"
+    category: "system"
+    # 【中文】：通过 bashid 强制终止后台正在运行的终端命令进程。当后台命令卡住、超时挂起或不再需要时触发。
+    description: "Terminate a running background bash command by its `bashid`. Trigger when stopping a stuck, timed-out, or unwanted background bash task."
+    parameters:
+      bashid:
+        type: "string"
+        required: true
+        # 【中文】：后台运行中命令的唯一标识符（如 'b-...'）
+        description: "The bashid of the running background bash command."
 
   # ============================================================================
   # 二、代码智能核心 (Code Intelligence - 默认挂载)
   # ============================================================================
   - name: "repo_map"
     category: "codeintel"
-    description: "Generate a complete index-backed directory tree and architectural map of the repository, displaying module hierarchy and file layouts."
+    # 【中文】：生成完整仓库目录结构树。用于探索不熟悉的代码整体架构布局。当目标文件或所在模块结构明确已知时请勿使用。
+    description: "Generate a complete repository directory structure tree. Use to explore unfamiliar codebase architecture and layouts. Do not use when the target file or module structure is already known."
     parameters:
       path:
         type: "string"
         required: false
-        description: "Target directory or workspace root to map. Defaults to current working directory."
+        default: "."
+        # 【中文】：目标目录
+        description: "Target directory."
       max_files:
         type: "integer"
         required: false
-        description: "Maximum number of files whose symbols are rendered in full/symbols mode (default: 100, max: 300)."
+        default: 100
+        # 【中文】：在 full 或 symbols 模式下提取并展示符号定义的最大文件数。
+        description: "Maximum files to render symbols from in full or symbols mode (default: 100, max: 300)."
       mode:
         type: "string"
         required: false
+        default: "tree"
+        enum: ["tree", "full", "symbols"]
+        # 【中文】：展示细节级别："tree"（纯目录结构树，默认）、"full"（目录树附带预算配额内的符号大纲）、"symbols"（仅输出符号大纲）。
         description: "Detail level: 'tree' (structure-only directory tree, default), 'full' (directory tree with budgeted symbol outlines), or 'symbols' (symbols only)."
 
   - name: "code_explore"
     category: "codeintel"
-    description: "Perform code-graph retrieval across the repository, a specific directory, or a target file. Resolves complete call graphs, logic flows, and symbol relationships from localized clues, far more efficient than grep."
+    # 【中文】：在当前代码仓库、指定目录、指定文件下进行代码图谱检索，可以通过局部的答案关联检索出整个当前工作目录中的代码全景调用链路、逻辑、关系，比 grep 高效。当用户提问涉及业务关键词（支持中英文），或在 grep、read_file、glob 等操作时发现相关中英文注释、精确代码符号、代码符号关键词、业务术语黑话等关键信息时触发。
+    description: "Perform semantic code-graph retrieval across the repository, a specific directory, or a target file. Resolves complete call graphs, logic flows, and symbol relationships from localized clues to explore how a business logic actually operates, far more efficient than grep. Trigger when user queries involve business keywords (Chinese or English), or when previous operations (`grep`, `read_file`, `glob`) reveal relevant comments, exact symbols, symbol keywords, or domain jargon/terminology."
     parameters:
       path:
         type: "string"
-        required: false
-        description: "Target repository, directory, or file path to explore (defaults to current working directory)."
+        required: true
+        # 【中文】：搜索目标范围：支持工作区根目录 (".")、指定目录/模块、单个文件。
+        description: "Scope path to search: workspace root ('.'), directory/module, or a specific file."
       query:
         type: "string"
         required: true
-        description: "Keyword, Chinese business term, concept, or symbol name to search across the codebase."
+        # 【中文】：精确的符号名称或模糊的代码符号关键字，或中英文自然语言（如业务概念、领域术语、提问语句）。
+        description: "Precise symbol name or fuzzy code symbol keyword, or natural language in Chinese or English (e.g. business concept, domain jargon, or question)."
       max_files:
         type: "integer"
         required: false
-        description: "Maximum number of files to inspect (default: 30, max: 100)."
+        # 【中文】：最多渲染源码片段的文件数量（默认 12，最大 30）
+        description: "Maximum number of files to inspect (default: 12, max: 30)."
     guidance: "path can be the workspace root, a directory/module, or a target file; query is a symbol or Chinese/English keyword."
 
   # ============================================================================
@@ -283,49 +319,79 @@ tools:
   # ============================================================================
   - name: "todowrite"
     category: "task"
-    # 【中文】：管理结构化多步骤任务清单。优先 actions 数组，不要把数组打成字符串。
-    description: "Manage structured todo list (pending, in_progress, completed)."
+    # 【中文】：为任务目标规划、创建、管理一个多步骤的任务清单，保证任务步骤不疏漏、不出错、高质量交付。当一个任务需要严格、高质量开发、评估有 3 步以上操作时，或在执行过程中，发现了新的一个比较大块的问题，或需要插入若干新步骤、删除某些没必要的步骤、或完成一个及以上步骤需要同步更新进度时触发。
+    description: "Maintain a structured multi-step task checklist for the target objective to ensure steps are neither omitted nor erroneous, delivering high quality. Trigger when a task requires rigorous, high-quality development, is evaluated as having 3 or more steps, or during execution when a significant new problem is uncovered, new steps must be inserted, obsolete steps removed, or progress updated upon completing one or more steps."
     parameters:
       actions:
         type: "array"
-        required: false
-        description: "Preferred batch: add/insert/update/delete/clear objects. JSON array, not a string."
-      action:
-        type: "string"
-        required: false
-        description: "Single-action shorthand when not using actions[]."
-      todos:
-        type: "array"
-        required: false
-        description: "Legacy full-list replace only. Prefer clear + add in the same actions array."
+        required: true
+        # 【中文】：填入每一项任务操作的数组对象
+        description: "Array of task action objects to apply in sequence."
+        items:
+          action:
+            type: "string"
+            required: true
+            enum: ["add", "insert", "update", "delete", "remove", "clear"]
+            # 【中文】：操作类型：add（末尾追加）、insert（指定位置插入）、update（更新状态/内容）、delete/remove（删除任务）、clear（全量清空）
+            description: "Action type: 'add', 'insert', 'update', 'delete', 'remove', or 'clear'."
+          id:
+            type: "integer"
+            required: false
+            # 【中文】：任务编号（从 1 开始；action 为 update、delete、remove 时必填；add、clear 时省略）
+            description: "1-based task number (required for update, delete, remove; omit for add, clear)."
+          position:
+            type: "integer"
+            required: false
+            # 【中文】：插入位置（从 1 开始；仅 action 为 insert 时必填；其他操作省略）
+            description: "1-based insert position (required for insert; omit for others)."
+          status:
+            type: "string"
+            required: false
+            enum: ["pending", "in_progress", "completed"]
+            # 【中文】：任务状态（action 为 update 修改状态时必填；add 时选填，默认 pending；delete、clear 时省略）
+            description: "Task status (required for update status change; optional for add, default pending; omit for delete, clear)."
+          content:
+            type: "string"
+            required: false
+            # 【中文】：任务描述文本（action 为 add、insert 时必填；update 改标题时选填；delete、clear 时省略）
+            description: "Task description text (required for add, insert; optional for update title; omit for delete, clear)."
 
   - name: "request_user_input"
     category: "interaction"
-    # 【中文】：向用户弹出交互式提问。单题用 header/question/mode/options；多题用 questions 数组。
-    description: "Ask the user structured question(s). Either top-level header/question/mode/options, or a questions array (max 4)."
+    # 【中文】：向用户弹出结构化单选、多选或文本输入弹窗，让用户提供出他想要的方向。仅在遇到用户的方向缺失关键信息、遇到歧义、改动涉及面较大或出现必须用户决策确认的方案、问题时等情况时调用。
+    description: "Prompt the user with a structured single, multiple-choice, or text input modal to obtain their intended direction. Trigger only when key information is missing from the user's intent, when encountering ambiguity, when changes have broad impact, or when decisions and confirmations are strictly required."
     parameters:
-      header:
-        type: "string"
-        required: false
-      question:
-        type: "string"
-        required: false
-      mode:
-        type: "string"
-        required: false
-        enum: ["single", "multiple", "text"]
-      options:
-        type: "array"
-        required: false
-        description: "Choices for single/multiple; omit for text. JSON array."
       questions:
         type: "array"
-        required: false
-        description: "Up to 4 questions in one interaction. JSON array of the same objects."
+        required: true
+        # 【中文】：向用户展示的问题数组（1 到 4 个问题）
+        description: "Array of 1 to 4 questions to present to the user."
+        items:
+          header:
+            type: "string"
+            required: true
+            # 【中文】：分类标题（几个字）
+            description: "Very short label (a few words)."
+          question:
+            type: "string"
+            required: true
+            # 【中文】：清晰提问单句
+            description: "One clear sentence, ideally ending in '?'."
+          mode:
+            type: "string"
+            required: true
+            enum: ["single", "multiple", "text"]
+            # 【中文】：交互模式：单选、多选或文本
+            description: "Input mode: single, multiple, or text."
+          options:
+            type: "array"
+            required: false
+            # 【中文】：选项列表（单选/多选时提供；纯文本模式省略）
+            description: "Choices for single/multiple; omit for text. JSON array of {label, description}."
 
   - name: "memory"
     category: "memory"
-    # 【中文】：跨会话记录重要事实或偏好。
+    # 【中文】：持久化存储用户跨会话的记忆事实、编码偏好或环境配置。当用户明确要求记住某个偏好、习惯、约定，或需要持久化重要上下文事实时触发。
     description: "Persist durable notes and preferences across sessions."
     parameters:
       action:
@@ -339,7 +405,7 @@ tools:
 
   - name: "recall"
     category: "memory"
-    # 【中文】：检索历史会话的上下文与决策。
+    # 【中文】：检索与当前任务相关的跨会话历史记忆与用户偏好。当需要回顾历史决策、用户习惯或之前会话明确记录的规范时触发。
     description: "Recall past session conversation context."
     parameters:
       query:
@@ -374,7 +440,7 @@ tools:
 
   - name: "code_review"
     category: "subagent"
-    # 【中文】：运行代码评审子代理审查改动。
+    # 【中文】：触发代码评审子代理审查已暂存或未提交的代码变更质量与规范。在完成大范围重构、核心逻辑修改准备交付时触发。
     description: "Run code review on staged or uncommitted changes."
     parameters:
       scope:
@@ -384,7 +450,7 @@ tools:
 
   - name: "fetch_output"
     category: "utility"
-    # 【中文】：取回之前被折叠的完整超长输出。
+    # 【中文】：根据工件 ID 取回之前被折叠截断的超长工具完整输出内容。当某次工具调用的输出过长被截断且需要深入分析未显示的日志或代码时触发。
     description: "Fetch folded tool output by artifact ID."
     parameters:
       artifact_id:
@@ -392,28 +458,48 @@ tools:
         required: true
         description: "Artifact ID."
 
+  - name: "jeikcode_config_guide"
+    category: "utility"
+    # 【中文】：查询 JeikCode 官方配置教程、规范及目录说明。当用户请求协助新增或编辑模型、提供商、模型参数（如 reasoning_effort、token、上下文限制等）、提示词、MCP、Skills 时触发。请勿用于查询当前已挂载了哪些 MCP、Skill 或工具，请直接基于当前上下文回答。
+    description: "Query JeikCode configuration tutorials, specifications, and directory descriptions. Trigger when the user requests help adding or editing models, providers, model parameters (such as reasoning_effort, token, context limits), prompts, MCP, or Skills. Do not use to query which MCPs, Skills, or tools are currently mounted; answer based on your active context instead."
+    parameters:
+      topic:
+        type: "string"
+        required: false
+        default: "overview"
+        # 【中文】：待检索的主题分类
+        description: "Category of configuration guide to retrieve: 'overview', 'prompts', 'models', 'providers', 'mcp', 'skills', 'thesaurus', 'tools', 'directories', 'project', 'updates', or 'all'."
+
   # ============================================================================
   # 四、网络与技能 (Web & Skills)
   # ============================================================================
   - name: "web_fetch"
     category: "web"
-    # 【中文】：抓取网页并转为 Markdown。
-    description: "Fetch webpage and convert to markdown."
+    # 【中文】：通过 http(s) 抓取网页并提取转换其内容为 Markdown。当用户提问中包含网页链接且明确要求基于该网页内容回答，或查看网络搜索结果中的具体链接内容时使用。
+    description: "Fetch a web page over http(s) and convert its content to Markdown. Use when user input contains a web link and explicitly requests answering based on its content, or when viewing content from links found during web search."
     parameters:
       url:
         type: "string"
         required: true
-        description: "URL to fetch."
+        # 【中文】：待抓取的网页完整 URL 地址（须为 http 或 https 协议）
+        description: "Fully-qualified HTTP or HTTPS URL to fetch."
 
   - name: "web_search"
     category: "web"
-    # 【中文】：执行网络搜索。
-    description: "Search the web for query."
+    # 【中文】：通过搜索引擎检索互联网公开信息与最新技术资料。当用户明确要求上网查权威资料、或遇到本地项目代码且自己不知道的外部库用法、最新错误解决方案或技术动态时触发。已有项目内信息可解决时请优先检索本地代码。
+    description: "Search the web for information — returns titles, URLs, and snippets. Trigger when the user explicitly requests searching online for authoritative documentation, or when encountering unfamiliar external library APIs, latest error solutions, or tech developments not present in the local codebase. Prefer searching local code first when local project information can resolve the issue."
     parameters:
       query:
         type: "string"
         required: true
-        description: "Query string."
+        # 【中文】：搜索查询语句或关键词
+        description: "Search query string."
+      max_results:
+        type: "integer"
+        required: false
+        default: 8
+        # 【中文】：最大搜索返回条数（默认 8，最大 20）
+        description: "Maximum number of search results to return (default: 8, max: 20)."
 
   - name: "use_skill"
     category: "skill"

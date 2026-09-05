@@ -50,6 +50,7 @@ use super::sensitive_path::{path_is_sensitive, references_sensitive_path};
 const WRITE_TOOLS: &[&str] = &[
     "edit_file",
     "write_file",
+    "global_search_replace",
     "search_replace",
     "parallel_edit_files",
 ];
@@ -60,7 +61,7 @@ fn is_write_tool(name: &str) -> bool {
 
 /// The raw target path(s) a write call would touch, parsed from its args. Empty on a parse
 /// failure (→ the gate prompts rather than silently auto-approving an unparseable call) or for
-/// a non-write tool. For `search_replace` the "target" is its search ROOT (`path`, default the
+/// a non-write tool. For `global_search_replace` the "target" is its search ROOT (`path`, default the
 /// working dir `.`), since it edits every match under that root.
 fn write_targets(tool: &str, args: &str) -> Vec<String> {
     match tool {
@@ -74,7 +75,7 @@ fn write_targets(tool: &str, args: &str) -> Vec<String> {
                 .map(|p| vec![p.file_path])
                 .unwrap_or_default()
         }
-        "search_replace" => {
+        "global_search_replace" | "search_replace" => {
             #[derive(Deserialize)]
             struct P {
                 #[serde(default)]
@@ -756,7 +757,11 @@ mod tests {
             write_targets("write_file", r#"{"file_path":"b.rs","content":"x"}"#),
             vec!["b.rs".to_string()]
         );
-        // search_replace default root = "."
+        // global_search_replace default root = "."
+        assert_eq!(
+            write_targets("global_search_replace", r#"{"search":"a","replace":"b"}"#),
+            vec![".".to_string()]
+        );
         assert_eq!(
             write_targets("search_replace", r#"{"search":"a","replace":"b"}"#),
             vec![".".to_string()]

@@ -6987,6 +6987,7 @@ mod tool_format_tests {
         // Suffixes not in strip list pass through.
         assert_eq!(display_tool_name_short("bash"), "Bash");
         assert_eq!(display_tool_name_short("grep"), "Grep");
+        assert_eq!(display_tool_name_short("global_search_replace"), "GlobalSearchReplace");
         assert_eq!(display_tool_name_short("search_replace"), "SearchReplace");
         assert_eq!(display_tool_name_short("web_fetch"), "WebFetch");
         assert_eq!(display_tool_name_short("code_explore"), "CodeExplore");
@@ -21533,7 +21534,7 @@ fn handle_agent_event(
                     };
                     let diff_entries = if matches!(
                         name.as_str(),
-                        "edit_file" | "write_file" | "create_file" | "search_replace" | "bash"
+                        "edit_file" | "write_file" | "create_file" | "global_search_replace" | "search_replace" | "bash"
                     ) {
                         let entries = crate::render::diff::parse_unified_diff(&output, 120);
                         (!entries.is_empty()).then_some(entries)
@@ -24438,7 +24439,7 @@ pub(crate) fn format_tool_detail(name: &str, args_json: &str) -> String {
         "web_search" => get_str("query")
             .map(|q| crate::width::truncate_with_ellipsis(&q, 100))
             .unwrap_or_default(),
-        "search_replace" => {
+        "global_search_replace" | "search_replace" => {
             // SearchReplaceArgs uses search/replace/glob/path (not
             // file_path/file/pattern/old). Show "search → replace" so
             // the approval prompt tells the user WHAT will be replaced.
@@ -24625,7 +24626,7 @@ fn disambiguate_batch_details(
             "read_file" | "edit_file" | "write_file" | "create_file" => {
                 get_str("file_path").or_else(|| get_str("file"))
             }
-            "search_replace" => get_str("file_path").or_else(|| get_str("file")),
+            "global_search_replace" | "search_replace" => get_str("file_path").or_else(|| get_str("file")),
             _ => None,
         }
     };

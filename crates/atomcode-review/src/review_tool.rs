@@ -380,6 +380,7 @@ impl Tool for ReviewTool {
                         "head": { "type": "string", "description": "For kind=range: the head git ref (defaults to HEAD)." },
                         "rev": { "type": "string", "description": "For kind=commit: the commit revision." }
                     },
+                    "required": ["kind"],
                     "description": "Explicit mutually-exclusive review scope. Omit for working-tree changes."
                 },
                 "paths": { "type": "array", "items": { "type": "string" }, "description": "Optional repo-relative path filters." },

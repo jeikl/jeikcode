@@ -80,6 +80,112 @@ pub struct McpToolAdapter {
     read_only: bool,
 }
 
+/// Sanitize external MCP JSON schemas to remove JS runtime artifacts, protocol leaks,
+/// and known generator glitches that confuse LLMs.
+pub fn sanitize_mcp_schema(mut schema: serde_json::Value) -> serde_json::Value {
+    fn clean_node(v: &mut serde_json::Value) {
+        match v {
+            serde_json::Value::Object(map) => {
+                // 1. Strip JS Number.MAX_SAFE_INTEGER noise (9007199254740991)
+                const JS_SAFE_INT_THRESHOLD: f64 = 9_000_000_000_000_000.0;
+                if let Some(max) = map.get("maximum").and_then(|m| m.as_f64()) {
+                    if max >= JS_SAFE_INT_THRESHOLD {
+                        map.remove("maximum");
+                    }
+                }
+                if let Some(min) = map.get("minimum").and_then(|m| m.as_f64()) {
+                    if min <= -JS_SAFE_INT_THRESHOLD {
+                        map.remove("minimum");
+                    }
+                }
+
+                // 2. Fix known generator type glitches (e.g. Brave Search pseudo-objects)
+                if let Some(props) = map.get_mut("properties").and_then(|p| p.as_object_mut()) {
+                    // Filter HTTP protocol leaks that code generators mistakenly expose to LLM
+                    const LEAKED_HTTP_HEADERS: &[&str] = &[
+                        "accept",
+                        "cache-control",
+                        "user-agent",
+                        "api-version",
+                    ];
+                    for header in LEAKED_HTTP_HEADERS {
+                        props.remove(*header);
+                    }
+
+                    // Fix safesearch object -> string + enum
+                    if let Some(ss) = props.get_mut("safesearch") {
+                        if ss.get("type").and_then(|t| t.as_str()) == Some("object") {
+                            if let Some(ss_obj) = ss.as_object_mut() {
+                                ss_obj.insert("type".to_string(), serde_json::json!("string"));
+                                ss_obj.insert(
+                                    "enum".to_string(),
+                                    serde_json::json!(["off", "moderate", "strict"]),
+                                );
+                            }
+                        }
+                    }
+
+                    // Fix freshness object -> string
+                    if let Some(fresh) = props.get_mut("freshness") {
+                        if fresh.get("type").and_then(|t| t.as_str()) == Some("object") {
+                            if let Some(fresh_obj) = fresh.as_object_mut() {
+                                fresh_obj.insert("type".to_string(), serde_json::json!("string"));
+                            }
+                        }
+                    }
+
+                    // Fix goggles object -> string
+                    if let Some(goggles) = props.get_mut("goggles") {
+                        if goggles.get("type").and_then(|t| t.as_str()) == Some("object") {
+                            if let Some(g_obj) = goggles.as_object_mut() {
+                                g_obj.insert("type".to_string(), serde_json::json!("string"));
+                            }
+                        }
+                    }
+
+                    // Fix units empty object -> string
+                    if let Some(units) = props.get_mut("units") {
+                        if units.get("type").and_then(|t| t.as_str()) == Some("object") {
+                            if let Some(units_obj) = units.as_object_mut() {
+                                units_obj.insert("type".to_string(), serde_json::json!("string"));
+                                units_obj.insert(
+                                    "enum".to_string(),
+                                    serde_json::json!(["metric", "imperial"]),
+                                );
+                            }
+                        }
+                    }
+                }
+
+                // Clean removed headers from required list
+                if let Some(reqs) = map.get_mut("required").and_then(|r| r.as_array_mut()) {
+                    reqs.retain(|item| {
+                        if let Some(s) = item.as_str() {
+                            !matches!(s, "accept" | "cache-control" | "user-agent" | "api-version")
+                        } else {
+                            true
+                        }
+                    });
+                }
+
+                // Recurse into all children
+                for child in map.values_mut() {
+                    clean_node(child);
+                }
+            }
+            serde_json::Value::Array(arr) => {
+                for child in arr {
+                    clean_node(child);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    clean_node(&mut schema);
+    schema
+}
+
 impl McpToolAdapter {
     /// Build an adapter from a discovered tool's [`McpToolInfo`] and the live
     /// registry that owns the server connection.
@@ -96,13 +202,14 @@ impl McpToolAdapter {
             format!("[MCP:{}] {}", info.server_name, info.description)
         };
         registry.register_tool_alias(&full_name, &info.server_name, &info.tool_name)?;
+        let schema = sanitize_mcp_schema(info.input_schema);
         Ok(Self {
             registry,
             server: info.server_name,
             tool: info.tool_name,
             full_name,
             description,
-            schema: info.input_schema,
+            schema,
             read_only: info.read_only,
         })
     }
@@ -351,5 +458,62 @@ mod tests {
             .register_tool_alias("mcp__collision", "second", "tool")
             .unwrap_err();
         assert!(error.contains("alias collision"));
+    }
+
+    #[test]
+    fn test_sanitize_mcp_schema() {
+        let input = serde_json::json!({
+            "type": "object",
+            "properties": {
+                "query": {
+                    "type": "string"
+                },
+                "accept": {
+                    "type": "string"
+                },
+                "cache-control": {
+                    "type": "string"
+                },
+                "index": {
+                    "type": "integer",
+                    "minimum": -9007199254740991.0,
+                    "maximum": 9007199254740991.0
+                },
+                "safesearch": {
+                    "type": "object"
+                },
+                "freshness": {
+                    "type": "object"
+                }
+            },
+            "required": ["query", "accept"]
+        });
+
+        let sanitized = sanitize_mcp_schema(input);
+        let props = sanitized.get("properties").unwrap().as_object().unwrap();
+
+        // Query preserved
+        assert!(props.contains_key("query"));
+
+        // Leaked HTTP headers removed
+        assert!(!props.contains_key("accept"));
+        assert!(!props.contains_key("cache-control"));
+
+        // Required array cleaned
+        let reqs = sanitized.get("required").unwrap().as_array().unwrap();
+        assert_eq!(reqs, &vec![serde_json::json!("query")]);
+
+        // JS max safe int stripped
+        let index = props.get("index").unwrap().as_object().unwrap();
+        assert!(!index.contains_key("minimum"));
+        assert!(!index.contains_key("maximum"));
+
+        // Brave pseudo-objects normalized
+        let ss = props.get("safesearch").unwrap().as_object().unwrap();
+        assert_eq!(ss.get("type").unwrap(), "string");
+        assert!(ss.contains_key("enum"));
+
+        let fresh = props.get("freshness").unwrap().as_object().unwrap();
+        assert_eq!(fresh.get("type").unwrap(), "string");
     }
 }

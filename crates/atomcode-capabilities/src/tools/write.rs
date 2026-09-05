@@ -14,6 +14,7 @@ pub struct WriteFileTool;
 
 #[derive(Deserialize)]
 struct Args {
+    #[serde(alias = "path")]
     file_path: String,
     content: String,
 }
@@ -24,10 +25,9 @@ impl Tool for WriteFileTool {
         "write_file"
     }
     fn description(&self) -> &str {
-        "Write full content to a file, creating parent directories and overwriting existing files. \
-         When to use: Creating brand-new files, or completely rewriting an existing file. \
-         When NOT to use: NEVER overwrite an existing file without reading it via `read_file` first. \
-         Do NOT use for partial edits (use `edit_file` instead)."
+        "Write full content to a file, overwriting existing files or automatically creating directories and files if absent. \
+         Use for creating new files or full rewrites. \
+         Never overwrite without reading via `read_file` first, and do not use for partial edits."
     }
     fn parameters_schema(&self) -> serde_json::Value {
         json!({

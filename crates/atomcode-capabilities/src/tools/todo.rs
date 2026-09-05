@@ -679,10 +679,7 @@ impl TodoTool {
     }
 }
 
-const TODOWRITE_DESCRIPTION: &str = "Maintain a structured task checklist for the target objective to plan and \
-standardize execution steps, prevent step omissions, and ensure high-quality delivery.\n\
-When to use: When a task requires planning involving 3 or more steps, or when step statuses need to be updated during execution.\n\
-When NOT to use: Forbidden when the execution plan involves only 2 turns or fewer.\n\
+const TODOWRITE_DESCRIPTION: &str = "Maintain a structured multi-step task checklist for the target objective to ensure steps are neither omitted nor erroneous, delivering high quality. Trigger when a task requires rigorous, high-quality development, is evaluated as having 3 or more steps, or during execution when a significant new problem is uncovered, new steps must be inserted, obsolete steps removed, or progress updated upon completing one or more steps.\n\
 Prefer ONE `actions` array per turn for every REAL change of the SAME kind you already know.\n\
 Do NOT call this tool unless the list must change. Never re-mark an item already in that status \
 (no-op — wasted turn). A successful result reprints the numbered list — use THOSE ids next; \
@@ -721,37 +718,38 @@ impl Tool for TodoTool {
             "properties": {
                 "actions": {
                     "type": "array",
-                    "description": "Batch of same-kind (or add+update / clear+add+update / insert+update) operations. delete-only. `clear` runs FIRST when mixed with add/update. insert stays with inserts/updates only. update/delete ids may be in any order.",
+                    "description": "Array of task action objects to apply in sequence. Each item specifies an action ('add', 'insert', 'update', 'delete', 'remove', 'clear').",
                     "items": {
                         "type": "object",
                         "properties": {
-                            "action": { "type": "string", "enum": ["add", "insert", "update", "delete", "remove", "clear"] },
-                            "id": { "type": "integer", "description": "1-based. update/delete: current list. insert+update: AFTER inserts. add+update: either post-add ids or old_len+k for the k-th add (works after a closed plan auto-clears)." },
-                            "position": { "type": "integer", "description": "For insert: 1-based slot on the list before this batch's inserts (after any adds)." },
-                            "status": { "type": "string", "enum": ["pending", "in_progress", "completed"] },
-                            "content": { "type": "string", "description": "For add/insert: task text." }
+                            "action": {
+                                "type": "string",
+                                "enum": ["add", "insert", "update", "delete", "remove", "clear"],
+                                "description": "Action type: 'add' (append new task), 'insert' (insert at position), 'update' (update existing task), 'delete'/'remove' (delete task), 'clear' (clear all tasks)."
+                            },
+                            "id": {
+                                "type": "integer",
+                                "description": "1-based task number. Required for 'update', 'delete', 'remove'; omitted for 'add', 'clear'."
+                            },
+                            "position": {
+                                "type": "integer",
+                                "description": "1-based insert slot. Required for 'insert'; omitted for other actions."
+                            },
+                            "status": {
+                                "type": "string",
+                                "enum": ["pending", "in_progress", "completed"],
+                                "description": "Task status. Required when 'update' modifies status; optional for 'add' (default: pending); omitted for 'delete', 'clear'."
+                            },
+                            "content": {
+                                "type": "string",
+                                "description": "Task description text. Required for 'add', 'insert'; optional for 'update' (when changing text); omitted for 'delete', 'clear'."
+                            }
                         },
                         "required": ["action"]
                     }
-                },
-                "action": { "type": "string", "enum": ["add", "insert", "update", "delete", "remove", "clear"], "description": "Single-action shorthand (same fields as one `actions` item)." },
-                "position": { "type": "integer", "description": "For action=insert: 1-based position." },
-                "id": { "type": "integer", "description": "For action=update/delete: 1-based task number." },
-                "status": { "type": "string", "enum": ["pending", "in_progress", "completed"] },
-                "content": { "type": "string", "description": "For action=add/insert: task text." },
-                "todos": {
-                    "type": "array",
-                    "description": "Legacy resume-only full-list replace. Do not send on new work — use `clear` + `add`s in the same `actions` array.",
-                    "items": {
-                        "type": "object",
-                        "properties": {
-                            "content": { "type": "string" },
-                            "status": { "type": "string", "enum": ["pending", "in_progress", "completed"] }
-                        },
-                        "required": ["content", "status"]
-                    }
                 }
-            }
+            },
+            "required": ["actions"]
         })
     }
     // Never touches the filesystem → risk() defaults to Safe.
@@ -780,11 +778,14 @@ impl Tool for TodoTool {
             };
         }
 
-        if v.get("actions").and_then(|a| a.as_array()).is_none()
-            && v.get("action").and_then(|a| a.as_str()).is_none()
-        {
+        if v.get("actions").is_none() && v.get("action").is_some() {
+            let single = v.clone();
+            v = json!({ "actions": [single] });
+        }
+
+        if v.get("actions").and_then(|a| a.as_array()).is_none() {
             return err(with_current_list(
-                "todowrite: provide `actions` (preferred batch), a single `action`, or legacy `todos`.",
+                "todowrite: provide a non-empty `actions` array of task action objects.",
                 &list,
             ));
         }

@@ -241,9 +241,8 @@ impl Tool for RequestUserInputTool {
     }
 
     fn description(&self) -> &str {
-        "Prompt the user with a structured single or multiple-choice modal. \
-         When to use: Trigger ONLY when encountering genuine ambiguity that you cannot determine on your own, \
-         where user decision or confirmation is strictly required to proceed with questions, solutions, or operations."
+        "Prompt the user with a structured single, multiple-choice, or text input modal to obtain their intended direction. \
+         Trigger only when key information is missing from the user's intent, when encountering ambiguity, when changes have broad impact, or when decisions and confirmations are strictly required."
     }
 
     fn parameters_schema(&self) -> serde_json::Value {
@@ -270,14 +269,11 @@ impl Tool for RequestUserInputTool {
         });
         serde_json::json!({
             "type": "object",
+            "required": ["questions"],
             "properties": {
-                "header": question["properties"]["header"],
-                "question": question["properties"]["question"],
-                "mode": question["properties"]["mode"],
-                "options": question["properties"]["options"],
                 "questions": {
                     "type": "array",
-                    "description": "Up to 4 questions answered in one interaction. Provide EITHER top-level header/question/mode/options for a single question, OR this array.",
+                    "description": "Array of 1 to 4 questions to present to the user.",
                     "maxItems": 4,
                     "items": question
                 }

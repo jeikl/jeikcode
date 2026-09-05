@@ -170,12 +170,12 @@ impl WorkerScopeGate {
                     Some(rel) => Some(self.deny_out_of_scope(&rel)),
                 }
             }
-            "search_replace" => {
+            "global_search_replace" | "search_replace" => {
                 let value = serde_json::from_str::<serde_json::Value>(args_json)
                     .unwrap_or(serde_json::Value::Null);
                 match value.get("path").and_then(|x| x.as_str()) {
                     None => Some(format!(
-                        "worker search_replace has no `path`, which would rewrite the whole tree; \
+                        "worker {tool} has no `path`, which would rewrite the whole tree; \
                          restrict `path` to within the declared scope [{}].",
                         self.display
                     )),

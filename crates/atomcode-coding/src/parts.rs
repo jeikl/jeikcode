@@ -425,6 +425,7 @@ async fn prepare_with_plugin_hooks_reusing_lease(
                 "bash",
                 "grep",
                 "glob",
+                "global_search_replace",
                 "search_replace",
                 "list_directory",
             ]

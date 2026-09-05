@@ -2,7 +2,7 @@
 //! skipped). Non-destructive ⇒ always `Safe`.
 
 use super::{err, is_skip_dir, not_found_hint, ok, resolve_path};
-use crate::tool_feedback::{format_path_not_found, parse_tool_args};
+use crate::tool_feedback::parse_tool_args;
 use async_trait::async_trait;
 use atomcode_kernel::tool::{Tool, ToolContext, ToolResult};
 use serde::Deserialize;
@@ -22,8 +22,8 @@ pub struct ListDirTool;
 
 #[derive(Deserialize)]
 struct Args {
-    #[serde(default)]
-    path: Option<String>,
+    #[serde(default, alias = "path")]
+    target_directory: Option<String>,
     #[serde(default)]
     depth: Option<usize>,
 }
@@ -34,15 +34,23 @@ impl Tool for ListDirTool {
         "list_directory"
     }
     fn description(&self) -> &str {
-        "List immediate files and subdirectories in a directory. \
-         When to use: When inspecting the direct children of one known directory."
+        "List immediate files and subdirectories in a directory (respects .gitignore). \
+         Use to inspect direct children of a known directory. For initial workspace exploration, pair with repo_map."
     }
     fn parameters_schema(&self) -> serde_json::Value {
         json!({
             "type": "object",
             "properties": {
-                "path": { "type": "string", "description": "Directory to list (default: working directory)." },
-                "depth": { "type": "integer", "description": "Recursion depth (default 1, max 6)." }
+                "target_directory": {
+                    "type": "string",
+                    "default": ".",
+                    "description": "Directory to list (default: working directory)."
+                },
+                "depth": {
+                    "type": "integer",
+                    "default": 1,
+                    "description": "Recursion depth (default 1, max 6)."
+                }
             }
         })
     }
@@ -53,11 +61,11 @@ impl Tool for ListDirTool {
     }
     // listing is non-destructive → risk() defaults to Safe.
     async fn execute(&self, args: &str, ctx: &ToolContext) -> ToolResult {
-        let a: Args = match parse_tool_args("list_directory", args, r#"{"path":"<dir>"}"#) {
+        let a: Args = match parse_tool_args("list_directory", args, r#"{"target_directory":"<dir>"}"#) {
             Ok(a) => a,
             Err(e) => return e.into_tool_result(),
         };
-        let raw = a.path.unwrap_or_else(|| ".".to_string());
+        let raw = a.target_directory.unwrap_or_else(|| ".".to_string());
         let root = resolve_path(&raw, &ctx.working_dir);
         let depth = a.depth.unwrap_or(1).min(MAX_DEPTH_CAP);
 
@@ -457,5 +465,16 @@ mod tests {
             "{}",
             r.content
         );
+    }
+
+    #[tokio::test]
+    async fn target_directory_param_works() {
+        let d = tempfile::tempdir().unwrap();
+        std::fs::write(d.path().join("hello.txt"), "world").unwrap();
+        let r = ListDirTool
+            .execute(r#"{"target_directory":"."}"#, &ctx(d.path()))
+            .await;
+        assert!(!r.is_error, "{}", r.content);
+        assert!(r.content.contains("hello.txt"), "{}", r.content);
     }
 }

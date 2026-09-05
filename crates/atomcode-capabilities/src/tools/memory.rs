@@ -11,8 +11,8 @@ use serde::Deserialize;
 use serde_json::json;
 use std::path::Path;
 
-const MEMORY_DESC: &str = "Persist facts or preferences across sessions. \
-When to use: When recording user workflow preferences or non-obvious project conventions.";
+const MEMORY_DESC: &str = "Persist durable facts or preferences across sessions. \
+Trigger when recording user workflow preferences or non-obvious project conventions.";
 
 pub struct MemoryTool;
 
@@ -77,6 +77,7 @@ impl Tool for MemoryTool {
                 "scope": {
                     "type": "string",
                     "enum": ["project", "global"],
+                    "default": "project",
                     "description": "'project' (default, current repository) or 'global' (all projects)."
                 }
             },

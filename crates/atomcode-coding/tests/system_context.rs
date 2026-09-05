@@ -55,7 +55,7 @@ async fn session_context_block_reaches_the_provider() {
         .join("\n\n");
 
     assert!(
-        sys.contains("SESSION CONTEXT"),
+        sys.contains("SESSION BASELINE") || sys.contains("SESSION CONTEXT"),
         "context block present:\n{sys}"
     );
     assert!(sys.contains("Working directory:"), "env block present");

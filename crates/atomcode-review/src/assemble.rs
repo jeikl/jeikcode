@@ -512,6 +512,7 @@ mod tests {
             "edit_file",
             "bash",
             "change_dir",
+            "global_search_replace",
             "search_replace",
             "parallel_edit_files",
         ] {

@@ -34,16 +34,16 @@ impl Tool for GlobTool {
         "glob"
     }
     fn description(&self) -> &str {
-        "Find files matching a glob pattern across directories (e.g. `**/*.rs`, `src/**/*.ts`). \
-         When to use: When locating file paths by name, extension, or directory layout."
+        "Find files matching a glob pattern across directories. \
+         Use to locate file paths by name, extension, or directory layout."
     }
     fn parameters_schema(&self) -> serde_json::Value {
         json!({
             "type": "object",
             "properties": {
-                "pattern": { "type": "string", "description": "Glob pattern, e.g. **/*.rs or src/**/*.ts." },
-                "path": { "type": "string", "description": "Base directory to search (default: working directory)." },
-                "limit": { "type": "integer", "description": "Maximum paths to return (default 300, max 2000)." }
+                "pattern": { "type": "string", "description": "Glob pattern." },
+                "path": { "type": "string", "default": ".", "description": "Directory scope to match." },
+                "limit": { "type": "integer", "default": 300, "description": "Maximum paths to return." }
             },
             "required": ["pattern"]
         })

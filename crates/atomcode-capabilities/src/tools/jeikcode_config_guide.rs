@@ -108,9 +108,7 @@ impl Tool for JeikcodeConfigGuideTool {
     }
 
     fn description(&self) -> &str {
-        "Query official JeikCode configuration guides, parameter specifications, prompts, models, and directory structures to answer or modify configurations for the active agent. \
-         When to use: Trigger when the user explicitly asks about, or requests assistance configuring, JeikCode settings, prompts, adding/deleting/modifying/querying models, providers, or model parameter configurations, MCP servers, skills, or other related setups. \
-         When NOT to use: Do NOT use to query which tools or MCPs are currently mounted in the active session (inspect your active context and prompts directly)."
+        "Query JeikCode configuration tutorials, specifications, and directory descriptions. Trigger when the user requests help adding or editing models, providers, model parameters (such as reasoning_effort, token, context limits), prompts, MCP, or Skills. Do not use to query which MCPs, Skills, or tools are currently mounted; answer based on your active context instead."
     }
 
     fn parameters_schema(&self) -> serde_json::Value {

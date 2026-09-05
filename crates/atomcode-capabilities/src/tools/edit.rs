@@ -6,7 +6,7 @@
 //! hints. Weak-model quirks (stringified arrays, stale line numbers, CRLF /
 //! indent / blank-line drift) are repaired internally and are not advertised.
 
-use super::{coerce_eol, err, ok, read::lenient_usize, resolve_path};
+use super::{coerce_eol, err, ok, resolve_path};
 use crate::tool_feedback::{format_path_not_found, parse_tool_args};
 use async_trait::async_trait;
 use atomcode_kernel::tool::{RiskLevel, Tool, ToolContext, ToolResult};
@@ -17,6 +17,7 @@ pub struct EditFileTool;
 
 #[derive(Deserialize)]
 struct Args {
+    #[serde(alias = "path")]
     file_path: String,
     #[serde(default)]
     old_string: String,
@@ -24,10 +25,6 @@ struct Args {
     new_string: String,
     #[serde(default)]
     replace_all: bool,
-    #[serde(default, deserialize_with = "lenient_usize")]
-    start_line: Option<usize>,
-    #[serde(default, deserialize_with = "lenient_usize")]
-    end_line: Option<usize>,
     #[serde(default, deserialize_with = "deserialize_edits")]
     edits: Vec<EditHunk>,
 }
@@ -40,15 +37,7 @@ struct EditHunk {
     new_string: String,
     #[serde(default)]
     replace_all: bool,
-    #[serde(default, deserialize_with = "lenient_usize")]
-    start_line: Option<usize>,
-    #[serde(default, deserialize_with = "lenient_usize")]
-    end_line: Option<usize>,
 }
-
-/// Generous window (lines) for treating a model `start_line` as "near enough"
-/// when the same `old_string` appears more than once.
-const LINE_HINT_SLACK: usize = 80;
 
 #[async_trait]
 impl Tool for EditFileTool {
@@ -56,38 +45,29 @@ impl Tool for EditFileTool {
         "edit_file"
     }
     fn description(&self) -> &str {
-        "Perform exact string replacements across multiple existing files. \
-         Modifying existing file contents must always prefer this tool. \
-         When to use: When modifying existing code or text in files. \
-         When NOT to use: NEVER use without reading the target file via `read_file` first. \
-         Do NOT use for creating new files."
+        "Perform exact string replacements in existing files to modify content. \
+         Do not call without reading the target file via `read_file` first."
     }
     fn parameters_schema(&self) -> serde_json::Value {
         json!({
             "type": "object",
             "properties": {
                 "file_path": { "type": "string", "description": "Path of the file to edit." },
-                "old_string": { "type": "string", "description": "Text to find and replace. Unique unless replace_all is true. Omit when using `edits`." },
-                "new_string": { "type": "string", "description": "Replacement text. Omit when using `edits`." },
-                "replace_all": { "type": "boolean", "description": "Replace all occurrences of old_string (default false)." },
                 "edits": {
                     "type": "array",
-                    "description": "Batch edits as a JSON array of {old_string, new_string} objects applied in order.",
+                    "description": "Series of edits to apply in sequence.",
                     "items": {
                         "type": "object",
                         "properties": {
-                            "old_string": { "type": "string", "description": "Snippet to replace." },
-                            "new_string": { "type": "string", "description": "Replacement snippet." },
-                            "replace_all": { "type": "boolean" },
-                            "start_line": { "type": "integer", "description": "Optional 1-based start line hint." },
-                            "end_line": { "type": "integer", "description": "Optional 1-based end line hint." }
-                        }
+                            "old_string": { "type": "string", "description": "Exact text to find and replace." },
+                            "new_string": { "type": "string", "description": "Replacement text." },
+                            "replace_all": { "type": "boolean", "description": "Replace all occurrences (default false)." }
+                        },
+                        "required": ["old_string", "new_string"]
                     }
-                },
-                "start_line": { "type": "integer", "description": "Optional 1-based start line hint." },
-                "end_line": { "type": "integer", "description": "Optional 1-based end line hint." }
+                }
             },
-            "required": ["file_path"]
+            "required": ["file_path", "edits"]
         })
     }
     fn risk(&self, _args: &str) -> RiskLevel {
@@ -103,32 +83,27 @@ impl Tool for EditFileTool {
         let a: Args = match parse_tool_args(
             "edit_file",
             args,
-            r#"{"file_path":"<path>","old_string":"<exact>","new_string":"<replacement>"}"#,
+            r#"{"file_path":"<path>","edits":[{"old_string":"<exact>","new_string":"<replacement>"}]}"#,
         ) {
             Ok(a) => a,
             Err(e) => return e.into_tool_result(),
         };
         let hunks: Vec<EditHunk> = if !a.edits.is_empty() {
             a.edits
-        } else {
+        } else if !a.old_string.is_empty() || !a.new_string.is_empty() {
             vec![EditHunk {
                 old_string: a.old_string,
                 new_string: a.new_string,
                 replace_all: a.replace_all,
-                start_line: a.start_line,
-                end_line: a.end_line,
             }]
+        } else {
+            Vec::new()
         };
         if hunks.is_empty()
-            || hunks.iter().all(|h| {
-                h.old_string.is_empty()
-                    && h.new_string.is_empty()
-                    && h.start_line.is_none()
-                    && h.end_line.is_none()
-            })
+            || hunks.iter().all(|h| h.old_string.is_empty() && h.new_string.is_empty())
         {
             return err(
-                "edit_file: provide `old_string`/`new_string`, `start_line`/`end_line`, or a non-empty `edits` array."
+                "edit_file: provide a non-empty `edits` array with `old_string` and `new_string`."
                     .to_string(),
             );
         }
@@ -169,28 +144,9 @@ impl Tool for EditFileTool {
         let mut buf = content.clone();
         let mut total = 0usize;
         let mut kinds: Vec<&str> = Vec::new();
-        // Model line numbers are relative to the file as last read (this call's
-        // original). Map them onto the current buffer after earlier hunks so a
-        // later hunk that still cites original coordinates does not splice the
-        // wrong place. Text matching still wins when old_string is present.
-        let mut line_map = OrigLineMap::default();
         for (i, h) in hunks.iter().enumerate() {
-            let mapped_start = h.start_line.map(|s| line_map.map(s));
-            let mapped_end = h.end_line.map(|e| line_map.map(e));
-            match apply_hunk(
-                &buf,
-                &h.old_string,
-                &h.new_string,
-                h.replace_all,
-                mapped_start,
-                mapped_end,
-            ) {
+            match apply_hunk(&buf, &h.old_string, &h.new_string, h.replace_all) {
                 Ok((next, n, kind)) => {
-                    if let Some((cur_s, old_n, new_n)) = changed_span(&buf, &next) {
-                        let orig_s = line_map.unmap(cur_s);
-                        let orig_e = orig_s.saturating_add(old_n.saturating_sub(1)).max(orig_s);
-                        line_map.record(orig_s, orig_e, new_n);
-                    }
                     buf = next;
                     total += n;
                     kinds.push(kind);
@@ -282,204 +238,46 @@ fn parse_edits_string(s: &str) -> Result<Vec<EditHunk>, String> {
     }
 }
 
-/// Maps 1-based line numbers from the file as last read onto the current
-/// in-memory buffer after earlier hunks in this same call.
-#[derive(Default)]
-struct OrigLineMap {
-    /// `(original_start, original_end, new_line_count)` in application order.
-    hunks: Vec<(usize, usize, usize)>,
-}
-
-impl OrigLineMap {
-    fn map(&self, orig: usize) -> usize {
-        let mut line = orig as isize;
-        for &(s, e, new_n) in &self.hunks {
-            if orig > e {
-                line += new_n as isize - (e - s + 1) as isize;
-            }
-        }
-        line.max(1) as usize
-    }
-
-    fn unmap(&self, current: usize) -> usize {
-        let mut candidate = current as isize;
-        for &(s, e, new_n) in self.hunks.iter().rev() {
-            let delta = new_n as isize - (e - s + 1) as isize;
-            if candidate > e as isize {
-                candidate -= delta;
-            }
-        }
-        candidate.max(1) as usize
-    }
-
-    fn record(&mut self, orig_s: usize, orig_e: usize, new_n: usize) {
-        let s = orig_s.max(1);
-        let e = orig_e.max(s);
-        self.hunks.push((s, e, new_n));
-    }
-}
-
-/// First contiguous changed region between two snapshots: (1-based start,
-/// old line count, new line count). `None` if identical.
-fn changed_span(old: &str, new: &str) -> Option<(usize, usize, usize)> {
-    let ol: Vec<&str> = old.lines().collect();
-    let nl: Vec<&str> = new.lines().collect();
-    let mut i = 0usize;
-    while i < ol.len() && i < nl.len() && ol[i] == nl[i] {
-        i += 1;
-    }
-    let mut o_end = ol.len();
-    let mut n_end = nl.len();
-    while o_end > i && n_end > i && ol[o_end - 1] == nl[n_end - 1] {
-        o_end -= 1;
-        n_end -= 1;
-    }
-    if i == o_end && i == n_end {
-        return None;
-    }
-    Some((i + 1, o_end - i, n_end - i))
-}
-
-fn byte_to_line(content: &str, byte: usize) -> usize {
-    content.as_bytes()[..byte.min(content.len())]
-        .iter()
-        .filter(|&&b| b == b'\n')
-        .count()
-        + 1
-}
-
-fn match_start_lines(content: &str, needle: &str) -> Vec<usize> {
-    if needle.is_empty() {
-        return Vec::new();
-    }
-    let mut lines = Vec::new();
-    let mut from = 0usize;
-    while let Some(pos) = content[from..].find(needle) {
-        let abs = from + pos;
-        lines.push(byte_to_line(content, abs));
-        from = abs + needle.len();
-    }
-    lines
-}
-
-fn replace_nth(content: &str, needle: &str, replacement: &str, n: usize) -> String {
-    if needle.is_empty() {
-        return content.to_string();
-    }
-    let mut from = 0usize;
-    let mut seen = 0usize;
-    while let Some(pos) = content[from..].find(needle) {
-        let abs = from + pos;
-        if seen == n {
-            let mut out = String::with_capacity(content.len() + replacement.len());
-            out.push_str(&content[..abs]);
-            out.push_str(replacement);
-            out.push_str(&content[abs + needle.len()..]);
-            return out;
-        }
-        seen += 1;
-        from = abs + needle.len();
-    }
-    content.to_string()
-}
-
-/// Pick the match nearest `hint` when it is uniquely nearer than the next, or
-/// within [`LINE_HINT_SLACK`]. `hint` is 1-based in the current buffer.
-fn pick_occurrence(match_lines: &[usize], hint: usize) -> Option<usize> {
-    if match_lines.is_empty() {
-        return None;
-    }
-    if match_lines.len() == 1 {
-        return Some(0);
-    }
-    let mut indexed: Vec<(usize, usize)> = match_lines
-        .iter()
-        .copied()
-        .enumerate()
-        .map(|(i, line)| (i, line.abs_diff(hint)))
-        .collect();
-    indexed.sort_by_key(|(_, d)| *d);
-    let (best_i, best_d) = indexed[0];
-    let second_d = indexed[1].1;
-    if best_d < second_d && (best_d <= LINE_HINT_SLACK || second_d - best_d >= 5) {
-        Some(best_i)
-    } else {
-        None
-    }
-}
-
 fn apply_hunk(
     content: &str,
     old_string: &str,
     new_string: &str,
     replace_all: bool,
-    start_line: Option<usize>,
-    end_line: Option<usize>,
 ) -> Result<(String, usize, &'static str), String> {
-    // Text locate always wins. Line numbers are hints (disambiguation / drift)
-    // when old_string is present; range splice is only the no-text fallback.
     if !old_string.is_empty() {
-        return apply_text_hunk(
-            content,
-            old_string,
-            new_string,
-            replace_all,
-            start_line.or(end_line),
-        );
+        return apply_text_hunk(content, old_string, new_string, replace_all);
     }
-    if let (Some(s), Some(e)) = (start_line, end_line) {
-        return apply_line_range(content, new_string, s, e);
-    }
-    Err(
-        "edit_file: provide `old_string`/`new_string`, `start_line`/`end_line`, or a non-empty `edits` array."
-            .into(),
-    )
+    Err("edit_file: provide a non-empty `old_string` in each edit hunk.".into())
 }
 
-fn apply_line_range(
-    content: &str,
-    new_string: &str,
-    s: usize,
-    e: usize,
-) -> Result<(String, usize, &'static str), String> {
-    if s == 0 || e == 0 || s > e {
-        return Err(format!(
-            "invalid line range: start_line ({s}) must be >= 1 and <= end_line ({e})."
-        ));
+/// If a model accidentally copies lines from `read_file` with the `LINE_NUMBER→` prefix,
+/// this helper strips that prefix so the target snippet can match cleanly.
+fn strip_line_prefix_hints(text: &str) -> Option<String> {
+    let mut stripped = String::with_capacity(text.len());
+    let mut had_prefix = false;
+    for (i, line) in text.lines().enumerate() {
+        if i > 0 {
+            stripped.push('\n');
+        }
+        let trimmed = line.trim_start();
+        if let Some(pos) = trimmed.find('→') {
+            let prefix = trimmed[..pos].trim_start();
+            if !prefix.is_empty() && prefix.chars().all(|c| c.is_ascii_digit()) {
+                stripped.push_str(&trimmed[pos + '→'.len_utf8()..]);
+                had_prefix = true;
+                continue;
+            }
+        }
+        stripped.push_str(line);
     }
-    let lines: Vec<&str> = content.lines().collect();
-    if s > lines.len() {
-        return Err(format!(
-            "[Line Out of Range]: file has {} lines, but start_line is {s}.",
-            lines.len()
-        ));
+    if had_prefix {
+        if text.ends_with('\n') {
+            stripped.push('\n');
+        }
+        Some(stripped)
+    } else {
+        None
     }
-    let file_eol = if content.contains("\r\n") {
-        "\r\n"
-    } else {
-        "\n"
-    };
-    let end_bounded = e.min(lines.len());
-    let prefix = if s > 1 {
-        let mut p = lines[..s - 1].join(file_eol);
-        p.push_str(file_eol);
-        p
-    } else {
-        String::new()
-    };
-    let suffix = if end_bounded < lines.len() {
-        let mut suf = String::from(file_eol);
-        suf.push_str(&lines[end_bounded..].join(file_eol));
-        suf
-    } else {
-        String::new()
-    };
-    let normalized_new = coerce_eol(new_string, file_eol);
-    let mut result = format!("{prefix}{normalized_new}{suffix}");
-    if content.ends_with('\n') && !result.ends_with('\n') {
-        result.push_str(file_eol);
-    }
-    Ok((result, 1, "line-range replace"))
 }
 
 fn apply_text_hunk(
@@ -487,7 +285,6 @@ fn apply_text_hunk(
     old_string: &str,
     new_string: &str,
     replace_all: bool,
-    line_hint: Option<usize>,
 ) -> Result<(String, usize, &'static str), String> {
     if old_string == new_string {
         return Err("old_string and new_string are identical — nothing to change.".into());
@@ -508,15 +305,22 @@ fn apply_text_hunk(
     };
 
     if count == 0 {
+        if let Some(clean_old) = strip_line_prefix_hints(old_string) {
+            let clean_new =
+                strip_line_prefix_hints(new_string).unwrap_or_else(|| new_string.to_string());
+            if let Ok(res) = apply_text_hunk(content, &clean_old, &clean_new, replace_all) {
+                return Ok((res.0, res.1, "stripped-arrow prefix match"));
+            }
+        }
         if let Some((fuzzy_result, fuzzy_count)) =
-            try_fuzzy_replace(content, old_string, new_string, replace_all, line_hint)
+            try_fuzzy_replace(content, old_string, new_string, replace_all)
         {
             if fuzzy_result != content {
                 return Ok((fuzzy_result, fuzzy_count, "line-trimmed whitespace match"));
             }
         }
         if let Some((token_result, token_count)) =
-            try_token_normalized_replace(content, old_string, new_string, replace_all, line_hint)
+            try_token_normalized_replace(content, old_string, new_string, replace_all)
         {
             if token_result != content {
                 return Ok((token_result, token_count, "token-normalized match"));
@@ -546,13 +350,6 @@ fn apply_text_hunk(
         return Err(format!("old_string not found in file.\n{hint}"));
     }
     if count > 1 && !replace_all {
-        if let Some(hint) = line_hint {
-            let lines = match_start_lines(content, &old_match);
-            if let Some(idx) = pick_occurrence(&lines, hint) {
-                let updated = replace_nth(content, &old_match, &new_match, idx);
-                return Ok((updated, 1, "exact (line-hint)"));
-            }
-        }
         return Err(format!(
             "old_string appears {count} times — it must be unique. Add surrounding context, or set replace_all=true."
         ));
@@ -692,7 +489,6 @@ fn try_fuzzy_replace(
     old_string: &str,
     new_string: &str,
     replace_all: bool,
-    line_hint: Option<usize>,
 ) -> Option<(String, usize)> {
     // 1. Exact match (with optional leading/trailing blank line trimming)
     let old_normalized: Vec<&str> = old_string.lines().map(|l| l.trim()).collect();
@@ -763,15 +559,9 @@ fn try_fuzzy_replace(
     if matches.is_empty() {
         return None;
     }
-    // Unique unless replace_all, or a line hint uniquely picks one nearby match.
+    // Unique unless replace_all
     if !replace_all && matches.len() > 1 {
-        let lines: Vec<usize> = matches.iter().map(|(s, _)| s + 1).collect();
-        match line_hint.and_then(|h| pick_occurrence(&lines, h)) {
-            Some(i) => {
-                matches = vec![matches[i]];
-            }
-            None => return None,
-        }
+        return None;
     }
 
     // Re-anchor the replacement to each match's REAL indentation (see `reanchored_replacement`).
@@ -937,7 +727,6 @@ fn try_token_normalized_replace(
     old_string: &str,
     new_string: &str,
     replace_all: bool,
-    line_hint: Option<usize>,
 ) -> Option<(String, usize)> {
     let old_normalized: Vec<String> = old_string
         .lines()
@@ -980,13 +769,7 @@ fn try_token_normalized_replace(
         return None;
     }
     if !replace_all && matches.len() > 1 {
-        let lines: Vec<usize> = matches.iter().map(|(s, _)| s + 1).collect();
-        match line_hint.and_then(|h| pick_occurrence(&lines, h)) {
-            Some(idx) => {
-                matches = vec![matches[idx]];
-            }
-            None => return None,
-        }
+        return None;
     }
 
     let has_trailing_newline = content.ends_with('\n');
@@ -1028,10 +811,10 @@ fn try_trimmed_boundary_replace(
     if clean_token_normalize(old_lines[0]) == clean_token_normalize(new_lines[0]) {
         let sub_old = old_lines[1..].join("\n");
         let sub_new = new_lines[1..].join("\n");
-        if let Some(res) = try_fuzzy_replace(content, &sub_old, &sub_new, false, None) {
+        if let Some(res) = try_fuzzy_replace(content, &sub_old, &sub_new, false) {
             return Some(res);
         }
-        if let Some(res) = try_token_normalized_replace(content, &sub_old, &sub_new, false, None) {
+        if let Some(res) = try_token_normalized_replace(content, &sub_old, &sub_new, false) {
             return Some(res);
         }
     }
@@ -1040,12 +823,10 @@ fn try_trimmed_boundary_replace(
         if clean_token_normalize(last_o) == clean_token_normalize(last_n) {
             let sub_old = old_lines[..old_lines.len() - 1].join("\n");
             let sub_new = new_lines[..new_lines.len() - 1].join("\n");
-            if let Some(res) = try_fuzzy_replace(content, &sub_old, &sub_new, false, None) {
+            if let Some(res) = try_fuzzy_replace(content, &sub_old, &sub_new, false) {
                 return Some(res);
             }
-            if let Some(res) =
-                try_token_normalized_replace(content, &sub_old, &sub_new, false, None)
-            {
+            if let Some(res) = try_token_normalized_replace(content, &sub_old, &sub_new, false) {
                 return Some(res);
             }
         }
@@ -1283,14 +1064,14 @@ fn find_closest_match_snippet(content: &str, old_string: &str) -> Option<String>
         let show_end = (end + ctx).min(content_lines.len());
         let snippet = content_lines[show_start..show_end].join("\n");
         Some(format!(
-            "[Content Mismatch]: Closest matching block found around lines {}-{} (similarity {:.0}%):\n```\n{}\n```\n(Hint: verify line numbers or specify start_line/end_line to replace directly)",
+            "[Content Mismatch]: Closest matching block found around lines {}-{} (similarity {:.0}%):\n```\n{}\n```\n(Hint: re-read the file with read_file to check exact text and indentation)",
             show_start + 1,
             show_end,
             best_score * 100.0,
             snippet
         ))
     } else {
-        Some("[Content Mismatch]: Target old_string could not be located in the file. Please check line numbers or file contents.".to_string())
+        Some("[Content Mismatch]: Target old_string could not be located in the file. Please re-read the file with read_file.".to_string())
     }
 }
 
@@ -2038,21 +1819,24 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn line_range_replace_succeeds_and_preserves_structure() {
+    async fn test_stripped_arrow_prefix_succeeds() {
         let d = tempfile::tempdir().unwrap();
-        let content = "line 1\nline 2\nline 3\nline 4\nline 5\n";
-        std::fs::write(d.path().join("range.rs"), content).unwrap();
-
-        let r = EditFileTool
-            .execute(
-                r#"{"file_path":"range.rs","start_line":2,"end_line":4,"new_string":"line TWO\nline THREE\nline FOUR"}"#,
-                &ctx(d.path()),
-            )
-            .await;
+        std::fs::write(d.path().join("code.rs"), "fn foo() {\n    bar();\n}\n").unwrap();
+        // Model accidentally copied read_file output prefix "1→" and "2→"
+        let args = serde_json::json!({
+            "file_path": "code.rs",
+            "edits": [
+                {
+                    "old_string": "1→fn foo() {\n2→    bar();",
+                    "new_string": "fn foo() {\n    baz();"
+                }
+            ]
+        });
+        let r = EditFileTool.execute(&args.to_string(), &ctx(d.path())).await;
         assert!(!r.is_error, "{}", r.content);
         assert_eq!(
-            std::fs::read_to_string(d.path().join("range.rs")).unwrap(),
-            "line 1\nline TWO\nline THREE\nline FOUR\nline 5\n"
+            std::fs::read_to_string(d.path().join("code.rs")).unwrap(),
+            "fn foo() {\n    baz();\n}\n"
         );
     }
 
@@ -2115,31 +1899,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn unique_old_string_ignores_stale_line_range() {
-        let d = tempfile::tempdir().unwrap();
-        std::fs::write(d.path().join("cfg.yaml"), "alpha: 1\nbeta: 2\ngamma: 3\n").unwrap();
-        let r = EditFileTool
-            .execute(
-                r#"{"file_path":"cfg.yaml","start_line":99,"end_line":100,"old_string":"beta: 2","new_string":"beta: 20"}"#,
-                &ctx(d.path()),
-            )
-            .await;
-        assert!(
-            !r.is_error,
-            "unique text must win over stale line numbers: {}",
-            r.content
-        );
-        assert_eq!(
-            std::fs::read_to_string(d.path().join("cfg.yaml")).unwrap(),
-            "alpha: 1\nbeta: 20\ngamma: 3\n"
-        );
-    }
-
-    #[tokio::test]
-    async fn multi_hunk_original_line_numbers_after_insertion() {
-        // Repro: first hunk grows the file; second hunk still cites original-file
-        // line numbers (how models think after one read). Internal offset must
-        // retarget the later range, and old_string must still win if present.
+    async fn multi_hunk_sequential_edits_succeed() {
         let d = tempfile::tempdir().unwrap();
         let original = [
             "# header",
@@ -2161,14 +1921,10 @@ mod tests {
             "file_path": "config.yaml",
             "edits": [
                 {
-                    "start_line": 3,
-                    "end_line": 5,
                     "old_string": "# block-a\na1\na2",
                     "new_string": hunk1_new.trim_end()
                 },
                 {
-                    "start_line": 7,
-                    "end_line": 8,
                     "old_string": "  jeikcode:\n    protocol: openai_chat",
                     "new_string": "  jeikcode:\n    protocol: openai_chat\n    # extra"
                 }
@@ -2181,59 +1937,9 @@ mod tests {
         let on_disk = std::fs::read_to_string(d.path().join("config.yaml")).unwrap();
         assert!(
             on_disk.contains("a5\n# block-b\n  jeikcode:"),
-            "second hunk must not splice into the grown first block:\n{on_disk}"
+            "second hunk must apply cleanly:\n{on_disk}"
         );
         assert!(on_disk.contains("    # extra"), "{on_disk}");
         assert!(on_disk.contains("# footer"), "{on_disk}");
-    }
-
-    #[tokio::test]
-    async fn multi_hunk_line_range_only_applies_original_coordinates() {
-        let d = tempfile::tempdir().unwrap();
-        std::fs::write(d.path().join("f.txt"), "L1\nL2\nL3\nL4\nL5\nL6\nL7\n").unwrap();
-        // Replace L2-L3 (2 lines) with 4 lines (+2). Original L6 should land on
-        // current L8 after the insertion — without offset it would hit L6 (old L4).
-        let args = serde_json::json!({
-            "file_path": "f.txt",
-            "edits": [
-                {"start_line": 2, "end_line": 3, "new_string": "A\nB\nC\nD"},
-                {"start_line": 6, "end_line": 6, "new_string": "SIX"}
-            ]
-        });
-        let r = EditFileTool
-            .execute(&args.to_string(), &ctx(d.path()))
-            .await;
-        assert!(!r.is_error, "{}", r.content);
-        assert_eq!(
-            std::fs::read_to_string(d.path().join("f.txt")).unwrap(),
-            "L1\nA\nB\nC\nD\nL4\nL5\nSIX\nL7\n"
-        );
-    }
-
-    #[tokio::test]
-    async fn line_hint_disambiguates_duplicate_old_string() {
-        let d = tempfile::tempdir().unwrap();
-        std::fs::write(d.path().join("a.txt"), "dup\nkeep\ndup\n").unwrap();
-        let r = EditFileTool
-            .execute(
-                r#"{"file_path":"a.txt","old_string":"dup","new_string":"x","start_line":3}"#,
-                &ctx(d.path()),
-            )
-            .await;
-        assert!(!r.is_error, "{}", r.content);
-        assert_eq!(
-            std::fs::read_to_string(d.path().join("a.txt")).unwrap(),
-            "dup\nkeep\nx\n"
-        );
-    }
-
-    #[test]
-    fn orig_line_map_shifts_later_ranges_only() {
-        let mut m = OrigLineMap::default();
-        m.record(10, 23, 36); // 14 lines → 36, delta +22
-        assert_eq!(m.map(10), 10, "hunk start itself is unshifted");
-        assert_eq!(m.map(46), 68);
-        assert_eq!(m.unmap(68), 46);
-        assert_eq!(m.map(5), 5, "earlier lines stay put");
     }
 }

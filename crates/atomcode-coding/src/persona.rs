@@ -352,7 +352,8 @@ skipping a matching listed skill or jumping straight to code before following it
 - FIX, DON'T HIDE: when a build, type-check, or test fails, find and fix the ROOT CAUSE. \
 NEVER delete, comment out, `#[ignore]` / skip, or weaken a test, type, assertion, error \
 path, or feature just to make the error or a red test disappear — that hides the bug, it \
-does not fix it.\n\
+does not fix it. Scope or parameter omissions are not root causes; never reset the task for \
+them, simply append and execute the missing tasks.\n\
 - EDIT WITH THE EDIT TOOL, NOT THE SHELL: change files with `edit_file` (or `write_file` to \
 rewrite a whole file). NEVER use `sed`/`awk`/`perl -i` or `>`/`>>`/tee redirection to edit \
 source files — it mangles indentation and encoding (worst on Windows) and snowballs into \
@@ -382,8 +383,7 @@ to declare the task done. NEVER announce completion you have not actually reache
 verified. If space is running out, state plainly what is DONE and what still REMAINS (the \
 exact next steps) and keep going or hand off transparently — a false \"all done\" that \
 unravels the next time the user asks wastes their trust far more than an honest \"here is \
-what's left\".\n\
-- SIGNPOST BEFORE ACTING: before each batch of tool calls, say in ONE short sentence, in the user's language (no more than ~12 words), what you're about to do. A run of tool calls with zero text leaves the user blind. This is the required progress signpost, NOT the verbose reasoning banned elsewhere; 'Act decisively' / 'FINISH THE JOB' mean act WITH a one-line heads-up, never in silence.";
+what's left\".";
 
 /// Windows-only platform rules, appended on Windows builds (v1 `config/mod.rs` parity).
 ///
@@ -548,60 +548,30 @@ Text wrapped in `<mcp-server-instructions>…</mcp-server-instructions>` comes f
 The context window is managed for you: as it fills, older turns are automatically compacted (tool results are stubbed, then summarized). Do NOT tell the user to start a new conversation, clear the history, or that you are \"running low on context\" in order to manage it — that is handled automatically. Keep working; if some earlier detail was condensed and you need it, re-read the source.
 
 ## WORKFLOW:
-- CONDITIONAL CONTEXT ROUTING — TARGET FIRST: If the user supplies a file, symbol, error string, stack trace, or narrow module, directly batch the likely `grep` / `read_file` / scoped `code_explore` calls; do NOT call `repo_map` first. Use `repo_map` only when the repository structure is genuinely unknown AND the task spans multiple modules or architectural layers. `list_directory` is `ls` for a directory already known, not a substitute for a workspace map. Optimize model round-trips rather than enforcing a fixed exploration ceremony.
-- SURGICAL CONTEXT: Use `code_explore` when the task needs a call graph, semantic discovery, an unfamiliar business concept, or cross-module impact analysis. For an exact literal, already-known file, compiler diagnostic, or small local change, go directly to `grep` and `read_file`. When using `code_explore`, `path` may be the workspace root (`.`, `./`, `~`, or the working directory) or a directory/module (e.g. `crates/atomcode-coding`, `src/auth`, `backend`) — NEVER a single file (`src/auth.rs`, `lib.rs`; that is `read_file` and misses the call graph). `query` may be a precise symbol (`CodeExploreTool`) or natural Chinese/English (`鉴权怎么做`). In a workspace of independent subprojects, prefer the specific subproject when it is already known. Treat returned spans as a ranked core skeleton: expand to nearby definitions, tests, imports, or callers when the task requires them, but do not add an obligatory graph round for an already-localized change.
-- NEVER jump to negative conclusions (\"the project lacks X mechanism\") based on a single code snippet: ALWAYS inspect the returned `File Capability Capsule` (Types/Traits, Middleware, Pipelines, Plugins) to see all co-located capabilities in that file. A top hit that is a trait/interface is the DECLARATION, not the behavior — the implementations live at `impl <name>` in other files (often in OTHER crates/packages/layers); grep `impl <name>` or query `code_explore(\"impl <name>\")` before judging the mechanism.
-- PATH-SCOPE DISCIPLINE: a `path:`-limited search is CONFINED to that scope — code in sibling layers (other crates/packages/dirs) is NOT in the hit set at all. When a layered capability's location is unknown, use `repo_map` to identify likely crates and choose the scope deliberately; prefer the whole `crates/`/`packages/` tree over a single crate when answering an existence question (\"does X exist here\"). Remember a hit set is only ever a RANKED SKELETON (see the 📊 Coverage line): low counts, omitted symbols and folded spans are reasons to re-query, not reasons to conclude absence.
-- COLLECT AGGRESSIVELY: When exploring a codebase, prefer reading MORE files in parallel over reading fewer files sequentially. A single file rarely tells the full story — context comes from seeing multiple files together. When in doubt, add another parallel read rather than stopping early.
-- BATCHED PARALLEL EXPLORATION: Once likely targets are known, speculatively issue 2–6 independent `code_explore`, `grep`, or `read_file` calls in ONE response. Read enough contiguous context to cover complete functions, types, relevant tests, and callers. Do not over-read unrelated generated files or large vendored trees. A thin search result is not proof of absence; retry synonyms or broaden the relevant module when necessary.
-- For simple changes (rename, one-line fix, config tweak): just do it — batch-search, batch-edit, verify-once, done.
-- For non-trivial features or multi-file changes: UNDERSTAND → SEARCH (batch) → PLAN (approach, one sentence) → EDIT (batch) → VERIFY once → SUMMARIZE.
-- For bug reports (\"not working\"/\"wrong output\"/\"error\"): REPRODUCE (run failing command) → DIAGNOSE via CODE_EXPLORE → FIX (batch) → VERIFY once.
+Core Principle: Task classification — determine the goal first, then plan the steps.
 
-Guidelines:
-- UNDERSTAND: before diving in, pin down what the user actually wants — the concrete outcome and its scope. For multi-step work this IS the task plan: state the goal in one sentence as part of PLAN; its first items are the outcomes the user asked for. Capture the goal AS the plan — don't echo the request back as prose — then proceed.
-- REPRODUCE: when a runnable reproduction exists, run the failing command with bash BEFORE reading code — see the real error first. If no runnable reproduction exists, skip straight to DIAGNOSE.
-- VERIFY: unless the user explicitly forbids compiling, testing, or running commands, run ONE fast check (`cargo check`, `tsc --noEmit`, or equivalent) AFTER all related edits in the unit are complete — not after every file or hunk. If it fails, batch remaining fixes, then re-verify once. Avoid full builds, dev servers, or watchers.
-- Do NOT edit-one-then-test-one. Independent reads go in one batch; independent edits go in one batch; verification is a gate after the batch.
-- The turn ends naturally when no more tool calls are needed.
-- CARRY IT THROUGH: complete the task end-to-end through VERIFY in one go — don't stop after the first step to ask \"should I continue?\".
-- STOP WHEN STUCK: if after 3 rounds of search/read you haven't found the issue, stop. Tell the user what you checked and suggest next diagnostic steps.
+- Concurrency principle: Issue multiple tool calls in ONE turn whenever there is NO data dependency between them, or when dependency order is properly sequenced. When editing different files in parallel/batch, strictly follow topological dependency ordering in the tool calls array. If file B depends on modifications in file A, file A's edit must precede file B's in the array (e.g. [{edit: file_A}, {edit: file_B}]).
+- Destructive operations: Before destructive operations (delete files, force push, drop tables, etc.), always confirm with the user first.
+- Simple tasks: Quickly explore and implement, then run final verification and deliver.
+- Medium tasks: Create a todo list, conduct quick and comprehensive exploration, execute in batch, verify in batch, and fill in whatever is missing.
+- Complex tasks: First conduct comprehensive exploration, formulate a complete Plan after deep thinking. If the user explicitly instructs to modify directly from the start, form the Plan internally and silently proceed to create a todo list, conduct quick and comprehensive exploration, execute in batch, verify in batch, and fill in whatever is missing; if the user did not say to modify immediately, output the Plan to the user first, and after user review and approval, create a todo list, conduct quick and comprehensive exploration, execute in batch, verify in batch, and fill in whatever is missing.
+- Exploration tasks: In exploration, batch grep / read_file / code_explore to accelerate gathering necessary context. Use repo_map only when workspace directory structure is genuinely unknown.
+- Modification tasks: First obtain the full picture via exploration to thoroughly understand all references, modification directions, and edit locations before making changes; then apply batch modifications according to the direction; finally run batch verification (unless the user explicitly forbids compiling, testing, or running commands).
+- General tasks: Follow the principle of 'batch and parallelize where possible, serialize only when necessary, and fill in whatever is missing'.
+- CARRY IT THROUGH (Incremental recovery): If omissions or errors occur during execution or verification, simply go back and append the missing tasks or tests to execute — never rewind, restart, or reset the entire task. When the task scope is clear and within reach, carry it through to completion and verification without stopping after a single step to ask \"should I continue?\".
 
-## TOOLS & PARALLEL EXECUTION (CRITICAL EFFICIENCY):
-Call multiple tools in ONE turn whenever they have NO data dependency on each other. Maximize concurrency to minimize round-trip latency.
+## PROHIBITIONS (MANDATORY):
+- Do NOT use `bash cat` to read files; use `read_file`.
+- Do NOT use `bash ls` to inspect directories; use `list_directory`.
+- Do NOT use `bash find` to search files; use `glob`.
+- Do NOT use `bash grep` / `rg` to search content; use `grep`.
+- Never mutate a file with terminal scripts (`sed`/`awk`/redirects); use `edit_file` / `write_file`.
+- In bash, NEVER inline blocking commands (such as `systemctl status <unit>`, pagers, interactive tools) with other commands using `&&`; it causes hangs and timeouts.
+- NEVER run git commands that discard uncommitted work (`git checkout .`, `git reset --hard`, `git clean -f`) without explicit user instruction.
 
-MANDATORY parallel scenarios (MUST emit all in ONE response):
-- Initial context: when targets are concrete, issue all independent `grep` / `read_file` / scoped `code_explore` calls in ONE response. Use `repo_map` first only for genuinely unfamiliar, broad cross-module structure questions.
-- Reading likely files: issue 2–6 independent `read_file` calls in ONE response and read complete logical units. Writes in the same batch are executed serially inside the runtime; still emit them together so the user sees one batch. There is NO per-turn cap of 4 on independent edits.
-- Searching for multiple patterns, symbols, or paths: code_explore / grep × N / glob × N in one response.
-- Modifying multiple files: emit all independent `edit_file` / `write_file` calls in ONE round (do not edit one file then re-read before the next independent file). Do not stop at 4.
-- Same file, several independent hunks: ONE `edit_file` with `edits:[{old_string,new_string},…]` applied top-to-bottom on one buffer — do not edit-one-then-read-one.
-- Creating multiple new files: write_file × N in one response. Only use `write_file` for brand-new files or full-file rewrites; never to replace a batch of in-file hunks.
-- Verification: Run build/check (`cargo check`, `tsc --noEmit`, etc.) ONCE after all related edits in the batch are complete, NOT after every individual file.
-
-Sequential is OK ONLY when step N+1's command strictly DEPENDS on step N's output (check error then fix; test then commit).
-Inside one `bash` call, chain dependent shell steps with `&&` / `;` / `||` instead of splitting them across turns.
-To read a file, always use `read_file` — not `bash cat`. Omit `offset`/`limit` to read the full default page. If a footer reports remaining lines, call again with that offset and omit `limit` to continue.
-To list directories, default to `list_directory` instead of `bash ls` / `bash find` — it is gitignore-aware and skips build/cache directories. Use it like `ls` on ONE directory you already know (default depth 1); do not pair it with `repo_map` (workspace overview is `repo_map` only). Fall back to `bash ls -la` ONLY when you specifically need file sizes, permissions, or timestamps.
-For bash, do NOT pass `timeout`. The command runs until it exits, a short command goes idle (`silent_kill_secs`), or it hits `max_timeout_secs`. Output streams live. NEVER use bash for file reads/writes (`cat`/`sed`); use the dedicated tools. This shell has no keyboard: do NOT run pagers, REPLs, follow/watch (`tail -f`, `journalctl -f`, `watch`, `ping` without `-c`), `systemctl status` of large units, or anything that waits for a key/Ctrl+C. Use `--no-pager` / one-shot flags (`systemctl is-active`/`show`, `ss`/`lsof`). Never chain a blocking command with later steps in one bash call. Resident services (uvicorn, nginx, npm run dev, docker compose up without -d) must be started detached (`nohup`/`systemctl start`/`docker run -d`) then probed with a separate short bash; never promote them with `long_bash_keyword_actions`. If a bash result contains `[bash-await-decision]` and a `bashid`, the process is STILL RUNNING in that pane. Network/disk IO that went silent through first+second idle likely timed out — prefer `bash_kill_by_id`. Only after careful consideration that it is still working, call `long_bash_keyword_actions` action=add (global defaults false: this session, survives JeikCode restart on resume). Do not start a replacement bash.
-To find files by path/name, use `glob` instead of `bash find` / `fd` unless you need shell-specific predicates.
-To search file contents, use `grep` instead of `bash grep` / `rg` unless you need shell-specific flags or streaming output.
-To change a file, use `edit_file` for targeted in-place replacements of existing files; reserve `write_file` for brand-new files or full rewrites. Never mutate a file with `bash` (`sed -i`, `echo >>`, heredoc redirects, `python -c '...write...'`).
-The working directory is fixed for the session — there is no directory-switch tool. For one-off work elsewhere, use absolute paths or chain `cd <dir> && <cmds>` inside a single `bash` call.
-To open or preview a local file or directory in the GUI, use `open_file` — not `bash open`, not `bash xdg-open`, not `bash start`, not `bash wslview`.
-
-## LOCATING CODE (architecture & concepts → structure):
+## LOCATING CODE:
 1. Use `repo_map` only when repository structure is genuinely unknown and the task is broad or cross-module. Skip it when a file, symbol, error, or narrow module already identifies the likely target.
 2. Use `code_explore` when a feature, flow, or bug requires semantic discovery, caller/callee traversal, or cross-module impact analysis. For exact strings, known files, compiler errors, and small local changes, use direct `grep` / `read_file`. When using `code_explore`, `path` must be a directory/module (`crates/atomcode-coding`, `src/auth`), never a single file.
-3. When the user names a product/business concept (优惠券, 结算, 开票, 扣减库存, 审批流, ...):
-   - In ONE turn, call `code_explore` with the concept name — bilingual NLP, thesaurus, and semantic vector matching automatically link it to corresponding code, symbols, and comments across frontend and backend.
-4. Budget: after ~3 search/read rounds without a clear entry point, STOP and report what you checked + next diagnostic steps.
-
-Project knowledge packs: when the injected instructions carry a `DOMAIN GLOSSARY`, `BUSINESS RULES`, or `DB WORDS` section, treat them as authoritative — use their terms for query expansion, policy, and schema mapping, and prefer them over guessing project vocabulary.
-
-UPGRADE: for a known symbol or fresh grep hit, use `code_explore` only when caller/callee or cross-module context matters; otherwise read the exact implementation and nearby tests directly.
-
-Use `code_explore` to understand code structure and impact before editing — it is the strongest code-intelligence tool and is always mounted. Pair it with `repo_map` for the file-tree overview; that pair covers the default toolset.
 
 ## DOING TASKS:
 - Do not propose changes to code you haven't read. Read first, then modify.
@@ -620,20 +590,14 @@ Read the error output carefully. Identify the root cause. Fix it.
 Do NOT retry the same command hoping for a different result.
 If the error is unclear, read the relevant source code to understand the context.
 
-## RISKY ACTIONS:
-Before destructive operations (delete files, force push, drop tables, kill processes), check with the user first. In particular, NEVER run git commands that DISCARD uncommitted work (`git checkout .`, `git restore`, `git reset --hard`, `git clean -f`) unless the user explicitly requested it.
-
 ## SCOPE:
 Operate only within the working directory shown in the session context. AtomCode's own config lives under `~/.atomcode` (or `$ATOMCODE_HOME`) globally and `./.atomcode` per-project; read and write it there, never under `~/.claude`.
 
 ## OPENING FILES:
 After creating or editing a preview/binary format (HTML, PDF, image, SVG), do NOT automatically open it in the user's browser — file on disk is enough. Ask first and call `open_file` only when requested.
 
-## PROGRESS SIGNPOSTS:
-Before a batch of tool calls, send ONE short line saying what you're about to do — a signpost the user follows along with (e.g. \"Inspecting auth middleware and session controllers in parallel.\"). A run of tool calls with zero text leaves the user blind. Keep it to a single sentence (12 words or fewer). Group related actions into one signpost instead of narrating each call. NEVER break a parallel batch into multiple single-tool turns just to narrate tools individually. Skip the signpost for a single trivial read. Write the signpost in the user's language — a Chinese request gets a Chinese signpost.
-
 ## OUTPUT:
-When executing tasks: keep text brief and direct. Lead with action — a one-line signpost before a batch of tool calls (see PROGRESS SIGNPOSTS) is expected, but skip verbose reasoning and filler.
+When executing tasks: keep text brief and direct. Lead with action, not reasoning.
 When explaining or answering questions: be thorough — the user is asking because they need to understand.
 Do NOT restate what the user said as filler — just do it.
 Use tables for structured data using `|`-pipe markdown form.
@@ -877,7 +841,7 @@ mod tests {
         // Discipline anchors the verify hook + tests rely on:
         assert!(p.contains("## WORKFLOW:"));
         assert!(p.contains("VERIFY"));
-        assert!(p.contains("## RISKY ACTIONS:"));
+        assert!(p.contains("## PROHIBITIONS (MANDATORY):"));
         // Skill-trigger nudge is always present (weak-model reinforcement of the catalog).
         assert!(
             p.contains("## SKILLS:"),
@@ -922,29 +886,14 @@ mod tests {
             );
         }
         assert!(
-            p.contains("LOCATING CODE")
-                && p.contains("DOMAIN GLOSSARY")
-                && p.contains("BUSINESS RULES")
-                && p.contains("DB WORDS"),
-            "persona must teach business-term packs (glossary/rules/db): {p}"
-        );
-        assert!(
-            p.contains("UPGRADE") && p.contains("code_explore"),
-            "persona must require grep→code_explore upgrade for known names"
-        );
-        assert!(
-            p.contains("`path` may be the workspace root") && p.contains("working directory"),
-            "persona must allow workspace-root code_explore: {p}"
+            p.contains("LOCATING CODE") && p.contains("code_explore"),
+            "persona must include code location and code_explore"
         );
         assert!(
             p.contains("crates/atomcode-coding")
                 && p.contains("src/auth")
-                && p.contains("NEVER a single file"),
+                && p.contains("never a single file"),
             "persona must forbid file-scoped code_explore and show directory examples: {p}"
-        );
-        assert!(
-            p.contains("Omit `offset`/`limit`"),
-            "persona must tell the model not to paginate ordinary files"
         );
     }
 
@@ -953,127 +902,91 @@ mod tests {
         // RULES is always injected, so any param combo carries WORKFLOW/OUTPUT.
         let p = coding_persona("m", false, true);
 
-        // WORKFLOW gains an UNDERSTAND front step on the non-trivial line.
-        // Batch-read/batch-edit/verify-once wording is part of the compiled RULES.
+        // WORKFLOW leads with the core principles.
         assert!(
-            p.contains("UNDERSTAND → SEARCH (batch) → PLAN"),
-            "non-trivial workflow leads with UNDERSTAND: {p}"
-        );
-        // The UNDERSTAND guideline ties intent to the task plan / its first items.
-        // Wording stays tool-agnostic here: RULES is injected unconditionally, so it must
-        // not name the env-gated `todowrite` tool (that lives in the gated TASK TRACKING).
-        assert!(
-            p.contains("pin down what the user actually wants"),
-            "UNDERSTAND guideline present: {p}"
+            p.contains("Core Principle: Task classification — determine the goal first, then plan the steps."),
+            "core workflow principle present: {p}"
         );
         assert!(
-            p.contains("its first items are the outcomes the user asked for"),
-            "understanding is carried by the task plan: {p}"
+            p.contains("Simple tasks: Quickly explore and implement"),
+            "simple tasks guideline present: {p}"
         );
-        // The UNDERSTAND bullet must stay its own line — a stray `\` continuation once
-        // welded it onto the REPRODUCE bullet. Assert the separating newline survives.
         assert!(
-            p.contains("proceed.\n- REPRODUCE"),
-            "UNDERSTAND bullet must not merge into the next guideline: {p}"
+            p.contains("Medium tasks: Create a todo list"),
+            "medium tasks guideline present: {p}"
+        );
+        assert!(
+            p.contains("Complex tasks: First conduct comprehensive exploration"),
+            "complex tasks guideline present: {p}"
+        );
+        assert!(
+            p.contains("Concurrency principle: Issue multiple tool calls in ONE turn"),
+            "concurrency principle present: {p}"
+        );
+        assert!(
+            p.contains("Destructive operations: Before destructive operations"),
+            "destructive operations present: {p}"
+        );
+        assert!(
+            p.contains("Exploration tasks: In exploration, batch grep / read_file / code_explore"),
+            "exploration tasks guideline present: {p}"
+        );
+        assert!(
+            p.contains("Modification tasks: First obtain the full picture"),
+            "modification tasks guideline present: {p}"
+        );
+        assert!(
+            p.contains("General tasks: Follow the principle of 'batch and parallelize"),
+            "general tasks principle preserved: {p}"
+        );
+        assert!(
+            p.contains("CARRY IT THROUGH (Incremental recovery)"),
+            "incremental recovery preserved: {p}"
         );
 
-        // OUTPUT is reconciled: filler-restate still banned, plan-capture allowed.
+        // OUTPUT is reconciled: filler-restate still banned, action-first retained.
         assert!(
             p.contains("Do NOT restate what the user said as filler"),
-            "OUTPUT keeps the no-filler-restate rule (reconciled form): {p}"
+            "OUTPUT keeps the no-filler-restate rule: {p}"
         );
         assert!(
-            !p.contains("Do NOT restate what the user said — just do it.\n"),
-            "old unconditional restate line must be gone: {p}"
-        );
-
-        // Simple-task branch is untouched (layered strategy).
-        assert!(
-            p.contains("For simple changes"),
-            "simple-change branch preserved: {p}"
+            p.contains("Lead with action, not reasoning."),
+            "OUTPUT keeps action-first rule: {p}"
         );
     }
 
     #[test]
-    fn progress_signposts_layered() {
-        // Universal section is in RULES → present for any model / any gate combo.
+    fn progress_signposts_removed_to_prevent_token_collapse() {
+        // Universal signposts section removed to avoid empty-text narrative loops before batch calls.
         let frontier = coding_persona("m", false, false);
         assert!(
-            frontier.contains("## PROGRESS SIGNPOSTS:"),
-            "signposts section always injected: {frontier}"
-        );
-        // Header must start its own line — guards the section HEAD boundary against a
-        // stray `\` continuation welding it onto the preceding paragraph (bare `contains`
-        // above would still match a welded `wslview`.## PROGRESS SIGNPOSTS`).
-        assert!(
-            frontier.contains("\n## PROGRESS SIGNPOSTS:"),
-            "signposts header must be on its own line: {frontier}"
+            !frontier.contains("## PROGRESS SIGNPOSTS:"),
+            "signposts section removed from default RULES: {frontier}"
         );
         assert!(
-            frontier.contains("Before a batch of tool calls"),
-            "signpost guidance present: {frontier}"
+            !frontier.contains("PROGRESS SIGNPOSTS"),
+            "no reference to PROGRESS SIGNPOSTS in default RULES: {frontier}"
         );
         assert!(
-            frontier.contains("leaves the user blind"),
-            "signpost rationale present: {frontier}"
-        );
-        // Signpost must be produced in the user's language (Chinese request → Chinese
-        // signpost); reinforced at point-of-use since the signpost is the turn's first text.
-        assert!(
-            frontier.contains("Write the signpost in the user's language"),
-            "signpost binds to the user's language: {frontier}"
+            !frontier.contains("a one-line signpost before a batch of tool calls"),
+            "OUTPUT does not mandate signposts before batch: {frontier}"
         );
 
-        // OUTPUT no longer nukes preamble: bare terse line gone, new reconciled form in.
-        assert!(
-            !frontier.contains("Lead with action, not reasoning."),
-            "old terse OUTPUT line must be gone: {frontier}"
-        );
-        assert!(
-            frontier.contains("a one-line signpost before a batch of tool calls"),
-            "OUTPUT reconciled to allow signpost: {frontier}"
-        );
-
-        // Gating invariant: the SIGNPOSTS section must not name env-gated tools.
-        let start = frontier.find("## PROGRESS SIGNPOSTS:").unwrap();
-        let rest = &frontier[start + "## PROGRESS SIGNPOSTS:".len()..];
-        let section_end = rest.find("\n## ").unwrap_or(rest.len());
-        let section = &rest[..section_end];
-        assert!(
-            !section.contains("todowrite") && !section.contains("request_user_input"),
-            "signposts section stays tool-agnostic: {section}"
-        );
-
-        // FIRM hard restatement is DeepSeek-only (GLM excluded from firm-execution).
+        // DeepSeek firm execution block also must not contain SIGNPOST BEFORE ACTING
         let deepseek = coding_persona("deepseek-v4-flash", false, false);
         assert!(
-            deepseek.contains("SIGNPOST BEFORE ACTING"),
-            "deepseek gets the firm signpost bullet: {deepseek}"
+            !deepseek.contains("SIGNPOST BEFORE ACTING"),
+            "deepseek firm execution block must not contain SIGNPOST BEFORE ACTING: {deepseek}"
         );
-        // FIRM-bullet-specific phrase — NOT the bare "in the user's language", which the
-        // universal SIGNPOSTS section (also in deepseek's persona) would satisfy on its own.
-        assert!(
-            deepseek.contains("in ONE short sentence, in the user's language"),
-            "deepseek firm signpost binds to the user's language: {deepseek}"
-        );
+
         let glm = coding_persona("glm-5.2", false, false);
         assert!(
             !glm.contains("SIGNPOST BEFORE ACTING"),
-            "GLM excluded from firm-execution block: {glm}"
+            "GLM must not contain SIGNPOST BEFORE ACTING: {glm}"
         );
         assert!(
-            glm.contains("## PROGRESS SIGNPOSTS:"),
-            "GLM still gets the universal signposts section: {glm}"
-        );
-
-        // Boundary guards against a stray `\` welding sections/bullets together.
-        assert!(
-            frontier.contains("Chinese signpost.\n\n## OUTPUT:"),
-            "SIGNPOSTS section must end with a blank line before OUTPUT: {frontier}"
-        );
-        assert!(
-            deepseek.contains("\n- SIGNPOST BEFORE ACTING"),
-            "firm bullet must be its own line (no weld with prior bullet): {deepseek}"
+            !glm.contains("## PROGRESS SIGNPOSTS:"),
+            "GLM must not contain PROGRESS SIGNPOSTS: {glm}"
         );
     }
 
@@ -1150,7 +1063,7 @@ mod tests {
 
     #[test]
     fn persona_frames_efficiency_as_round_trips_not_fewer_tool_calls() {
-        // "minimal tool calls" contradicts the `## TOOLS:` section (which urges maximal
+        // "minimal tool calls" contradicts the concurrency principle (which urges maximal
         // parallel calls) and can push weak models to under-read / guess. The real cost is
         // round-trip latency, so the opening line must target round-trips, not tool count.
         let p = coding_persona("m", true, false);
@@ -1160,27 +1073,24 @@ mod tests {
         );
         assert!(
             !p.contains("minimal tool calls"),
-            "must not tell the model to minimize tool calls (contradicts ## TOOLS:)"
+            "must not tell the model to minimize tool calls"
         );
         assert!(
-            p.contains("NO per-turn cap of 4") && p.contains("Do not stop at 4"),
-            "must not teach a 4-edit batch ceiling: {p}"
+            p.contains("Concurrency principle"),
+            "must include concurrency principle: {p}"
         );
     }
 
     #[test]
-    fn reproduce_step_is_conditional_on_a_runnable_repro() {
-        // Many bugs (UI/rendering, intermittent, state-dependent) have no single runnable
-        // command; the old absolute "run the failing command BEFORE reading code" made weak
-        // models burn a round or fabricate a repro. The step must be conditional.
+    fn workflow_incremental_recovery_and_carry_through() {
         let p = coding_persona("m", true, false);
         assert!(
-            p.contains("when a runnable reproduction exists"),
-            "REPRODUCE must be conditional on a runnable repro: {p}"
+            p.contains("CARRY IT THROUGH (Incremental recovery)"),
+            "incremental recovery must be present: {p}"
         );
         assert!(
-            p.contains("skip straight to DIAGNOSE"),
-            "must give an explicit out when there is no runnable command"
+            p.contains("never rewind, restart, or reset the entire task"),
+            "no-rewind discipline must be present: {p}"
         );
     }
 
@@ -1333,14 +1243,10 @@ mod tests {
     fn persona_prefers_builtin_tools_over_shell_equivalents() {
         let p = coding_persona("m", true, false);
         for phrase in [
-            "not `bash cat`",
-            "instead of `bash ls`",
-            "instead of `bash find`",
-            "instead of `bash grep`",
-            "not `bash open`",
-            "not `bash xdg-open`",
-            "not `bash start`",
-            "not `bash wslview`",
+            "bash cat",
+            "bash ls",
+            "bash find",
+            "bash grep",
         ] {
             assert!(
                 p.contains(phrase),
@@ -1363,22 +1269,18 @@ mod tests {
 
     #[test]
     fn list_directory_guidance_drops_the_vague_escape_hatch() {
-        // The old wording ("when a tree view is enough") let weak models justify
-        // `bash ls -la` for almost anything. Replace the vague condition with one
-        // concrete exception (sizes/permissions/timestamps) so the default is
-        // unambiguous, while still preferring list_directory over `bash ls`.
         let p = coding_persona("m", true, false);
         assert!(
             !p.contains("when a tree view is enough"),
             "the vague escape hatch must be gone: {p}"
         );
         assert!(
-            p.contains("instead of `bash ls`"),
-            "must still prefer list_directory over `bash ls`"
+            p.contains("`bash ls`"),
+            "must prohibit bash ls"
         );
         assert!(
-            p.contains("file sizes, permissions, or timestamps"),
-            "must name the single concrete fallback case: {p}"
+            p.contains("list_directory"),
+            "must recommend list_directory"
         );
     }
 
@@ -1394,24 +1296,9 @@ mod tests {
             "must not tell the model to list_directory depth 2-3 on round 1: {p}"
         );
         assert!(
-            p.contains("CONDITIONAL CONTEXT ROUTING")
-                && p.contains("do NOT call `repo_map` first")
-                && p.contains("Use `repo_map` only when"),
+            p.contains("Use repo_map only when workspace directory structure is genuinely unknown")
+                && p.contains("Skip it when a file, symbol, error, or narrow module already identifies the likely target"),
             "concrete targets must bypass an obligatory repo_map round: {p}"
-        );
-        assert!(
-            !p.contains("hot spans")
-                && p.contains("2–6 independent `read_file` calls")
-                && p.contains("complete logical units"),
-            "reads must batch useful context instead of prompting tiny hot-span slices: {p}"
-        );
-        assert!(
-            p.contains("do NOT pass `timeout`") && p.contains("max_timeout_secs"),
-            "persona must tell the model not to pass bash timeout: {p}"
-        );
-        assert!(
-            p.contains("no keyboard") && p.contains("--no-pager") && p.contains("silent_kill_secs"),
-            "persona must warn against blocking/pager bash and name idle kill: {p}"
         );
     }
 

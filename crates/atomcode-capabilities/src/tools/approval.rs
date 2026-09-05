@@ -105,7 +105,7 @@ impl PermissionDecision {
         let decision = v.get("decision").and_then(|x| x.as_str()).unwrap_or("deny");
         let remember = v.get("remember").and_then(|x| x.as_bool()).unwrap_or(false);
         match decision {
-            "allow_always" => PermissionDecision::AllowAlways,
+            "allow_always" | "allow_persist" => PermissionDecision::AllowAlways,
             "allow" if remember => PermissionDecision::AllowAlways,
             "allow" => PermissionDecision::AllowOnce,
             _ => PermissionDecision::Deny,
@@ -119,7 +119,7 @@ impl PermissionDecision {
 pub fn parse_permission_decision(s: &str) -> PermissionDecision {
     match s {
         "allow" => PermissionDecision::AllowOnce,
-        "always_allow" => PermissionDecision::AllowAlways,
+        "always_allow" | "allow_persist" => PermissionDecision::AllowAlways,
         _ => PermissionDecision::Deny,
     }
 }

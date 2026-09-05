@@ -119,6 +119,22 @@ impl SessionMcpPool {
         }
     }
 
+    /// Mark a tool auto-approved across all live session registries for this project.
+    pub async fn mark_tool_auto_approved(&self, project_dir: &Path, full_name: &str) {
+        let project_dir = project_key(project_dir);
+        let registries: Vec<_> = {
+            let entries = self.entries.read().await;
+            entries
+                .iter()
+                .filter(|(key, _)| key.project_dir == project_dir)
+                .map(|(_, entry)| entry.generation.registry.clone())
+                .collect()
+        };
+        for registry in registries {
+            registry.mark_tool_auto_approved(full_name);
+        }
+    }
+
     /// Shut down the isolated process for one session. Called on session delete.
     pub async fn retire_session(&self, project_dir: &Path, session_id: &str) {
         let key = SessionMcpKey {

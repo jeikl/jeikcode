@@ -79,7 +79,7 @@ async fn session_context_block_reaches_the_provider() {
     assert!(sys.contains("GIT STATUS"), "git snapshot present");
     // The persona's static parity sections ride along too.
     assert!(
-        sys.contains("## RISKY ACTIONS:"),
-        "persona risky actions rule present"
+        sys.contains("## PROHIBITIONS (MANDATORY):"),
+        "persona prohibitions rule present"
     );
 }

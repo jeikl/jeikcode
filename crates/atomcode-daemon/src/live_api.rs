@@ -2483,8 +2483,22 @@ pub(crate) async fn live_permission(
     let decision = if req.decision == "allow_persist" {
         if let Some(full) = req.tool_name.as_deref() {
             let reg = state.mcp_registry.read().await.clone();
-            if let Some((server, tool)) = reg.split_tool_name(full).await {
-                let project_dir = state.project.read().await.working_dir.clone();
+            let project_dir = state.project.read().await.working_dir.clone();
+            let session_pool = atomcode_capabilities::mcp::SessionMcpPool::global();
+            let session_reg = match req.session_id.as_deref() {
+                Some(sid) => session_pool.cached_registry(&project_dir, sid).await,
+                None => None,
+            };
+            let split = if let Some(pair) = reg.split_tool_name(full).await {
+                Some(pair)
+            } else if let Some(sreg) = &session_reg {
+                sreg.split_tool_name(full).await
+            } else {
+                full.strip_prefix("mcp__")
+                    .and_then(|s| s.split_once("__"))
+                    .map(|(s, t)| (s.to_string(), t.to_string()))
+            };
+            if let Some((server, tool)) = split {
                 if let Err(e) = atomcode_capabilities::mcp::config::add_auto_approved_tool(
                     &project_dir,
                     &server,
@@ -2494,9 +2508,12 @@ pub(crate) async fn live_permission(
                 }
                 reg.mark_tool_auto_approved(full);
                 state.mcp_pool.registry(&project_dir).await.mark_tool_auto_approved(full);
+                session_pool.mark_tool_auto_approved(&project_dir, full).await;
+                let snapshot = atomcode_capabilities::mcp::refresh_session_mcp_schema(&project_dir).await;
+                session_pool.hydrate_project(&project_dir, &snapshot).await;
             }
         }
-        PermissionDecision::AllowOnce
+        PermissionDecision::AllowAlways
     } else {
         let d = parse_permission_decision(&req.decision);
         if let Some(full) = req.tool_name.as_deref() {
@@ -2504,6 +2521,9 @@ pub(crate) async fn live_permission(
                 let project_dir = state.project.read().await.working_dir.clone();
                 state.mcp_registry.read().await.mark_tool_auto_approved(full);
                 state.mcp_pool.registry(&project_dir).await.mark_tool_auto_approved(full);
+                atomcode_capabilities::mcp::SessionMcpPool::global()
+                    .mark_tool_auto_approved(&project_dir, full)
+                    .await;
             }
         }
         d

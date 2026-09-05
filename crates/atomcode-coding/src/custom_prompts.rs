@@ -61,6 +61,7 @@ pub struct EnvironmentConfig {
 pub struct CustomRulesConfig {
     pub version: Option<String>,
     pub workflow: Option<WorkflowConfig>,
+    pub prohibitions: Option<Vec<String>>,
     pub tools_discipline: Option<ToolsDisciplineConfig>,
     pub locating_code: Option<LocatingCodeConfig>,
     pub doing_tasks: Option<Vec<String>>,
@@ -79,6 +80,7 @@ pub struct CustomRulesConfig {
 
 #[derive(Debug, Clone, Deserialize, Serialize, Default)]
 pub struct WorkflowConfig {
+    pub principle: Option<String>,
     pub first_round_reflex: Option<String>,
     pub surgical_context: Option<String>,
     pub never_negative_conclusion: Option<String>,
@@ -387,6 +389,9 @@ pub(crate) fn render_custom_rules_from(cfg: &CustomRulesConfig) -> String {
     // Workflow
     if let Some(wf) = &cfg.workflow {
         out.push_str("## WORKFLOW:\n");
+        if let Some(p) = &wf.principle {
+            out.push_str(&format!("{p}\n\n"));
+        }
         if let Some(r) = &wf.first_round_reflex {
             out.push_str(&format!("- {r}\n"));
         }
@@ -408,16 +413,36 @@ pub(crate) fn render_custom_rules_from(cfg: &CustomRulesConfig) -> String {
             }
         }
         if let Some(guide) = &wf.guidelines {
-            out.push_str("\nGuidelines:\n");
-            for (_, v) in guide {
+            let mut items: Vec<_> = guide.iter().collect();
+            items.sort_by_key(|(k, _)| match k.as_str() {
+                "concurrency" => 1,
+                "destructive_confirmation" => 2,
+                "simple_tasks" => 3,
+                "medium_tasks" => 4,
+                "complex_tasks" => 5,
+                "exploration_tasks" => 6,
+                "modification_tasks" => 7,
+                "general_tasks" => 8,
+                "incremental_recovery" => 9,
+                _ => 10,
+            });
+            for (_, v) in items {
                 out.push_str(&format!("- {v}\n"));
             }
         }
         out.push('\n');
     }
 
-    // Tools & parallel execution
-    if let Some(td) = &cfg.tools_discipline {
+    // Prohibitions (new) or Tools & parallel execution (fallback)
+    if let Some(prohibitions) = &cfg.prohibitions {
+        if !prohibitions.is_empty() {
+            out.push_str("## PROHIBITIONS (MANDATORY):\n");
+            for item in prohibitions {
+                out.push_str(&format!("- {item}\n"));
+            }
+            out.push('\n');
+        }
+    } else if let Some(td) = &cfg.tools_discipline {
         out.push_str("## TOOLS & PARALLEL EXECUTION (CRITICAL EFFICIENCY):\n");
         if let Some(p) = &td.concurrency_principle {
             out.push_str(&format!("{p}\n\n"));
@@ -520,24 +545,6 @@ pub(crate) fn render_custom_rules_from(cfg: &CustomRulesConfig) -> String {
         out.push_str(&format!("## CHINESE CODE SUPPORT:\n{cs}\n\n"));
     }
 
-    // Task tracking — custom rules replace the built-in RULES block AND skip
-    // TODO_USAGE, so this section must be rendered here or todowrite guidance
-    // never reaches the model.
-    if let Some(tt) = &cfg.task_tracking {
-        out.push_str(&format!("## TASK TRACKING:\n{tt}\n\n"));
-    }
-
-    if let Some(ask) = &cfg.asking_the_user {
-        out.push_str(&format!("## ASKING THE USER:\n{ask}\n\n"));
-    }
-
-    if let Some(del) = &cfg.delegation {
-        out.push_str(&format!("## DELEGATING WITH `task`:\n{del}\n\n"));
-    }
-
-    if let Some(rev) = &cfg.code_review {
-        out.push_str(&format!("## CODE REVIEW:\n{rev}\n\n"));
-    }
 
     if let Some(sk) = &cfg.skills {
         out.push_str(&format!("## SKILLS:\n{sk}\n\n"));
@@ -635,43 +642,31 @@ doing_tasks:
         let rules: CustomRulesConfig =
             serde_yaml::from_str(strip_utf8_bom(include_str!("../assets/prompts/rules.yaml")))
                 .expect("rules.yaml");
-        let surgical = rules
-            .workflow
-            .as_ref()
-            .unwrap()
-            .surgical_context
-            .as_deref()
-            .unwrap();
-        assert!(surgical.contains("SURGICAL CONTEXT"));
+        let wf = rules.workflow.as_ref().unwrap();
         assert!(
-            surgical.contains("crates/atomcode-coding") && surgical.contains("code_explore"),
-            "surgical_context must mention code_explore and module path: {surgical}"
+            wf.principle
+                .as_deref()
+                .unwrap()
+                .contains("Task classification")
         );
-        let first_round = rules
-            .workflow
-            .as_ref()
-            .unwrap()
-            .first_round_reflex
-            .as_deref()
-            .unwrap();
+        let guide = wf.guidelines.as_ref().unwrap();
+        assert!(guide.contains_key("concurrency"));
+        assert!(guide.contains_key("destructive_confirmation"));
+        assert!(guide.contains_key("simple_tasks"));
+        assert!(guide.contains_key("medium_tasks"));
+        assert!(guide.contains_key("complex_tasks"));
+        assert!(guide.contains_key("exploration_tasks"));
+        assert!(guide.contains_key("modification_tasks"));
+        assert!(guide.contains_key("general_tasks"));
+        assert!(guide.contains_key("incremental_recovery"));
         assert!(
-            first_round.contains("CONDITIONAL CONTEXT ROUTING")
-                && first_round.contains("do NOT call `repo_map` first")
-                && !first_round.contains("repo_map` ONLY"),
-            "concrete targets must not pay an obligatory repo_map round: {first_round}"
-        );
-        let batched = rules
-            .workflow
-            .as_ref()
-            .unwrap()
-            .batched_parallel_exploration
-            .as_deref()
-            .unwrap();
-        assert!(
-            batched.contains("2–6 independent")
-                && batched.contains("complete functions")
-                && !batched.contains("hot spans"),
-            "batched exploration must favor broad useful context over tiny slices: {batched}"
+            rules
+                .prohibitions
+                .as_ref()
+                .unwrap()
+                .iter()
+                .any(|p| p.contains("bash cat")),
+            "prohibitions is a live rules.yaml field"
         );
         assert!(
             rules

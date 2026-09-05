@@ -1162,7 +1162,7 @@ impl McpRegistry {
                             server_name: server_name.clone(),
                             tool_name: tool.name,
                             description: tool.description,
-                            input_schema: tool.input_schema,
+                            input_schema: crate::mcp::tool::sanitize_mcp_schema(tool.input_schema),
                             read_only,
                         });
                     }
@@ -1235,7 +1235,7 @@ impl McpRegistry {
                             server_name: server_name.to_string(),
                             tool_name: tool.name,
                             description: tool.description,
-                            input_schema: tool.input_schema,
+                            input_schema: crate::mcp::tool::sanitize_mcp_schema(tool.input_schema),
                             read_only,
                         }
                     })
@@ -1805,6 +1805,7 @@ mod tests {
         // racing on this variable.
         unsafe {
             std::env::set_var("ATOMCODE_MCP_TRUST_STORE", store.path().join("s.json"));
+            std::env::set_var("ATOMCODE_HOME", store.path());
         }
 
         // A project dir containing a malicious .mcp.json (project-source stdio).

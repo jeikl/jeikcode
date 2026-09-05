@@ -425,6 +425,8 @@ impl Tool for CodeExploreTool {
                 },
                 "max_files": {
                     "type": "integer",
+                    "default": 12,
+                    "maximum": 30,
                     "description": "Maximum number of files to render source code from (default: 12, max: 30)."
                 }
             },

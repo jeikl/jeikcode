@@ -80,111 +80,9 @@ pub struct McpToolAdapter {
     read_only: bool,
 }
 
-/// Sanitize external MCP JSON schemas to remove JS runtime artifacts, protocol leaks,
-/// and known generator glitches that confuse LLMs.
-pub fn sanitize_mcp_schema(mut schema: serde_json::Value) -> serde_json::Value {
-    fn clean_node(v: &mut serde_json::Value) {
-        match v {
-            serde_json::Value::Object(map) => {
-                // 1. Strip JS Number.MAX_SAFE_INTEGER noise (9007199254740991)
-                const JS_SAFE_INT_THRESHOLD: f64 = 9_000_000_000_000_000.0;
-                if let Some(max) = map.get("maximum").and_then(|m| m.as_f64()) {
-                    if max >= JS_SAFE_INT_THRESHOLD {
-                        map.remove("maximum");
-                    }
-                }
-                if let Some(min) = map.get("minimum").and_then(|m| m.as_f64()) {
-                    if min <= -JS_SAFE_INT_THRESHOLD {
-                        map.remove("minimum");
-                    }
-                }
-
-                // 2. Fix known generator type glitches (e.g. Brave Search pseudo-objects)
-                if let Some(props) = map.get_mut("properties").and_then(|p| p.as_object_mut()) {
-                    // Filter HTTP protocol leaks that code generators mistakenly expose to LLM
-                    const LEAKED_HTTP_HEADERS: &[&str] = &[
-                        "accept",
-                        "cache-control",
-                        "user-agent",
-                        "api-version",
-                    ];
-                    for header in LEAKED_HTTP_HEADERS {
-                        props.remove(*header);
-                    }
-
-                    // Fix safesearch object -> string + enum
-                    if let Some(ss) = props.get_mut("safesearch") {
-                        if ss.get("type").and_then(|t| t.as_str()) == Some("object") {
-                            if let Some(ss_obj) = ss.as_object_mut() {
-                                ss_obj.insert("type".to_string(), serde_json::json!("string"));
-                                ss_obj.insert(
-                                    "enum".to_string(),
-                                    serde_json::json!(["off", "moderate", "strict"]),
-                                );
-                            }
-                        }
-                    }
-
-                    // Fix freshness object -> string
-                    if let Some(fresh) = props.get_mut("freshness") {
-                        if fresh.get("type").and_then(|t| t.as_str()) == Some("object") {
-                            if let Some(fresh_obj) = fresh.as_object_mut() {
-                                fresh_obj.insert("type".to_string(), serde_json::json!("string"));
-                            }
-                        }
-                    }
-
-                    // Fix goggles object -> string
-                    if let Some(goggles) = props.get_mut("goggles") {
-                        if goggles.get("type").and_then(|t| t.as_str()) == Some("object") {
-                            if let Some(g_obj) = goggles.as_object_mut() {
-                                g_obj.insert("type".to_string(), serde_json::json!("string"));
-                            }
-                        }
-                    }
-
-                    // Fix units empty object -> string
-                    if let Some(units) = props.get_mut("units") {
-                        if units.get("type").and_then(|t| t.as_str()) == Some("object") {
-                            if let Some(units_obj) = units.as_object_mut() {
-                                units_obj.insert("type".to_string(), serde_json::json!("string"));
-                                units_obj.insert(
-                                    "enum".to_string(),
-                                    serde_json::json!(["metric", "imperial"]),
-                                );
-                            }
-                        }
-                    }
-                }
-
-                // Clean removed headers from required list
-                if let Some(reqs) = map.get_mut("required").and_then(|r| r.as_array_mut()) {
-                    reqs.retain(|item| {
-                        if let Some(s) = item.as_str() {
-                            !matches!(s, "accept" | "cache-control" | "user-agent" | "api-version")
-                        } else {
-                            true
-                        }
-                    });
-                }
-
-                // Recurse into all children
-                for child in map.values_mut() {
-                    clean_node(child);
-                }
-            }
-            serde_json::Value::Array(arr) => {
-                for child in arr {
-                    clean_node(child);
-                }
-            }
-            _ => {}
-        }
-    }
-
-    clean_node(&mut schema);
-    schema
-}
+pub use crate::schema_sanitizer::{
+    extract_quoted_enums, is_bare_object, sanitize_mcp_schema, LEAKED_HTTP_HEADERS,
+};
 
 impl McpToolAdapter {
     /// Build an adapter from a discovered tool's [`McpToolInfo`] and the live
@@ -511,9 +409,94 @@ mod tests {
         // Brave pseudo-objects normalized
         let ss = props.get("safesearch").unwrap().as_object().unwrap();
         assert_eq!(ss.get("type").unwrap(), "string");
-        assert!(ss.contains_key("enum"));
+        assert_eq!(
+            ss.get("enum").unwrap(),
+            &serde_json::json!(["off", "moderate", "strict"])
+        );
 
         let fresh = props.get("freshness").unwrap().as_object().unwrap();
         assert_eq!(fresh.get("type").unwrap(), "string");
+        assert_eq!(
+            fresh.get("enum").unwrap(),
+            &serde_json::json!(["pd", "pw", "pm", "py"])
+        );
+    }
+
+    #[test]
+    fn test_sanitize_brave_image_and_llm_context_and_heuristics() {
+        let input = serde_json::json!({
+            "type": "object",
+            "properties": {
+                "safesearch": {
+                    "type": "object",
+                    "description": "Safe search setting ('off', 'strict')"
+                },
+                "goggles": {
+                    "type": "object",
+                    "description": "Goggles URL or ID."
+                },
+                "units": {
+                    "type": "object"
+                },
+                "heuristic_enum": {
+                    "type": "object",
+                    "description": "Choice between 'alpha', 'beta', or 'gamma'."
+                },
+                "heuristic_bare": {
+                    "type": "object",
+                    "description": "An opaque configuration value."
+                },
+                "user-agent": {
+                    "type": "string"
+                },
+                "api-version": {
+                    "type": "string"
+                }
+            },
+            "required": ["safesearch", "user-agent", "heuristic_bare"]
+        });
+
+        let sanitized = sanitize_mcp_schema(input);
+        let props = sanitized.get("properties").unwrap().as_object().unwrap();
+
+        // 1. brave_image_search: safesearch without 'moderate' gets ['off', 'strict']
+        let ss = props.get("safesearch").unwrap().as_object().unwrap();
+        assert_eq!(ss.get("type").unwrap(), "string");
+        assert_eq!(ss.get("enum").unwrap(), &serde_json::json!(["off", "strict"]));
+
+        // 2. brave_llm_context: goggles is type string
+        let goggles = props.get("goggles").unwrap().as_object().unwrap();
+        assert_eq!(goggles.get("type").unwrap(), "string");
+
+        // 3. units has string and metric/imperial enum
+        let units = props.get("units").unwrap().as_object().unwrap();
+        assert_eq!(units.get("type").unwrap(), "string");
+        assert_eq!(
+            units.get("enum").unwrap(),
+            &serde_json::json!(["metric", "imperial"])
+        );
+
+        // 4. Heuristic enum extraction from description
+        let he = props.get("heuristic_enum").unwrap().as_object().unwrap();
+        assert_eq!(he.get("type").unwrap(), "string");
+        assert_eq!(
+            he.get("enum").unwrap(),
+            &serde_json::json!(["alpha", "beta", "gamma"])
+        );
+
+        // 5. Heuristic bare object fallback to anyOf [string, object]
+        let hb = props.get("heuristic_bare").unwrap().as_object().unwrap();
+        assert!(hb.get("type").is_none());
+        assert!(hb.contains_key("anyOf"));
+
+        // 6. Header stripping
+        assert!(!props.contains_key("user-agent"));
+        assert!(!props.contains_key("api-version"));
+
+        // 7. Required array cleaned
+        let reqs = sanitized.get("required").unwrap().as_array().unwrap();
+        assert!(!reqs.contains(&serde_json::json!("user-agent")));
+        assert!(reqs.contains(&serde_json::json!("safesearch")));
+        assert!(reqs.contains(&serde_json::json!("heuristic_bare")));
     }
 }

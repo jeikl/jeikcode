@@ -60,6 +60,10 @@ pub mod cc_hooks;
 /// Kernel-only deps, so it is always available regardless of capability features.
 pub mod compaction;
 
+/// Universal tool parameter schema sanitizer (MCP protocol leaks, bare objects, header cleanup).
+/// Serde-only deps, so it is always available regardless of capability features.
+pub mod schema_sanitizer;
+
 /// Shared `$ATOMCODE_HOME` path resolution for the persisting capabilities — one
 /// home for the rule (and for documenting its single known `sudo` divergence from
 /// production). Internal; compiled only when a feature that persists needs it.

@@ -167,21 +167,34 @@ pub(crate) fn friendly_http_error(code: u16, detail: &str) -> String {
 /// Recursively clean and normalize tool parameter schemas for universal LLM wire compatibility
 /// (OpenAI, Anthropic, Gemini gateways, Ollama, Bedrock, etc.).
 ///
-/// Converts Draft-6+ `const: "val"` to OpenAPI-3.0-standard `enum: ["val"]`,
+/// Cleans external MCP artifacts (leaked headers, pseudo-objects like Brave Search),
+/// converts Draft-6+ `const: "val"` to OpenAPI-3.0-standard `enum: ["val"]`,
 /// flattens polymorphic `oneOf`/`anyOf` discriminator objects into clean flat schemas,
 /// and strips meta keywords like `$schema`/`$id` that cause upstream 400s (e.g. Gemini Schema errors).
 pub(crate) fn sanitize_schema_for_wire(val: &Value) -> Value {
+    let sanitized = crate::schema_sanitizer::sanitize_mcp_schema(val.clone());
+    sanitize_schema_for_wire_inner(&sanitized)
+}
+
+fn sanitize_schema_for_wire_inner(val: &Value) -> Value {
     match val {
         Value::Object(map) => {
             let mut out = serde_json::Map::new();
 
-            // Check if this object is a oneOf / anyOf container that should be normalized
+            // Check if this object is a oneOf / anyOf container of object variants that should be normalized
             if let Some(one_of) = map
                 .get("oneOf")
                 .or_else(|| map.get("anyOf"))
                 .and_then(|v| v.as_array())
             {
-                if !one_of.is_empty() && one_of.iter().all(|item| item.is_object()) {
+                let is_object_union = !one_of.is_empty()
+                    && one_of.iter().all(|item| {
+                        item.as_object().map_or(false, |obj| {
+                            obj.get("type").and_then(|t| t.as_str()) == Some("object")
+                                || obj.get("properties").is_some()
+                        })
+                    });
+                if is_object_union {
                     let mut merged_props = serde_json::Map::new();
                     let mut merged_desc = map.get("description").cloned();
                     let mut kinds = Vec::new();
@@ -212,10 +225,11 @@ pub(crate) fn sanitize_schema_for_wire(val: &Value) -> Value {
                                             }
                                         } else {
                                             merged_props
-                                                .insert(k.clone(), sanitize_schema_for_wire(v));
+                                                .insert(k.clone(), sanitize_schema_for_wire_inner(v));
                                         }
                                     } else {
-                                        merged_props.insert(k.clone(), sanitize_schema_for_wire(v));
+                                        merged_props
+                                            .insert(k.clone(), sanitize_schema_for_wire_inner(v));
                                     }
                                 }
                             }
@@ -231,14 +245,14 @@ pub(crate) fn sanitize_schema_for_wire(val: &Value) -> Value {
                         merged_props.insert("kind".to_string(), kind_prop);
                     }
 
-                    out.insert("type".to_string(), json!("object"));
-                    if let Some(desc) = merged_desc {
-                        out.insert("description".to_string(), desc);
-                    }
                     if !merged_props.is_empty() {
+                        out.insert("type".to_string(), json!("object"));
+                        if let Some(desc) = merged_desc {
+                            out.insert("description".to_string(), desc);
+                        }
                         out.insert("properties".to_string(), Value::Object(merged_props));
+                        return Value::Object(out);
                     }
-                    return Value::Object(out);
                 }
             }
 
@@ -252,11 +266,13 @@ pub(crate) fn sanitize_schema_for_wire(val: &Value) -> Value {
                     out.insert("enum".to_string(), json!([v]));
                     continue;
                 }
-                out.insert(k.clone(), sanitize_schema_for_wire(v));
+                out.insert(k.clone(), sanitize_schema_for_wire_inner(v));
             }
             Value::Object(out)
         }
-        Value::Array(arr) => Value::Array(arr.iter().map(sanitize_schema_for_wire).collect()),
+        Value::Array(arr) => {
+            Value::Array(arr.iter().map(sanitize_schema_for_wire_inner).collect())
+        }
         _ => val.clone(),
     }
 }
@@ -381,5 +397,46 @@ mod wire_dump_tests {
             json!(["working_tree", "staged", "range"])
         );
         assert_eq!(res["properties"]["base"]["type"], "string");
+    }
+
+    #[test]
+    fn sanitize_schema_cleans_brave_pseudo_objects_and_headers() {
+        use super::sanitize_schema_for_wire;
+
+        let brave_schema = json!({
+            "type": "object",
+            "properties": {
+                "query": { "type": "string", "description": "Search query" },
+                "safesearch": { "type": "object", "description": "Safe search setting ('off', 'moderate', 'strict')" },
+                "freshness": { "type": "object", "description": "Filters by date" },
+                "units": { "type": "object" },
+                "accept": { "type": "string", "description": "HTTP Accept header" },
+                "user-agent": { "type": "string", "description": "HTTP User-Agent" }
+            },
+            "required": ["query", "accept"]
+        });
+
+        let sanitized = sanitize_schema_for_wire(&brave_schema);
+        let props = sanitized.get("properties").unwrap().as_object().unwrap();
+
+        // Leaked headers stripped
+        assert!(!props.contains_key("accept"));
+        assert!(!props.contains_key("user-agent"));
+
+        // Required cleaned
+        let req = sanitized.get("required").unwrap().as_array().unwrap();
+        assert_eq!(req, &vec![json!("query")]);
+
+        // safesearch fixed to string + enum
+        assert_eq!(props["safesearch"]["type"], "string");
+        assert_eq!(props["safesearch"]["enum"], json!(["off", "moderate", "strict"]));
+
+        // freshness fixed to string + enum
+        assert_eq!(props["freshness"]["type"], "string");
+        assert_eq!(props["freshness"]["enum"], json!(["pd", "pw", "pm", "py"]));
+
+        // units fixed to string + enum
+        assert_eq!(props["units"]["type"], "string");
+        assert_eq!(props["units"]["enum"], json!(["metric", "imperial"]));
     }
 }

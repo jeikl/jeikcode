@@ -29,6 +29,16 @@ impl TodoStatus {
     }
 }
 
+impl std::fmt::Display for TodoStatus {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            TodoStatus::Pending => write!(f, "pending"),
+            TodoStatus::InProgress => write!(f, "in_progress"),
+            TodoStatus::Completed => write!(f, "completed"),
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TodoItem {
     pub content: String,
@@ -372,8 +382,9 @@ fn apply_actions_batch(
     if kinds.contains("delete") {
         let mut delete_ids: Vec<usize> = Vec::new();
         for item in arr {
-            let id =
-                json_id(item).ok_or_else(|| "todowrite: `delete` needs an `id`.".to_string())?;
+            let id = json_id(item).ok_or_else(|| {
+                "todowrite: `delete` needs a valid `id` (1-based task number). Example: {\"action\": \"delete\", \"id\": 1}.".to_string()
+            })?;
             if id == 0 || (id as usize) > tmp.len() {
                 return Err(unknown_task_id(id, &tmp));
             }
@@ -471,7 +482,7 @@ fn apply_add(
         .and_then(|c| c.as_str())
         .map(normalize_todo_content)
         .filter(|c| !c.is_empty())
-        .ok_or_else(|| "todowrite: `add` needs non-empty `content`.".to_string())?;
+        .ok_or_else(|| "todowrite: `add` needs non-empty `content`. Example: {\"action\": \"add\", \"content\": \"Implement feature X\"}.".to_string())?;
     if auto_clear {
         maybe_auto_clear_finished(list);
     }
@@ -484,7 +495,7 @@ fn apply_insert(list: &mut Vec<TodoItem>, v: &serde_json::Value) -> Result<usize
         .and_then(|c| c.as_str())
         .map(normalize_todo_content)
         .filter(|c| !c.is_empty())
-        .ok_or_else(|| "todowrite: `insert` needs non-empty `content`.".to_string())?;
+        .ok_or_else(|| "todowrite: `insert` needs non-empty `content`. Example: {\"action\": \"insert\", \"content\": \"Task description\", \"position\": 1}.".to_string())?;
     Ok(upsert_todo(
         list,
         content,
@@ -499,7 +510,7 @@ fn apply_update(
     visible_len: usize,
     add_landings: &[usize],
 ) -> Result<(), String> {
-    let id = json_id(v).ok_or_else(|| "todowrite: `update` needs a valid `id`.".to_string())?;
+    let id = json_id(v).ok_or_else(|| "todowrite: `update` needs a valid `id` (1-based task number). Example: {\"action\": \"update\", \"id\": 1, \"status\": \"in_progress\"}.".to_string())?;
     let Some(resolved) = resolve_update_id(id, visible_len, add_landings, list.len()) else {
         return Err(unknown_task_id(id, list));
     };
@@ -512,7 +523,7 @@ fn apply_update(
         .filter(|c| !c.is_empty());
     if status.is_none() && new_content.is_none() {
         return Err(
-            "todowrite: `update` needs a `status` of pending|in_progress|completed.".into(),
+            "todowrite: `update` needs at least one of `status` (pending|in_progress|completed) or `content`. Example: {\"action\": \"update\", \"id\": 1, \"status\": \"in_progress\"}.".into(),
         );
     }
     if let Some(content) = new_content {
@@ -550,7 +561,7 @@ fn try_apply_one_action(list: &mut Vec<TodoItem>, v: &serde_json::Value) -> Resu
         Some("update") => apply_update(list, v, list.len(), &[]),
         Some("delete") | Some("remove") => {
             let id = json_id(v)
-                .ok_or_else(|| "todowrite: `update`/`delete` needs a valid `id`.".to_string())?;
+                .ok_or_else(|| "todowrite: `delete` needs a valid `id` (1-based task number). Example: {\"action\": \"delete\", \"id\": 1}.".to_string())?;
             if id == 0 || (id as usize) > list.len() {
                 return Err(unknown_task_id(id, list));
             }
@@ -562,7 +573,7 @@ fn try_apply_one_action(list: &mut Vec<TodoItem>, v: &serde_json::Value) -> Resu
             Ok(())
         }
         _ => Err(
-            "todowrite: `action` must be `add`, `insert`, `update`, `delete`/`remove`, or `clear`."
+            "todowrite: `action` must be `add`, `insert`, `update`, `delete`/`remove`, or `clear`. Example: {\"action\": \"add\", \"content\": \"Task text\"}."
                 .into(),
         ),
     }
@@ -845,7 +856,7 @@ fn summarize_todo_action(v: &serde_json::Value) -> Result<String, String> {
     match v.get("action").and_then(|a| a.as_str()) {
         Some("add") => match v.get("content").and_then(|c| c.as_str()) {
             Some(c) if !c.trim().is_empty() => Ok(format!("Added task: {}", c.trim())),
-            _ => Err("`add` needs non-empty `content`.".into()),
+            _ => Err("`add` needs non-empty `content`. Example: {\"action\": \"add\", \"content\": \"Implement feature X\"}".into()),
         },
         Some("insert") => {
             let content = v
@@ -853,32 +864,54 @@ fn summarize_todo_action(v: &serde_json::Value) -> Result<String, String> {
                 .and_then(|c| c.as_str())
                 .map(str::trim)
                 .filter(|c| !c.is_empty())
-                .ok_or_else(|| "`insert` needs non-empty `content`.".to_string())?;
+                .ok_or_else(|| "`insert` needs non-empty `content`. Example: {\"action\": \"insert\", \"content\": \"New task\", \"position\": 1}".to_string())?;
             let pos = insert_position(v).unwrap_or(1).max(1);
             Ok(format!("#{pos} \u{2192} inserted: {content}"))
         }
         Some("update") => {
             let id = json_id(v);
-            let status = v.get("status").and_then(|x| x.as_str());
-            match (id, status.and_then(TodoStatus::parse)) {
-                (Some(id), Some(_)) if id >= 1 => {
-                    Ok(format!("#{} \u{2192} {}", id, status.unwrap()))
-                }
-                (None, _) => Err("`update` needs an `id` (the task number).".into()),
-                (Some(_), _) => {
-                    Err("`update` needs a `status` of pending|in_progress|completed.".into())
-                }
+            let raw_status = v.get("status").and_then(|x| x.as_str());
+            let parsed_status = raw_status.and_then(TodoStatus::parse);
+            let has_content = v
+                .get("content")
+                .and_then(|c| c.as_str())
+                .map(str::trim)
+                .filter(|c| !c.is_empty())
+                .is_some();
+
+            if id.is_none() {
+                return Err("`update` needs a valid `id` (1-based task number). Example: {\"action\": \"update\", \"id\": 1, \"status\": \"in_progress\"}".into());
+            }
+            let task_id = id.unwrap();
+            if raw_status.is_some() && parsed_status.is_none() {
+                return Err(format!(
+                    "`update` has invalid `status`: `{}`. Must be `pending`, `in_progress`, or `completed`. Example: {{\"action\": \"update\", \"id\": {}, \"status\": \"in_progress\"}}",
+                    raw_status.unwrap(),
+                    task_id
+                ));
+            }
+            if parsed_status.is_none() && !has_content {
+                return Err(format!(
+                    "`update` needs at least one of `status` ('pending'|'in_progress'|'completed') or `content` (non-empty text). Example: {{\"action\": \"update\", \"id\": {}, \"status\": \"in_progress\"}}",
+                    task_id
+                ));
+            }
+            match (parsed_status, has_content) {
+                (Some(st), true) => Ok(format!("#{task_id} \u{2192} {st} (content updated)")),
+                (Some(st), false) => Ok(format!("#{task_id} \u{2192} {st}")),
+                (None, true) => Ok(format!("#{task_id} \u{2192} content updated")),
+                (None, false) => unreachable!(),
             }
         }
         Some("delete") | Some("remove") => match json_id(v) {
             Some(id) if id >= 1 => Ok(format!("#{id} \u{2192} removed")),
-            _ => Err("`delete`/`remove` needs an `id` (the task number).".into()),
+            _ => Err("`delete`/`remove` needs a valid `id` (1-based task number). Example: {\"action\": \"delete\", \"id\": 1}".into()),
         },
         Some("clear") => Ok("all tasks cleared".to_string()),
         Some(other) => Err(format!(
-            "`action` must be add|insert|update|delete|clear (got `{other}`)."
+            "`action` must be add|insert|update|delete|clear (got `{other}`). Example: {{\"action\": \"add\", \"content\": \"Task text\"}}"
         )),
-        None => Err("each item needs an `action` field.".into()),
+        None => Err("each item needs an `action` field ('add', 'insert', 'update', 'delete', or 'clear'). Example: {{\"action\": \"add\", \"content\": \"Task text\"}}".into()),
     }
 }
 
@@ -1842,5 +1875,89 @@ mod tests {
         );
         assert_eq!(list.len(), 5);
         assert_eq!(list[4].content, "tail");
+    }
+
+    #[tokio::test]
+    async fn todowrite_rejects_add_without_content() {
+        let t = TodoTool::new();
+        let res = t.execute(r#"{"actions":[{"action":"add"}]}"#, &ctx()).await;
+        assert!(res.is_error);
+        assert!(
+            res.content.contains("`add` needs non-empty `content`"),
+            "{}",
+            res.content
+        );
+        assert!(
+            res.content.contains("Example: {\"action\": \"add\", \"content\": \"Implement feature X\"}"),
+            "{}",
+            res.content
+        );
+    }
+
+    #[tokio::test]
+    async fn todowrite_rejects_update_without_id() {
+        let t = TodoTool::new();
+        let res = t
+            .execute(
+                r#"{"actions":[{"action":"update","status":"in_progress"}]}"#,
+                &ctx(),
+            )
+            .await;
+        assert!(res.is_error);
+        assert!(
+            res.content.contains("`update` needs a valid `id`"),
+            "{}",
+            res.content
+        );
+        assert!(
+            res.content.contains("Example: {\"action\": \"update\", \"id\": 1, \"status\": \"in_progress\"}"),
+            "{}",
+            res.content
+        );
+    }
+
+    #[tokio::test]
+    async fn todowrite_rejects_update_without_status_or_content() {
+        let t = TodoTool::new();
+        let _ = t
+            .execute(
+                r#"{"actions":[{"action":"add","content":"Step 1"}]}"#,
+                &ctx(),
+            )
+            .await;
+        let res = t
+            .execute(r#"{"actions":[{"action":"update","id":1}]}"#, &ctx())
+            .await;
+        assert!(res.is_error);
+        assert!(
+            res.content.contains("`update` needs at least one of `status`"),
+            "{}",
+            res.content
+        );
+    }
+
+    #[tokio::test]
+    async fn todowrite_accepts_update_with_content_only() {
+        let t = TodoTool::new();
+        let add_res = t
+            .execute(
+                r#"{"actions":[{"action":"add","content":"Original text"}]}"#,
+                &ctx(),
+            )
+            .await;
+        assert!(!add_res.is_error, "{}", add_res.content);
+
+        let update_res = t
+            .execute(
+                r#"{"actions":[{"action":"update","id":1,"content":"Updated text"}]}"#,
+                &ctx(),
+            )
+            .await;
+        assert!(!update_res.is_error, "{}", update_res.content);
+        assert!(
+            update_res.content.contains("Updated text"),
+            "{}",
+            update_res.content
+        );
     }
 }

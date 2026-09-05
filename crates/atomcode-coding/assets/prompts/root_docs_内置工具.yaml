@@ -310,6 +310,8 @@ tools:
       max_files:
         type: "integer"
         required: false
+        default: 12
+        maximum: 30
         # 【中文】：最多渲染源码片段的文件数量（默认 12，最大 30）
         description: "Maximum number of files to inspect (default: 12, max: 30)."
     guidance: "path can be the workspace root, a directory/module, or a target file; query is a symbol or Chinese/English keyword."

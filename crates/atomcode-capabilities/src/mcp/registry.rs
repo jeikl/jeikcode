@@ -1158,10 +1158,12 @@ impl McpRegistry {
                     let mut server_tools = Vec::with_capacity(result.tools.len());
                     for tool in result.tools {
                         let read_only = tool.is_read_only();
+                        let desc = crate::mcp::tool::sanitize_description(&tool.description);
+                        let desc = crate::mcp::tool::truncate_description(&desc);
                         server_tools.push(McpToolInfo {
                             server_name: server_name.clone(),
                             tool_name: tool.name,
-                            description: tool.description,
+                            description: desc,
                             input_schema: crate::mcp::tool::sanitize_mcp_schema(tool.input_schema),
                             read_only,
                         });
@@ -1231,10 +1233,12 @@ impl McpRegistry {
                     .into_iter()
                     .map(|tool| {
                         let read_only = tool.is_read_only();
+                        let desc = crate::mcp::tool::sanitize_description(&tool.description);
+                        let desc = crate::mcp::tool::truncate_description(&desc);
                         McpToolInfo {
                             server_name: server_name.to_string(),
                             tool_name: tool.name,
-                            description: tool.description,
+                            description: desc,
                             input_schema: crate::mcp::tool::sanitize_mcp_schema(tool.input_schema),
                             read_only,
                         }

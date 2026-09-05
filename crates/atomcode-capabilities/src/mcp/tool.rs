@@ -81,7 +81,9 @@ pub struct McpToolAdapter {
 }
 
 pub use crate::schema_sanitizer::{
-    extract_quoted_enums, is_bare_object, sanitize_mcp_schema, LEAKED_HTTP_HEADERS,
+    ensure_object_schema, extract_quoted_enums, is_bare_object, sanitize_description,
+    sanitize_mcp_schema, truncate_description, LEAKED_HTTP_HEADERS,
+    MAX_MCP_DESCRIPTION_LENGTH, TRUNCATION_SUFFIX,
 };
 
 impl McpToolAdapter {
@@ -91,13 +93,16 @@ impl McpToolAdapter {
     /// external server cannot replace another tool under an approved name.
     pub fn new(registry: Arc<McpRegistry>, info: McpToolInfo) -> Result<Self, String> {
         let full_name = mcp_tool_full_name(&info.server_name, &info.tool_name);
-        let description = if info.description.is_empty() {
+        let raw_desc = info.description.trim();
+        let sanitized_desc = sanitize_description(raw_desc);
+        let truncated_desc = truncate_description(&sanitized_desc);
+        let description = if truncated_desc.is_empty() {
             format!(
                 "MCP tool from server '{}'. See input schema for details.",
                 info.server_name
             )
         } else {
-            format!("[MCP:{}] {}", info.server_name, info.description)
+            format!("[MCP:{}] {}", info.server_name, truncated_desc)
         };
         registry.register_tool_alias(&full_name, &info.server_name, &info.tool_name)?;
         let schema = sanitize_mcp_schema(info.input_schema);
@@ -359,6 +364,18 @@ mod tests {
     }
 
     #[test]
+    fn test_adapter_description_sanitization_and_truncation() {
+        let reg = Arc::new(McpRegistry::new());
+        let mut t = info("docs", "search");
+        t.description = "  Search documentation.\n  Supports multi-line\r\nqueries with  whitespace. ".to_string();
+        let adapter = McpToolAdapter::new(reg, t).unwrap();
+        assert_eq!(
+            adapter.description(),
+            "[MCP:docs] Search documentation. Supports multi-line queries with whitespace."
+        );
+    }
+
+    #[test]
     fn test_sanitize_mcp_schema() {
         let input = serde_json::json!({
             "type": "object",
@@ -377,11 +394,9 @@ mod tests {
                     "minimum": -9007199254740991.0,
                     "maximum": 9007199254740991.0
                 },
-                "safesearch": {
-                    "type": "object"
-                },
-                "freshness": {
-                    "type": "object"
+                "goggles": {
+                    "type": "array",
+                    "items": { "type": "string" }
                 }
             },
             "required": ["query", "accept"]
@@ -406,97 +421,9 @@ mod tests {
         assert!(!index.contains_key("minimum"));
         assert!(!index.contains_key("maximum"));
 
-        // Brave pseudo-objects normalized
-        let ss = props.get("safesearch").unwrap().as_object().unwrap();
-        assert_eq!(ss.get("type").unwrap(), "string");
-        assert_eq!(
-            ss.get("enum").unwrap(),
-            &serde_json::json!(["off", "moderate", "strict"])
-        );
-
-        let fresh = props.get("freshness").unwrap().as_object().unwrap();
-        assert_eq!(fresh.get("type").unwrap(), "string");
-        assert_eq!(
-            fresh.get("enum").unwrap(),
-            &serde_json::json!(["pd", "pw", "pm", "py"])
-        );
-    }
-
-    #[test]
-    fn test_sanitize_brave_image_and_llm_context_and_heuristics() {
-        let input = serde_json::json!({
-            "type": "object",
-            "properties": {
-                "safesearch": {
-                    "type": "object",
-                    "description": "Safe search setting ('off', 'strict')"
-                },
-                "goggles": {
-                    "type": "object",
-                    "description": "Goggles URL or ID."
-                },
-                "units": {
-                    "type": "object"
-                },
-                "heuristic_enum": {
-                    "type": "object",
-                    "description": "Choice between 'alpha', 'beta', or 'gamma'."
-                },
-                "heuristic_bare": {
-                    "type": "object",
-                    "description": "An opaque configuration value."
-                },
-                "user-agent": {
-                    "type": "string"
-                },
-                "api-version": {
-                    "type": "string"
-                }
-            },
-            "required": ["safesearch", "user-agent", "heuristic_bare"]
-        });
-
-        let sanitized = sanitize_mcp_schema(input);
-        let props = sanitized.get("properties").unwrap().as_object().unwrap();
-
-        // 1. brave_image_search: safesearch without 'moderate' gets ['off', 'strict']
-        let ss = props.get("safesearch").unwrap().as_object().unwrap();
-        assert_eq!(ss.get("type").unwrap(), "string");
-        assert_eq!(ss.get("enum").unwrap(), &serde_json::json!(["off", "strict"]));
-
-        // 2. brave_llm_context: goggles is type string
+        // goggles retains type: "array" and items intact (Gemini protobuf requirement)
         let goggles = props.get("goggles").unwrap().as_object().unwrap();
-        assert_eq!(goggles.get("type").unwrap(), "string");
-
-        // 3. units has string and metric/imperial enum
-        let units = props.get("units").unwrap().as_object().unwrap();
-        assert_eq!(units.get("type").unwrap(), "string");
-        assert_eq!(
-            units.get("enum").unwrap(),
-            &serde_json::json!(["metric", "imperial"])
-        );
-
-        // 4. Heuristic enum extraction from description
-        let he = props.get("heuristic_enum").unwrap().as_object().unwrap();
-        assert_eq!(he.get("type").unwrap(), "string");
-        assert_eq!(
-            he.get("enum").unwrap(),
-            &serde_json::json!(["alpha", "beta", "gamma"])
-        );
-
-        // 5. Heuristic bare object fallback to anyOf [string, object]
-        let hb = props.get("heuristic_bare").unwrap().as_object().unwrap();
-        assert!(hb.get("type").is_none());
-        assert!(hb.contains_key("anyOf"));
-
-        // 6. Header stripping
-        assert!(!props.contains_key("user-agent"));
-        assert!(!props.contains_key("api-version"));
-
-        // 7. Required array cleaned
-        let reqs = sanitized.get("required").unwrap().as_array().unwrap();
-        assert!(!reqs.contains(&serde_json::json!("user-agent")));
-        assert!(reqs.contains(&serde_json::json!("safesearch")));
-        assert!(reqs.contains(&serde_json::json!("heuristic_bare")));
+        assert_eq!(goggles.get("type").unwrap(), "array");
+        assert_eq!(goggles.get("items").unwrap(), &serde_json::json!({ "type": "string" }));
     }
 }

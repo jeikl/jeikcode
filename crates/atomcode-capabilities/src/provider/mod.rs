@@ -400,23 +400,21 @@ mod wire_dump_tests {
     }
 
     #[test]
-    fn sanitize_schema_cleans_brave_pseudo_objects_and_headers() {
+    fn test_sanitize_schema_cleans_headers_and_preserves_array() {
         use super::sanitize_schema_for_wire;
 
-        let brave_schema = json!({
+        let tool_schema = json!({
             "type": "object",
             "properties": {
                 "query": { "type": "string", "description": "Search query" },
-                "safesearch": { "type": "object", "description": "Safe search setting ('off', 'moderate', 'strict')" },
-                "freshness": { "type": "object", "description": "Filters by date" },
-                "units": { "type": "object" },
+                "goggles": { "type": "array", "items": { "type": "string" }, "description": "Goggles URLs" },
                 "accept": { "type": "string", "description": "HTTP Accept header" },
                 "user-agent": { "type": "string", "description": "HTTP User-Agent" }
             },
             "required": ["query", "accept"]
         });
 
-        let sanitized = sanitize_schema_for_wire(&brave_schema);
+        let sanitized = sanitize_schema_for_wire(&tool_schema);
         let props = sanitized.get("properties").unwrap().as_object().unwrap();
 
         // Leaked headers stripped
@@ -427,16 +425,8 @@ mod wire_dump_tests {
         let req = sanitized.get("required").unwrap().as_array().unwrap();
         assert_eq!(req, &vec![json!("query")]);
 
-        // safesearch fixed to string + enum
-        assert_eq!(props["safesearch"]["type"], "string");
-        assert_eq!(props["safesearch"]["enum"], json!(["off", "moderate", "strict"]));
-
-        // freshness fixed to string + enum
-        assert_eq!(props["freshness"]["type"], "string");
-        assert_eq!(props["freshness"]["enum"], json!(["pd", "pw", "pm", "py"]));
-
-        // units fixed to string + enum
-        assert_eq!(props["units"]["type"], "string");
-        assert_eq!(props["units"]["enum"], json!(["metric", "imperial"]));
+        // goggles preserves type: "array" and items (vital for Gemini API)
+        assert_eq!(props["goggles"]["type"], "array");
+        assert_eq!(props["goggles"]["items"], json!({ "type": "string" }));
     }
 }

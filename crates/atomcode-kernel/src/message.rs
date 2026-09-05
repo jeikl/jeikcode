@@ -594,10 +594,11 @@ impl Conversation {
     }
 
     /// Canonical ordering priority for multi-segment system blocks.
+    /// Block: Code Tools (`=== CODE TOOLS`) - immediately follows Block 2 Workflow & Discipline
     /// Block 3: Skills Catalog (`=== AVAILABLE SKILLS`)
     /// Block 4: MCP Server Instructions (`=== MCP SERVER INSTRUCTIONS`)
     /// Block 5: Authoritative Project Instructions & Knowledge (`=== AUTHORITATIVE PROJECT INSTRUCTIONS`)
-    /// Block 6: Session Baseline (`=== SESSION BASELINE`)
+    /// Block 6: Session Baseline (`=== SESSION BASELINE` or legacy `=== SESSION CONTEXT`)
     pub fn reconcile_system_block(&mut self, header: &str, block: Option<String>) {
         let existing = self
             .messages
@@ -609,7 +610,37 @@ impl Conversation {
 
         match (block, existing) {
             (Some(text), Some(i)) => {
-                self.messages[i] = Message::system(text);
+                let target_order = system_block_order(header);
+                let leading = self
+                    .messages
+                    .iter()
+                    .take_while(|m| m.role == Role::System)
+                    .count();
+                let needs_reorder = if target_order > 0 {
+                    self.messages[..i]
+                        .iter()
+                        .any(|m| {
+                            let o = system_block_order(&m.text);
+                            o > 0 && o > target_order
+                        })
+                } else {
+                    false
+                };
+
+                if needs_reorder {
+                    self.messages.remove(i);
+                    let leading = leading - 1;
+                    let insert_at = self.messages[..leading]
+                        .iter()
+                        .position(|m| {
+                            let o = system_block_order(&m.text);
+                            o > 0 && o > target_order
+                        })
+                        .unwrap_or(leading);
+                    self.messages.insert(insert_at, Message::system(text));
+                } else {
+                    self.messages[i] = Message::system(text);
+                }
             }
             (Some(text), None) => {
                 let leading = self
@@ -640,14 +671,16 @@ impl Conversation {
 }
 
 fn system_block_order(text: &str) -> u8 {
-    if text.starts_with("=== AVAILABLE SKILLS") {
-        3
+    if text.starts_with("=== CODE TOOLS") {
+        25
+    } else if text.starts_with("=== AVAILABLE SKILLS") {
+        30
     } else if text.starts_with("=== MCP SERVER INSTRUCTIONS") {
-        4
+        40
     } else if text.starts_with("=== AUTHORITATIVE PROJECT INSTRUCTIONS & KNOWLEDGE") {
-        5
-    } else if text.starts_with("=== SESSION BASELINE") {
-        6
+        50
+    } else if text.starts_with("=== SESSION BASELINE") || text.starts_with("=== SESSION CONTEXT") {
+        60
     } else {
         0
     }

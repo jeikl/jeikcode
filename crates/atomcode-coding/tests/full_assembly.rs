@@ -125,8 +125,8 @@ async fn full_assembly_lifecycle() {
         }
     }
 
-    // Prefix order: persona → SESSION CONTEXT → CODE TOOLS (all System) → MEMORY
-    // (frozen synthetic User), all BEFORE the real query.
+    // Prefix order: persona (block 1) → workflow (block 2) → CODE TOOLS → SESSION BASELINE
+    // (all System) → MEMORY (frozen synthetic User), all BEFORE the real query.
     {
         let calls = calls1.lock().unwrap();
         let first = &calls[0].0;
@@ -136,25 +136,30 @@ async fn full_assembly_lifecycle() {
                 .map(|m| (&m.role, m.text[..m.text.len().min(30)].to_string()))
                 .collect::<Vec<_>>()
         };
-        assert_eq!(first[0].role, Role::System, "persona leads");
+        assert_eq!(first[0].role, Role::System, "persona identity leads");
         assert!(
-            first[1].role == Role::System && first[1].text.starts_with("=== SESSION CONTEXT ==="),
-            "session-context block injected after persona: {:?}",
+            first[1].role == Role::System && first[1].text.starts_with(atomcode_coding::persona::CRITICAL_PRECEDENCE_NOTICE),
+            "workflow discipline follows persona: {:?}",
             shape()
         );
         assert!(
             first[2].role == Role::System && first[2].text.starts_with("=== CODE TOOLS ==="),
-            "code-tools routing card belongs to the leading System run: {:?}",
+            "code-tools routing card follows workflow discipline: {:?}",
             shape()
         );
         assert!(
-            first[3].role == Role::User
-                && first[3].synthetic
-                && first[3].text.starts_with("=== MEMORY ==="),
+            first[3].role == Role::System && first[3].text.starts_with("=== SESSION BASELINE ==="),
+            "session baseline follows code-tools: {:?}",
+            shape()
+        );
+        assert!(
+            first[4].role == Role::User
+                && first[4].synthetic
+                && first[4].text.starts_with("=== MEMORY ==="),
             "memory block follows the leading System run: {:?}",
             shape()
         );
-        assert!(first[3].text.contains("prefers tabs"));
+        assert!(first[4].text.contains("prefers tabs"));
         // StatusReminderHook appends the date to the bottom of the real query;
         // no independent synthetic user message is created.
         assert_eq!(
@@ -255,8 +260,8 @@ async fn full_assembly_lifecycle() {
             .any(|m| m.text.starts_with("the second task\n\n<system-reminder>")));
         let system_count = first.iter().filter(|m| m.role == Role::System).count();
         assert_eq!(
-            system_count, 3,
-            "persona + session-context + code-tools exactly once each"
+            system_count, 4,
+            "persona b1 + workflow b2 + code-tools + session-baseline exactly once each"
         );
         let memory_count = first
             .iter()

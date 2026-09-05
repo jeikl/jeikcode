@@ -7,7 +7,7 @@
 
 use async_trait::async_trait;
 use atomcode_kernel::hook::LifecycleHooks;
-use atomcode_kernel::message::{Conversation, Message, Role};
+use atomcode_kernel::message::{Conversation, Role};
 
 pub const CODE_TOOLS_HEADER: &str = "=== CODE TOOLS ===";
 
@@ -43,27 +43,24 @@ impl CodeToolsHook {
 #[async_trait]
 impl LifecycleHooks for CodeToolsHook {
     async fn session_start(&self, convo: &mut Conversation, _resumed: bool) {
-        let block = self.enabled.then(|| CARD.to_string());
-        // Remove both the new System form and legacy synthetic-User copies, then
-        // insert exactly one block at the end of the leading System run.
+        // Remove legacy synthetic-User copies
         convo.messages.retain(|m| {
-            !(m.text.starts_with(CODE_TOOLS_HEADER)
-                && (m.role == Role::System || (m.role == Role::User && m.synthetic)))
+            !(m.text.starts_with(CODE_TOOLS_HEADER) && m.role == Role::User && m.synthetic)
         });
-        if let Some(block) = block {
-            let at = convo
-                .messages
-                .iter()
-                .take_while(|m| m.role == Role::System)
-                .count();
-            convo.messages.insert(at, Message::system(block));
-        }
+        let block = self.enabled.then(|| CARD.to_string());
+        convo.reconcile_system_block(CODE_TOOLS_HEADER, block);
+    }
+
+    async fn turn_start(&self, convo: &mut Conversation) {
+        let block = self.enabled.then(|| CARD.to_string());
+        convo.reconcile_system_block(CODE_TOOLS_HEADER, block);
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use atomcode_kernel::message::Message;
 
     #[tokio::test]
     async fn injects_system_card_when_mounted() {
@@ -84,6 +81,22 @@ mod tests {
             c.messages[1].text
         );
         assert_eq!(c.messages[2].text, "hi");
+    }
+
+    #[tokio::test]
+    async fn places_card_after_workflow_and_before_baseline() {
+        let hook = CodeToolsHook::new(true);
+        let mut c = Conversation::default();
+        c.push(Message::system("Block 1 Identity"));
+        c.push(Message::system("⚡ CRITICAL PRECEDENCE: Block 2 Workflow"));
+        c.push(Message::system("=== SESSION BASELINE ===\nCWD: ..."));
+        c.push(Message::user("hi"));
+        hook.session_start(&mut c, false).await;
+        assert_eq!(c.messages[0].text, "Block 1 Identity");
+        assert!(c.messages[1].text.contains("Block 2 Workflow"));
+        assert!(c.messages[2].text.starts_with(CODE_TOOLS_HEADER));
+        assert!(c.messages[3].text.starts_with("=== SESSION BASELINE ==="));
+        assert_eq!(c.messages[4].text, "hi");
     }
 
     #[tokio::test]

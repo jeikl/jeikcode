@@ -6299,11 +6299,11 @@ async fn chat_permission(
     Json(req): Json<PermissionDecisionRequest>,
 ) -> impl IntoResponse {
     use atomcode_capabilities::tools::{parse_permission_decision, PermissionDecision};
+    let project_dir = state.project.read().await.working_dir.clone();
     if req.decision == "allow_persist" {
         if let Some(full) = req.tool_name.as_deref() {
             let reg = state.mcp_registry.read().await.clone();
             if let Some((server, tool)) = reg.split_tool_name(full).await {
-                let project_dir = state.project.read().await.working_dir.clone();
                 if let Err(e) = atomcode_capabilities::mcp::config::add_auto_approved_tool(
                     &project_dir,
                     &server,
@@ -6312,6 +6312,7 @@ async fn chat_permission(
                     tracing::warn!("[permission] persist autoApprove failed: {e}");
                 }
                 reg.mark_tool_auto_approved(full);
+                state.mcp_pool.registry(&project_dir).await.mark_tool_auto_approved(full);
             }
         }
         let ok = state
@@ -6320,6 +6321,12 @@ async fn chat_permission(
         return Json(serde_json::json!({ "success": ok }));
     }
     let decision = parse_permission_decision(&req.decision);
+    if let Some(full) = req.tool_name.as_deref() {
+        if decision == PermissionDecision::AllowAlways {
+            state.mcp_registry.read().await.mark_tool_auto_approved(full);
+            state.mcp_pool.registry(&project_dir).await.mark_tool_auto_approved(full);
+        }
+    }
     if state.pending_permissions.deliver(&req.session_id, decision) {
         Json(serde_json::json!({ "success": true }))
     } else {

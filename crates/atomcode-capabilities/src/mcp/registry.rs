@@ -377,14 +377,24 @@ impl McpRegistry {
     }
 
     /// Split a full MCP tool name (`mcp__{server}__{tool}`) into `(server, tool)`,
-    /// using the explicit alias map because sanitization and truncation are not
-    /// reversible. Returns `None` for an unknown or non-MCP name.
+    /// using the explicit alias map when available, with fallback to parsing the
+    /// canonical `mcp__{server}__{tool}` delimiter. Returns `None` for non-MCP names.
     pub async fn split_tool_name(&self, full: &str) -> Option<(String, String)> {
-        full.strip_prefix("mcp__")?;
-        self.tool_aliases
+        let without_prefix = full.strip_prefix("mcp__")?;
+        if let Some(pair) = self
+            .tool_aliases
             .read()
             .ok()
             .and_then(|aliases| aliases.get(full).cloned())
+        {
+            return Some(pair);
+        }
+        let (server, tool) = without_prefix.split_once("__")?;
+        if !server.is_empty() && !tool.is_empty() {
+            Some((server.to_string(), tool.to_string()))
+        } else {
+            None
+        }
     }
 
     /// Split configs by project trust. Uses the shared trust store (via the local
@@ -1561,7 +1571,7 @@ mod tests {
     use super::*;
 
     #[tokio::test]
-    async fn split_tool_name_matches_known_server_and_rejects_others() {
+    async fn split_tool_name_matches_known_server_and_canonical_fallback() {
         let reg = McpRegistry::new();
         reg.servers.write().await.insert(
             "srv".to_string(),
@@ -1570,17 +1580,23 @@ mod tests {
                 barrier: Arc::new(tokio::sync::Barrier::new(1)),
             }) as Arc<dyn McpClient>,
         );
-        reg.register_tool_alias("mcp__srv__query", "srv", "query")
+        reg.register_tool_alias("mcp__srv__query", "srv_alias", "query")
             .unwrap();
-        // Known server → split.
+        // Registered alias → alias split.
         assert_eq!(
             reg.split_tool_name("mcp__srv__query").await,
-            Some(("srv".to_string(), "query".to_string()))
+            Some(("srv_alias".to_string(), "query".to_string()))
         );
-        // Unknown server → None.
-        assert_eq!(reg.split_tool_name("mcp__other__x").await, None);
+        // Canonical unaliased tool → fallback split.
+        assert_eq!(
+            reg.split_tool_name("mcp__other__x").await,
+            Some(("other".to_string(), "x".to_string()))
+        );
         // Missing `mcp__` prefix → None.
         assert_eq!(reg.split_tool_name("plain_tool").await, None);
+        // Malformed MCP name → None.
+        assert_eq!(reg.split_tool_name("mcp__").await, None);
+        assert_eq!(reg.split_tool_name("mcp__invalid").await, None);
     }
 
     #[tokio::test]

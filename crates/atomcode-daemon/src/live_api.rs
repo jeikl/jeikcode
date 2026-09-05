@@ -667,7 +667,10 @@ pub(crate) async fn run_chat_turn_v2(
                 let current_mode = live_current_approval_mode();
                 let decision = match &mut perm_rx {
                     None => fallback_approval_decision(current_mode),
-                    Some(_) if current_mode == ApprovalMode::Auto => PermissionDecision::AllowOnce,
+                    Some(_) if current_mode == ApprovalMode::Auto => {
+                        let _ = handle.set_mode(atomcode_coding::RuntimeMode::Auto).await;
+                        PermissionDecision::AllowOnce
+                    }
                     Some(rx) => {
                         let _ = runtime_event_tx
                             .send(CodingRuntimeEvent::Request(request.clone()));
@@ -679,10 +682,14 @@ pub(crate) async fn run_chat_turn_v2(
                                     break PermissionDecision::Deny;
                                 }
                                 decision = rx.recv() => {
+                                    if live_current_approval_mode() == ApprovalMode::Auto {
+                                        let _ = handle.set_mode(atomcode_coding::RuntimeMode::Auto).await;
+                                    }
                                     break decision.unwrap_or(PermissionDecision::Deny);
                                 }
                                 _ = tokio::time::sleep(std::time::Duration::from_millis(100)) => {
                                     if live_current_approval_mode() == ApprovalMode::Auto {
+                                        let _ = handle.set_mode(atomcode_coding::RuntimeMode::Auto).await;
                                         break PermissionDecision::AllowOnce;
                                     }
                                 }
@@ -2276,20 +2283,23 @@ pub(crate) async fn approval_mode_get() -> impl IntoResponse {
 }
 
 async fn apply_live_mode(mode: ApprovalMode) -> bool {
-    let accepted = match crate::native_live::binding() {
-        Ok(_) => crate::native_live::set_mode(native_runtime_mode(mode))
-            .await
-            .is_ok(),
-        Err(_) => true,
-    };
-    if accepted {
-        live_set_mode(mode);
+    live_set_mode(mode);
+    if crate::native_live::binding().is_ok() {
+        let _ = crate::native_live::set_mode(native_runtime_mode(mode)).await;
     }
-    accepted
+    true
 }
 
-pub(crate) async fn approval_mode_set(Json(req): Json<LiveModeReq>) -> impl IntoResponse {
+pub(crate) async fn approval_mode_set(
+    State(state): State<AppState>,
+    Json(req): Json<LiveModeReq>,
+) -> impl IntoResponse {
     let ok = apply_live_mode(req.mode).await;
+    if req.mode == ApprovalMode::Auto {
+        state
+            .pending_permissions
+            .deliver_all(PermissionDecision::AllowOnce);
+    }
     Json(ApprovalModeResp {
         ok,
         mode: live_current_approval_mode(),
@@ -2304,8 +2314,16 @@ pub(crate) async fn approval_mode_set(Json(req): Json<LiveModeReq>) -> impl Into
 /// 下一轮实际用哪个 PermissionDecider 由 run_turn 读 LIVE_APPROVAL_MODE 决定。
 /// 模式是运行时会话状态，不写入 config（与 provider 持久化为默认不同）——避免
 /// Auto（wire: bypass）这种危险态被静默持久化。
-pub(crate) async fn live_mode(Json(req): Json<LiveModeReq>) -> impl IntoResponse {
+pub(crate) async fn live_mode(
+    State(state): State<AppState>,
+    Json(req): Json<LiveModeReq>,
+) -> impl IntoResponse {
     let ok = apply_live_mode(req.mode).await;
+    if req.mode == ApprovalMode::Auto {
+        state
+            .pending_permissions
+            .deliver_all(PermissionDecision::AllowOnce);
+    }
     Json(ApprovalModeResp {
         ok,
         mode: live_current_approval_mode(),
@@ -2475,11 +2493,20 @@ pub(crate) async fn live_permission(
                     tracing::warn!("[permission] persist autoApprove failed: {e}");
                 }
                 reg.mark_tool_auto_approved(full);
+                state.mcp_pool.registry(&project_dir).await.mark_tool_auto_approved(full);
             }
         }
         PermissionDecision::AllowOnce
     } else {
-        parse_permission_decision(&req.decision)
+        let d = parse_permission_decision(&req.decision);
+        if let Some(full) = req.tool_name.as_deref() {
+            if d == PermissionDecision::AllowAlways {
+                let project_dir = state.project.read().await.working_dir.clone();
+                state.mcp_registry.read().await.mark_tool_auto_approved(full);
+                state.mcp_pool.registry(&project_dir).await.mark_tool_auto_approved(full);
+            }
+        }
+        d
     };
     let response = match decision {
         PermissionDecision::AllowOnce => atomcode_capabilities::tools::ApprovalResponse::allow(),

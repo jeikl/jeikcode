@@ -87,6 +87,19 @@ impl PermissionResponders {
             false
         }
     }
+
+    /// 把决定广播送给所有当前正在等待的 session（例如切换为 Auto 模式时立即放行解冻）。
+    /// 返回成功送达的 session 数量。
+    pub fn deliver_all(&self, decision: PermissionDecision) -> usize {
+        let senders: Vec<_> = self.inner.read().unwrap().values().cloned().collect();
+        let mut count = 0;
+        for tx in senders {
+            if tx.send(decision).is_ok() {
+                count += 1;
+            }
+        }
+        count
+    }
 }
 
 #[cfg(test)]
@@ -111,6 +124,20 @@ mod tests {
     fn deliver_to_unknown_session_returns_false() {
         let reg = PermissionResponders::new();
         assert!(!reg.deliver("nope", PermissionDecision::Deny));
+    }
+
+    #[tokio::test]
+    async fn deliver_all_wakes_all_waiting_sessions() {
+        let reg = PermissionResponders::new();
+        let (tx1, mut rx1) = tokio::sync::mpsc::unbounded_channel();
+        let (tx2, mut rx2) = tokio::sync::mpsc::unbounded_channel();
+        reg.register("sess-1".into(), tx1);
+        reg.register("sess-2".into(), tx2);
+
+        let count = reg.deliver_all(PermissionDecision::AllowOnce);
+        assert_eq!(count, 2);
+        assert_eq!(rx1.recv().await, Some(PermissionDecision::AllowOnce));
+        assert_eq!(rx2.recv().await, Some(PermissionDecision::AllowOnce));
     }
 
     #[tokio::test]

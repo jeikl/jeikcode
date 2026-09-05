@@ -22,21 +22,17 @@ pub fn suppress_console_window(cmd: &mut tokio::process::Command) {
     cmd.creation_flags(CREATE_NO_WINDOW);
 }
 
-/// Unix `setsid` + `TIOCNOTTY` equivalent: the child must not inherit the
-/// TUI's console. `CREATE_NO_WINDOW` alone only suppresses a *new* window
-/// when the parent is console-less (daemon); a TUI parent still hands the
-/// child the same `CONOUT$`, so `jeikclaw doctor` / Node / Python can
-/// `SetConsoleMode` / `SetConsoleCursorPosition(0,0)` and the TUI loses
-/// raw mode — keys die, caret jumps to the top of the 终端 tab.
+/// Unix `setsid` + `TIOCNOTTY` equivalent: the child must not inherit or allocate
+/// an interactive console window. On Windows 11, `CREATE_NEW_CONSOLE` forces
+/// the OS console host (Windows Terminal / conhost) to spawn a visible console window,
+/// flashing black CMD boxes every turn.
 ///
-/// `CREATE_NEW_CONSOLE` gives the child its own independent console so it
-/// does not inherit the TUI's console, while `CREATE_NO_WINDOW` ensures no
-/// console window is visibly popped up.
+/// Using `CREATE_NO_WINDOW` ensures no console window is created, while standard
+/// handles are safely redirected through piped/null stdio.
 #[cfg(target_os = "windows")]
 pub fn detach_from_console(cmd: &mut tokio::process::Command) {
     const CREATE_NO_WINDOW: u32 = 0x08000000;
-    const CREATE_NEW_CONSOLE: u32 = 0x00000010;
-    cmd.creation_flags(CREATE_NO_WINDOW | CREATE_NEW_CONSOLE);
+    cmd.creation_flags(CREATE_NO_WINDOW);
 }
 
 #[cfg(not(target_os = "windows"))]

@@ -3082,6 +3082,10 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
     const nextState = beginModeSwitch(modeState, m);
     if (nextState === modeState) return;
     setModeState(nextState);
+    if (m === 'bypass') {
+      setLivePending(null);
+      onPermissionResolved?.(null);
+    }
     void postLiveMode(m)
       .then((confirmed) => {
         setModeState((cur) => completeModeSwitch(cur, confirmed));

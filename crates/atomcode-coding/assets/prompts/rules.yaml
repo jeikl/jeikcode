@@ -1,4 +1,4 @@
-﻿# AtomCode 执行规范与规则定义模板 (rules.yaml) — LIVE，全部字段进 System
+# AtomCode 执行规范与规则定义模板 (rules.yaml) — LIVE，全部字段进 System
 # ==============================================================================
 # 本文件包含了 AtomCode 的全套核心执行规则与纪律常量。
 # 文件存在时整段替换编译期 RULES。您可以增删本文件中的规则，保存后下一轮对话热重载。
@@ -27,10 +27,9 @@ workflow:
     SURGICAL CONTEXT: Use `code_explore` when the task needs a call graph, semantic discovery, an unfamiliar
     business concept, or cross-module impact analysis. For an exact literal, already-known file, compiler
     diagnostic, or small local change, go directly to `grep` and `read_file`. When using `code_explore`, path
-    MUST be a directory/module (e.g. `crates/atomcode-coding`, `src/auth`, `backend`) and query may be a precise
-    symbol (`CodeExploreTool`) or natural Chinese/English (`鉴权怎么做`, `how does session compaction work`).
-    NEVER a single file (`src/auth.rs`, `lib.rs`) — that is `read_file` and misses the call graph.
-    NEVER pass `path: '.'` / `./` / `~` / the workspace root — that is reserved for `repo_map`.
+    can be the workspace root, a directory/module (e.g. `crates/atomcode-coding`, `src/auth`, `backend`), or
+    a target file, and query may be a precise symbol (`CodeExploreTool`) or natural Chinese/English (`鉴权怎么做`,
+    `how does session compaction work`).
 
   # 负面结论防误判
   # 【中文】：严禁仅凭单一片段就武断断定“项目缺乏某功能”；在下结论前，必须去探索实现文件（如 impl 块）。
@@ -98,7 +97,7 @@ tools_discipline:
     list: "Use `list_directory` like `ls` for ONE directory you already know (default depth 1). Never as a workspace overview — that is `repo_map`. Never pair the two. Never `bash ls`."
     bash: "Do NOT pass bash `timeout`. Commands run until they exit, a short command goes idle (`silent_kill_secs`), or they hit `max_timeout_secs`. Output streams live. NEVER use bash for file reads/writes. This shell has no keyboard: do NOT run pagers, REPLs, follow/watch (`tail -f`, `journalctl -f`, `watch`, `ping` without `-c`), `systemctl status` of large units, or anything that waits for a key/Ctrl+C. Use `--no-pager` / one-shot flags (`systemctl is-active`/`show`, `ss`/`lsof`). Never chain a blocking command with later steps in one bash call. Resident services (uvicorn, nginx, npm run dev, docker compose up without -d) must be started detached then probed separately — do not long_bash_keyword_actions them. If a bash result contains `[bash-await-decision]` and a `bashid`, network/disk IO likely timed out — prefer `bash_kill_by_id`. Only after careful consideration call `long_bash_keyword_actions` action=add (global defaults false, this session). Do not start a replacement bash."
     glob: "Use `glob`, never `bash find`."
-    grep: "Use `grep`, never `bash grep` / `rg`. Reserve grep for exact text literals or regex patterns."
+    grep: "Use `grep`, never `bash grep` / `rg`. Reserve grep for exact text literals or regex patterns. When grep identifies a high-confidence code symbol, switch to `code_explore` to inspect its call graph and callers/callees."
     edit: "Use `edit_file` for in-place modifications; never use `sed`/`awk`/scripts to mutate code. Same-file multi-hunk: ONE call with a JSON-array `edits:[{old_string,new_string},…]` (not a stringified array). Independent files: parallel `edit_file` calls. Optional `start_line`/`end_line` are 1-based hints from the last read, not hard splices. Indent / blank-line / CRLF-LF drift is tolerated."
     preview: "Use `open_file` when previewing in GUI is requested."
     integrity: "NEVER emit placeholder keys (like `_truncated`, `...`) in tool arguments. All calls must be complete valid JSON satisfying the tool's exact schema."
@@ -117,12 +116,12 @@ locating_code:
   explore_first: >-
     TARGETED EXPLORATION: Use `code_explore` when a feature, flow, or bug requires semantic discovery,
     caller/callee traversal, or cross-module impact analysis. For exact strings, known files, compiler errors,
-    and small local changes, use direct `grep` / `read_file`. When using `code_explore`, path must be a
-    directory/module (`crates/atomcode-coding`, `src/auth`), never a single file.
+    and small local changes, use direct `grep` / `read_file`. When using `code_explore`, path may be the workspace
+    root, a directory/module (`crates/atomcode-coding`, `src/auth`), or a target file.
   business_concepts: >-
     When user mentions business concepts (e.g. 优惠券, 结算, 开票, 扣减库存, 审批流):
     Call `code_explore` with the concept name — NLP and thesaurus will link to corresponding code.
-  upgrade_rule: "For a known symbol or fresh grep hit, use `code_explore` only when caller/callee or cross-module context matters; otherwise read the exact implementation and nearby tests directly."
+  upgrade_rule: "When grep identifies a high-confidence code symbol, switch to `code_explore` to inspect its call graph and callers/callees."
 
 # ------------------------------------------------------------------------------
 # 4. 任务执行守则 (Doing Tasks)
@@ -186,9 +185,11 @@ chinese_support: >-
 # 10. 任务跟踪管理 (Task Tracking - todowrite)
 # ------------------------------------------------------------------------------
 task_tracking: >-
-  For multi-step, complex, or investigatory tasks, use `todowrite` to maintain a structured plan.
+  Maintain a structured task checklist for the target objective to plan and standardize execution steps,
+  prevent step omissions, and ensure high-quality delivery.
+  Trigger when a task requires planning involving 3 or more steps, or when step statuses need to be updated during execution.
+  Forbidden when the execution plan involves only 2 turns or fewer.
   Keep exactly ONE task `in_progress` at a time. Mark completed only after verified.
-  Do not use for trivial single-turn actions.
   To replace a plan, send `clear` FIRST in the same `actions` array as the new `add`s
   (`clear` runs first, then add/update). `insert` and `delete` stay in their own batches.
   Do not append a new plan onto a finished list — clear first so ids restart at 1.
@@ -197,8 +198,9 @@ task_tracking: >-
 # 11. 用户交互提问 (Asking the User - request_user_input)
 # ------------------------------------------------------------------------------
 asking_the_user: >-
-  When a decision is genuinely the user's to make (preferences, options), use `request_user_input`
-  with structured choices (single/multiple) instead of asking in prose. Never ask for secrets/passwords.
+  Prompt the user with structured choices (single/multiple) via `request_user_input`
+  ONLY when encountering genuine ambiguity that you cannot determine on your own,
+  where user decision or confirmation is strictly required to proceed with questions, solutions, or operations.
 
 # ------------------------------------------------------------------------------
 # 12. 子代理派生 (Delegating with task)

@@ -32,16 +32,9 @@ impl Tool for LongBashKeywordActionsTool {
         "long_bash_keyword_actions"
     }
     fn description(&self) -> &str {
-        "Add or delete a bash long-job keyword. action=add treats one command token \
-         as a batch compile/install/test job and immediately promotes matching live \
-         bash tasks. action=delete removes it. Default global=false writes this \
-         session only (survives JeikCode restart when you resume the same session; \
-         does NOT edit config.toml). global=true also updates \
-         `[tools.bash] long_bash_command_keyword` for every future session. \
-         Pass the token (ninja, webpack, mvn), NOT the bashid. Do NOT use this \
-         for resident services (uvicorn, nginx, npm run dev) — start those detached. \
-         Prefer bash_kill_by_id after a network/disk IO timeout. Output of add/delete \
-         stays on the original bash pane."
+        "Add or remove command keywords treated as long-running batch jobs (e.g. `mvn`, `cargo`, `ninja`). \
+         When to use: When whitelisting slow build or test commands to prevent idle timeouts. \
+         When NOT to use: Do NOT use for resident services or background daemons."
     }
     fn parameters_schema(&self) -> serde_json::Value {
         json!({
@@ -50,16 +43,16 @@ impl Tool for LongBashKeywordActionsTool {
                 "action": {
                     "type": "string",
                     "enum": ["add", "delete"],
-                    "description": "add: treat keyword as a long job. delete: stop treating it as one."
+                    "description": "Action to perform: 'add' to register a keyword, 'delete' to remove it."
                 },
                 "keyword": {
                     "type": "string",
-                    "description": "One command token (e.g. ninja, webpack, mvn). Whole-word match."
+                    "description": "Command keyword token (e.g. 'mvn', 'cargo', 'ninja')."
                 },
                 "global": {
                     "type": "boolean",
                     "default": false,
-                    "description": "If true, also write/delete the keyword in config.toml. Default false (this session only)."
+                    "description": "Persist in config.toml for all future sessions (default false, current session only)."
                 }
             },
             "required": ["action", "keyword"]
@@ -171,11 +164,8 @@ impl Tool for BashKillByIdTool {
         "bash_kill_by_id"
     }
     fn description(&self) -> &str {
-        "Stop a still-running bash task by its bashid (from `[bash-await-decision]` \
-         or a live pane). The original bash pane prints \
-         `[task was canceled by bash kill tool]`. Do not start a replacement bash. \
-         Not for stopping detached resident services — use kill/systemctl/docker stop. \
-         Prefer this after a network/disk IO idle timeout."
+        "Terminate a running background bash command by its `bashid`. \
+         When to use: When stopping a stuck, timed-out, or unwanted background bash task."
     }
     fn parameters_schema(&self) -> serde_json::Value {
         json!({
@@ -183,7 +173,7 @@ impl Tool for BashKillByIdTool {
             "properties": {
                 "bashid": {
                     "type": "string",
-                    "description": "The bashid from the await-decision prompt (e.g. b-00000001)."
+                    "description": "The bashid of the running background bash command."
                 }
             },
             "required": ["bashid"]

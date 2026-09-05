@@ -175,27 +175,23 @@ impl Tool for ReadFileTool {
         "read_file"
     }
     fn description(&self) -> &str {
-        "Read a file from the filesystem. Returns the contents with 1-based \
-         line numbers (`<n>\\t<content>`). Omit `offset` and `limit` to read the full \
-         default page. If a footer reports remaining lines, call again with that `offset` \
-         and omit `limit` to continue. Prefer `code_explore` for feature/design/logic \
-         before reading many files. If the path is a directory its entries are listed \
-         instead. Relative paths resolve against the working directory."
+        "Read a specified file. Output is line-numbered text formatted as `<line_number>\\t<content>`. \
+         When to use: When you need to read a file."
     }
     fn parameters_schema(&self) -> serde_json::Value {
         json!({
             "type": "object",
             "properties": {
-                "file_path": { "type": "string", "description": "Path to read (absolute, or relative to the working directory)" },
+                "file_path": { "type": "string", "description": "Path to the file to read." },
                 "offset": {
                     "type": "integer",
                     "minimum": 1,
-                    "description": "Start line, 1-based. Only provide if the file is too large to read at once."
+                    "description": "Start line, 1-based. Provide ONLY when paginating a file that was reported too large."
                 },
                 "limit": {
                     "type": "integer",
                     "minimum": 1,
-                    "description": "The number of lines to read. Only provide if the file is too large to read at once."
+                    "description": "Number of lines to read. Provide ONLY when paginating a file that was reported too large."
                 }
             },
             "required": ["file_path"]

@@ -38,12 +38,9 @@ impl Tool for JeikcodeConfigReloadTool {
     }
 
     fn description(&self) -> &str {
-        "Reload JeikCode configuration after you have written `~/.atomcode/config.toml`, \
-         `~/.atomcode/mcp.json`, `<workspace>/.mcp.json`, or skills. Call this once the files \
-         are saved so the running session remounts models, MCP servers, and skills. \
-         The reload is applied after THIS turn completes; newly connected MCP tools become \
-         available on the NEXT user message. Do not ask the user to restart JeikCode. \
-         Equivalent to the user running `/reload` plus `/mcp reload`."
+        "Hot-reload configuration in the active running session without restarting. \
+         When to use: Trigger immediately after modifying and saving any configuration file \
+         (such as config.toml, mcp.json, etc.) under system-level or project-level ~/.atomcode or ~/.jeikcode."
     }
 
     fn parameters_schema(&self) -> serde_json::Value {
@@ -53,7 +50,7 @@ impl Tool for JeikcodeConfigReloadTool {
                 "scope": {
                     "type": "string",
                     "enum": ["all", "mcp", "config"],
-                    "description": "Optional hint. The runtime always reloads config.toml, MCP, and skills together."
+                    "description": "Optional scope hint ('all', 'mcp', 'config'). The runtime reloads config.toml, MCP, and skills together."
                 }
             }
         })

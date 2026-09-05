@@ -141,7 +141,6 @@ pub fn coding_tool_names() -> &'static [&'static str] {
             "grep",
             "glob",
             "search_replace",
-            "ast_grep",
             "todowrite",
             "jeikcode_config_guide",
             "jeikcode_config_reload",
@@ -164,7 +163,6 @@ pub fn coding_tool_names() -> &'static [&'static str] {
             "grep",
             "glob",
             "search_replace",
-            "ast_grep",
             "todowrite",
             "jeikcode_config_guide",
             "jeikcode_config_reload",
@@ -198,7 +196,6 @@ pub fn register_coding_tools_with_vision(reg: &mut ToolRegistry, vision: bool) {
     reg.register(Arc::new(GrepTool));
     reg.register(Arc::new(GlobTool));
     reg.register(Arc::new(SearchReplaceTool));
-    reg.register(Arc::new(AstGrepTool));
     reg.register(Arc::new(JeikcodeConfigGuideTool::new()));
     reg.register(Arc::new(JeikcodeConfigReloadTool::new()));
     // Gate on ATOMCODE_TODO env var (0/false/off → skip; anything else or absent → register).
@@ -823,7 +820,6 @@ mod tests {
         "grep",
         "glob",
         "search_replace",
-        "ast_grep",
         "todowrite",
         "jeikcode_config_guide",
         "jeikcode_config_reload",

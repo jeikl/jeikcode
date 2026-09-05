@@ -56,40 +56,36 @@ impl Tool for EditFileTool {
         "edit_file"
     }
     fn description(&self) -> &str {
-        "Replace text in a file. Same-file multi-hunk: ONE call with \
-         `edits:[{old_string,new_string},…]` (JSON array, applied serially on one \
-         buffer, one write; a failed hunk leaves the file UNCHANGED). Independent \
-         files: emit parallel `edit_file` calls. For one hunk, top-level \
-         `old_string`/`new_string`. Each `old_string` must be UNIQUE unless \
-         `replace_all` is true. Indentation, blank lines, and CRLF/LF differences \
-         are tolerated. Optional `start_line`/`end_line` are 1-based hints from the \
-         last read — not hard splices when `old_string` is present. Relative paths \
-         resolve against the working directory."
+        "Perform exact string replacements across multiple existing files. \
+         Modifying existing file contents must always prefer this tool. \
+         When to use: When modifying existing code or text in files. \
+         When NOT to use: NEVER use without reading the target file via `read_file` first. \
+         Do NOT use for creating new files."
     }
     fn parameters_schema(&self) -> serde_json::Value {
         json!({
             "type": "object",
             "properties": {
-                "file_path": { "type": "string", "description": "Path to edit (absolute, or relative to the working directory)" },
-                "old_string": { "type": "string", "description": "Single-hunk: text to find and replace. Omit when using `edits`. Unique unless replace_all is true." },
-                "new_string": { "type": "string", "description": "Single-hunk: replacement text. Omit when using `edits`." },
-                "replace_all": { "type": "boolean", "description": "Single-hunk: replace ALL occurrences (default false)." },
+                "file_path": { "type": "string", "description": "Path of the file to edit." },
+                "old_string": { "type": "string", "description": "Text to find and replace. Unique unless replace_all is true. Omit when using `edits`." },
+                "new_string": { "type": "string", "description": "Replacement text. Omit when using `edits`." },
+                "replace_all": { "type": "boolean", "description": "Replace all occurrences of old_string (default false)." },
                 "edits": {
                     "type": "array",
-                    "description": "Same-file multi-hunk batch as a JSON array of objects. Applied serially on one in-memory buffer; one write. Prefer this over N edit_file calls on the same file. Independent files should be parallel top-level calls.",
+                    "description": "Batch edits as a JSON array of {old_string, new_string} objects applied in order.",
                     "items": {
                         "type": "object",
                         "properties": {
-                            "old_string": { "type": "string", "description": "Exact unique snippet to replace. Indentation / blank-line / CRLF drift is tolerated." },
+                            "old_string": { "type": "string", "description": "Snippet to replace." },
                             "new_string": { "type": "string", "description": "Replacement snippet." },
                             "replace_all": { "type": "boolean" },
-                            "start_line": { "type": "integer", "description": "Optional 1-based hint from the last read. Locating still prefers old_string; small drift and earlier-hunk offsets are handled internally." },
-                            "end_line": { "type": "integer", "description": "Optional 1-based hint. Line-range splice is used only when old_string is omitted." }
+                            "start_line": { "type": "integer", "description": "Optional 1-based start line hint." },
+                            "end_line": { "type": "integer", "description": "Optional 1-based end line hint." }
                         }
                     }
                 },
-                "start_line": { "type": "integer", "description": "Optional 1-based hint from the last read. When old_string is present it only disambiguates / absorbs drift; it is not a hard splice." },
-                "end_line": { "type": "integer", "description": "Optional 1-based hint. Range splice only when old_string is omitted." }
+                "start_line": { "type": "integer", "description": "Optional 1-based start line hint." },
+                "end_line": { "type": "integer", "description": "Optional 1-based end line hint." }
             },
             "required": ["file_path"]
         })

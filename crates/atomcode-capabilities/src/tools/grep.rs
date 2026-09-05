@@ -58,19 +58,9 @@ impl Tool for GrepTool {
         "grep"
     }
     fn description(&self) -> &str {
-        "Search file contents by regular expression (literal / exact-string search).\n\
-         pattern (required JSON field): the regex itself. NEVER put it in `description`.\n\
-           GOOD: {\"pattern\":\"GetSalePostSettingData\",\"path\":\"src/auth\"}\n\
-           GOOD: {\"pattern\":\"positionTracking\"}\n\
-           BAD:  {\"description\":\" [Constraint: pattern: foo]\"}  — that is not `pattern`\n\
-           BAD:  {\"description\":\" [Constraint: path: a.cs, pattern: Foo]\"}\n\
-         path: directory or file to search (optional; default working directory).\n\
-         For a feature, design, or code-logic question, use `code_explore` \
-         (path = a directory/module, query = Chinese/English or a symbol) instead of grep.\n\
-         Smart-case: case-insensitive unless the pattern contains an uppercase letter. \
-         Escape regex metachars, e.g. `console\\.log\\(`. Use `glob` (e.g. `*.rs`) to \
-         restrict file types. Default 200 matches and 0 context lines; raise `max_results` \
-         or add `context` if needed. Results are capped; truncated pages report remaining work."
+        "Search file contents by regular expression or literal string. \
+         When to use: Searching for exact text, error strings, symbols, or regex patterns across files. \
+         When grep identifies a high-confidence code symbol, switch to `code_explore` to inspect its call graph and callers/callees."
     }
     fn parameters_schema(&self) -> serde_json::Value {
         json!({
@@ -78,15 +68,24 @@ impl Tool for GrepTool {
             "properties": {
                 "pattern": {
                     "type": "string",
-                    "description": "REQUIRED JSON field: the regex to search for. Example: 'GetSalePostSettingData'. Do NOT put this in `description` or wrap it as '[Constraint: pattern: …]'."
+                    "description": "Regex pattern or exact text to search for."
                 },
                 "path": {
                     "type": "string",
-                    "description": "Directory or file to search (default: the working directory). Pass as `path`, not inside `description`."
+                    "description": "Directory or file to search (default: working directory)."
                 },
-                "glob": { "type": "string", "description": "File-name glob to restrict which files are searched, e.g. `*.rs`, `*.{ts,tsx}` (ripgrep-style: no `/` matches at any depth)" },
-                "max_results": { "type": "integer", "description": "Max matching lines to return (default 200). Raise this instead of re-running a narrower crawl." },
-                "context": { "type": "integer", "description": "Lines of context around each match (default 0, max 10)" }
+                "glob": {
+                    "type": "string",
+                    "description": "File glob pattern to restrict search (e.g. '*.rs', '*.{ts,tsx}')."
+                },
+                "max_results": {
+                    "type": "integer",
+                    "description": "Maximum matching lines to return (default 200)."
+                },
+                "context": {
+                    "type": "integer",
+                    "description": "Lines of context before and after each match (default 0, max 10)."
+                }
             },
             "required": ["pattern"]
         })
@@ -836,22 +835,14 @@ mod tests {
     }
 
     #[test]
-    fn description_forbids_constraint_description_payload() {
+    fn description_and_schema_steer_to_code_explore() {
         let d = GrepTool.description();
-        assert!(
-            d.contains("never in `description`") || d.contains("NEVER put it in `description`"),
-            "{d}"
-        );
-        assert!(d.contains("[Constraint: pattern:"), "{d}");
         assert!(d.contains("code_explore"), "{d}");
         let schema = GrepTool.parameters_schema();
         let pat = schema["properties"]["pattern"]["description"]
             .as_str()
             .unwrap_or("");
-        assert!(
-            pat.contains("Constraint") || pat.contains("description"),
-            "{pat}"
-        );
+        assert!(pat.contains("Regex pattern"), "{pat}");
     }
 
     #[tokio::test]

@@ -486,9 +486,8 @@ impl atomcode_kernel::tool::Tool for FetchOutputTool {
     }
 
     fn description(&self) -> &str {
-        "Read more of a large tool output that was truncated. Pass the artifact_id from a \
-truncation marker. Omit `limit` to read the next 256 KiB; do not request tiny slices. \
-If the artifact is unavailable, re-run the original command instead."
+        "Fetch remaining chunks of a truncated tool output. \
+         When to use: When a previous tool output displayed a truncation marker with an `artifact_id`."
     }
 
     fn read_only_hint(&self) -> bool {
@@ -499,9 +498,9 @@ If the artifact is unavailable, re-run the original command instead."
         serde_json::json!({
             "type": "object",
             "properties": {
-                "artifact_id": {"type": "string", "description": "id from a truncation marker"},
-                "offset": {"type": "integer", "description": "byte offset to start at (default 0). After a partial result, use the next offset shown and omit `limit`."},
-                "limit": {"type": "integer", "description": "max bytes to return (default/max 262144). Omit unless you need a smaller window."}
+                "artifact_id": {"type": "string", "description": "The artifact_id from the truncation marker."},
+                "offset": {"type": "integer", "description": "Byte offset to start reading from."},
+                "limit": {"type": "integer", "description": "Maximum bytes to return (default/max 262144)."}
             },
             "required": ["artifact_id"]
         })

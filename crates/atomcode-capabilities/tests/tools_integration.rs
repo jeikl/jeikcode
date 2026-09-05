@@ -62,7 +62,6 @@ fn full_toolset_registers_and_mounts() {
         "grep",
         "glob",
         "search_replace",
-        "ast_grep",
     ] {
         assert!(
             names.iter().any(|n| n == core),

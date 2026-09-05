@@ -137,21 +137,15 @@ impl Tool for OpenFileTool {
         "open_file"
     }
     fn description(&self) -> &str {
-        "Open a local file, directory, or URL in the user's default GUI application — a browser \
-         for HTML/URLs, an image viewer for PNG/JPG, a PDF reader for PDF, or the OS file \
-         manager for directories. Supports http:// and https:// URLs (opens in the default \
-         browser). USE ONLY when the user asks to preview/open/view a file or directory, or \
-         when previewing is the obvious next step AND you have asked first — do NOT auto-open \
-         after every write_file/edit_file. Prefer this tool over shelling out to `open`, \
-         `xdg-open`, `start`, or `wslview`. Cross-platform dispatch is built in; headless / SSH \
-         / CI sessions refuse with a clear reason so you can give the user the path instead of \
-         pretending a window opened."
+        "Open a local file or URL in the default OS desktop application. \
+         When to use: Trigger when the user explicitly asks to open or preview a file, or when installation, \
+         system configuration, or workflow tasks strictly require launching an external program."
     }
     fn parameters_schema(&self) -> serde_json::Value {
         json!({
             "type": "object",
             "properties": {
-                "file_path": { "type": "string", "description": "File or directory path to open, or an http:// / https:// URL. Absolute, or relative to the working directory. Must exist (for file paths)." }
+                "file_path": { "type": "string", "description": "File or directory path to open, or an http:// / https:// URL." }
             },
             "required": ["file_path"]
         })

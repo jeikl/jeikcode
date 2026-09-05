@@ -11,13 +11,8 @@ use serde::Deserialize;
 use serde_json::json;
 use std::path::Path;
 
-const MEMORY_DESC: &str = "Persist a durable, non-obvious learning about the user or THIS \
-project so future sessions remember it. Use `action:\"remember\"` when the user states a \
-lasting preference, corrects you in a way that should stick, or you discover a non-obvious \
-project convention/quirk. Use `action:\"forget\"` to drop entries matching a keyword, and \
-`action:\"list\"` to review current memory. DO NOT record: obvious facts, standard \
-tool/language behavior, anything already in AGENTS.md/.atomcode.md, verbose explanations, \
-or session-specific one-offs. Keep each entry to one concise line.";
+const MEMORY_DESC: &str = "Persist facts or preferences across sessions. \
+When to use: When recording user workflow preferences or non-obvious project conventions.";
 
 pub struct MemoryTool;
 
@@ -66,10 +61,24 @@ impl Tool for MemoryTool {
         json!({
             "type": "object",
             "properties": {
-                "action": { "type": "string", "enum": ["remember", "forget", "list"], "description": "remember a fact, forget entries by keyword, or list current memory" },
-                "content": { "type": "string", "description": "The concise fact to remember (required for action=remember)" },
-                "keyword": { "type": "string", "description": "Substring of entries to remove (required for action=forget)" },
-                "scope": { "type": "string", "enum": ["project", "global"], "description": "project (default) = this repo only; global = all projects" }
+                "action": {
+                    "type": "string",
+                    "enum": ["remember", "forget", "list"],
+                    "description": "Action to perform: 'remember' to persist a fact, 'forget' to remove by keyword, or 'list' to view current entries."
+                },
+                "content": {
+                    "type": "string",
+                    "description": "Concise fact or preference to remember (required for action=remember)."
+                },
+                "keyword": {
+                    "type": "string",
+                    "description": "Substring match to remove (required for action=forget)."
+                },
+                "scope": {
+                    "type": "string",
+                    "enum": ["project", "global"],
+                    "description": "'project' (default, current repository) or 'global' (all projects)."
+                }
             },
             "required": ["action"]
         })

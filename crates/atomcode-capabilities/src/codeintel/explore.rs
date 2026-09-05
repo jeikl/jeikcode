@@ -343,64 +343,6 @@ struct Args {
     path: Option<String>,
 }
 
-fn looks_like_single_file(p: &str) -> bool {
-    let t = p.trim().trim_end_matches(['/', '\\']);
-    let Some(ext) = Path::new(t).extension().and_then(|e| e.to_str()) else {
-        return false;
-    };
-    matches!(
-        ext.to_ascii_lowercase().as_str(),
-        "rs" | "py"
-            | "ts"
-            | "tsx"
-            | "js"
-            | "jsx"
-            | "go"
-            | "java"
-            | "kt"
-            | "cs"
-            | "c"
-            | "cc"
-            | "cpp"
-            | "h"
-            | "hpp"
-            | "php"
-            | "rb"
-            | "swift"
-            | "scala"
-            | "vue"
-            | "svelte"
-            | "md"
-            | "toml"
-            | "json"
-            | "yaml"
-            | "yml"
-            | "xml"
-            | "sql"
-            | "html"
-            | "css"
-            | "sh"
-            | "txt"
-            | "lock"
-    )
-}
-
-fn file_scope_err(file: &Path, workspace: &Path) -> String {
-    let rel = crate::pathnorm::to_display(file.strip_prefix(workspace).unwrap_or(file));
-    let parent = file
-        .parent()
-        .filter(|p| !p.as_os_str().is_empty())
-        .map(|p| crate::pathnorm::to_display(p.strip_prefix(workspace).unwrap_or(p)))
-        .filter(|s| !s.is_empty() && s != ".")
-        .unwrap_or_else(|| "the parent module directory".to_string());
-    format!(
-        "code_explore `path` must be a directory or module, not a single file (`{rel}`). \
-         A file path is `read_file` and misses the call graph. \
-         Retry: path=`{parent}`  query=<precise symbol or Chinese/English question> \
-         — put the symbol in `query`, never in `path`."
-    )
-}
-
 /// Tokens that mean "the whole workspace".
 fn is_workspace_root_token(p: &str) -> bool {
     let t = p.trim().trim_end_matches(['/', '\\']);
@@ -461,21 +403,12 @@ impl Tool for CodeExploreTool {
     }
 
     fn description(&self) -> &str {
-        "PRIMARY code-intelligence tool. Search inside the workspace or a directory/module — never a file.\n\
-         \n\
-         path (required): workspace root or a directory/module.\n\
-           GOOD: .   crates/atomcode-coding   src/auth   backend/service\n\
-           BAD:  src/auth.rs   crates/foo/src/lib.rs   foo.go   (a file → use read_file)\n\
-         query (required): the search term, either\n\
-           - a precise symbol: CodeExploreTool, assemble_parts, AuthService\n\
-           - natural Chinese or English: 鉴权怎么做, how does session compaction work\n\
-           Put the symbol/question HERE, not in path. This field is `query`, never `description`.\n\
-         \n\
-         Inside that directory the index finds the symbol or the feature and returns the call graph \
-         plus verbatim source. Narrowing path to one file misses callers/callees and is identical to \
-         read_file — do not do that. Prefer this over grep+read. Fire several scoped DIRECTORY calls \
-         in parallel. A thin result is INCONCLUSIVE: retry synonyms / a broader directory; CATALOG \
-         files are related, not absence. Reserve grep for exact literals."
+        "Perform code-graph retrieval across the repository, a specific directory, or a target file. \
+         Resolves complete call graphs, logic flows, and symbol relationships from localized clues, \
+         far more efficient than grep. \
+         When to use: Trigger when user queries involve business keywords (Chinese or English), or \
+         when previous operations (`grep`, `read_file`, `glob`) reveal relevant comments, exact symbols, \
+         symbol keywords, or domain jargon/terminology."
     }
 
     fn parameters_schema(&self) -> serde_json::Value {
@@ -484,15 +417,15 @@ impl Tool for CodeExploreTool {
             "properties": {
                 "path": {
                     "type": "string",
-                    "description": "REQUIRED. Workspace root ('.', './', '~', or the working directory) or a directory/module such as 'crates/atomcode-coding', 'src/auth', 'backend/service'. NEVER a file ('src/auth.rs', 'lib.rs', 'foo.go') — that is read_file and will error. Put the symbol or question in `query`, not here."
+                    "description": "Scope path to search: workspace root ('.'), a directory/module (e.g. 'crates/atomcode-coding', 'src/auth'), or a specific file."
                 },
                 "query": {
                     "type": "string",
-                    "description": "REQUIRED. Precise symbol name (CodeExploreTool, assemble_parts) OR natural language in Chinese or English (鉴权怎么做, how does X work). This is `query`, never `description` or `pattern`. Do not put the symbol in `path`."
+                    "description": "Precise symbol name or natural language in Chinese or English (e.g. business concept, domain jargon, or question)."
                 },
                 "max_files": {
                     "type": "integer",
-                    "description": "Maximum number of files to render source code from (default: 12, max: 30)"
+                    "description": "Maximum number of files to render source code from (default: 12, max: 30)."
                 }
             },
             "required": ["query", "path"]
@@ -529,14 +462,6 @@ impl Tool for CodeExploreTool {
                 );
             }
         };
-        if looks_like_single_file(path_str) {
-            let resolved = if Path::new(path_str).is_absolute() {
-                PathBuf::from(path_str)
-            } else {
-                ctx.working_dir.join(path_str)
-            };
-            return err(file_scope_err(&resolved, &ctx.working_dir));
-        }
 
         let root = canonical(&ctx.working_dir);
         let max_files = a
@@ -598,11 +523,6 @@ impl Tool for CodeExploreTool {
                 }
             })
         };
-        if let Some(sc) = scope_path.as_deref() {
-            if sc.is_file() {
-                return err(file_scope_err(sc, &root));
-            }
-        }
 
         let t_index_start = std::time::Instant::now();
         let graph = self.index.get_scoped(&root, scope_path.as_deref());

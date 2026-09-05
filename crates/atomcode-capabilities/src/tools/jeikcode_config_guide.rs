@@ -108,7 +108,9 @@ impl Tool for JeikcodeConfigGuideTool {
     }
 
     fn description(&self) -> &str {
-        "Primary configuration guide and knowledge tool for JeikCode. MUST be invoked whenever the user asks ANY question about JeikCode configurations, settings, system prompts, rules.yaml / init.yaml, project constraints (AGENTS.md, ATOMCODE.md, dbwords.md, rules.md, glossary.md), models & providers, reasoning effort/history, MCP servers, Skills, Cilin thesaurus, tool timeouts, or ~/.atomcode directory layout. NOTE: When the user asks what tools, MCPs, or skills are currently mounted/loaded in the active session, always check your own context, system prompt, and memory FIRST. If not mounted, answer honestly and ask the user if they would like you to look up how to configure them in JeikCode. Do NOT invoke this tool to answer what is currently mounted. However, if the user explicitly asks about the static MCP configuration files, you should query the MCP configuration and report how many are successfully configured/mounted."
+        "Query official JeikCode configuration guides, parameter specifications, prompts, models, and directory structures to answer or modify configurations for the active agent. \
+         When to use: Trigger when the user explicitly asks about, or requests assistance configuring, JeikCode settings, prompts, adding/deleting/modifying/querying models, providers, or model parameter configurations, MCP servers, skills, or other related setups. \
+         When NOT to use: Do NOT use to query which tools or MCPs are currently mounted in the active session (inspect your active context and prompts directly)."
     }
 
     fn parameters_schema(&self) -> serde_json::Value {
@@ -139,7 +141,7 @@ impl Tool for JeikcodeConfigGuideTool {
                         "all"
                     ],
                     "default": "overview",
-                    "description": "Category of configuration guide to retrieve: 'overview' (index map), 'prompts' (init.yaml / rules.yaml hot-reload & seed docs), 'models' (models, providers, reasoning effort/history, tokens), 'mcp' (mcp.json), 'skills' (SKILL.md & plugins), 'thesaurus' (词林 bilingual code search), 'tools' (bash hard cap, short timeouts, output fold, coding knobs), 'directories' (full ~/.atomcode map), 'project' (AGENTS.md, ATOMCODE.md, rules.md, glossary.md, dbwords.md project constraints), 'updates' (default update source, /upgrade command, release build), 'all' (complete guide)."
+                    "description": "Category of configuration guide to retrieve: 'overview', 'prompts', 'models', 'providers', 'mcp', 'skills', 'thesaurus', 'tools', 'directories', 'project', 'updates', or 'all'."
                 }
             }
         })

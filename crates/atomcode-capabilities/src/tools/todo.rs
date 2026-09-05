@@ -679,7 +679,10 @@ impl TodoTool {
     }
 }
 
-const TODOWRITE_DESCRIPTION: &str = "Create and maintain a structured task list for the current coding session. \
+const TODOWRITE_DESCRIPTION: &str = "Maintain a structured task checklist for the target objective to plan and \
+standardize execution steps, prevent step omissions, and ensure high-quality delivery.\n\
+When to use: When a task requires planning involving 3 or more steps, or when step statuses need to be updated during execution.\n\
+When NOT to use: Forbidden when the execution plan involves only 2 turns or fewer.\n\
 Prefer ONE `actions` array per turn for every REAL change of the SAME kind you already know.\n\
 Do NOT call this tool unless the list must change. Never re-mark an item already in that status \
 (no-op — wasted turn). A successful result reprints the numbered list — use THOSE ids next; \

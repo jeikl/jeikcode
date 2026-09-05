@@ -24,17 +24,17 @@ impl Tool for WriteFileTool {
         "write_file"
     }
     fn description(&self) -> &str {
-        "Write content to a file: creates it (and any missing parent directories) or \
-         OVERWRITES it if it exists. Use this for new files or full rewrites; for small \
-         changes to an existing file prefer edit_file. Relative paths resolve against \
-         the working directory."
+        "Write full content to a file, creating parent directories and overwriting existing files. \
+         When to use: Creating brand-new files, or completely rewriting an existing file. \
+         When NOT to use: NEVER overwrite an existing file without reading it via `read_file` first. \
+         Do NOT use for partial edits (use `edit_file` instead)."
     }
     fn parameters_schema(&self) -> serde_json::Value {
         json!({
             "type": "object",
             "properties": {
-                "file_path": { "type": "string", "description": "Path to write (absolute, or relative to the working directory)" },
-                "content": { "type": "string", "description": "The full content to write" }
+                "file_path": { "type": "string", "description": "Target file path to write." },
+                "content": { "type": "string", "description": "Full content to write." }
             },
             "required": ["file_path", "content"]
         })

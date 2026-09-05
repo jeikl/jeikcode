@@ -34,18 +34,15 @@ impl Tool for ListDirTool {
         "list_directory"
     }
     fn description(&self) -> &str {
-        "List ONE directory like `ls` (indented; directories end with '/'). `depth` \
-         default 1 = this directory plus immediate children (max 6). This is NOT a \
-         workspace overview — use `repo_map` for that, and do not pair the two. \
-         Build/VCS/cache directories (node_modules, .git, target, …) are skipped. \
-         Relative paths resolve against the working directory."
+        "List immediate files and subdirectories in a directory. \
+         When to use: When inspecting the direct children of one known directory."
     }
     fn parameters_schema(&self) -> serde_json::Value {
         json!({
             "type": "object",
             "properties": {
-                "path": { "type": "string", "description": "Directory to list (default: the working directory)" },
-                "depth": { "type": "integer", "description": "Max recursion depth (default 1, max 6). 1 = this directory plus immediate children. Workspace tree → repo_map." }
+                "path": { "type": "string", "description": "Directory to list (default: working directory)." },
+                "depth": { "type": "integer", "description": "Recursion depth (default 1, max 6)." }
             }
         })
     }

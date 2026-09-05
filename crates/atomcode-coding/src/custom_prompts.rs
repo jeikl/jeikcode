@@ -642,10 +642,10 @@ doing_tasks:
             .surgical_context
             .as_deref()
             .unwrap();
-        assert!(surgical.contains("NEVER pass"));
+        assert!(surgical.contains("SURGICAL CONTEXT"));
         assert!(
-            surgical.contains("crates/atomcode-coding") && surgical.contains("src/auth.rs"),
-            "surgical_context must show directory GOOD / file BAD: {surgical}"
+            surgical.contains("crates/atomcode-coding") && surgical.contains("code_explore"),
+            "surgical_context must mention code_explore and module path: {surgical}"
         );
         let first_round = rules
             .workflow

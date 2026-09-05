@@ -34,19 +34,16 @@ impl Tool for GlobTool {
         "glob"
     }
     fn description(&self) -> &str {
-        "Find files by glob pattern (e.g. `**/*.rs`, `src/**/*.ts`) under a base \
-         directory, gitignore-aware. `**` crosses directories, `*` does not. Build/VCS/ \
-         cache directories are skipped. Defaults to 300 matches; raise `limit` or narrow \
-         the pattern/path if truncated. Relative base paths resolve against the working \
-         directory."
+        "Find files matching a glob pattern across directories (e.g. `**/*.rs`, `src/**/*.ts`). \
+         When to use: When locating file paths by name, extension, or directory layout."
     }
     fn parameters_schema(&self) -> serde_json::Value {
         json!({
             "type": "object",
             "properties": {
-                "pattern": { "type": "string", "description": "Glob pattern, e.g. **/*.rs" },
-                "path": { "type": "string", "description": "Base directory to search (default: the working directory)" },
-                "limit": { "type": "integer", "description": "Max paths to return (default 300, max 2000). Raise this instead of splitting into many globs." }
+                "pattern": { "type": "string", "description": "Glob pattern, e.g. **/*.rs or src/**/*.ts." },
+                "path": { "type": "string", "description": "Base directory to search (default: working directory)." },
+                "limit": { "type": "integer", "description": "Maximum paths to return (default 300, max 2000)." }
             },
             "required": ["pattern"]
         })

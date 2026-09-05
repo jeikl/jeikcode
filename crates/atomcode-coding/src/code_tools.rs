@@ -14,16 +14,16 @@ pub const CODE_TOOLS_HEADER: &str = "=== CODE TOOLS ===";
 const CARD: &str = "\
 === CODE TOOLS ===
 Natural-language code question or precise symbol lookup \
-→ `code_explore(path=<DIR/module>, query=<中文/English or symbol>)`
+→ `code_explore(path=<DIR/module/file>, query=<中文/English or symbol>)`
   GOOD: path=crates/atomcode-coding  query=CodeExploreTool
   GOOD: path=src/auth               query=用户登录如何校验
   GOOD: path=.                      query=会话压缩如何工作
-  BAD:  path=src/auth.rs            (file → read_file)
+  GOOD: path=src/auth.rs            query=TokenClaims
 Workspace layout only → `repo_map` (do not pair with list_directory)
 Exact literals / error strings / TODO → `grep(pattern, path)`
 Already-located file and line → `read_file` (omit `offset`/`limit` to read the full default page; \
 call again with that offset and omit `limit` to finish the file)
-Do not wander with grep+read in place of `code_explore`. Never pass a file to `code_explore`.
+Do not wander with grep+read in place of `code_explore`.
 A thin/empty `code_explore` result is not absence — read Coverage/CATALOG and retry synonyms \
 or a broader directory.";
 
@@ -77,7 +77,7 @@ mod tests {
             c.messages[1].text.contains("src/auth")
                 && c.messages[1].text.contains("src/auth.rs")
                 && c.messages[1].text.contains("read_file"),
-            "card must show directory GOOD / file BAD before the model calls: {}",
+            "card must guide directory, root, or file queries before the model calls: {}",
             c.messages[1].text
         );
         assert_eq!(c.messages[2].text, "hi");

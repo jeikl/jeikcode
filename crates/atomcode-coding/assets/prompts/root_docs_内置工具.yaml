@@ -245,40 +245,38 @@ tools:
   # ============================================================================
   - name: "repo_map"
     category: "codeintel"
-    # 【中文】：生成索引支撑的完整代码库文件树与 AST 符号地图。
-    description: "Generate complete, index-backed file tree and AST declaration map of the workspace."
+    description: "Generate a complete index-backed directory tree and architectural map of the repository, displaying module hierarchy and file layouts."
     parameters:
       path:
         type: "string"
         required: false
-        default: "."
-        description: "Root path."
-      max_depth:
+        description: "Target directory or workspace root to map. Defaults to current working directory."
+      max_files:
         type: "integer"
         required: false
-        default: 3
-        description: "Max depth."
+        description: "Maximum number of files whose symbols are rendered in full/symbols mode (default: 100, max: 300)."
+      mode:
+        type: "string"
+        required: false
+        description: "Detail level: 'tree' (structure-only directory tree, default), 'full' (directory tree with budgeted symbol outlines), or 'symbols' (symbols only)."
 
   - name: "code_explore"
     category: "codeintel"
-    # 【中文核心工具】：全能代码探索与语义问答工具（核心主力工具，不仅用于架构探索！）。
-    # 【使用技巧】：`path` 必须是目录/模块（crates/atomcode-coding、src/auth），禁止单个文件（那是 read_file）。
-    # 在该目录下用 `query` 查精准符号名（CodeExploreTool）或自然中英文（鉴权怎么做 / how does X work）。
-    # 例：path="crates/atomcode-coding" query="CodeExploreTool"；path="src/auth" query="用户登录如何校验"。
-    # 工具会自动进行中英 NLP 语义分析、同义词扩展、AST 语法树调用链路追踪，并精准返回核心实现代码。
-    description: "PRIMARY code-intelligence tool. path MUST be a directory/module (crates/atomcode-coding, src/auth), never a file. query is a precise symbol or natural Chinese/English."
+    description: "Perform code-graph retrieval across the repository, a specific directory, or a target file. Resolves complete call graphs, logic flows, and symbol relationships from localized clues, far more efficient than grep."
     parameters:
       path:
         type: "string"
-        required: true
-        # 【中文】：【必填】目录或模块（crates/atomcode-coding、src/auth）。禁止单个文件（src/auth.rs → read_file）。禁止 `.` / 工作区根（→ repo_map）。
-        description: "REQUIRED directory or module (e.g. 'crates/atomcode-coding', 'src/auth'). NEVER a file ('src/auth.rs') — that is read_file. NEVER '.' — call repo_map first."
+        required: false
+        description: "Target repository, directory, or file path to explore (defaults to current working directory)."
       query:
         type: "string"
         required: true
-        # 【中文】：精准符号名（CodeExploreTool）或自然中英文（鉴权怎么做、how does session compaction work）。符号放 query，不要放 path。
-        description: "Precise symbol name (CodeExploreTool) OR natural Chinese/English (鉴权怎么做, how does X work). Put the symbol here, not in path."
-    guidance: "path is a directory/module after repo_map; query is a symbol or Chinese/English. Never pass a file as path. Never pass '.'."
+        description: "Keyword, Chinese business term, concept, or symbol name to search across the codebase."
+      max_files:
+        type: "integer"
+        required: false
+        description: "Maximum number of files to inspect (default: 30, max: 100)."
+    guidance: "path can be the workspace root, a directory/module, or a target file; query is a symbol or Chinese/English keyword."
 
   # ============================================================================
   # 三、任务管理与交互 (Task & Interaction)

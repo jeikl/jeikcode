@@ -72,35 +72,10 @@ impl Tool for RepoMapTool {
     }
 
     fn description(&self) -> &str {
-        "WHEN TO USE — FIRST CALL on any unfamiliar repo, BEFORE writing code or running deeper \
-         searches. Prints the COMPLETE index-backed DIRECTORY TREE: every top-level file is listed \
-         by name and every subdirectory is recursed to the deepest level (files inside deeper \
-         directories are counted, not named — never elided), so you see the real module/layer \
-         layout in one round. Do NOT also call list_directory — that is `ls` for one directory \
-         you already know, not a second workspace tree.\n\
-         \n\
-         HOW IT FITS THE FLOW — structure first, then dive:\n\
-         1. Round 1: `repo_map` ONLY (full layout) — never skip on an unfamiliar repo. Do not \
-         pair it with list_directory.\n\
-         2. Dive with several parallel `code_explore` calls (one per DIRECTORY/module + question \
-         or symbol; never a file as `path`). `grep` only for exact literals. `read_file` only the \
-         hot spans Coverage/CATALOG already named.\n\
-         3. Only if you need actual file names under a specific dir you already know, use \
-         list_directory (like `ls`, default depth 1); only to read a specific file's full body, \
-         use read_file.\n\
-         \n\
-         MODES — default `tree` = structure only (small, never truncated). Pass `mode: full` \
-         (tree + budgeted symbol outline) or `symbols` (symbols only) when you already know the \
-         layout and need types/functions. In a multi-project workspace, pass `path:` to map ONE repo \
-         at a time (the default spans ALL repos as separate subtrees; `.` is allowed here). To see \
-         files under deeper directories, call `code_explore` with a concrete subdirectory from this \
-         tree (directory/module, never a `.rs`/`.ts` file) — never `path: '.'`. If hits miss a \
-         subdirectory shown here, re-explore that directory.\n\
-         \n\
-         CAUTION — a directory tree is NOT proof a mechanism is absent: it shows WHERE things live, \
-         not WHAT exists. Empty-looking trees can hide code in sibling crates/layers (interface here, \
-         impl elsewhere). Do not conclude 'project lacks X' from the tree alone — follow up with \
-         `code_explore` on a concrete subdirectory."
+        "Generate a complete index-backed directory tree and architectural map of the repository, \
+         displaying module hierarchy and file layouts. \
+         When to use: When exploring an unfamiliar repository layout, architectural layers, or multi-module workspace structure. \
+         When NOT to use: Do NOT use when the target file or module is already known (use grep, read_file, or code_explore directly)."
     }
 
     fn parameters_schema(&self) -> serde_json::Value {
@@ -109,16 +84,16 @@ impl Tool for RepoMapTool {
             "properties": {
                 "path": {
                     "type": "string",
-                    "description": "Subdirectory or workspace path to map (default: working directory root)"
+                    "description": "Target directory or workspace root to map. Defaults to current working directory."
                 },
                 "max_files": {
                     "type": "integer",
-                    "description": "Maximum number of files whose SYMBOLS are rendered in mode full/symbols (default 100, max 300). The directory tree always shows every directory."
+                    "description": "Maximum number of files whose symbols are rendered in full/symbols mode (default: 100, max: 300)."
                 },
                 "mode": {
                     "type": "string",
                     "enum": ["tree", "full", "symbols"],
-                    "description": "tree (default): complete directory tree only (structure exploration); full: directory tree + budgeted symbol detail; symbols: symbol detail only"
+                    "description": "Detail level: 'tree' (structure-only directory tree, default), 'full' (directory tree with budgeted symbol outlines), or 'symbols' (symbols only)."
                 }
             }
         })

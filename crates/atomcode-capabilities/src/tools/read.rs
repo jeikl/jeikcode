@@ -44,19 +44,12 @@ impl ReadFileTool {
     }
 }
 
-fn continuation_footer(start: usize, end: usize, total: usize, soft_braked: bool) -> String {
+fn continuation_footer(start: usize, end: usize, total: usize) -> String {
     let remaining = total.saturating_sub(end);
-    if soft_braked {
-        format!(
-            "\n[Showing lines {start}-{end} of {total}. Large file (>1000 lines) truncated early to save context. \
-             DO NOT mechanically paginate through this file. Use `grep` to find the exact symbol, then read a targeted range with `offset` and `limit`.]"
-        )
-    } else {
-        format!(
-            "\n[Showing lines {start}-{end} of {total}. {remaining} lines remaining. \
-             Avoid reading large files end-to-end; prefer targeted slices using `offset` and `limit` around specific symbols found via `grep`.]"
-        )
-    }
+    format!(
+        "\n[Showing lines {start}-{end} of {total}. {remaining} lines remaining. \
+         Avoid reading large files end-to-end; prefer targeted slices using `offset` and `limit` around specific symbols found via `grep`.]"
+    )
 }
 
 /// Cap on an image read back to a vision model: base64 inflates ~33% and every image
@@ -306,12 +299,8 @@ impl Tool for ReadFileTool {
             ));
         }
         let skill_md = path.file_name().is_some_and(|n| n == "SKILL.md");
-        let is_unsliced_large_file =
-            !skill_md && a.offset.is_none() && a.limit.is_none() && total > 1000;
         let page_limit = if skill_md {
             a.limit.unwrap_or(usize::MAX)
-        } else if is_unsliced_large_file {
-            300
         } else {
             a.limit.unwrap_or(DEFAULT_READ_LIMIT)
         };
@@ -341,7 +330,7 @@ impl Tool for ReadFileTool {
             };
             let candidate_end = start_idx + i + 1;
             let footer_len = if candidate_end < total {
-                continuation_footer(start, candidate_end, total, is_unsliced_large_file).len()
+                continuation_footer(start, candidate_end, total).len()
             } else if start > 1 {
                 format!("\n[Showing lines {start}-{candidate_end} of {total} (end)]").len()
             } else {
@@ -365,7 +354,6 @@ impl Tool for ReadFileTool {
                 start,
                 end_idx,
                 total,
-                is_unsliced_large_file,
             ));
         } else if start > 1 {
             out.push_str(&format!(
@@ -634,11 +622,10 @@ mod tests {
             .await;
 
         assert!(!r.is_error, "{}", r.content);
-        assert!(r.content.contains("300→line 300"), "{}", r.content);
-        assert!(!r.content.contains("line 301"), "{}", r.content);
+        assert!(r.content.contains("1500→line 1500"), "{}", r.content);
+        assert!(!r.content.contains("line 1501"), "{}", r.content);
         assert!(
-            r.content.contains("Showing lines 1-300 of 3505")
-                && r.content.contains("Large file (>1000 lines)")
+            r.content.contains("Showing lines 1-1500 of 3505. 2005 lines remaining.")
                 && !r.content.contains("read_file("),
             "{}",
             r.content
@@ -646,12 +633,12 @@ mod tests {
 
         let page2 = ReadFileTool::default()
             .execute(
-                r#"{"file_path":"notes.txt","offset":301,"limit":100}"#,
+                r#"{"file_path":"notes.txt","offset":1501,"limit":100}"#,
                 &ctx(d.path()),
             )
             .await;
         assert!(!page2.is_error, "{}", page2.content);
-        assert!(page2.content.contains("301→line 301"), "{}", page2.content);
+        assert!(page2.content.contains("1501→line 1501"), "{}", page2.content);
         assert!(!page2.content.contains("read_file("), "{}", page2.content);
     }
 
@@ -698,15 +685,12 @@ mod tests {
 
     #[test]
     fn continuation_footer_does_not_contain_callable_json() {
-        let footer = continuation_footer(1, 10, 100, false);
+        let footer = continuation_footer(1, 10, 100);
         assert!(!footer.contains("read_file("), "{footer}");
         assert!(footer.contains("90 lines remaining"), "{footer}");
-
-        let soft_braked = continuation_footer(1, 300, 2000, true);
-        assert!(!soft_braked.contains("read_file("), "{soft_braked}");
         assert!(
-            soft_braked.contains("Large file (>1000 lines)"),
-            "{soft_braked}"
+            footer.contains("Avoid reading large files end-to-end"),
+            "{footer}"
         );
     }
 
@@ -987,9 +971,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn large_file_triggers_soft_brake() {
+    async fn large_file_paginates_without_continuation_json() {
         let d = tempfile::tempdir().unwrap();
-        let text = (1..=1200)
+        let text = (1..=1800)
             .map(|n| format!("line_{n}"))
             .collect::<Vec<_>>()
             .join("\n");
@@ -1001,14 +985,14 @@ mod tests {
 
         assert!(!r.is_error, "{}", r.content);
         assert!(
-            r.content.contains("Large file (>1000 lines)"),
+            r.content.contains("Showing lines 1-1500 of 1800. 300 lines remaining."),
             "{}",
             r.content
         );
         assert!(!r.content.contains("read_file("), "{}", r.content);
         assert!(r.content.contains("1→line_1"), "{}", r.content);
-        assert!(r.content.contains("300→line_300"), "{}", r.content);
-        assert!(!r.content.contains("line_305"), "{}", r.content);
+        assert!(r.content.contains("1500→line_1500"), "{}", r.content);
+        assert!(!r.content.contains("line_1501"), "{}", r.content);
     }
 
     #[test]

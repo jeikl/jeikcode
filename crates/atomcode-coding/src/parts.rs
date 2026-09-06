@@ -756,6 +756,7 @@ async fn prepare_with_plugin_hooks_reusing_lease(
         cfg.working_dir.clone(),
         turn_execution_policy.clone(),
     )));
+    hooks.push(Arc::new(atomcode_capabilities::session::WriteStateHook::new()));
     // Todo hook (native runtime path — the live TUI + webui): per-turn <system-reminder> of the
     // current list so the model keeps it accurate after compaction, PLUS an `offer_continuation`
     // that nudges once to close out open items when the model tries to stop. Gated on the SAME

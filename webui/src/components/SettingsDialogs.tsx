@@ -159,17 +159,138 @@ export function LanguageDialog({ onClose }: { onClose: () => void }) {
   );
 }
 
+/** 提供商账号编辑弹窗 */
+function AccountFormDialog({
+  editing,
+  existingIds = [],
+  onClose,
+  onSaved,
+}: {
+  editing?: { id: string; type: string; base_url?: string; has_api_key: boolean; skip_tls_verify?: boolean };
+  existingIds?: string[];
+  onClose: () => void;
+  onSaved: () => void;
+}) {
+  const { t } = useSettings();
+  const isEdit = !!editing;
+  const [id, setId] = useState(editing?.id ?? '');
+  const [type, setType] = useState(normalizeProviderType(editing?.type));
+  const [baseUrl, setBaseUrl] = useState(editing?.base_url ?? '');
+  const [apiKey, setApiKey] = useState('');
+  const [skipTls, setSkipTls] = useState(Boolean(editing?.skip_tls_verify));
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const handleSave = async () => {
+    const trimmedId = id.trim();
+    if (!trimmedId) {
+      setError(t('settings.nameModelRequired'));
+      return;
+    }
+    if (!isEdit && existingIds.includes(trimmedId)) {
+      setError(t('settings.nameExists'));
+      return;
+    }
+    setSaving(true);
+    setError(null);
+    try {
+      await createOrUpdateAccount(trimmedId, {
+        id: trimmedId,
+        type,
+        base_url: baseUrl.trim() || undefined,
+        api_key: apiKey.trim() || undefined,
+        skip_tls_verify: skipTls,
+      });
+      onSaved();
+    } catch (e: unknown) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <SettingsModal
+      title={isEdit ? t('settings.editAccount') : t('settings.addAccount')}
+      hideFooter
+      onClose={onClose}
+    >
+      <div class="field-group add-model-form">
+        <div class="add-model-field">
+          <label class="add-model-label">{t('settings.accountName')}</label>
+          <input
+            class="menu-input"
+            type="text"
+            placeholder="openai / deepseek / gemini"
+            disabled={isEdit}
+            value={id}
+            onInput={(e) => setId((e.target as HTMLInputElement).value)}
+          />
+        </div>
+
+        <div class="add-model-field">
+          <label class="add-model-label">{t('settings.providerType')}</label>
+          <Select
+            value={type}
+            options={PROVIDER_TYPE_OPTIONS}
+            onChange={(v) => setType(v)}
+          />
+        </div>
+
+        <div class="add-model-field">
+          <label class="add-model-label">{t('settings.baseUrl')}</label>
+          <input
+            class="menu-input"
+            type="text"
+            placeholder="https://api.openai.com/v1"
+            value={baseUrl}
+            onInput={(e) => setBaseUrl((e.target as HTMLInputElement).value)}
+          />
+        </div>
+
+        <div class="add-model-field">
+          <label class="add-model-label">{t('settings.apiKeyInput')}</label>
+          <input
+            class="menu-input"
+            type="password"
+            placeholder={isEdit ? t('settings.apiKeyKeep') : 'sk-…'}
+            value={apiKey}
+            onInput={(e) => setApiKey((e.target as HTMLInputElement).value)}
+          />
+        </div>
+
+        {error && <div class="modal-error">{error}</div>}
+
+        <div class="modal-footer" style={{ marginTop: '16px', padding: 0 }}>
+          <button class="btn" type="button" onClick={onClose} disabled={saving}>
+            {t('settings.close')}
+          </button>
+          <button class="btn btn-primary" type="button" onClick={handleSave} disabled={saving}>
+            {saving ? t('settings.saving') : t('settings.save')}
+          </button>
+        </div>
+      </div>
+    </SettingsModal>
+  );
+}
+
 export function ModelConfigDialog({ onClose }: { onClose: () => void }) {
   const { t } = useSettings();
   const [config, setConfig] = useState<ConfigInfo | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
 
-  // 添加模型改为独立弹窗
-  const [showAdd, setShowAdd] = useState(false);
-  // 编辑已有 provider：选中的条目（null=未编辑）。
-  const [editTarget, setEditTarget] = useState<ProviderInfo | null>(null);
-  // 删除确认改用 webui 弹窗（ConfirmDialog），不再用系统 confirm/alert。
-  const [deleteTarget, setDeleteTarget] = useState<string | null>(null);
+  // 折叠状态（按 accountId 控制，默认全部展开）
+  const [collapsedAccounts, setCollapsedAccounts] = useState<Record<string, boolean>>({});
+
+  // 弹窗状态
+  const [showAddModel, setShowAddModel] = useState(false);
+  const [addModelDefaultAccount, setAddModelDefaultAccount] = useState<string | undefined>(undefined);
+  const [editModelTarget, setEditModelTarget] = useState<ProviderInfo | null>(null);
+  const [deleteModelTarget, setDeleteModelTarget] = useState<string | null>(null);
+
+  const [editAccountTarget, setEditAccountTarget] = useState<{ id: string; type: string; base_url?: string; has_api_key: boolean; skip_tls_verify?: boolean } | null>(null);
+  const [showAddAccount, setShowAddAccount] = useState(false);
+  const [deleteAccountTarget, setDeleteAccountTarget] = useState<string | null>(null);
 
   const reload = () =>
     getConfig()
@@ -177,6 +298,56 @@ export function ModelConfigDialog({ onClose }: { onClose: () => void }) {
       .catch((e: unknown) => setLoadError(e instanceof Error ? e.message : String(e)));
 
   useEffect(() => { reload(); }, []);
+
+  const toggleCollapse = (accId: string) => {
+    setCollapsedAccounts((prev) => ({ ...prev, [accId]: !prev[accId] }));
+  };
+
+  // 按提供商账号归类模型
+  const accountGroups = useMemo(() => {
+    if (!config) return [];
+    const accounts = config.accounts ?? [];
+    const providers = config.providers ?? [];
+
+    const groupMap = new Map<
+      string,
+      {
+        account: { id: string; type: string; base_url?: string; has_api_key: boolean; skip_tls_verify?: boolean };
+        models: ProviderInfo[];
+      }
+    >();
+
+    // 先填入所有已知账号
+    for (const acc of accounts) {
+      groupMap.set(acc.id, { account: acc, models: [] });
+    }
+
+    // 归入模型
+    for (const p of providers) {
+      const accId = p.account || p.name;
+      if (!groupMap.has(accId)) {
+        groupMap.set(accId, {
+          account: {
+            id: accId,
+            type: p.type,
+            base_url: p.base_url,
+            has_api_key: p.has_api_key,
+            skip_tls_verify: p.skip_tls_verify,
+          },
+          models: [],
+        });
+      }
+      groupMap.get(accId)!.models.push(p);
+    }
+
+    // 排序：有默认模型的账号在前，其余按名称字母排
+    return Array.from(groupMap.values()).sort((a, b) => {
+      const aHasDef = a.models.some((m) => m.is_default);
+      const bHasDef = b.models.some((m) => m.is_default);
+      if (aHasDef !== bHasDef) return aHasDef ? -1 : 1;
+      return a.account.id.localeCompare(b.account.id);
+    });
+  }, [config]);
 
   return (
     <>
@@ -187,13 +358,23 @@ export function ModelConfigDialog({ onClose }: { onClose: () => void }) {
         {!config && !loadError && <div class="modal-loading">{t('settings.loading')}</div>}
         {config && (
           <>
-            <div class="add-model-top">
+            <div class="add-model-top" style={{ display: 'flex', gap: '8px', justifyContent: 'flex-start' }}>
               <button
                 class="btn btn-primary"
                 type="button"
-                onClick={() => setShowAdd(true)}
+                onClick={() => {
+                  setAddModelDefaultAccount(undefined);
+                  setShowAddModel(true);
+                }}
               >
                 ＋ {t('settings.addModel')}
+              </button>
+              <button
+                class="btn"
+                type="button"
+                onClick={() => setShowAddAccount(true)}
+              >
+                ＋ {t('settings.addAccount')}
               </button>
             </div>
             <Row label={t('settings.defaultProvider')} value={config.default_provider} />
@@ -202,119 +383,240 @@ export function ModelConfigDialog({ onClose }: { onClose: () => void }) {
             )}
             <Row label={t('settings.configFile')} value={config.path} mono />
 
-            <div class="provider-list">
-              <span class="modal-label">
-                {t('settings.providers')} ({config.providers.length})
-              </span>
-              {[...config.providers].sort((a, b) => {
-                if (a.is_default !== b.is_default) return a.is_default ? -1 : 1;
-                return a.name.localeCompare(b.name);
-              }).map((p) => (
-                <div key={p.name} class={'provider-card' + (p.is_default ? ' default' : '')}>
-                  <div class="provider-card-head">
-                    <span class="provider-name">{p.name}</span>
-                    {p.is_default && (
-                      <span class="provider-default-badge">{t('settings.default')}</span>
-                    )}
-                    <span class="provider-type">{p.type}</span>
-                    <button
-                      class="provider-edit-btn"
-                      type="button"
-                      onClick={() => setEditTarget(p)}
-                      title={t('settings.edit')}
+            <div class="provider-list" style={{ marginTop: '14px' }}>
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '8px' }}>
+                <span class="modal-label" style={{ margin: 0 }}>
+                  {t('settings.accounts')} ({accountGroups.length}) · {t('settings.providers')} ({config.providers.length})
+                </span>
+              </div>
+
+              {accountGroups.map(({ account, models }) => {
+                const isCollapsed = Boolean(collapsedAccounts[account.id]);
+                return (
+                  <div key={account.id} class="provider-group">
+                    <div
+                      class="provider-group-header"
+                      onClick={() => toggleCollapse(account.id)}
                     >
-                      {t('settings.edit')}
-                    </button>
-                    <button
-                      class="provider-delete-btn"
-                      type="button"
-                      onClick={() => setDeleteTarget(p.name)}
-                      title={t('settings.delete')}
-                    >
-                      {t('settings.delete')}
-                    </button>
-                  </div>
-                  <div class="provider-card-body">
-                    <div>
-                      <span class="pk">{t('settings.model')}: </span>
-                      <span class="pv">{p.model}</span>
+                      <div class="provider-group-info">
+                        <span class={`provider-group-toggle ${!isCollapsed ? 'open' : ''}`}>
+                          ▶
+                        </span>
+                        <span class="provider-group-title">{account.id}</span>
+                        <span class="provider-group-badge">{account.type}</span>
+                        {account.base_url && (
+                          <span class="provider-group-url" title={account.base_url}>
+                            {account.base_url}
+                          </span>
+                        )}
+                        <span class={account.has_api_key ? 'ok' : 'nok'} style={{ fontSize: '11px' }}>
+                          {account.has_api_key ? `● ${t('settings.configured')}` : `○ ${t('settings.notConfigured')}`}
+                        </span>
+                        <span class="provider-group-count">
+                          {t('settings.modelsCount', { n: models.length })}
+                        </span>
+                      </div>
+
+                      <div class="provider-group-actions" onClick={(e) => e.stopPropagation()}>
+                        <button
+                          class="provider-group-btn"
+                          type="button"
+                          onClick={() => {
+                            setAddModelDefaultAccount(account.id);
+                            setShowAddModel(true);
+                          }}
+                          title={t('settings.addModel')}
+                        >
+                          ＋ {t('settings.model')}
+                        </button>
+                        <button
+                          class="provider-group-btn"
+                          type="button"
+                          onClick={() => setEditAccountTarget(account)}
+                          title={t('settings.edit')}
+                        >
+                          {t('settings.edit')}
+                        </button>
+                        <button
+                          class="provider-group-btn danger"
+                          type="button"
+                          onClick={() => setDeleteAccountTarget(account.id)}
+                          title={t('settings.delete')}
+                        >
+                          {t('settings.delete')}
+                        </button>
+                      </div>
                     </div>
-                    {p.base_url && (
-                      <div>
-                        <span class="pk">base_url: </span>
-                        <span class="pv">{p.base_url}</span>
+
+                    {!isCollapsed && (
+                      <div class="provider-group-models">
+                        {models.length === 0 ? (
+                          <div class="provider-group-empty">
+                            {t('settings.noModels')}
+                          </div>
+                        ) : (
+                          models
+                            .sort((a, b) => {
+                              if (a.is_default !== b.is_default) return a.is_default ? -1 : 1;
+                              return a.name.localeCompare(b.name);
+                            })
+                            .map((p) => (
+                              <div
+                                key={p.name}
+                                class={`model-card ${p.is_default ? 'default' : ''}`}
+                              >
+                                <div class="model-card-head">
+                                  <div class="model-card-name-row">
+                                    <span class="model-card-name">{p.name}</span>
+                                    {p.is_default && (
+                                      <span class="model-card-badge">{t('settings.default')}</span>
+                                    )}
+                                    <span class="model-card-id">{p.model}</span>
+                                  </div>
+                                  <div class="model-card-actions">
+                                    {!p.is_default && (
+                                      <button
+                                        class="provider-group-btn"
+                                        type="button"
+                                        onClick={async () => {
+                                          await setDefaultProvider(p.name);
+                                          reload();
+                                        }}
+                                        title={t('settings.setAsDefault')}
+                                      >
+                                        {t('settings.setAsDefault')}
+                                      </button>
+                                    )}
+                                    <button
+                                      class="provider-group-btn"
+                                      type="button"
+                                      onClick={() => setEditModelTarget(p)}
+                                      title={t('settings.edit')}
+                                    >
+                                      {t('settings.edit')}
+                                    </button>
+                                    <button
+                                      class="provider-group-btn danger"
+                                      type="button"
+                                      onClick={() => setDeleteModelTarget(p.name)}
+                                      title={t('settings.delete')}
+                                    >
+                                      {t('settings.delete')}
+                                    </button>
+                                  </div>
+                                </div>
+
+                                <div class="model-card-meta">
+                                  {p.context_window && (
+                                    <div class="model-card-meta-item">
+                                      <span class="pk">{t('settings.contextWindow')}:</span>
+                                      <span class="pv">{(p.context_window / 1000).toFixed(0)}k</span>
+                                    </div>
+                                  )}
+                                  <div class="model-card-meta-item">
+                                    <span class="pk">{t('settings.supportsVision')}:</span>
+                                    <span>{p.supports_vision ? t('settings.yes') : t('settings.no')}</span>
+                                  </div>
+                                  <div class="model-card-meta-item">
+                                    <span class="pk">{t('settings.reasoningModel')}:</span>
+                                    <span>{p.reasoning_model ? t('settings.yes') : t('settings.no')}</span>
+                                    {p.reasoning_model && p.reasoning_effort && (
+                                      <span class="pv" style={{ marginLeft: '4px' }}>({p.reasoning_effort})</span>
+                                    )}
+                                  </div>
+                                </div>
+                              </div>
+                            ))
+                        )}
                       </div>
                     )}
-                    {p.context_window && (
-                      <div>
-                        <span class="pk">{t('settings.contextWindow')}: </span>
-                        <span>{(p.context_window / 1000).toFixed(0)}k tokens</span>
-                      </div>
-                    )}
-                    <div>
-                      <span class="pk">{t('settings.apiKey')}: </span>
-                      <span class={p.has_api_key ? 'ok' : 'nok'}>
-                        {p.has_api_key ? t('settings.configured') : t('settings.notConfigured')}
-                      </span>
-                    </div>
-                    <div>
-                      <span class="pk">{t('settings.supportsVision')}: </span>
-                      <span>{p.supports_vision ? t('settings.yes') : t('settings.no')}</span>
-                      <span class="pk"> · {t('settings.reasoningModel')}: </span>
-                      <span>{p.reasoning_model ? t('settings.yes') : t('settings.no')}</span>
-                      {p.reasoning_model && p.reasoning_effort && (
-                        <>
-                          <span class="pk"> · {t('settings.reasoningEffort')}: </span>
-                          <span class="pv">{p.reasoning_effort}</span>
-                        </>
-                      )}
-                      {p.reasoning_model && p.reasoning_history && (
-                        <>
-                          <span class="pk"> · {t('settings.reasoningHistory')}: </span>
-                          <span class="pv">{p.reasoning_history}</span>
-                        </>
-                      )}
-                    </div>
                   </div>
-                </div>
-              ))}
+                );
+              })}
             </div>
           </>
         )}
       </div>
     </SettingsModal>
-    {showAdd && (
+
+    {showAddModel && (
       <ProviderFormDialog
+        defaultAccount={addModelDefaultAccount}
+        accounts={config?.accounts ?? []}
         existingNames={config?.providers.map((p) => p.name) ?? []}
-        onClose={() => setShowAdd(false)}
+        onClose={() => {
+          setShowAddModel(false);
+          setAddModelDefaultAccount(undefined);
+        }}
         onSaved={() => {
-          setShowAdd(false);
+          setShowAddModel(false);
+          setAddModelDefaultAccount(undefined);
           reload();
         }}
       />
     )}
-    {editTarget && (
+
+    {editModelTarget && (
       <ProviderFormDialog
-        editing={editTarget}
+        editing={editModelTarget}
+        accounts={config?.accounts ?? []}
         existingNames={config?.providers.map((p) => p.name) ?? []}
-        onClose={() => setEditTarget(null)}
+        onClose={() => setEditModelTarget(null)}
         onSaved={() => {
-          setEditTarget(null);
+          setEditModelTarget(null);
           reload();
         }}
       />
     )}
-    {deleteTarget && (
+
+    {showAddAccount && (
+      <AccountFormDialog
+        existingIds={(config?.accounts ?? []).map((a) => a.id)}
+        onClose={() => setShowAddAccount(false)}
+        onSaved={() => {
+          setShowAddAccount(false);
+          reload();
+        }}
+      />
+    )}
+
+    {editAccountTarget && (
+      <AccountFormDialog
+        editing={editAccountTarget}
+        existingIds={(config?.accounts ?? []).map((a) => a.id)}
+        onClose={() => setEditAccountTarget(null)}
+        onSaved={() => {
+          setEditAccountTarget(null);
+          reload();
+        }}
+      />
+    )}
+
+    {deleteModelTarget && (
       <ConfirmDialog
         title={t('settings.deleteTitle')}
-        body={t('settings.deleteConfirm', { name: deleteTarget })}
+        body={t('settings.deleteConfirm', { name: deleteModelTarget })}
         confirmLabel={t('settings.delete')}
         cancelLabel={t('common.cancel')}
         onConfirm={async () => {
-          await deleteProvider(deleteTarget);
+          await deleteProvider(deleteModelTarget);
           reload();
         }}
-        onClose={() => setDeleteTarget(null)}
+        onClose={() => setDeleteModelTarget(null)}
+      />
+    )}
+
+    {deleteAccountTarget && (
+      <ConfirmDialog
+        title={t('settings.deleteAccountTitle')}
+        body={t('settings.deleteAccountConfirm', { name: deleteAccountTarget })}
+        confirmLabel={t('settings.delete')}
+        cancelLabel={t('common.cancel')}
+        onConfirm={async () => {
+          await deleteAccount(deleteAccountTarget);
+          reload();
+        }}
+        onClose={() => setDeleteAccountTarget(null)}
       />
     )}
     </>
@@ -328,22 +630,32 @@ export function ModelConfigDialog({ onClose }: { onClose: () => void }) {
  */
 function ProviderFormDialog({
   editing,
+  defaultAccount,
+  accounts = [],
   existingNames = [],
   onClose,
   onSaved,
 }: {
   editing?: ProviderInfo;
+  defaultAccount?: string;
+  accounts?: AccountInfo[];
   existingNames?: string[];
   onClose: () => void;
   onSaved: () => void;
 }) {
   const { t } = useSettings();
   const isEdit = !!editing;
+
+  // 所属提供商账号
+  const initialAccount = editing?.account || defaultAccount || (accounts.length > 0 ? accounts[0].id : '');
+  const [account, setAccount] = useState<string>(initialAccount);
+  const selectedAccount = accounts.find((a) => a.id === account);
+
   const [name] = useState(editing?.name ?? '');
   const [nameInput, setNameInput] = useState(editing?.name ?? '');
-  const [type, setType] = useState(normalizeProviderType(editing?.type));
+  const [type, setType] = useState(normalizeProviderType(editing?.type || selectedAccount?.type));
   const [model, setModel] = useState(editing?.model ?? '');
-  const [baseUrl, setBaseUrl] = useState(editing?.base_url ?? '');
+  const [baseUrl, setBaseUrl] = useState(editing?.base_url ?? selectedAccount?.base_url ?? '');
   const [apiKey, setApiKey] = useState('');
   const [contextWindow, setContextWindow] = useState<number>(editing?.context_window ?? 128000);
   const [supportsVision, setSupportsVision] = useState(Boolean(editing?.supports_vision));
@@ -355,6 +667,16 @@ function ProviderFormDialog({
   const [setDefault, setSetDefault] = useState(editing?.is_default ?? false);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
+
+  // 当切换所属账号时自动复用账号的配置
+  const handleAccountChange = (newAccId: string) => {
+    setAccount(newAccId);
+    const acc = accounts.find((a) => a.id === newAccId);
+    if (acc) {
+      setType(normalizeProviderType(acc.type));
+      if (acc.base_url) setBaseUrl(acc.base_url);
+    }
+  };
 
   const [candidates, setCandidates] = useState<string[]>([]);
   const [fetching, setFetching] = useState(false);
@@ -421,17 +743,20 @@ function ProviderFormDialog({
 
   const pickModel = (id: string) => {
     setModel(id);
+    if (!nameInput.trim()) {
+      setNameInput(id);
+    }
     setModelMenuOpen(false);
   };
 
   const handleSave = async () => {
     const newName = nameInput.trim();
     if (isEdit) {
-      if (!newName || !model.trim() || !baseUrl.trim()) {
+      if (!newName || !model.trim()) {
         setError(t('settings.allRequired'));
         return;
       }
-    } else if (!newName || !model.trim() || !baseUrl.trim() || !apiKey.trim()) {
+    } else if (!newName || !model.trim()) {
       setError(t('settings.allRequired'));
       return;
     }
@@ -457,7 +782,8 @@ function ProviderFormDialog({
           ...(newName !== name ? { name: newName } : {}),
           type,
           model: model.trim(),
-          base_url: baseUrl.trim(),
+          account: account.trim() || undefined,
+          base_url: baseUrl.trim() || undefined,
           ...(apiKey.trim() ? { api_key: apiKey.trim() } : {}),
           context_window: contextWindow,
           ...advanced,
@@ -470,8 +796,9 @@ function ProviderFormDialog({
           name: newName,
           type,
           model: model.trim(),
-          base_url: baseUrl.trim(),
-          api_key: apiKey.trim(),
+          account: account.trim() || undefined,
+          base_url: baseUrl.trim() || undefined,
+          api_key: apiKey.trim() || undefined,
           context_window: contextWindow,
           set_default: setDefault || undefined,
           ...advanced,
@@ -493,6 +820,27 @@ function ProviderFormDialog({
       onClose={onClose}
     >
       <div class="field-group add-model-form">
+        <div class="add-model-field">
+          <label class="add-model-label">{t('settings.accountSelect')}</label>
+          <div style={{ display: 'flex', gap: '8px' }}>
+            <input
+              class="menu-input"
+              type="text"
+              placeholder="openai / deepseek / gemini"
+              list="account-datalist"
+              value={account}
+              onInput={(e) => handleAccountChange((e.target as HTMLInputElement).value)}
+            />
+            <datalist id="account-datalist">
+              {accounts.map((a) => (
+                <option key={a.id} value={a.id}>
+                  {a.id} ({a.type})
+                </option>
+              ))}
+            </datalist>
+          </div>
+        </div>
+
         <div class="add-model-field">
           <label class="add-model-label">{t('settings.providerName')}</label>
           <input
@@ -603,7 +951,7 @@ function ProviderFormDialog({
           <input
             class="menu-input"
             type="text"
-            placeholder="https://api.example.com/v1"
+            placeholder={selectedAccount?.base_url || 'https://api.openai.com/v1'}
             value={baseUrl}
             onInput={(e) => setBaseUrl((e.target as HTMLInputElement).value)}
           />
@@ -614,13 +962,19 @@ function ProviderFormDialog({
           <input
             class="menu-input"
             type="password"
-            placeholder={isEdit ? t('settings.apiKeyKeep') : 'sk-...'}
+            placeholder={
+              isEdit
+                ? t('settings.apiKeyKeep')
+                : selectedAccount?.has_api_key
+                  ? '（复用提供商 API Key）'
+                  : 'sk-…'
+            }
             value={apiKey}
             onInput={(e) => setApiKey((e.target as HTMLInputElement).value)}
           />
         </div>
 
-        <div class="add-model-toggles">
+        <div class="add-model-checkboxes">
           <label class="add-model-checkbox-label">
             <input
               type="checkbox"
@@ -640,30 +994,21 @@ function ProviderFormDialog({
         </div>
 
         {reasoningModel && (
-          <div class="add-model-row">
+          <div class="add-model-reasoning-fields">
             <div class="add-model-field">
               <label class="add-model-label">{t('settings.reasoningEffort')}</label>
               <Select
                 value={reasoningEffort}
-                options={REASONING_EFFORT_OPTIONS.map((o) => ({
-                  value: o.value,
-                  label: o.value ? o.label : t('settings.effortDefault'),
-                }))}
-                onChange={setReasoningEffort}
+                options={REASONING_EFFORT_OPTIONS}
+                onChange={(v) => setReasoningEffort(v)}
               />
             </div>
             <div class="add-model-field">
               <label class="add-model-label">{t('settings.reasoningHistory')}</label>
               <Select
                 value={reasoningHistory}
-                options={REASONING_HISTORY_OPTIONS.map((o) => ({
-                  value: o.value,
-                  label:
-                    o.value === 'include'
-                      ? t('settings.historyInclude')
-                      : t('settings.historyExclude'),
-                }))}
-                onChange={setReasoningHistory}
+                options={REASONING_HISTORY_OPTIONS}
+                onChange={(v) => setReasoningHistory(v)}
               />
             </div>
           </div>
@@ -674,8 +1019,8 @@ function ProviderFormDialog({
             {(isEdit ? t('settings.updateFailed') : t('settings.addFailed'))}: {error}
           </div>
         )}
-        <div class="add-model-actions">
-          <button class="btn" type="button" onClick={onClose}>
+        <div class="modal-footer" style={{ marginTop: '16px', padding: 0 }}>
+          <button class="btn" type="button" onClick={onClose} disabled={saving}>
             {t('settings.close')}
           </button>
           <button class="btn btn-primary" type="button" disabled={saving} onClick={handleSave}>

@@ -3603,6 +3603,217 @@ body {
 .config-row .config-val { color: var(--app-primary-foreground); font-size: 12px; word-break: break-all; }
 .config-row .config-val.mono { font-family: var(--app-monospace-font-family); }
 
+/* === Provider Accounts Group & Model Cards === */
+.provider-group {
+  border: 1px solid var(--app-input-border);
+  border-radius: var(--corner-radius-normal, 8px);
+  background: var(--app-secondary-background);
+  overflow: hidden;
+  margin-bottom: 12px;
+  transition: border-color 0.2s;
+}
+
+.provider-group:hover {
+  border-color: var(--app-input-focus-border, var(--app-brand));
+}
+
+.provider-group-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 10px 14px;
+  background: color-mix(in srgb, var(--app-tool-background), transparent 20%);
+  cursor: pointer;
+  user-select: none;
+  gap: 12px;
+}
+
+.provider-group-header:hover {
+  background: var(--app-list-hover-background);
+}
+
+.provider-group-info {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex: 1;
+  min-width: 0;
+}
+
+.provider-group-toggle {
+  font-size: 11px;
+  color: var(--app-secondary-foreground);
+  transition: transform 0.2s ease;
+  width: 14px;
+  display: inline-block;
+  text-align: center;
+}
+
+.provider-group-toggle.open {
+  transform: rotate(90deg);
+}
+
+.provider-group-title {
+  font-weight: 600;
+  font-size: 13px;
+  color: var(--app-primary-foreground);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.provider-group-badge {
+  font-size: 10.5px;
+  padding: 1px 6px;
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--app-brand), transparent 85%);
+  color: var(--app-brand);
+  font-family: var(--app-monospace-font-family);
+  white-space: nowrap;
+}
+
+.provider-group-url {
+  font-size: 11px;
+  color: var(--app-secondary-foreground);
+  font-family: var(--app-monospace-font-family);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 220px;
+}
+
+.provider-group-count {
+  font-size: 11px;
+  color: var(--app-secondary-foreground);
+  margin-left: auto;
+  white-space: nowrap;
+}
+
+.provider-group-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.provider-group-btn {
+  font-size: 11px;
+  padding: 3px 8px;
+  border-radius: 4px;
+  border: 1px solid var(--app-input-border);
+  background: var(--app-primary-background);
+  color: var(--app-primary-foreground);
+  cursor: pointer;
+  transition: all 0.15s;
+}
+
+.provider-group-btn:hover {
+  border-color: var(--app-brand);
+  color: var(--app-brand);
+}
+
+.provider-group-btn.danger:hover {
+  border-color: var(--app-error-foreground);
+  color: var(--app-error-foreground);
+}
+
+.provider-group-models {
+  padding: 10px 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  background: var(--app-primary-background);
+  border-top: 1px solid var(--app-input-border);
+}
+
+.provider-group-empty {
+  font-size: 12px;
+  color: var(--app-secondary-foreground);
+  text-align: center;
+  padding: 14px 0;
+  font-style: italic;
+}
+
+.model-card {
+  border: 1px solid var(--app-input-border);
+  border-radius: 6px;
+  padding: 8px 12px;
+  background: var(--app-secondary-background);
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  transition: all 0.15s;
+}
+
+.model-card:hover {
+  border-color: color-mix(in srgb, var(--app-brand), transparent 40%);
+}
+
+.model-card.default {
+  border-color: var(--app-brand);
+  background: color-mix(in srgb, var(--app-brand), transparent 96%);
+}
+
+.model-card-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.model-card-name-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.model-card-name {
+  font-weight: 600;
+  font-size: 12.5px;
+  color: var(--app-primary-foreground);
+  font-family: var(--app-monospace-font-family);
+}
+
+.model-card-id {
+  font-size: 11.5px;
+  color: var(--app-secondary-foreground);
+  font-family: var(--app-monospace-font-family);
+  background: color-mix(in srgb, var(--app-input-border), transparent 50%);
+  padding: 1px 5px;
+  border-radius: 4px;
+}
+
+.model-card-badge {
+  font-size: 10.5px;
+  padding: 1px 6px;
+  border-radius: 10px;
+  background: var(--app-brand);
+  color: #fff;
+  font-weight: 500;
+}
+
+.model-card-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.model-card-meta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 12px;
+  font-size: 11px;
+  color: var(--app-secondary-foreground);
+  margin-top: 2px;
+}
+
+.model-card-meta-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
 .provider-card {
   border: 1px solid var(--app-input-border);
   border-radius: var(--corner-radius-small);

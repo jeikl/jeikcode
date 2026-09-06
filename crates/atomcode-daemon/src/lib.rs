@@ -118,6 +118,18 @@ pub(crate) struct ConfigResponse {
     pub default_provider: String,
     pub default_workdir: Option<String>,
     pub providers: Vec<ProviderInfo>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub accounts: Vec<AccountInfo>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct AccountInfo {
+    pub id: String,
+    #[serde(rename = "type")]
+    pub provider_type: String,
+    pub base_url: Option<String>,
+    pub has_api_key: bool,
+    pub skip_tls_verify: bool,
 }
 
 /// Sanitized provider view (no api_key).
@@ -146,6 +158,8 @@ pub(crate) struct ProviderInfo {
     pub supports_vision: Option<bool>,
     /// Explicit reasoning-model flag (`None` = unset / name heuristics).
     pub reasoning_model: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub account: Option<String>,
 }
 
 /// Login attempts stay addressable while a blocking poll is in flight. Per-record
@@ -7488,7 +7502,7 @@ pub struct ServerOpts {
 /// attach, legacy session migration) is handled by the binary's `main()` before
 /// calling this; see `src/main.rs`.
 pub async fn run_server(opts: ServerOpts) -> anyhow::Result<()> {
-    use axum::routing::patch;
+    use axum::routing::{patch, put};
 
     let ServerOpts {
         host,
@@ -7773,6 +7787,15 @@ pub async fn run_server(opts: ServerOpts) -> anyhow::Result<()> {
         .route(
             "/providers/:name/thinking",
             patch(api_provider::patch_thinking),
+        )
+        .route(
+            "/provider-accounts",
+            post(api_provider::create_or_update_provider_account),
+        )
+        .route(
+            "/provider-accounts/:id",
+            put(api_provider::create_or_update_provider_account)
+                .delete(api_provider::delete_provider_account),
         )
         // Auth API (P0)
         .route("/auth/status", get(api_auth::auth_status))

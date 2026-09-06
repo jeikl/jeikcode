@@ -361,6 +361,7 @@ impl Tool for ReadFileTool {
                 "\n[Showing lines {start}-{end_idx} of {total} (end)]"
             ));
         }
+        crate::tools::write_state::record_read(&path);
         ok(out)
     }
 }

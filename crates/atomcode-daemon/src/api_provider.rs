@@ -1,5 +1,6 @@
 use atomcode_config::config::provider::{
-    default_context_window_for, ProviderConfig, ProviderPricing,
+    default_context_window_for, ModelProfileConfig, ProviderAccountConfig, ProviderConfig,
+    ProviderPricing,
 };
 use axum::{extract::Path, http::StatusCode, response::IntoResponse, Json};
 use serde::Deserialize;
@@ -22,6 +23,8 @@ pub(crate) struct CreateProviderRequest {
     #[serde(rename = "type")]
     pub provider_type: String,
     pub model: String,
+    #[serde(default)]
+    pub account: Option<String>,
     pub api_key: Option<String>,
     pub base_url: Option<String>,
     pub user_agent: Option<String>,
@@ -52,6 +55,8 @@ pub(crate) struct PatchProviderRequest {
     #[serde(rename = "type")]
     pub provider_type: Option<String>,
     pub model: Option<String>,
+    #[serde(default)]
+    pub account: Option<String>,
     pub api_key: Option<Option<String>>,
     #[serde(default)]
     pub clear_api_key: bool,
@@ -83,6 +88,21 @@ pub(crate) struct PatchProviderRequest {
     pub clear_reasoning_model: bool,
 }
 
+/// POST /provider-accounts / PUT /provider-accounts/:id
+#[derive(Debug, Deserialize)]
+pub(crate) struct CreateOrUpdateAccountRequest {
+    pub id: Option<String>,
+    #[serde(rename = "type")]
+    pub provider_type: Option<String>,
+    pub base_url: Option<Option<String>>,
+    pub api_key: Option<Option<String>>,
+    #[serde(default)]
+    pub clear_api_key: bool,
+    #[serde(default)]
+    pub clear_base_url: bool,
+    pub skip_tls_verify: Option<bool>,
+}
+
 /// PATCH /providers/:name/thinking - Update thinking settings.
 #[derive(Debug, Deserialize)]
 pub(crate) struct PatchThinkingRequest {
@@ -108,19 +128,45 @@ pub(crate) async fn get_providers() -> impl IntoResponse {
     // List the unified catalog so new-schema / folded CodingPlan models (absent
     // from `config.providers`) remain visible and selectable.
     let default_selection = config.effective_model_selection().unwrap_or_default();
-    let mut ids: Vec<String> = config.logical_models().into_keys().collect();
+    let logical_models = config.logical_models();
+    let mut ids: Vec<String> = logical_models.keys().cloned().collect();
     ids.sort();
     let providers: Vec<ProviderInfo> = ids
         .iter()
         .filter_map(|id| {
             config
                 .provider_config_for_selection(id)
-                .map(|p| provider_info(id, &p, &default_selection))
+                .map(|p| {
+                    let mut info = provider_info(id, &p, &default_selection);
+                    if let Some(m) = logical_models.get(id) {
+                        info.account = Some(m.account.clone());
+                    }
+                    info
+                })
         })
         .collect();
+
+    let logical_accounts = config.logical_accounts();
+    let mut account_ids: Vec<String> = logical_accounts.keys().cloned().collect();
+    account_ids.sort();
+    let accounts: Vec<crate::AccountInfo> = account_ids
+        .into_iter()
+        .map(|id| {
+            let a = &logical_accounts[&id];
+            crate::AccountInfo {
+                id: id.clone(),
+                provider_type: a.provider.clone(),
+                base_url: a.base_url.clone(),
+                has_api_key: a.api_key.as_ref().is_some_and(|k| !k.is_empty()),
+                skip_tls_verify: a.skip_tls_verify,
+            }
+        })
+        .collect();
+
     Json(serde_json::json!({
         "default_provider": default_selection,
         "providers": providers,
+        "accounts": accounts,
     }))
     .into_response()
 }
@@ -161,6 +207,87 @@ pub(crate) async fn create_provider(Json(req): Json<CreateProviderRequest>) -> i
     let context_window = req
         .context_window
         .unwrap_or_else(|| default_context_window_for(&req.provider_type));
+
+    if let Some(ref acc_id) = req.account {
+        let account_name = acc_id.trim().to_string();
+        let mut is_new = false;
+        let config = match update_config(|config| {
+            is_new = !config.models.contains_key(&name);
+            if !config.provider_accounts.contains_key(&account_name) {
+                config.provider_accounts.insert(
+                    account_name.clone(),
+                    ProviderAccountConfig {
+                        provider: req.provider_type.clone(),
+                        display_name: None,
+                        api_key: req.api_key.clone(),
+                        base_url: req.base_url.clone(),
+                        user_agent: req.user_agent.clone(),
+                        skip_tls_verify: req.skip_tls_verify,
+                        enterprise_url: None,
+                        ephemeral: false,
+                    },
+                );
+            } else if let Some(acc) = config.provider_accounts.get_mut(&account_name) {
+                if !req.provider_type.trim().is_empty() {
+                    acc.provider = req.provider_type.clone();
+                }
+                if req.api_key.is_some() {
+                    acc.api_key = req.api_key.clone();
+                }
+                if req.base_url.is_some() {
+                    acc.base_url = req.base_url.clone();
+                }
+                if req.user_agent.is_some() {
+                    acc.user_agent = req.user_agent.clone();
+                }
+                acc.skip_tls_verify = req.skip_tls_verify;
+            }
+
+            let profile = ModelProfileConfig {
+                account: account_name.clone(),
+                model: req.model.clone(),
+                display_name: None,
+                system_prompt: None,
+                context_window,
+                max_tokens: req.max_tokens,
+                capable_model: None,
+                thinking_type: req.thinking_type.clone(),
+                thinking_keep: req.thinking_keep.clone(),
+                reasoning_history: req.reasoning_history.clone(),
+                reasoning_effort: req.reasoning_effort.clone(),
+                reasoning_levels: None,
+                thinking_enabled: req.thinking_enabled,
+                thinking_budget: req.thinking_budget,
+                pricing: req.pricing.clone(),
+                supports_vision: req.supports_vision,
+                reasoning_model: req.reasoning_model,
+            };
+            config.models.insert(name.clone(), profile);
+
+            let has_valid_default = config
+                .effective_model_selection()
+                .is_some_and(|s| config.selection_exists(&s));
+            if req.set_default || !has_valid_default {
+                config.default_model = Some(name.clone());
+                config.default_provider = name.clone();
+            }
+            Ok(())
+        }) {
+            Ok(config) => config,
+            Err(error) => return json_error(StatusCode::INTERNAL_SERVER_ERROR, error).into_response(),
+        };
+
+        let default_selection = config.effective_model_selection().unwrap_or_default();
+        let p = config.provider_config_for_selection(&name).unwrap();
+        let mut info = provider_info(&name, &p, &default_selection);
+        info.account = Some(account_name);
+        let status = if is_new {
+            StatusCode::CREATED
+        } else {
+            StatusCode::OK
+        };
+        return (status, Json(info)).into_response();
+    }
 
     let provider = ProviderConfig {
         provider_type: req.provider_type,
@@ -206,7 +333,8 @@ pub(crate) async fn create_provider(Json(req): Json<CreateProviderRequest>) -> i
         Err(error) => return json_error(StatusCode::INTERNAL_SERVER_ERROR, error).into_response(),
     };
 
-    let p = config.providers.get(&name).unwrap();
+    let default_selection = config.effective_model_selection().unwrap_or_default();
+    let p = config.provider_config_for_selection(&name).unwrap();
     let status = if is_new {
         StatusCode::CREATED
     } else {
@@ -214,7 +342,7 @@ pub(crate) async fn create_provider(Json(req): Json<CreateProviderRequest>) -> i
     };
     (
         status,
-        Json(provider_info(&name, p, &config.default_provider)),
+        Json(provider_info(&name, &p, &default_selection)),
     )
         .into_response()
 }
@@ -273,87 +401,224 @@ pub(crate) async fn patch_provider(
     let mut missing = false;
     let mut conflict = false;
     let config = match update_config(|config| {
-        if final_name != name && config.providers.contains_key(&final_name) {
+        if final_name != name
+            && (config.providers.contains_key(&final_name)
+                || config.models.contains_key(&final_name)
+                || config.provider_accounts.contains_key(&final_name))
+        {
             conflict = true;
             anyhow::bail!("provider {final_name:?} already exists");
         }
-        let Some(existing) = config.providers.get_mut(&name) else {
-            missing = true;
-            anyhow::bail!("provider {name:?} not found");
-        };
-        if let Some(value) = req.provider_type {
-            existing.provider_type = value;
-        }
-        if let Some(value) = req.model {
-            existing.model = value;
-        }
-        if req.clear_api_key {
-            existing.api_key = None;
-        } else if let Some(value) = req.api_key {
-            existing.api_key = value;
-        }
-        if req.clear_base_url {
-            existing.base_url = None;
-        } else if let Some(value) = req.base_url {
-            existing.base_url = value;
-        }
-        if req.clear_user_agent {
-            existing.user_agent = None;
-        } else if let Some(value) = req.user_agent {
-            existing.user_agent = value;
-        }
-        if let Some(value) = req.context_window {
-            existing.context_window = value;
-        }
-        if req.clear_max_tokens {
-            existing.max_tokens = None;
-        } else if let Some(value) = req.max_tokens {
-            existing.max_tokens = value;
-        }
-        if let Some(value) = req.thinking_enabled {
-            existing.thinking_enabled = value;
-        }
-        if let Some(value) = req.thinking_budget {
-            existing.thinking_budget = value;
-        }
-        if let Some(value) = req.thinking_type {
-            existing.thinking_type = value;
-        }
-        if let Some(value) = req.thinking_keep {
-            existing.thinking_keep = value;
-        }
-        if let Some(value) = req.reasoning_history {
-            existing.reasoning_history = value;
-        }
-        if let Some(value) = req.reasoning_effort {
-            existing.reasoning_effort = value;
-        }
-        if let Some(value) = req.skip_tls_verify {
-            existing.skip_tls_verify = value;
-        }
-        if req.clear_pricing {
-            existing.pricing = None;
-        } else if let Some(value) = req.pricing {
-            existing.pricing = value;
-        }
-        if req.clear_supports_vision {
-            existing.supports_vision = None;
-        } else if let Some(value) = req.supports_vision {
-            existing.supports_vision = value;
-        }
-        if req.clear_reasoning_model {
-            existing.reasoning_model = None;
-        } else if let Some(value) = req.reasoning_model {
-            existing.reasoning_model = value;
-        }
-        if final_name != name {
-            let provider = config.providers.remove(&name).expect("validated above");
-            config.providers.insert(final_name.clone(), provider);
+
+        if let Some(existing) = config.providers.get_mut(&name) {
+            if let Some(value) = req.provider_type {
+                existing.provider_type = value;
+            }
+            if let Some(value) = req.model {
+                existing.model = value;
+            }
+            if req.clear_api_key {
+                existing.api_key = None;
+            } else if let Some(value) = req.api_key {
+                existing.api_key = value;
+            }
+            if req.clear_base_url {
+                existing.base_url = None;
+            } else if let Some(value) = req.base_url {
+                existing.base_url = value;
+            }
+            if req.clear_user_agent {
+                existing.user_agent = None;
+            } else if let Some(value) = req.user_agent {
+                existing.user_agent = value;
+            }
+            if let Some(value) = req.context_window {
+                existing.context_window = value;
+            }
+            if req.clear_max_tokens {
+                existing.max_tokens = None;
+            } else if let Some(value) = req.max_tokens {
+                existing.max_tokens = value;
+            }
+            if let Some(value) = req.thinking_enabled {
+                existing.thinking_enabled = value;
+            }
+            if let Some(value) = req.thinking_budget {
+                existing.thinking_budget = value;
+            }
+            if let Some(value) = req.thinking_type {
+                existing.thinking_type = value;
+            }
+            if let Some(value) = req.thinking_keep {
+                existing.thinking_keep = value;
+            }
+            if let Some(value) = req.reasoning_history {
+                existing.reasoning_history = value;
+            }
+            if let Some(value) = req.reasoning_effort {
+                existing.reasoning_effort = value;
+            }
+            if let Some(value) = req.skip_tls_verify {
+                existing.skip_tls_verify = value;
+            }
+            if req.clear_pricing {
+                existing.pricing = None;
+            } else if let Some(value) = req.pricing {
+                existing.pricing = value;
+            }
+            if req.clear_supports_vision {
+                existing.supports_vision = None;
+            } else if let Some(value) = req.supports_vision {
+                existing.supports_vision = value;
+            }
+            if req.clear_reasoning_model {
+                existing.reasoning_model = None;
+            } else if let Some(value) = req.reasoning_model {
+                existing.reasoning_model = value;
+            }
+            if final_name != name {
+                let provider = config.providers.remove(&name).expect("validated above");
+                config.providers.insert(final_name.clone(), provider);
+                if config.default_provider == name {
+                    config.default_provider = final_name.clone();
+                }
+                if config.default_model.as_deref() == Some(&name) {
+                    config.default_model = Some(final_name.clone());
+                }
+            }
+            Ok(())
+        } else if let Some(mut existing_model) = config.models.remove(&name) {
+            if let Some(value) = req.model {
+                existing_model.model = value;
+            }
+            if let Some(value) = req.context_window {
+                existing_model.context_window = value;
+            }
+            if req.clear_max_tokens {
+                existing_model.max_tokens = None;
+            } else if let Some(value) = req.max_tokens {
+                existing_model.max_tokens = value;
+            }
+            if let Some(value) = req.thinking_enabled {
+                existing_model.thinking_enabled = value;
+            }
+            if let Some(value) = req.thinking_budget {
+                existing_model.thinking_budget = value;
+            }
+            if let Some(value) = req.thinking_type {
+                existing_model.thinking_type = value;
+            }
+            if let Some(value) = req.thinking_keep {
+                existing_model.thinking_keep = value;
+            }
+            if let Some(value) = req.reasoning_history {
+                existing_model.reasoning_history = value;
+            }
+            if let Some(value) = req.reasoning_effort {
+                existing_model.reasoning_effort = value;
+            }
+            if req.clear_pricing {
+                existing_model.pricing = None;
+            } else if let Some(value) = req.pricing {
+                existing_model.pricing = value;
+            }
+            if req.clear_supports_vision {
+                existing_model.supports_vision = None;
+            } else if let Some(value) = req.supports_vision {
+                existing_model.supports_vision = value;
+            }
+            if req.clear_reasoning_model {
+                existing_model.reasoning_model = None;
+            } else if let Some(value) = req.reasoning_model {
+                existing_model.reasoning_model = value;
+            }
+            if let Some(new_account) = req.account {
+                existing_model.account = new_account;
+            }
+
+            let account_id = existing_model.account.clone();
+            if let Some(acc) = config.provider_accounts.get_mut(&account_id) {
+                if let Some(value) = req.provider_type {
+                    acc.provider = value;
+                }
+                if req.clear_api_key {
+                    acc.api_key = None;
+                } else if let Some(value) = req.api_key {
+                    acc.api_key = value;
+                }
+                if req.clear_base_url {
+                    acc.base_url = None;
+                } else if let Some(value) = req.base_url {
+                    acc.base_url = value;
+                }
+                if req.clear_user_agent {
+                    acc.user_agent = None;
+                } else if let Some(value) = req.user_agent {
+                    acc.user_agent = value;
+                }
+                if let Some(value) = req.skip_tls_verify {
+                    acc.skip_tls_verify = value;
+                }
+            } else if req.provider_type.is_some() || req.base_url.is_some() || req.api_key.is_some() {
+                config.provider_accounts.insert(
+                    account_id,
+                    ProviderAccountConfig {
+                        provider: req.provider_type.unwrap_or_else(|| "openai".into()),
+                        display_name: None,
+                        api_key: req.api_key.flatten(),
+                        base_url: req.base_url.flatten(),
+                        user_agent: req.user_agent.flatten(),
+                        skip_tls_verify: req.skip_tls_verify.unwrap_or(false),
+                        enterprise_url: None,
+                        ephemeral: false,
+                    },
+                );
+            }
+
+            config.models.insert(final_name.clone(), existing_model);
+            if config.default_model.as_deref() == Some(&name) {
+                config.default_model = Some(final_name.clone());
+            }
             if config.default_provider == name {
                 config.default_provider = final_name.clone();
             }
+            Ok(())
+        } else if let Some(acc) = config.provider_accounts.get_mut(&name) {
+            if let Some(value) = req.provider_type {
+                acc.provider = value;
+            }
+            if req.clear_api_key {
+                acc.api_key = None;
+            } else if let Some(value) = req.api_key {
+                acc.api_key = value;
+            }
+            if req.clear_base_url {
+                acc.base_url = None;
+            } else if let Some(value) = req.base_url {
+                acc.base_url = value;
+            }
+            if req.clear_user_agent {
+                acc.user_agent = None;
+            } else if let Some(value) = req.user_agent {
+                acc.user_agent = value;
+            }
+            if let Some(value) = req.skip_tls_verify {
+                acc.skip_tls_verify = value;
+            }
+            if final_name != name {
+                let acc = config.provider_accounts.remove(&name).unwrap();
+                config.provider_accounts.insert(final_name.clone(), acc);
+                for m in config.models.values_mut() {
+                    if m.account == name {
+                        m.account = final_name.clone();
+                    }
+                }
+            }
+            Ok(())
+        } else {
+            missing = true;
+            anyhow::bail!("provider {name:?} not found");
         }
-        Ok(())
     }) {
         Ok(config) => config,
         Err(_) if missing => {
@@ -373,21 +638,76 @@ pub(crate) async fn patch_provider(
         Err(error) => return json_error(StatusCode::INTERNAL_SERVER_ERROR, error).into_response(),
     };
 
-    let default_provider = config.default_provider.clone();
-    let p = config.providers.get(&final_name).unwrap();
-    Json(provider_info(&final_name, p, &default_provider)).into_response()
+    let default_provider = config.effective_model_selection().unwrap_or_default();
+    if let Some(p) = config.provider_config_for_selection(&final_name) {
+        let mut info = provider_info(&final_name, &p, &default_provider);
+        if let Some(m) = config.logical_models().get(&final_name) {
+            info.account = Some(m.account.clone());
+        }
+        Json(info).into_response()
+    } else if let Some(acc) = config.logical_accounts().get(&final_name) {
+        let info = ProviderInfo {
+            name: final_name.clone(),
+            provider_type: acc.provider.clone(),
+            model: String::new(),
+            base_url: acc.base_url.clone(),
+            has_api_key: acc.api_key.as_ref().is_some_and(|k| !k.is_empty()),
+            requires_login: false,
+            is_default: false,
+            context_window: 128_000,
+            max_tokens: None,
+            thinking_enabled: None,
+            thinking_budget: None,
+            thinking_type: None,
+            thinking_keep: None,
+            reasoning_history: None,
+            reasoning_effort: None,
+            skip_tls_verify: acc.skip_tls_verify,
+            ephemeral: acc.ephemeral,
+            pricing: None,
+            supports_vision: None,
+            reasoning_model: None,
+            account: Some(final_name.clone()),
+        };
+        Json(info).into_response()
+    } else {
+        json_error(
+            StatusCode::NOT_FOUND,
+            format!("Provider '{}' not found", final_name),
+        )
+        .into_response()
+    }
 }
 
 /// DELETE /providers/:name - Delete a provider.
 pub(crate) async fn delete_provider(Path(name): Path<String>) -> impl IntoResponse {
     let mut missing = false;
     let config = match update_config(|config| {
-        if config.providers.remove(&name).is_none() {
+        let removed_legacy = config.providers.remove(&name).is_some();
+        let removed_model = config.models.remove(&name).is_some();
+        let removed_account = if !removed_legacy && !removed_model {
+            if config.provider_accounts.remove(&name).is_some() {
+                config.models.retain(|_, m| m.account != name);
+                true
+            } else {
+                false
+            }
+        } else {
+            false
+        };
+        if !removed_legacy && !removed_model && !removed_account {
             missing = true;
             anyhow::bail!("provider {name:?} not found");
         }
-        if config.default_provider == name {
-            config.default_provider = config.providers.keys().min().cloned().unwrap_or_default();
+        if config.default_provider == name || config.default_model.as_deref() == Some(&name) {
+            config.default_model = None;
+            config.default_provider = config
+                .models
+                .keys()
+                .min()
+                .cloned()
+                .or_else(|| config.providers.keys().min().cloned())
+                .unwrap_or_default();
         }
         Ok(())
     }) {
@@ -402,14 +722,46 @@ pub(crate) async fn delete_provider(Path(name): Path<String>) -> impl IntoRespon
         Err(error) => return json_error(StatusCode::INTERNAL_SERVER_ERROR, error).into_response(),
     };
 
-    let providers: Vec<ProviderInfo> = config
-        .providers
+    let default_selection = config.effective_model_selection().unwrap_or_default();
+    let logical_models = config.logical_models();
+    let mut ids: Vec<String> = logical_models.keys().cloned().collect();
+    ids.sort();
+    let providers: Vec<ProviderInfo> = ids
         .iter()
-        .map(|(n, p)| provider_info(n, p, &config.default_provider))
+        .filter_map(|id| {
+            config
+                .provider_config_for_selection(id)
+                .map(|p| {
+                    let mut info = provider_info(id, &p, &default_selection);
+                    if let Some(m) = logical_models.get(id) {
+                        info.account = Some(m.account.clone());
+                    }
+                    info
+                })
+        })
         .collect();
+
+    let logical_accounts = config.logical_accounts();
+    let mut account_ids: Vec<String> = logical_accounts.keys().cloned().collect();
+    account_ids.sort();
+    let accounts: Vec<crate::AccountInfo> = account_ids
+        .into_iter()
+        .map(|id| {
+            let a = &logical_accounts[&id];
+            crate::AccountInfo {
+                id: id.clone(),
+                provider_type: a.provider.clone(),
+                base_url: a.base_url.clone(),
+                has_api_key: a.api_key.as_ref().is_some_and(|k| !k.is_empty()),
+                skip_tls_verify: a.skip_tls_verify,
+            }
+        })
+        .collect();
+
     Json(serde_json::json!({
-        "default_provider": config.default_provider,
+        "default_provider": default_selection,
         "providers": providers,
+        "accounts": accounts,
     }))
     .into_response()
 }
@@ -508,6 +860,108 @@ pub(crate) async fn patch_thinking(
         .into_response();
     };
     Json(provider_info(&name, &p, &default_selection)).into_response()
+}
+
+/// POST /provider-accounts / PUT /provider-accounts/:id
+pub(crate) async fn create_or_update_provider_account(
+    path_id: Option<Path<String>>,
+    Json(req): Json<CreateOrUpdateAccountRequest>,
+) -> impl IntoResponse {
+    let raw_id = path_id
+        .map(|Path(id)| id)
+        .or(req.id)
+        .unwrap_or_default();
+    let id = match validate_provider_name(&raw_id) {
+        Ok(id) => id,
+        Err(e) => return json_error(StatusCode::BAD_REQUEST, e).into_response(),
+    };
+
+    let config = match update_config(|config| {
+        let acc = config
+            .provider_accounts
+            .entry(id.clone())
+            .or_insert_with(|| ProviderAccountConfig {
+                provider: req.provider_type.clone().unwrap_or_else(|| "openai".into()),
+                display_name: None,
+                api_key: None,
+                base_url: None,
+                user_agent: None,
+                skip_tls_verify: false,
+                enterprise_url: None,
+                ephemeral: false,
+            });
+
+        if let Some(provider_type) = req.provider_type {
+            if !provider_type.trim().is_empty() {
+                acc.provider = provider_type;
+            }
+        }
+        if req.clear_api_key {
+            acc.api_key = None;
+        } else if let Some(key) = req.api_key {
+            acc.api_key = key;
+        }
+        if req.clear_base_url {
+            acc.base_url = None;
+        } else if let Some(url) = req.base_url {
+            acc.base_url = url;
+        }
+        if let Some(skip) = req.skip_tls_verify {
+            acc.skip_tls_verify = skip;
+        }
+        Ok(())
+    }) {
+        Ok(c) => c,
+        Err(e) => return json_error(StatusCode::INTERNAL_SERVER_ERROR, e).into_response(),
+    };
+
+    let acc = &config.provider_accounts[&id];
+    Json(crate::AccountInfo {
+        id,
+        provider_type: acc.provider.clone(),
+        base_url: acc.base_url.clone(),
+        has_api_key: acc.api_key.as_ref().is_some_and(|k| !k.is_empty()),
+        skip_tls_verify: acc.skip_tls_verify,
+    })
+    .into_response()
+}
+
+/// DELETE /provider-accounts/:id
+pub(crate) async fn delete_provider_account(Path(id): Path<String>) -> impl IntoResponse {
+    let mut missing = false;
+    let config = match update_config(|config| {
+        let removed_account = config.provider_accounts.remove(&id).is_some();
+        let removed_legacy = config.providers.remove(&id).is_some();
+        if !removed_account && !removed_legacy {
+            missing = true;
+            anyhow::bail!("account {id:?} not found");
+        }
+        config.models.retain(|_, m| m.account != id);
+        if config.default_provider == id || config.default_model.as_deref() == Some(&id) {
+            config.default_model = None;
+            config.default_provider = config
+                .models
+                .keys()
+                .min()
+                .cloned()
+                .or_else(|| config.providers.keys().min().cloned())
+                .unwrap_or_default();
+        }
+        Ok(())
+    }) {
+        Ok(c) => c,
+        Err(_) if missing => {
+            return json_error(StatusCode::NOT_FOUND, format!("Account '{}' not found", id))
+                .into_response()
+        }
+        Err(e) => return json_error(StatusCode::INTERNAL_SERVER_ERROR, e).into_response(),
+    };
+
+    Json(serde_json::json!({
+        "success": true,
+        "default_provider": config.effective_model_selection().unwrap_or_default(),
+    }))
+    .into_response()
 }
 
 // ============================================================================
@@ -673,5 +1127,100 @@ mod upstream_tests {
             parse_model_ids(body),
             vec!["grok-4.5".to_string(), "grok-4.6".to_string()]
         );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use atomcode_config::config::Config;
+
+    #[tokio::test]
+    async fn patch_provider_works_on_new_schema_model() {
+        update_config(|config| {
+            config.provider_accounts.insert(
+                "gemini".into(),
+                ProviderAccountConfig {
+                    provider: "anthropic".into(),
+                    display_name: None,
+                    api_key: Some("test-key".into()),
+                    base_url: Some("http://127.0.0.1:8046/v1".into()),
+                    user_agent: None,
+                    skip_tls_verify: false,
+                    enterprise_url: None,
+                    ephemeral: false,
+                },
+            );
+            config.models.insert(
+                "gemini-3.8.flash-high".into(),
+                ModelProfileConfig {
+                    account: "gemini".into(),
+                    model: "gemini-3.8-flash-high".into(),
+                    display_name: None,
+                    system_prompt: None,
+                    context_window: 1_000_000,
+                    max_tokens: None,
+                    capable_model: None,
+                    thinking_type: None,
+                    thinking_keep: None,
+                    reasoning_history: Some("include".into()),
+                    reasoning_effort: Some("high".into()),
+                    reasoning_levels: None,
+                    thinking_enabled: Some(true),
+                    thinking_budget: Some(2048),
+                    pricing: None,
+                    supports_vision: Some(true),
+                    reasoning_model: Some(true),
+                },
+            );
+            config.default_model = Some("gemini-3.8.flash-high".into());
+            config.default_provider = "gemini-3.8.flash-high".into();
+            Ok(())
+        })
+        .unwrap();
+
+        // Call patch_provider to update reasoning_effort and context_window
+        let req = PatchProviderRequest {
+            name: None,
+            provider_type: Some("anthropic".into()),
+            model: Some("gemini-3.8-flash-high-v2".into()),
+            account: None,
+            api_key: None,
+            clear_api_key: false,
+            base_url: Some(Some("http://127.0.0.1:8046/v2".into())),
+            clear_base_url: false,
+            user_agent: None,
+            clear_user_agent: false,
+            context_window: Some(2_000_000),
+            max_tokens: None,
+            clear_max_tokens: false,
+            thinking_enabled: Some(Some(true)),
+            thinking_budget: Some(Some(4096)),
+            thinking_type: None,
+            thinking_keep: None,
+            reasoning_history: Some(Some("include".into())),
+            reasoning_effort: Some(Some("max".into())),
+            skip_tls_verify: Some(false),
+            pricing: None,
+            clear_pricing: false,
+            supports_vision: Some(Some(true)),
+            clear_supports_vision: false,
+            reasoning_model: Some(Some(true)),
+            clear_reasoning_model: false,
+        };
+
+        let resp = patch_provider(Path("gemini-3.8.flash-high".into()), Json(req)).await;
+        let response = resp.into_response();
+        assert_eq!(response.status(), StatusCode::OK);
+
+        // Verify that config was updated
+        let loaded = load_config().unwrap();
+        let model = loaded.models.get("gemini-3.8.flash-high").expect("model should still exist");
+        assert_eq!(model.model, "gemini-3.8-flash-high-v2");
+        assert_eq!(model.context_window, 2_000_000);
+        assert_eq!(model.reasoning_effort.as_deref(), Some("max"));
+
+        let acc = loaded.provider_accounts.get("gemini").expect("account should exist");
+        assert_eq!(acc.base_url.as_deref(), Some("http://127.0.0.1:8046/v2"));
     }
 }

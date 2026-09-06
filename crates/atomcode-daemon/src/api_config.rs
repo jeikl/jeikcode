@@ -38,21 +38,47 @@ fn empty_config() -> Config {
 /// `ProviderConfig` view via the resolution boundary.
 pub(crate) fn config_response(config: &Config) -> ConfigResponse {
     let default_selection = config.effective_model_selection().unwrap_or_default();
-    let mut ids: Vec<String> = config.logical_models().into_keys().collect();
+    let logical_models = config.logical_models();
+    let mut ids: Vec<String> = logical_models.keys().cloned().collect();
     ids.sort();
     let providers = ids
         .iter()
         .filter_map(|id| {
             config
                 .provider_config_for_selection(id)
-                .map(|p| provider_info(id, &p, &default_selection))
+                .map(|p| {
+                    let mut info = provider_info(id, &p, &default_selection);
+                    if let Some(m) = logical_models.get(id) {
+                        info.account = Some(m.account.clone());
+                    }
+                    info
+                })
         })
         .collect();
+
+    let logical_accounts = config.logical_accounts();
+    let mut account_ids: Vec<String> = logical_accounts.keys().cloned().collect();
+    account_ids.sort();
+    let accounts = account_ids
+        .into_iter()
+        .map(|id| {
+            let a = &logical_accounts[&id];
+            crate::AccountInfo {
+                id: id.clone(),
+                provider_type: a.provider.clone(),
+                base_url: a.base_url.clone(),
+                has_api_key: a.api_key.as_ref().is_some_and(|k| !k.is_empty()),
+                skip_tls_verify: a.skip_tls_verify,
+            }
+        })
+        .collect();
+
     ConfigResponse {
         path: Config::default_path(),
         default_provider: default_selection,
         default_workdir: config.default_workdir.clone(),
         providers,
+        accounts,
     }
 }
 
@@ -86,6 +112,7 @@ pub(crate) fn provider_info(
         pricing: p.pricing,
         supports_vision: p.supports_vision,
         reasoning_model: p.reasoning_model,
+        account: None,
     }
 }
 

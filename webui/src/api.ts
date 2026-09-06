@@ -608,10 +608,19 @@ export async function deleteSession(
 
 // --- Config types ---
 
+export interface AccountInfo {
+  id: string;
+  type: string;
+  base_url?: string;
+  has_api_key: boolean;
+  skip_tls_verify?: boolean;
+}
+
 export interface ProviderInfo {
   name: string;
   type: string;
   model: string;
+  account?: string;
   base_url?: string;
   has_api_key: boolean;
   requires_login?: boolean;
@@ -634,6 +643,7 @@ export interface ConfigInfo {
   default_provider: string;
   default_workdir?: string;
   providers: ProviderInfo[];
+  accounts?: AccountInfo[];
 }
 
 export async function getConfig(): Promise<ConfigInfo> {
@@ -774,6 +784,7 @@ export interface CreateProviderBody {
   name: string;
   type: string; // openai | anthropic | responses | ollama | claude
   model: string;
+  account?: string;
   api_key?: string;
   base_url?: string;
   context_window?: number;
@@ -805,6 +816,7 @@ export interface UpdateProviderBody {
   name?: string;
   type?: string;
   model?: string;
+  account?: string;
   api_key?: string;
   base_url?: string;
   context_window?: number;
@@ -825,6 +837,43 @@ export async function updateProvider(name: string, body: UpdateProviderBody): Pr
   });
   if (!r.ok) { const e = await r.json().catch(() => ({})); throw new Error((e as any).error || `HTTP ${r.status}`); }
   return r.json();
+}
+
+export interface CreateOrUpdateAccountBody {
+  id?: string;
+  type?: string;
+  base_url?: string;
+  api_key?: string;
+  clear_api_key?: boolean;
+  clear_base_url?: boolean;
+  skip_tls_verify?: boolean;
+}
+
+export async function createOrUpdateAccount(
+  id: string,
+  body: CreateOrUpdateAccountBody,
+): Promise<AccountInfo> {
+  const r = await apiFetch(`/provider-accounts/${encodeURIComponent(id)}`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json', ...authHeaders() },
+    body: JSON.stringify(body),
+  });
+  if (!r.ok) {
+    const e = await r.json().catch(() => ({}));
+    throw new Error((e as any).error || `HTTP ${r.status}`);
+  }
+  return r.json();
+}
+
+export async function deleteAccount(id: string): Promise<void> {
+  const r = await apiFetch(`/provider-accounts/${encodeURIComponent(id)}`, {
+    method: 'DELETE',
+    headers: authHeaders(),
+  });
+  if (!r.ok) {
+    const e = await r.json().catch(() => ({}));
+    throw new Error((e as any).error || `HTTP ${r.status}`);
+  }
 }
 
 /** POST /providers/upstream-models — 拉取 openai/anthropic/responses/ollama 上游模型列表。 */

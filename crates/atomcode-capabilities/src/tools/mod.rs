@@ -41,6 +41,7 @@ pub(crate) mod bash_runtime;
 pub mod bash_workspace_gate;
 pub mod cd;
 pub mod edit;
+pub mod edit_history;
 pub mod encoding;
 pub mod glob;
 pub mod grep;
@@ -68,6 +69,7 @@ pub mod web_fetch;
 pub mod web_search;
 pub mod write;
 pub mod write_approval;
+pub mod write_state;
 #[cfg(feature = "memory")]
 pub use memory::MemoryTool;
 
@@ -115,6 +117,10 @@ pub use web_fetch::WebFetchTool;
 pub use web_search::WebSearchTool;
 pub use write::WriteFileTool;
 pub use write_approval::WriteApprovalGate;
+pub use write_state::{
+    check_write_permitted, record_edit, record_read, record_write_success, WritePermission,
+    WriteStateHook,
+};
 
 /// Names of the full neutral coding toolset — pass to
 /// [`ToolRegistry::mount`](atomcode_kernel::tool::ToolRegistry::mount).

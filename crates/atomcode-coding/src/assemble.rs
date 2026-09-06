@@ -145,6 +145,7 @@ fn build_coding_agent_from_tools(
             cfg.working_dir.clone(),
             turn_execution_policy,
         )))
+        .hook(Arc::new(atomcode_capabilities::session::WriteStateHook::new()))
         .working_dir(cfg.working_dir.clone())
         // Cache-friendly task-boundary stub + hard-overflow recovery ladder (stub→truncate
         // →drain+LLM-summary). The overflow path is off the normal path (typed error only).

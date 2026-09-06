@@ -266,3 +266,52 @@ test('clear + delete in one batch is rejected', () => {
   assert.deepEqual(list, before);
 });
 
+test('multi-turn folding maintains running todo list and supports re-planning', () => {
+  // Turn 1: Initial plan with 2 items
+  let sessionTodos = foldTodoToolCall(
+    null,
+    'todowrite',
+    JSON.stringify({
+      todos: [
+        { content: 'task 1', status: 'pending' },
+        { content: 'task 2', status: 'pending' },
+      ],
+    }),
+  );
+  assert.equal(sessionTodos?.length, 2);
+  assert.equal(sessionTodos?.[0]?.status, 'pending');
+
+  // Turn 1 patch: task 1 completed
+  sessionTodos = foldTodoToolCall(
+    sessionTodos,
+    'todowrite',
+    JSON.stringify({ action: 'update', id: 1, status: 'completed' }),
+  );
+  assert.equal(sessionTodos?.[0]?.status, 'completed');
+  assert.equal(sessionTodos?.[1]?.status, 'pending');
+
+  // Turn 2: incremental action completing task 2 across turn boundary
+  sessionTodos = foldTodoToolCall(
+    sessionTodos,
+    'todowrite',
+    JSON.stringify({ action: 'update', id: 2, status: 'completed' }),
+  );
+  assert.equal(sessionTodos?.[0]?.status, 'completed');
+  assert.equal(sessionTodos?.[1]?.status, 'completed');
+
+  // Turn 3: New plan replaces previous completed session todos
+  sessionTodos = foldTodoToolCall(
+    sessionTodos,
+    'todowrite',
+    JSON.stringify({
+      todos: [
+        { content: 'round 3 task', status: 'in_progress' },
+      ],
+    }),
+  );
+  assert.equal(sessionTodos?.length, 1);
+  assert.equal(sessionTodos?.[0]?.content, 'round 3 task');
+  assert.equal(sessionTodos?.[0]?.status, 'in_progress');
+});
+
+

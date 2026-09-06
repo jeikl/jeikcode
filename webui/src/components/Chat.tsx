@@ -192,17 +192,26 @@ function freezeTodosIntoLastAssistant(msgs: Message[], items: TodoItem[]): Messa
   return msgs;
 }
 
-/** Find the most recent unfinished todo list across a message timeline. */
-function findLatestUnfinishedTodos(msgs: Message[]): TodoItem[] | null {
+/**
+ * Find the active todo list for the session from message history.
+ * Inspects the MOST RECENT assistant message that carries a `todo_list`.
+ * If that latest list has unfinished items, returns it for the sticky panel.
+ * If that latest list is already fully completed (or no todo list exists),
+ * returns null so completed older plans are NOT revived.
+ */
+function findLatestActiveTodos(msgs: Message[]): TodoItem[] | null {
   for (let i = msgs.length - 1; i >= 0; i--) {
     const parts = msgs[i]!.parts;
     if (!parts) continue;
     for (let j = parts.length - 1; j >= 0; j--) {
       const part = parts[j]!;
       if (part.kind === 'todo_list' && part.items && part.items.length > 0) {
+        // Stop at the latest message that had a plan.
+        // Never jump backwards across turns to resurrect an older, superseded plan!
         if (part.items.some((t) => t.status !== 'completed')) {
           return part.items;
         }
+        return null;
       }
     }
   }
@@ -1706,7 +1715,7 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
         stashedTodos && stashedTodos.some((t) => t.status !== 'completed')
           ? stashedTodos
           : cached
-            ? findLatestUnfinishedTodos(cached)
+            ? findLatestActiveTodos(cached)
             : null;
       if (restoredTodos && restoredTodos.length > 0) {
         setActiveTodos(restoredTodos);
@@ -1875,7 +1884,7 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
               pinTimelineToBottom();
             }
             if (!activeTodosRef.current) {
-              const diskUnfinished = findLatestUnfinishedTodos(displayMessages);
+              const diskUnfinished = findLatestActiveTodos(displayMessages);
               if (diskUnfinished && diskUnfinished.length > 0) {
                 setActiveTodos(diskUnfinished);
                 activeTodosRef.current = diskUnfinished;
@@ -2298,21 +2307,21 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
 
   function sessionMessagesToDisplay(msgs: SessionMessage[], sourceOffset = 0): Message[] {
     const loaded: Message[] = [];
-    // Per-assistant-turn todo calls so each reply freezes its own plan.
-    let turnTodoCalls: { name: string; args: string }[] = [];
+    // Running session-level todo list across turns.
+    // Baseline is the last full plan; subsequent actions fold over it.
+    let sessionTodoList: TodoItem[] = [];
+    let turnHadTodoCalls = false;
     const flushTurnTodos = () => {
-      if (turnTodoCalls.length === 0 || loaded.length === 0) {
-        turnTodoCalls = [];
+      if (!turnHadTodoCalls || loaded.length === 0) {
+        turnHadTodoCalls = false;
         return;
       }
-      const list = reduceTodosFromCalls(turnTodoCalls);
-      turnTodoCalls = [];
-      if (list.length === 0) return;
+      turnHadTodoCalls = false;
       for (let i = loaded.length - 1; i >= 0; i--) {
         if (loaded[i]!.role !== 'assistant') continue;
         loaded[i] = {
           ...loaded[i]!,
-          parts: withTrailingTodoList(loaded[i]!.parts, list),
+          parts: withTrailingTodoList(loaded[i]!.parts, sessionTodoList),
         };
         break;
       }
@@ -2369,7 +2378,8 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
             },
           });
           if (isTodoTool(tc.name)) {
-            turnTodoCalls.push({ name: tc.name, args: rawArgs });
+            sessionTodoList = foldTodoToolCall(sessionTodoList, tc.name, rawArgs) ?? [];
+            turnHadTodoCalls = true;
           }
         }
         loaded.push({

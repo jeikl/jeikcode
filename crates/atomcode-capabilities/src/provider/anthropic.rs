@@ -22,6 +22,7 @@
 //!     `Map` (sorted on serialize) with no timestamps/uuids, so the same
 //!     `(system, messages, tools)` always serialize identically.
 
+use super::reasoning::{ReasoningPolicy, REASONING_PLACEHOLDER};
 use super::retry::{self, RetryPolicy};
 use async_trait::async_trait;
 use atomcode_kernel::message::{Message, Role};
@@ -53,10 +54,18 @@ pub struct AnthropicConfig {
     pub max_tokens: u32,
     /// `anthropic-version` header value.
     pub anthropic_version: String,
-    /// Enable extended thinking (`thinking: {type:"adaptive"}`). Off by default — only
-    /// the 4.6+ models accept it, and the assistant must then echo signed thinking
-    /// blocks back (handled via `reasoning_blocks`).
+    /// Enable extended thinking. Off by default. When enabled, emits standard Claude 3.7+
+    /// `thinking: {type:"enabled", budget_tokens:...}` or adaptive mode if configured.
     pub thinking: bool,
+    /// Maximum tokens allocated to the thinking phase (`thinking.budget_tokens`).
+    /// Defaults to 10000 (or derived from effort / max_tokens clamp) when thinking is enabled.
+    pub thinking_budget: Option<u32>,
+    /// Thinking mode: `"enabled"` (default) or `"adaptive"`.
+    pub thinking_type: Option<String>,
+    /// Explicit reasoning model flag; `Some(true)` ⇒ `ReasoningPolicy::Include`, `Some(false)` ⇒ `ReasoningPolicy::Exclude`.
+    pub reasoning_model: Option<bool>,
+    /// Explicit reasoning round-trip policy; `None` ⇒ derived from the model name and base URL.
+    pub reasoning_policy: Option<ReasoningPolicy>,
     /// Forward sampling params (`temperature` / future `top_p` / `top_k`) on the wire.
     /// **Off by default** because the default model is a modern Claude (Opus 4.7+),
     /// which REMOVED these — sending `temperature` 400s — and extended thinking is
@@ -96,6 +105,10 @@ impl AnthropicConfig {
             max_tokens: 4096,
             anthropic_version: "2023-06-01".to_string(),
             thinking: false,
+            thinking_budget: None,
+            thinking_type: None,
+            reasoning_model: None,
+            reasoning_policy: None,
             send_sampling_params: false,
             idle_timeout: Duration::from_secs(120),
             open_timeout: Duration::from_secs(90),
@@ -109,6 +122,7 @@ impl AnthropicConfig {
 
 pub struct AnthropicProvider {
     cfg: AnthropicConfig,
+    policy: ReasoningPolicy,
     client: reqwest::Client,
     url: String,
     /// Stable per-conversation id bound ONCE by the kernel; see the field on
@@ -118,7 +132,27 @@ pub struct AnthropicProvider {
 }
 
 impl AnthropicProvider {
+    pub fn resolve_policy(cfg: &AnthropicConfig) -> ReasoningPolicy {
+        cfg.reasoning_model
+            .map(|rm| {
+                if rm {
+                    ReasoningPolicy::Include
+                } else {
+                    ReasoningPolicy::Exclude
+                }
+            })
+            .or(cfg.reasoning_policy)
+            .unwrap_or_else(|| {
+                if cfg.thinking {
+                    ReasoningPolicy::Include
+                } else {
+                    ReasoningPolicy::derive(&cfg.model, &cfg.base_url)
+                }
+            })
+    }
+
     pub fn new(cfg: AnthropicConfig) -> Result<Self, ProviderError> {
+        let policy = Self::resolve_policy(&cfg);
         let mut builder = crate::proxy::apply_async_proxy_policy(reqwest::Client::builder())
             .connect_timeout(cfg.connect_timeout)
             // Reap idle keep-alives before the server does (see POOL_IDLE_TIMEOUT).
@@ -140,6 +174,7 @@ impl AnthropicProvider {
         let url = messages_endpoint_url(&cfg.base_url);
         Ok(Self {
             cfg,
+            policy,
             client,
             url,
             session_id: std::sync::OnceLock::new(),
@@ -167,7 +202,7 @@ impl LlmProvider for AnthropicProvider {
         tools: &[ToolDef],
         options: &ChatOptions,
     ) -> Result<BoxStream<'static, StreamEvent>, ProviderError> {
-        let body = build_request_body(&self.cfg.model, messages, tools, options, &self.cfg);
+        let body = build_request_body(&self.cfg.model, messages, tools, options, &self.cfg, self.policy);
         super::wire_dump_request(&self.cfg.model, &body); // byte-level dump (ATOMCODE_WIRE_DUMP=1)
 
         // Open the stream. A hard failure here returns `Err` so the kernel's
@@ -426,6 +461,11 @@ fn ends_with_api_version(base: &str) -> bool {
 // Request building (pure, deterministic)
 // ---------------------------------------------------------------------------
 
+pub(crate) fn is_official_anthropic(base_url: &str) -> bool {
+    let u = base_url.to_ascii_lowercase();
+    u.contains("api.anthropic.com") || u.contains("api.anthropic.test")
+}
+
 /// Build the full Messages API request body. Deterministic: keys come from a
 /// BTreeMap-backed `Map` (sorted on serialize), values are ordered literals.
 fn build_request_body(
@@ -434,17 +474,21 @@ fn build_request_body(
     tools: &[ToolDef],
     options: &ChatOptions,
     cfg: &AnthropicConfig,
+    policy: ReasoningPolicy,
 ) -> Value {
     let mut body = Map::new();
     body.insert("model".into(), json!(model));
     // `max_tokens` is REQUIRED. Per-call override wins; else the cfg default.
+    let max_tokens = options.max_tokens.unwrap_or(cfg.max_tokens);
     body.insert(
         "max_tokens".into(),
-        json!(options.max_tokens.unwrap_or(cfg.max_tokens)),
+        json!(max_tokens),
     );
     body.insert("stream".into(), json!(true));
 
-    let (system_blocks, mut msgs) = format_messages(messages, cfg.thinking);
+    let is_official = is_official_anthropic(&cfg.base_url);
+    let echo_thinking = policy == ReasoningPolicy::Include;
+    let (system_blocks, mut msgs) = format_messages(messages, echo_thinking, is_official);
     if !system_blocks.is_empty() {
         // Prompt-cache breakpoints: Anthropic allows at most 4 breakpoints per request.
         // We set cache_control on Block 1 (idx 0) and Block 2 (idx 1).
@@ -495,8 +539,43 @@ fn build_request_body(
     // Anthropic rejects extended/adaptive thinking combined with forced tool use.
     // Suppress thinking for this one request; the session config remains unchanged,
     // so the following round resumes thinking automatically.
-    if cfg.thinking && !forces_tool_use {
-        body.insert("thinking".into(), json!({ "type": "adaptive" }));
+    let thinking_enabled = (cfg.thinking || policy == ReasoningPolicy::Include)
+        && cfg.thinking_type.as_deref() != Some("disabled")
+        && !forces_tool_use;
+    if thinking_enabled {
+        if cfg.thinking_type.as_deref() == Some("adaptive") {
+            body.insert("thinking".into(), json!({ "type": "adaptive" }));
+        } else {
+            let mut budget = if let Some(b) = cfg.thinking_budget {
+                b
+            } else if let Some(effort) = &options.reasoning_effort {
+                match effort {
+                    ReasoningEffort::Low => 2048,
+                    ReasoningEffort::Medium => 8192,
+                    ReasoningEffort::High => 16384,
+                    ReasoningEffort::XHigh => 24576,
+                    ReasoningEffort::Max => 32768,
+                    ReasoningEffort::Custom(ref s) => s.parse::<u32>().unwrap_or(10000),
+                }
+            } else {
+                10000
+            };
+
+            if max_tokens > 1024 {
+                if budget >= max_tokens {
+                    budget = (max_tokens * 3 / 4).clamp(1024, max_tokens.saturating_sub(1));
+                } else {
+                    budget = budget.clamp(1024, max_tokens.saturating_sub(1));
+                }
+            }
+            body.insert(
+                "thinking".into(),
+                json!({
+                    "type": "enabled",
+                    "budget_tokens": budget,
+                }),
+            );
+        }
     }
     if let Some(effort) = super::openai_compat::resolve_wire_effort(model, options) {
         body.insert("output_config".into(), json!({ "effort": effort }));
@@ -552,7 +631,11 @@ fn apply_message_cache_breakpoint(messages: &mut [Value]) {
 /// Split kernel messages into the Anthropic top-level `system` text blocks (all non-empty
 /// System messages) and the wire `messages[]` (User/Assistant/Tool mapped to content
 /// blocks; consecutive Tool results folded into one `user` message).
-fn format_messages(messages: &[Message], echo_thinking: bool) -> (Vec<String>, Vec<Value>) {
+fn format_messages(
+    messages: &[Message],
+    echo_thinking: bool,
+    is_official: bool,
+) -> (Vec<String>, Vec<Value>) {
     // Leading System messages lift to the top-level `system` block array. Anthropic has no
     // system message ROLE on the wire.
     let system_blocks: Vec<String> = messages
@@ -575,7 +658,7 @@ fn format_messages(messages: &[Message], echo_thinking: bool) -> (Vec<String>, V
                 continue;
             }
             Role::Assistant => {
-                out.push(format_assistant_message(m, echo_thinking));
+                out.push(format_assistant_message(m, echo_thinking, is_official));
                 i += 1;
                 continue;
             }
@@ -697,31 +780,64 @@ fn format_user_message(m: &Message) -> Value {
 /// An `assistant` message. Plain text (no tool calls, no echoed thinking) → `content`
 /// STRING. Otherwise an ARRAY in Anthropic's required order: signed thinking blocks
 /// (only when `echo_thinking`), then the text block, then `tool_use` blocks.
-fn format_assistant_message(m: &Message, echo_thinking: bool) -> Value {
-    // Echo a signed thinking block back ONLY if THIS provider produced it. An opaque
-    // token is PROVIDER-BOUND — replaying another vendor's `signature`/`data` to
-    // Anthropic fails hard (400) — so we filter on `provider`, honoring the
-    // [`ReasoningBlock`](atomcode_kernel::message::ReasoningBlock) INVARIANT. A `None`
-    // provider is treated as foreign (never echoed).
-    let echoable = |b: &atomcode_kernel::message::ReasoningBlock| {
-        echo_thinking && b.provider.as_deref() == Some("anthropic")
-    };
-    let has_echo = m.reasoning_blocks.iter().any(|b| echoable(b));
-    if m.tool_calls.is_empty() && !has_echo {
-        // Pure-text assistant turn — keep it a STRING.
-        return json!({ "role": "assistant", "content": m.text });
-    }
+fn format_assistant_message(m: &Message, echo_thinking: bool, is_official: bool) -> Value {
     let mut parts: Vec<Value> = Vec::new();
-    for b in m.reasoning_blocks.iter().filter(|b| echoable(b)) {
-        let opaque = b.opaque.as_deref().unwrap_or_default();
-        // Empty text ⇒ a REDACTED block (carries `data`, not a `signature`); a normal
-        // thinking block carries readable text + its `signature`.
-        if b.text.is_empty() {
-            parts.push(json!({ "type": "redacted_thinking", "data": opaque }));
+    let mut has_thinking_blocks = false;
+
+    if echo_thinking {
+        if is_official {
+            // Echo a signed thinking block back ONLY if THIS provider produced it. An opaque
+            // token is PROVIDER-BOUND — replaying another vendor's `signature`/`data` to
+            // Anthropic fails hard (400) — so we filter on `provider`, honoring the
+            // [`ReasoningBlock`](atomcode_kernel::message::ReasoningBlock) INVARIANT. A `None`
+            // provider is treated as foreign (never echoed).
+            for b in m.reasoning_blocks.iter().filter(|b| b.provider.as_deref() == Some("anthropic")) {
+                has_thinking_blocks = true;
+                let opaque = b.opaque.as_deref().unwrap_or_default();
+                if b.text.is_empty() {
+                    parts.push(json!({ "type": "redacted_thinking", "data": opaque }));
+                } else {
+                    parts.push(json!({ "type": "thinking", "thinking": b.text, "signature": opaque }));
+                }
+            }
         } else {
-            parts.push(json!({ "type": "thinking", "thinking": b.text, "signature": opaque }));
+            // Third-party gateway (Gemini, DeepSeek, New API, One API, etc.):
+            // Gateways do not enforce Anthropic's private key signature HMAC.
+            for b in &m.reasoning_blocks {
+                has_thinking_blocks = true;
+                let opaque = b.opaque.as_deref().unwrap_or_default();
+                if b.text.is_empty() && !opaque.is_empty() {
+                    parts.push(json!({ "type": "redacted_thinking", "data": opaque }));
+                } else {
+                    parts.push(json!({ "type": "thinking", "thinking": b.text, "signature": opaque }));
+                }
+            }
+            // If no reasoning_blocks were present, synthesize a thinking block from m.reasoning or placeholder
+            if !has_thinking_blocks {
+                if let Some(text) = m.reasoning.as_deref().filter(|s| !s.is_empty()) {
+                    parts.push(json!({
+                        "type": "thinking",
+                        "thinking": text,
+                        "signature": "",
+                    }));
+                    has_thinking_blocks = true;
+                } else if !m.tool_calls.is_empty() {
+                    parts.push(json!({
+                        "type": "thinking",
+                        "thinking": REASONING_PLACEHOLDER,
+                        "signature": "",
+                    }));
+                    has_thinking_blocks = true;
+                }
+            }
         }
     }
+
+    if m.tool_calls.is_empty() && !has_thinking_blocks {
+        // Pure-text assistant turn without thinking — keep it a STRING.
+        return json!({ "role": "assistant", "content": m.text });
+    }
+
     if !m.text.is_empty() {
         parts.push(json!({ "type": "text", "text": m.text }));
     }
@@ -944,11 +1060,23 @@ impl AnthropicSseDecoder {
                     .and_then(|s| s.as_str())
                     .unwrap_or("")
                     .to_string();
+                let sig = cb
+                    .and_then(|c| {
+                        c.get("signature")
+                            .or_else(|| c.get("thought_signature"))
+                            .or_else(|| c.get("thoughtSignature"))
+                    })
+                    .and_then(|s| s.as_str())
+                    .unwrap_or("")
+                    .to_string();
                 let b = self.block_mut(index);
                 b.kind = kind;
                 b.id = id;
                 b.name = name;
                 b.redacted_data = data;
+                if !sig.is_empty() {
+                    b.signature = sig;
+                }
             }
             "content_block_delta" => {
                 let index = usize_at(&v, "index");
@@ -978,7 +1106,11 @@ impl AnthropicSseDecoder {
                     }
                     "signature_delta" => {
                         if let Some(s) = delta
-                            .and_then(|d| d.get("signature"))
+                            .and_then(|d| {
+                                d.get("signature")
+                                    .or_else(|| d.get("thought_signature"))
+                                    .or_else(|| d.get("thoughtSignature"))
+                            })
                             .and_then(|s| s.as_str())
                         {
                             self.block_mut(index).signature.push_str(s);
@@ -1001,11 +1133,47 @@ impl AnthropicSseDecoder {
                     }
                     _ => {}
                 }
+                // Also handle gateways that attach signature/thought_signature directly inside delta (e.g. alongside thinking_delta)
+                if dtype != "signature_delta" {
+                    if let Some(s) = delta
+                        .and_then(|d| {
+                            d.get("signature")
+                                .or_else(|| d.get("thought_signature"))
+                                .or_else(|| d.get("thoughtSignature"))
+                        })
+                        .and_then(|s| s.as_str())
+                    {
+                        if !s.is_empty() {
+                            let b = self.block_mut(index);
+                            if b.signature.is_empty() {
+                                b.signature.push_str(s);
+                            } else if b.signature != s && !b.signature.contains(s) {
+                                b.signature.push_str(s);
+                            }
+                        }
+                    }
+                }
             }
             "content_block_stop" => {
                 let index = usize_at(&v, "index");
                 if index >= self.blocks.len() {
                     return;
+                }
+                // Check if gateway passes signature at content_block_stop
+                if let Some(s) = v
+                    .get("signature")
+                    .or_else(|| v.get("thought_signature"))
+                    .or_else(|| v.get("thoughtSignature"))
+                    .or_else(|| v.get("content_block").and_then(|c| {
+                        c.get("signature")
+                            .or_else(|| c.get("thought_signature"))
+                            .or_else(|| c.get("thoughtSignature"))
+                    }))
+                    .and_then(|s| s.as_str())
+                {
+                    if !s.is_empty() && self.blocks[index].signature.is_empty() {
+                        self.blocks[index].signature = s.to_string();
+                    }
                 }
                 // take() the block so its buffers can move into the emitted events.
                 let b = std::mem::take(&mut self.blocks[index]);
@@ -1098,6 +1266,21 @@ fn usize_at(v: &Value, key: &str) -> usize {
 mod tests {
     use super::*;
     use atomcode_kernel::message::{ImageContent, ReasoningBlock};
+
+    fn format_messages(messages: &[Message], echo_thinking: bool) -> (Vec<String>, Vec<Value>) {
+        super::format_messages(messages, echo_thinking, true)
+    }
+
+    fn build_request_body(
+        model: &str,
+        messages: &[Message],
+        tools: &[ToolDef],
+        options: &ChatOptions,
+        cfg: &AnthropicConfig,
+    ) -> Value {
+        let policy = AnthropicProvider::resolve_policy(cfg);
+        super::build_request_body(model, messages, tools, options, cfg, policy)
+    }
 
     fn cfg() -> AnthropicConfig {
         AnthropicConfig::new("k", "https://api.anthropic.test", "claude-opus-4-8")
@@ -1415,12 +1598,88 @@ mod tests {
         let (_s, out) = format_messages(&[Message::user("hi"), a], true);
         let content = out[1]["content"].as_array().unwrap();
         // only the Anthropic block is echoed, then the text — the foreign one is dropped.
-        assert_eq!(
-            content[0],
-            json!({"type":"thinking","thinking":"ours","signature":"sig-a"})
-        );
+        assert_eq!(content[0], json!({"type":"thinking","thinking":"ours","signature":"sig-a"}));
         assert_eq!(content[1], json!({"type":"text","text":"answer"}));
         assert_eq!(content.len(), 2, "the foreign block must not appear");
+    }
+
+    #[test]
+    fn gateway_echoes_reasoning_from_message_when_blocks_empty() {
+        let mut a = Message::assistant("answer", vec![]);
+        a.reasoning = Some("synthesized reasoning from gateway".into());
+        // Non-official gateway (is_official = false) with echo_thinking = true
+        let (_s, out) = super::format_messages(&[Message::user("hi"), a], true, false);
+        let content = out[1]["content"].as_array().expect("array of content blocks");
+        assert_eq!(
+            content[0],
+            json!({
+                "type": "thinking",
+                "thinking": "synthesized reasoning from gateway",
+                "signature": "",
+            })
+        );
+        assert_eq!(content[1], json!({"type":"text","text":"answer"}));
+    }
+
+    #[test]
+    fn gateway_echoes_placeholder_on_tool_calls_when_empty() {
+        let a = Message::assistant(
+            "",
+            vec![ToolCall {
+                id: "t1".into(),
+                name: "bash".into(),
+                arguments: "{}".into(),
+            }],
+        );
+        // Non-official gateway (is_official = false) with echo_thinking = true and no reasoning
+        let (_s, out) = super::format_messages(&[Message::user("hi"), a], true, false);
+        let content = out[1]["content"].as_array().expect("array of content blocks");
+        assert_eq!(
+            content[0],
+            json!({
+                "type": "thinking",
+                "thinking": REASONING_PLACEHOLDER,
+                "signature": "",
+            })
+        );
+        assert_eq!(content[1]["type"], "tool_use");
+    }
+
+    #[test]
+    fn thinking_request_body_emits_enabled_with_budget() {
+        let mut c = cfg();
+        c.thinking = true;
+        c.max_tokens = 16384;
+        c.thinking_budget = Some(5000);
+        let body = build_request_body("claude-opus-4-8", &[Message::user("hi")], &[], &ChatOptions::default(), &c);
+        assert_eq!(
+            body["thinking"],
+            json!({
+                "type": "enabled",
+                "budget_tokens": 5000,
+            })
+        );
+    }
+
+    #[test]
+    fn thinking_request_body_emits_adaptive_when_configured() {
+        let mut c = cfg();
+        c.thinking = true;
+        c.thinking_type = Some("adaptive".into());
+        let body = build_request_body("claude-opus-4-8", &[Message::user("hi")], &[], &ChatOptions::default(), &c);
+        assert_eq!(body["thinking"], json!({ "type": "adaptive" }));
+    }
+
+    #[test]
+    fn thinking_enabled_by_reasoning_policy_include() {
+        let mut c = cfg();
+        c.thinking = false;
+        c.max_tokens = 8192;
+        c.reasoning_policy = Some(ReasoningPolicy::Include);
+        let body = build_request_body("claude-opus-4-8", &[Message::user("hi")], &[], &ChatOptions::default(), &c);
+        assert_eq!(body["thinking"]["type"], "enabled");
+        // default budget clamped to max_tokens - 1 (or 75%): 8192 * 3 / 4 = 6144
+        assert_eq!(body["thinking"]["budget_tokens"], 6144);
     }
 
     #[test]
@@ -1781,6 +2040,44 @@ mod tests {
         assert!(
             matches!(&ev[1], StreamEvent::ReasoningSignature { opaque, provider, .. } if opaque == "sig-xyz" && provider == "anthropic")
         );
+    }
+
+    #[test]
+    fn sse_thinking_captures_signature_from_content_block_start() {
+        let mut d = AnthropicSseDecoder::new();
+        let mut ev = Vec::new();
+        ev.extend(d.feed(line("content_block_start", json!({
+            "type": "content_block_start",
+            "index": 0,
+            "content_block": {
+                "type": "thinking",
+                "thinking": "",
+                "thought_signature": "gemini-sig-start"
+            }
+        })).as_bytes()));
+        ev.extend(d.feed(line("content_block_delta", json!({"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"thinking..."}})).as_bytes()));
+        ev.extend(d.feed(line("content_block_stop", json!({"type":"content_block_stop","index":0})).as_bytes()));
+        assert_eq!(kinds(&ev), vec!["reason", "reasonsig"]);
+        assert!(matches!(&ev[1], StreamEvent::ReasoningSignature { opaque, .. } if opaque == "gemini-sig-start"));
+    }
+
+    #[test]
+    fn sse_thinking_captures_thought_signature_from_delta() {
+        let mut d = AnthropicSseDecoder::new();
+        let mut ev = Vec::new();
+        ev.extend(d.feed(line("content_block_start", json!({"type":"content_block_start","index":0,"content_block":{"type":"thinking","thinking":""}})).as_bytes()));
+        ev.extend(d.feed(line("content_block_delta", json!({
+            "type": "content_block_delta",
+            "index": 0,
+            "delta": {
+                "type": "thinking_delta",
+                "thinking": "thinking...",
+                "thoughtSignature": "gemini-sig-delta"
+            }
+        })).as_bytes()));
+        ev.extend(d.feed(line("content_block_stop", json!({"type":"content_block_stop","index":0})).as_bytes()));
+        assert_eq!(kinds(&ev), vec!["reason", "reasonsig"]);
+        assert!(matches!(&ev[1], StreamEvent::ReasoningSignature { opaque, .. } if opaque == "gemini-sig-delta"));
     }
 
     #[test]

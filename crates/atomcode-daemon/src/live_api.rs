@@ -413,6 +413,7 @@ pub(crate) fn chat_runtime_config(
             .map(|p| p.provider_type.clone())
             .unwrap_or_else(|| "openai".into()),
         thinking_enabled: p.and_then(|p| p.thinking_enabled),
+        thinking_budget: p.and_then(|p| p.thinking_budget),
         thinking_type: p.and_then(|p| p.thinking_type.clone()),
         thinking_keep: p.and_then(|p| p.thinking_keep.clone()),
         reasoning_model: p.and_then(|p| p.reasoning_model),

@@ -143,23 +143,18 @@ async fn full_assembly_lifecycle() {
             shape()
         );
         assert!(
-            first[2].role == Role::System && first[2].text.starts_with("=== CODE TOOLS ==="),
-            "code-tools routing card follows workflow discipline: {:?}",
+            first[2].role == Role::System && first[2].text.starts_with("=== SESSION BASELINE ==="),
+            "session baseline follows workflow discipline: {:?}",
             shape()
         );
         assert!(
-            first[3].role == Role::System && first[3].text.starts_with("=== SESSION BASELINE ==="),
-            "session baseline follows code-tools: {:?}",
-            shape()
-        );
-        assert!(
-            first[4].role == Role::User
-                && first[4].synthetic
-                && first[4].text.starts_with("=== MEMORY ==="),
+            first[3].role == Role::User
+                && first[3].synthetic
+                && first[3].text.starts_with("=== MEMORY ==="),
             "memory block follows the leading System run: {:?}",
             shape()
         );
-        assert!(first[4].text.contains("prefers tabs"));
+        assert!(first[3].text.contains("prefers tabs"));
         // StatusReminderHook appends the date to the bottom of the real query;
         // no independent synthetic user message is created.
         assert_eq!(
@@ -260,8 +255,8 @@ async fn full_assembly_lifecycle() {
             .any(|m| m.text.starts_with("the second task\n\n<system-reminder>")));
         let system_count = first.iter().filter(|m| m.role == Role::System).count();
         assert_eq!(
-            system_count, 4,
-            "persona b1 + workflow b2 + code-tools + session-baseline exactly once each"
+            system_count, 3,
+            "persona b1 + workflow b2 + session-baseline exactly once each"
         );
         let memory_count = first
             .iter()

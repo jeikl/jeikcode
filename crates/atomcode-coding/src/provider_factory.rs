@@ -134,10 +134,19 @@ impl CodingProviderFactory for DefaultCodingProviderFactory {
                 let mut ac = AnthropicConfig::new(&cfg.api_key, &cfg.base_url, &cfg.model);
                 ac.context_window = cfg.context_window;
                 ac.idle_timeout = cfg.stream_timeout;
-                ac.max_tokens = default_max_tokens(cfg.context_window);
+                ac.max_tokens = cfg
+                    .chat_options
+                    .max_tokens
+                    .unwrap_or_else(|| default_max_tokens(cfg.context_window));
                 ac.thinking = cfg
                     .thinking_enabled
                     .unwrap_or_else(|| cfg.reasoning_model.unwrap_or(false));
+                ac.thinking_budget = cfg.thinking_budget;
+                ac.thinking_type = cfg.thinking_type.clone();
+                ac.reasoning_model = cfg.reasoning_model;
+                ac.reasoning_policy =
+                    ReasoningPolicy::from_config(cfg.reasoning_history.as_deref())
+                        .map_err(ProviderBuildError::Adapter)?;
                 ac.user_agent = Some(ua.clone());
                 ac.skip_tls_verify = cfg.skip_tls_verify;
                 Arc::new(
@@ -218,6 +227,7 @@ pub fn derive_tier_config(
     tier.thinking_keep = provider.thinking_keep.clone();
     tier.reasoning_history = provider.reasoning_history.clone();
     tier.thinking_enabled = provider.thinking_enabled;
+    tier.thinking_budget = provider.thinking_budget;
     tier.reasoning_model = provider.reasoning_model;
     tier.user_agent = provider.user_agent.clone();
     tier.skip_tls_verify = provider.skip_tls_verify;
@@ -266,6 +276,7 @@ pub fn derive_tier_config_from_resolved(
     tier.thinking_keep = resolved.thinking_keep.clone();
     tier.reasoning_history = resolved.reasoning_history.clone();
     tier.thinking_enabled = resolved.thinking_enabled;
+    tier.thinking_budget = resolved.thinking_budget;
     tier.reasoning_model = resolved.reasoning_model;
     tier.user_agent = resolved.user_agent.clone();
     tier.skip_tls_verify = resolved.skip_tls_verify;

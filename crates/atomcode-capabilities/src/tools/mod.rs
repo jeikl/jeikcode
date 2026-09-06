@@ -118,8 +118,8 @@ pub use web_search::WebSearchTool;
 pub use write::WriteFileTool;
 pub use write_approval::WriteApprovalGate;
 pub use write_state::{
-    check_write_permitted, record_edit, record_read, record_write_success, WritePermission,
-    WriteStateHook,
+    check_write_permitted, record_edit, record_read, record_read_confirmed, record_write_success,
+    WritePermission, WriteStateHook,
 };
 
 /// Names of the full neutral coding toolset — pass to

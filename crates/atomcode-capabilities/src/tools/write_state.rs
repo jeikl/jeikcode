@@ -145,6 +145,17 @@ pub fn record_write_success(path: &Path) {
     entry.1.last_op = Some(FileOpKind::Write);
 }
 
+/// Record that a file has been confirmed read in this turn (e.g. by returning its full content on write intercept).
+pub fn record_read_confirmed(path: &Path) {
+    let p = canon(path);
+    let mut lock = STATE_MACHINE.lock().unwrap();
+    let turn = get_turn_for_path(&p, &lock);
+    let entry = lock.files.entry(p).or_insert((turn, FileTurnState::default()));
+    entry.0 = turn;
+    entry.1.read_confirmed = true;
+    entry.1.last_op = Some(FileOpKind::Read);
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WritePermission {
     Allowed,
@@ -250,9 +261,10 @@ pub async fn build_unread_refusal_message(path: &Path, display_path: &str) -> St
             DEFAULT_READ_LIMIT + 1
         )
     } else {
+        record_read_confirmed(path);
         format!(
             "[Showing lines 1-{total} of {total} (全量内容)]\n\
-             提示：以上为目标文件的全量内容（共 {total} 行）。请读取确认欲写入文件内容后再写入。"
+             提示：以上为目标文件的全量内容（共 {total} 行）。当前已将该文件状态更新为【已读】，请确认欲写入文件内容后直接再次调用 `write_file` 写入。"
         )
     };
 

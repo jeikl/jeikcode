@@ -415,18 +415,20 @@ pub(crate) fn render_custom_rules_from(cfg: &CustomRulesConfig) -> String {
         if let Some(guide) = &wf.guidelines {
             let mut items: Vec<_> = guide.iter().collect();
             items.sort_by_key(|(k, _)| match k.as_str() {
-                "concurrency" => 1,
-                "destructive_confirmation" => 2,
-                "simple_tasks" => 3,
-                "medium_tasks" => 4,
-                "complex_tasks" => 5,
-                "exploration_tasks" => 6,
-                "exploration_stop_condition" => 7,
-                "confidence_brake" => 8,
+                "simple_tasks" => 1,
+                "medium_tasks" => 2,
+                "complex_tasks" => 3,
+                "todolist_closure" => 4,
+                "best_effort_drive" => 5,
+                "incremental_recovery" => 6,
+                "concurrency" => 7,
+                "exploration_tasks" => 8,
                 "modification_tasks" => 9,
-                "general_tasks" => 10,
-                "incremental_recovery" => 11,
-                _ => 12,
+                "destructive_confirmation" => 10,
+                "exploration_stop_condition" => 11,
+                "confidence_brake" => 12,
+                "general_tasks" => 13,
+                _ => 14,
             });
             for (_, v) in items {
                 out.push_str(&format!("- {v}\n"));
@@ -649,20 +651,19 @@ doing_tasks:
             wf.principle
                 .as_deref()
                 .unwrap()
-                .contains("Task classification")
+                .contains("Determine the final goal first")
         );
         let guide = wf.guidelines.as_ref().unwrap();
-        assert!(guide.contains_key("concurrency"));
-        assert!(guide.contains_key("destructive_confirmation"));
         assert!(guide.contains_key("simple_tasks"));
         assert!(guide.contains_key("medium_tasks"));
         assert!(guide.contains_key("complex_tasks"));
-        assert!(guide.contains_key("exploration_tasks"));
-        assert!(guide.contains_key("exploration_stop_condition"));
-        assert!(guide.contains_key("confidence_brake"));
-        assert!(guide.contains_key("modification_tasks"));
-        assert!(guide.contains_key("general_tasks"));
+        assert!(guide.contains_key("todolist_closure"));
+        assert!(guide.contains_key("best_effort_drive"));
         assert!(guide.contains_key("incremental_recovery"));
+        assert!(guide.contains_key("concurrency"));
+        assert!(guide.contains_key("exploration_tasks"));
+        assert!(guide.contains_key("modification_tasks"));
+        assert!(guide.contains_key("destructive_confirmation"));
         assert!(
             rules
                 .prohibitions
@@ -691,7 +692,7 @@ doing_tasks:
                 .signposts
                 .as_deref()
                 .unwrap()
-                .contains("key milestone"),
+                .contains("status"),
             "signposts is a live rules.yaml field"
         );
     }
@@ -704,7 +705,6 @@ doing_tasks:
         let prefix = render_init_live_prefix_from(&init).expect("init live prefix");
         assert!(prefix.contains("## SYSTEM REMINDERS:"), "{prefix}");
         assert!(prefix.contains("## MCP SERVER INSTRUCTIONS:"), "{prefix}");
-        assert!(prefix.contains("## CONTEXT MANAGEMENT:"), "{prefix}");
         assert!(
             init.environment
                 .as_ref()

@@ -230,6 +230,18 @@ mod tests {
         // Verify disk content was untouched
         let disk = std::fs::read_to_string(&target).unwrap();
         assert_eq!(disk, "line 1\nline 2\nline 3\n");
+
+        // Because full content was returned, state is now marked as read.
+        // A second write in the same turn should succeed directly!
+        let r2 = WriteFileTool
+            .execute(
+                r#"{"file_path":"unread.txt","content":"overwritten directly\n"}"#,
+                &ctx(d.path()),
+            )
+            .await;
+        assert!(!r2.is_error, "subsequent write in same turn must succeed: {}", r2.content);
+        let disk2 = std::fs::read_to_string(&target).unwrap();
+        assert_eq!(disk2, "overwritten directly\n");
     }
 
     #[tokio::test]
@@ -258,6 +270,16 @@ mod tests {
             "{}",
             r.content
         );
+
+        // Because the file was truncated (not full content), it should NOT be marked as read yet.
+        // A second write without reading the remainder must still be intercepted.
+        let r2 = WriteFileTool
+            .execute(
+                r#"{"file_path":"huge.txt","content":"still not permitted"}"#,
+                &ctx(d.path()),
+            )
+            .await;
+        assert!(r2.is_error, "must still be intercepted because file was truncated");
     }
 
     #[tokio::test]

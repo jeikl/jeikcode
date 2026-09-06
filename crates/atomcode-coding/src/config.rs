@@ -177,8 +177,11 @@ pub struct CodingAgentConfig {
     /// ⇒ `thinking: {type:"adaptive"}` on the wire. `None`/`Some(false)` ⇒ off. (v2 uses
     /// adaptive thinking, so v1's `thinking_budget` has no direct mapping and is dropped.)
     pub thinking_enabled: Option<bool>,
-    /// Kimi-family thinking control for the OpenAI-compatible adapter: `thinking.type`
-    /// (`"enabled"`/`"disabled"`). `None` ⇒ omit.
+    /// Maximum tokens allocated to the thinking phase (`thinking.budget_tokens`).
+    /// Defaults to 10000 (or derived from effort / max_tokens clamp) when thinking is enabled.
+    pub thinking_budget: Option<u32>,
+    /// Kimi-family / Anthropic thinking control: `thinking.type`
+    /// (`"enabled"`/`"adaptive"`/`"disabled"`). `None` ⇒ default.
     pub thinking_type: Option<String>,
     /// Kimi K2.6 preserved thinking: `thinking.keep`. `None` ⇒ omit.
     pub thinking_keep: Option<String>,
@@ -263,6 +266,7 @@ pub struct CodingRuntimeConfig {
     pub reasoning_effort: Option<String>,
     pub provider_type: String,
     pub thinking_enabled: Option<bool>,
+    pub thinking_budget: Option<u32>,
     pub thinking_type: Option<String>,
     pub thinking_keep: Option<String>,
     pub reasoning_model: Option<bool>,
@@ -361,6 +365,7 @@ impl CodingRuntimeConfig {
                 .map(|r| r.provider_type.clone())
                 .unwrap_or_else(|| "openai".into()),
             thinking_enabled: r.and_then(|r| r.thinking_enabled),
+            thinking_budget: r.and_then(|r| r.thinking_budget),
             thinking_type: r.and_then(|r| r.thinking_type.clone()),
             thinking_keep: r.and_then(|r| r.thinking_keep.clone()),
             reasoning_model: r.and_then(|r| r.reasoning_model),
@@ -435,6 +440,7 @@ impl CodingRuntimeConfig {
         config.provider_type = self.provider_type.clone();
         config.reasoning_history = self.reasoning_history.clone();
         config.thinking_enabled = self.thinking_enabled;
+        config.thinking_budget = self.thinking_budget;
         config.thinking_type = self.thinking_type.clone();
         config.thinking_keep = self.thinking_keep.clone();
         config.reasoning_model = self.reasoning_model;
@@ -488,6 +494,7 @@ pub fn apply_provider_config(
     config.provider_type = provider.provider_type.clone();
     config.reasoning_history = provider.reasoning_history.clone();
     config.thinking_enabled = provider.thinking_enabled;
+    config.thinking_budget = provider.thinking_budget;
     config.thinking_type = provider.thinking_type.clone();
     config.thinking_keep = provider.thinking_keep.clone();
     config.reasoning_model = provider.reasoning_model;
@@ -775,6 +782,7 @@ impl CodingAgentConfig {
             reasoning_history: None,
             provider_type: "openai".into(),
             thinking_enabled: None,
+            thinking_budget: None,
             thinking_type: None,
             thinking_keep: None,
             compact_threshold: 0.7,

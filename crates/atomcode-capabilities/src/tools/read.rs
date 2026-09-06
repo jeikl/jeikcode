@@ -44,37 +44,17 @@ impl ReadFileTool {
     }
 }
 
-fn continuation_footer(file_path: &str, start: usize, end: usize, total: usize) -> String {
-    // Never echo a previous small `limit` — that is what trapped models in 25-line
-    // crawls. The next call should omit `limit` and pick up at `offset`.
-    let continuation = json!({
-        "file_path": file_path,
-        "offset": end + 1,
-    });
+fn continuation_footer(start: usize, end: usize, total: usize, soft_braked: bool) -> String {
     let remaining = total.saturating_sub(end);
-    let next = end + 1;
-    let detailed = if remaining <= DEFAULT_READ_LIMIT {
+    if soft_braked {
         format!(
-            "\n[Showing lines {start}-{end} of {total}. {remaining} lines remaining. \
-             Continue reading: read_file({continuation})]"
+            "\n[Showing lines {start}-{end} of {total}. Large file (>1000 lines) truncated early to save context. \
+             DO NOT mechanically paginate through this file. Use `grep` to find the exact symbol, then read a targeted range with `offset` and `limit`.]"
         )
     } else {
         format!(
             "\n[Showing lines {start}-{end} of {total}. {remaining} lines remaining. \
-             Continue reading: read_file({continuation})]"
-        )
-    };
-    // Reserve enough room for the one line we always return, even when it is a
-    // maximum-length four-byte UTF-8 line. This keeps the total budget real,
-    // rather than only bounding the body in ordinary short-path cases.
-    let detailed_footer_budget = MAX_READ_OUTPUT_BYTES
-        .saturating_sub(MAX_LINE_LEN.saturating_mul(4))
-        .saturating_sub(128);
-    if detailed.len() <= detailed_footer_budget {
-        detailed
-    } else {
-        format!(
-            "\n[Showing lines {start}-{end} of {total}. {remaining} lines remaining. Use offset={next} and omit `limit`.]"
+             Avoid reading large files end-to-end; prefer targeted slices using `offset` and `limit` around specific symbols found via `grep`.]"
         )
     }
 }
@@ -175,7 +155,7 @@ impl Tool for ReadFileTool {
         "read_file"
     }
     fn description(&self) -> &str {
-        "Read file contents. Output is line-numbered text formatted as '<line_number>→<content>'."
+        "Read file contents. Output is text with sparse line anchors formatted as '<line_number>→<content>' on the first returned line and every 10th line (other lines show content only). Count from the nearest anchor to identify line numbers. For large files, use `grep` to find target symbols first, then read a bounded slice with `offset` and `limit`."
     }
     fn parameters_schema(&self) -> serde_json::Value {
         json!({
@@ -186,12 +166,12 @@ impl Tool for ReadFileTool {
                     "type": "integer",
                     "default": 1,
                     "minimum": 1,
-                    "description": "Start line, 1-based. Provide only when paginating."
+                    "description": "Start line, 1-based. Use when reading a targeted section around a known symbol or line."
                 },
                 "limit": {
                     "type": "integer",
                     "minimum": 1,
-                    "description": "Number of lines to read. Provide only when paginating."
+                    "description": "Number of lines to read. Use bounded limits (e.g. 50-100) instead of reading whole large files."
                 }
             },
             "required": ["file_path"]
@@ -326,8 +306,12 @@ impl Tool for ReadFileTool {
             ));
         }
         let skill_md = path.file_name().is_some_and(|n| n == "SKILL.md");
+        let is_unsliced_large_file =
+            !skill_md && a.offset.is_none() && a.limit.is_none() && total > 1000;
         let page_limit = if skill_md {
             a.limit.unwrap_or(usize::MAX)
+        } else if is_unsliced_large_file {
+            300
         } else {
             a.limit.unwrap_or(DEFAULT_READ_LIMIT)
         };
@@ -342,17 +326,24 @@ impl Tool for ReadFileTool {
             .enumerate()
         {
             let n = start + i;
+            let is_anchor = i == 0 || n % 10 == 0;
             let rendered = if line.chars().count() > MAX_LINE_LEN {
                 let head: String = line.chars().take(MAX_LINE_LEN).collect();
-                format!("{n}→{head}... (line truncated to {MAX_LINE_LEN} chars)\n")
-            } else {
+                if is_anchor {
+                    format!("{n}→{head}... (line truncated to {MAX_LINE_LEN} chars)\n")
+                } else {
+                    format!("{head}... (line truncated to {MAX_LINE_LEN} chars)\n")
+                }
+            } else if is_anchor {
                 format!("{n}→{line}\n")
+            } else {
+                format!("{line}\n")
             };
             let candidate_end = start_idx + i + 1;
             let footer_len = if candidate_end < total {
-                continuation_footer(&a.file_path, start, candidate_end, total).len()
+                continuation_footer(start, candidate_end, total, is_unsliced_large_file).len()
             } else if start > 1 {
-                format!("[Showing lines {start}-{candidate_end} of {total} (end)]").len()
+                format!("\n[Showing lines {start}-{candidate_end} of {total} (end)]").len()
             } else {
                 0
             };
@@ -370,10 +361,15 @@ impl Tool for ReadFileTool {
             end_idx = candidate_end;
         }
         if end_idx < total {
-            out.push_str(&continuation_footer(&a.file_path, start, end_idx, total));
+            out.push_str(&continuation_footer(
+                start,
+                end_idx,
+                total,
+                is_unsliced_large_file,
+            ));
         } else if start > 1 {
             out.push_str(&format!(
-                "[Showing lines {start}-{end_idx} of {total} (end)]"
+                "\n[Showing lines {start}-{end_idx} of {total} (end)]"
             ));
         }
         ok(out)
@@ -537,7 +533,8 @@ mod tests {
             .await;
         assert!(!r.is_error);
         assert!(r.content.contains("1→first"), "{}", r.content);
-        assert!(r.content.contains("3→third"), "{}", r.content);
+        assert!(r.content.contains("third"), "{}", r.content);
+        assert!(!r.content.contains("3→third"), "{}", r.content);
     }
 
     #[tokio::test]
@@ -611,19 +608,16 @@ mod tests {
             )
             .await;
         assert!(r.content.contains("2→l2"), "{}", r.content);
-        assert!(r.content.contains("3→l3"), "{}", r.content);
+        assert!(r.content.contains("l3"), "{}", r.content);
+        assert!(!r.content.contains("3→l3"), "{}", r.content);
         assert!(!r.content.contains("→l1"), "{}", r.content);
         assert!(!r.content.contains("→l4"), "{}", r.content);
         assert!(
-            r.content.contains("Showing lines 2-3 of 5") && r.content.contains("\"offset\":4"),
+            r.content.contains("Showing lines 2-3 of 5"),
             "{}",
             r.content
         );
-        assert!(
-            r.content.contains("Continue reading") && !r.content.contains("\"limit\":"),
-            "continuation must not echo the small requested limit: {}",
-            r.content
-        );
+        assert!(!r.content.contains("read_file("), "{}", r.content);
     }
 
     #[tokio::test]
@@ -640,51 +634,25 @@ mod tests {
             .await;
 
         assert!(!r.is_error, "{}", r.content);
-        assert!(r.content.contains("1500→line 1500"), "{}", r.content);
-        assert!(!r.content.contains("1501→line 1501"), "{}", r.content);
+        assert!(r.content.contains("300→line 300"), "{}", r.content);
+        assert!(!r.content.contains("line 301"), "{}", r.content);
         assert!(
-            r.content.contains("Showing lines 1-1500 of 3505")
-                && r.content.contains("\"offset\":1501")
-                && r.content.contains("Continue reading")
-                && !r.content.contains("\"limit\":"),
+            r.content.contains("Showing lines 1-300 of 3505")
+                && r.content.contains("Large file (>1000 lines)")
+                && !r.content.contains("read_file("),
             "{}",
             r.content
         );
 
         let page2 = ReadFileTool::default()
-            .execute(r#"{"file_path":"notes.txt","offset":1501}"#, &ctx(d.path()))
+            .execute(
+                r#"{"file_path":"notes.txt","offset":301,"limit":100}"#,
+                &ctx(d.path()),
+            )
             .await;
         assert!(!page2.is_error, "{}", page2.content);
-        assert!(
-            page2.content.contains("1501→line 1501"),
-            "{}",
-            page2.content
-        );
-        assert!(
-            page2.content.contains("\"offset\":3001"),
-            "{}",
-            page2.content
-        );
-
-        let page3 = ReadFileTool::default()
-            .execute(r#"{"file_path":"notes.txt","offset":3001}"#, &ctx(d.path()))
-            .await;
-        assert!(!page3.is_error, "{}", page3.content);
-        assert!(
-            page3.content.contains("3001→line 3001"),
-            "{}",
-            page3.content
-        );
-        assert!(
-            page3.content.contains("3505→line 3505"),
-            "{}",
-            page3.content
-        );
-        assert!(
-            page3.content.contains("(end)") || !page3.content.contains("\"offset\":"),
-            "last page finishes the file: {}",
-            page3.content
-        );
+        assert!(page2.content.contains("301→line 301"), "{}", page2.content);
+        assert!(!page2.content.contains("read_file("), "{}", page2.content);
     }
 
     #[tokio::test]
@@ -706,7 +674,7 @@ mod tests {
             "read_file must emit within budget: {} bytes",
             r.content.len()
         );
-        assert!(r.content.contains("read_file("), "{}", r.content);
+        assert!(!r.content.contains("read_file("), "{}", r.content);
     }
 
     #[tokio::test]
@@ -720,7 +688,7 @@ mod tests {
             .await;
 
         assert!(!r.is_error, "{}", r.content);
-        assert!(r.content.contains("read_file("), "{}", r.content);
+        assert!(!r.content.contains("read_file("), "{}", r.content);
         assert!(
             r.content.len() <= MAX_READ_OUTPUT_BYTES,
             "{} bytes",
@@ -729,11 +697,17 @@ mod tests {
     }
 
     #[test]
-    fn oversized_continuation_path_uses_a_compact_footer() {
-        let footer = continuation_footer(&"x".repeat(300_000), 1, 10, 100);
-        assert!(!footer.contains("file_path"), "{footer}");
-        assert!(footer.contains("offset=11"), "{footer}");
-        assert!(footer.len() < MAX_READ_OUTPUT_BYTES, "{}", footer.len());
+    fn continuation_footer_does_not_contain_callable_json() {
+        let footer = continuation_footer(1, 10, 100, false);
+        assert!(!footer.contains("read_file("), "{footer}");
+        assert!(footer.contains("90 lines remaining"), "{footer}");
+
+        let soft_braked = continuation_footer(1, 300, 2000, true);
+        assert!(!soft_braked.contains("read_file("), "{soft_braked}");
+        assert!(
+            soft_braked.contains("Large file (>1000 lines)"),
+            "{soft_braked}"
+        );
     }
 
     #[tokio::test]
@@ -891,7 +865,8 @@ mod tests {
             .await;
         assert!(!r.is_error, "{}", r.content);
         assert!(r.content.contains("2→l2"), "{}", r.content);
-        assert!(r.content.contains("3→l3"), "{}", r.content);
+        assert!(r.content.contains("l3"), "{}", r.content);
+        assert!(!r.content.contains("3→l3"), "{}", r.content);
         assert!(!r.content.contains("→l4"), "{}", r.content);
     }
 
@@ -978,6 +953,62 @@ mod tests {
             "{}",
             r.content
         );
+    }
+
+    #[tokio::test]
+    async fn sparse_line_anchors_emit_on_first_and_every_tenth_line() {
+        let d = tempfile::tempdir().unwrap();
+        let text = (1..=25)
+            .map(|n| format!("content_{n}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        std::fs::write(d.path().join("anchors.txt"), text).unwrap();
+
+        let r = ReadFileTool::default()
+            .execute(
+                r#"{"file_path":"anchors.txt","offset":5,"limit":16}"#,
+                &ctx(d.path()),
+            )
+            .await;
+
+        assert!(!r.is_error, "{}", r.content);
+        // Line 5 is the first visible line -> must have anchor "5→"
+        assert!(r.content.contains("5→content_5"), "{}", r.content);
+        // Line 6-9 must NOT have line number anchor
+        assert!(r.content.contains("\ncontent_6\n"), "{}", r.content);
+        assert!(!r.content.contains("6→"), "{}", r.content);
+        // Line 10 is multiple of 10 -> must have anchor "10→"
+        assert!(r.content.contains("10→content_10"), "{}", r.content);
+        // Line 15 -> not anchor
+        assert!(r.content.contains("\ncontent_15\n"), "{}", r.content);
+        assert!(!r.content.contains("15→"), "{}", r.content);
+        // Line 20 is multiple of 10 -> must have anchor "20→"
+        assert!(r.content.contains("20→content_20"), "{}", r.content);
+    }
+
+    #[tokio::test]
+    async fn large_file_triggers_soft_brake() {
+        let d = tempfile::tempdir().unwrap();
+        let text = (1..=1200)
+            .map(|n| format!("line_{n}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        std::fs::write(d.path().join("giant.txt"), text).unwrap();
+
+        let r = ReadFileTool::default()
+            .execute(r#"{"file_path":"giant.txt"}"#, &ctx(d.path()))
+            .await;
+
+        assert!(!r.is_error, "{}", r.content);
+        assert!(
+            r.content.contains("Large file (>1000 lines)"),
+            "{}",
+            r.content
+        );
+        assert!(!r.content.contains("read_file("), "{}", r.content);
+        assert!(r.content.contains("1→line_1"), "{}", r.content);
+        assert!(r.content.contains("300→line_300"), "{}", r.content);
+        assert!(!r.content.contains("line_305"), "{}", r.content);
     }
 
     #[test]

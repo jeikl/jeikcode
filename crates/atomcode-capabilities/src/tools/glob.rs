@@ -35,6 +35,7 @@ impl Tool for GlobTool {
     }
     fn description(&self) -> &str {
         "Find files matching a glob pattern across directories. \
+         Returns matching file paths sorted by modification time (most recent first). \
          Use to locate file paths by name, extension, or directory layout."
     }
     fn parameters_schema(&self) -> serde_json::Value {
@@ -99,7 +100,7 @@ impl Tool for GlobTool {
         let res = tokio::task::spawn_blocking(move || {
             let deadline = Instant::now() + Duration::from_secs(search_secs);
             let mut timed_out = false;
-            let mut hits: Vec<String> = Vec::new();
+            let mut hits: Vec<(String, std::time::SystemTime)> = Vec::new();
             let mut builder = WalkBuilder::new(&base2);
             builder
                 .hidden(true)
@@ -143,11 +144,18 @@ impl Tool for GlobTool {
                 if matcher.is_match(rel) {
                     // Display relative to the working dir for usable paths.
                     let shown = crate::pathnorm::to_display(path.strip_prefix(&wd).unwrap_or(path));
-                    hits.push(shown);
+                    let mtime = entry
+                        .metadata()
+                        .ok()
+                        .and_then(|m| m.modified().ok())
+                        .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
+                    hits.push((shown, mtime));
                 }
             }
-            hits.sort();
-            (hits, timed_out)
+            // Sort by modification time descending (most recently modified first)
+            hits.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+            let file_paths: Vec<String> = hits.into_iter().map(|(shown, _)| shown).collect();
+            (file_paths, timed_out)
         })
         .await;
 
@@ -171,7 +179,7 @@ impl Tool for GlobTool {
                 if total > cap {
                     hits.truncate(cap);
                 }
-                let mut out = format!("{total} files found:\n{}", hits.join("\n"));
+                let mut out = format!("{total} files found (sorted by modification time, most recent first):\n{}", hits.join("\n"));
                 if extra > 0 {
                     out.push_str(&format!(
                         "\n[{extra} more files not shown; raise `limit` or narrow the pattern/path]"
@@ -406,5 +414,28 @@ mod tests {
             .await;
         assert!(r.content.contains("keep.rs"), "{}", r.content);
         assert!(!r.content.contains("target/x.rs"), "{}", r.content);
+    }
+
+    #[tokio::test]
+    async fn sorts_by_mtime_descending() {
+        let d = tempfile::tempdir().unwrap();
+        let f_old = d.path().join("old.txt");
+        let f_new = d.path().join("new.txt");
+        std::fs::write(&f_old, "old content").unwrap();
+        // Brief pause to ensure distinct file modification timestamp on Windows filesystem
+        std::thread::sleep(std::time::Duration::from_millis(60));
+        std::fs::write(&f_new, "new content").unwrap();
+
+        let r = GlobTool
+            .execute(r#"{"pattern":"*.txt"}"#, &ctx(d.path()))
+            .await;
+        assert!(!r.is_error, "{}", r.content);
+        let pos_new = r.content.find("new.txt").expect("must find new.txt");
+        let pos_old = r.content.find("old.txt").expect("must find old.txt");
+        assert!(
+            pos_new < pos_old,
+            "new.txt should appear before old.txt due to mtime descending: {}",
+            r.content
+        );
     }
 }

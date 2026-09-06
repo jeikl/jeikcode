@@ -1869,10 +1869,9 @@ pub(crate) async fn live_message(
     if let Some(session_id) = sid.clone() {
         if crate::native_live::should_use_registry_for_session(&session_id) {
             let wd = live_current_working_dir(&working_dir);
-            if atomcode_coding::session_runtime_registry::SessionRuntimeRegistry::global()
-                .handle(&session_id)
-                .is_none()
-            {
+            let registry =
+                atomcode_coding::session_runtime_registry::SessionRuntimeRegistry::global();
+            if registry.handle(&session_id).is_none() {
                 if let Err(error) = crate::native_live::ensure_registry_runner(
                     wd.clone(),
                     state.telemetry.clone(),
@@ -1885,9 +1884,89 @@ pub(crate) async fn live_message(
                     return Json(serde_json::json!({ "accepted": false, "error": error }));
                 }
             }
-            if atomcode_coding::session_runtime_registry::SessionRuntimeRegistry::global()
-                .handle(&session_id)
-                .is_some()
+            // Mirror the hub-execution path: when the request carries an explicit
+            // `provider` that differs from the registry-bound one, reassemble the
+            // handle's provider before submitting. Without this, a session whose
+            // runner was spawned on an earlier model keeps using that model
+            // even after `postLiveProvider` persisted `preferred_model` to the
+            // session metadata. Mirroring `live_provider`'s rejection semantics,
+            // an active turn short-circuits with `active_turn: true` so the
+            // client can revert its optimistic selection and prompt the user to
+            // stop the turn first.
+            if let Some(requested) = requested_provider.as_deref() {
+                if let Some(handle) = registry.handle(&session_id) {
+                    let reload_config = match Config::load(&Config::default_path()) {
+                        Ok(c) => c,
+                        Err(error) => {
+                            return Json(serde_json::json!({
+                                "accepted": false,
+                                "error": format!("load provider config failed: {error}"),
+                            }));
+                        }
+                    };
+                    if !reload_config.selection_exists(requested) {
+                        return Json(serde_json::json!({
+                            "accepted": false,
+                            "error": format!("provider {requested:?} not found"),
+                        }));
+                    }
+                    let requested_fingerprint = match crate::native_live::provider_fingerprint(
+                        &reload_config,
+                        requested,
+                    ) {
+                        Ok(fp) => fp,
+                        Err(error) => {
+                            return Json(serde_json::json!({
+                                "accepted": false,
+                                "error": error,
+                            }));
+                        }
+                    };
+                    let needs_reload = registry
+                        .provider_fingerprint(&session_id)
+                        .as_deref()
+                        .map(|bound| bound != requested_fingerprint.as_str())
+                        .unwrap_or(true);
+                    if needs_reload {
+                        use atomcode_coding::runtime::RuntimePhase;
+                        match handle.status().phase {
+                            RuntimePhase::InTurn | RuntimePhase::WaitingApproval => {
+                                return Json(serde_json::json!({
+                                    "accepted": false,
+                                    "active_turn": true,
+                                    "error": "a turn is running; stop it before switching the model",
+                                }));
+                            }
+                            _ => {}
+                        }
+                        let runtime_config = live_runtime_config(
+                            &reload_config,
+                            requested,
+                            &wd,
+                            state.telemetry.clone(),
+                        );
+                        let next =
+                            crate::kernel_runtime::coding_config_from_runtime(&runtime_config);
+                        if let Err(error) = handle.reassemble_provider(next).await {
+                            let active_turn = matches!(
+                                error,
+                                atomcode_coding::runtime::RuntimeError::Busy
+                                    | atomcode_coding::runtime::RuntimeError::Unavailable
+                            );
+                            return Json(serde_json::json!({
+                                "accepted": false,
+                                "active_turn": active_turn,
+                                "error": format!("registry provider reload rejected: {error:?}"),
+                            }));
+                        }
+                        registry.set_provider_fingerprint(
+                            &session_id,
+                            Some(requested_fingerprint.clone()),
+                        );
+                    }
+                }
+            }
+            if registry.handle(&session_id).is_some()
             {
                 let original_images: Vec<ImageContent> = req
                     .images
@@ -3098,6 +3177,56 @@ mod tests {
             "other",
             "fingerprint-a",
         ));
+    }
+
+    /// Regression: the registry path of `/live/message` must consult the
+    /// registry's cached provider fingerprint and decide whether to
+    /// reassemble. Mirrors the comparison the request handler performs
+    /// before issuing `reassemble_provider`, so an incorrect cache lookup
+    /// shows up here even without spinning up a full AppState.
+    #[test]
+    fn registry_fingerprint_cache_triggers_reload_on_change() {
+        let reg = atomcode_coding::session_runtime_registry::SessionRuntimeRegistry::new();
+        let session = "test-session".to_string();
+
+        // No cached fingerprint yet — the handler treats this as "needs
+        // reload" so a freshly attached registry handle is force-aligned
+        // with the request's `provider` on first submit.
+        let requested_fp = "fingerprint-b";
+        let needs_reload = reg
+            .provider_fingerprint(&session)
+            .as_deref()
+            .map(|bound| bound != requested_fp)
+            .unwrap_or(true);
+        assert!(
+            needs_reload,
+            "missing cache must trigger reload on first submit"
+        );
+
+        // After the handler caches the bound fingerprint, a request that
+        // matches must NOT trigger a reload (reassembly is heavyweight).
+        reg.set_provider_fingerprint(&session, Some(requested_fp.to_string()));
+        let needs_reload = reg
+            .provider_fingerprint(&session)
+            .as_deref()
+            .map(|bound| bound != requested_fp)
+            .unwrap_or(true);
+        assert!(
+            !needs_reload,
+            "matching fingerprint must skip reload to avoid pointless reassembly"
+        );
+
+        // A different requested fingerprint must trigger a reload so the
+        // registry handle does not silently keep using the stale model.
+        let needs_reload = reg
+            .provider_fingerprint(&session)
+            .as_deref()
+            .map(|bound| bound != "fingerprint-c")
+            .unwrap_or(true);
+        assert!(
+            needs_reload,
+            "mismatched fingerprint must trigger reload to honor the new model"
+        );
     }
 
     #[test]

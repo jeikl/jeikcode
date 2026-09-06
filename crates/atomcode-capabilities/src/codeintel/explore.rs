@@ -408,7 +408,8 @@ impl Tool for CodeExploreTool {
          how a business logic actually operates, far more efficient than grep. \
          Trigger when user queries involve business keywords (Chinese or English), or \
          when previous operations (`grep`, `read_file`, `glob`) reveal relevant comments, exact symbols, \
-         symbol keywords, or domain jargon/terminology."
+         symbol keywords, or domain jargon/terminology. \
+         For workspace directory layout only, use `repo_map` instead."
     }
 
     fn parameters_schema(&self) -> serde_json::Value {
@@ -417,11 +418,11 @@ impl Tool for CodeExploreTool {
             "properties": {
                 "path": {
                     "type": "string",
-                    "description": "Scope path to search: workspace root ('.'), directory/module, or a specific file."
+                    "description": "Scope path to search: directory/module (e.g. 'crates/atomcode-coding', 'src/auth'), workspace root ('.'), or a specific file (e.g. 'src/auth.rs'). (For workspace directory layout only, use `repo_map` instead of `code_explore`)."
                 },
                 "query": {
                     "type": "string",
-                    "description": "Precise symbol name or fuzzy code symbol keyword, or natural language in Chinese or English (e.g. business concept, domain jargon, or question)."
+                    "description": "Natural-language question or precise symbol lookup in Chinese or English. Examples:\n- path='crates/atomcode-coding' query='CodeExploreTool'\n- path='src/auth' query='用户登录如何校验'\n- path='.' query='会话压缩如何工作'\n- path='src/auth.rs' query='TokenClaims'"
                 },
                 "max_files": {
                     "type": "integer",
@@ -2571,7 +2572,7 @@ fn render_explore_output(
             > FOLD_AFTER_LINES
         {
             next.push(format!(
-                "{n}. read_file  {rel}  offset={}  (omit limit; call again with the footer offset to finish the file)",
+                "{n}. read_file  {rel}  offset={}  limit=100 (inspect targeted slice around symbol)",
                 first.sym.node.start_line
             ));
             n += 1;

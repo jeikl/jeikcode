@@ -24,8 +24,8 @@ impl CodeToolsFirstHook {
         "For a natural-language code question or a symbol lookup, call `code_explore` \
 NOW: path MUST be a directory/module (crates/atomcode-coding, src/auth), never a file \
 (src/auth.rs). query is a precise symbol OR Chinese/English (鉴权怎么做). \
-Do not start with grep+read_file. Grep is only for exact literals. If a read_file footer \
-shows remaining lines, continue with that offset and omit `limit`."
+Do not start with grep+read_file. Grep is only for exact literals. Avoid reading full files; \
+use grep context (-A/-B/-C) or targeted read_file offset+limit slices."
     }
 }
 

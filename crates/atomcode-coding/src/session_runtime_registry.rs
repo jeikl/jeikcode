@@ -292,6 +292,13 @@ fn activity_from_runtime_event(
 #[derive(Debug, Default)]
 pub struct SessionRuntimeRegistry {
     entries: RwLock<HashMap<SessionKey, LiveInner>>,
+    /// Provider identity fingerprints keyed by session. Updated whenever a
+    /// handle is bound or its provider is reassembled, so callers can compare
+    /// a requested provider against the bound one without reaching into the
+    /// runtime internals. Optional — absent when the bound handle was created
+    /// without going through the fingerprint-aware spawn paths (older callers
+    /// that pass `None` here).
+    provider_fingerprints: RwLock<HashMap<SessionKey, String>>,
 }
 
 /// Process-wide registry. Drivers attach views here instead of competing for
@@ -400,6 +407,37 @@ impl SessionRuntimeRegistry {
             inner.push_activity(RuntimeActivity::Ready);
         }
         true
+    }
+
+    /// Record the provider fingerprint currently bound to `key`. Callers
+    /// (e.g. the daemon's `/live` paths) update this whenever they spawn a
+    /// new runtime or reassemble the provider on an existing one, so the
+    /// next `/live/message` can detect a stale bound provider without
+    /// reaching into runtime internals. `None` clears the entry (e.g. when
+    /// the runner is torn down).
+    pub fn set_provider_fingerprint(&self, key: &SessionKey, fingerprint: Option<String>) {
+        let mut guard = self
+            .provider_fingerprints
+            .write()
+            .unwrap_or_else(|e| e.into_inner());
+        match fingerprint {
+            Some(fp) => {
+                guard.insert(key.clone(), fp);
+            }
+            None => {
+                guard.remove(key);
+            }
+        }
+    }
+
+    /// Provider fingerprint bound to `key`, if recorded. `None` means either
+    /// the session has no bound runner or the caller never set one.
+    pub fn provider_fingerprint(&self, key: &SessionKey) -> Option<String> {
+        let guard = self
+            .provider_fingerprints
+            .read()
+            .unwrap_or_else(|e| e.into_inner());
+        guard.get(key).cloned()
     }
 
     pub fn set_activity(&self, key: &SessionKey, activity: RuntimeActivity) -> bool {
@@ -1019,5 +1057,38 @@ mod tests {
             activity_from_runtime_event(&approval, RuntimeActivity::Running),
             RuntimeActivity::WaitingApproval
         );
+    }
+
+    #[test]
+    fn provider_fingerprint_round_trips_and_clears() {
+        // Cache for an unknown session is `None`.
+        let reg = SessionRuntimeRegistry::new();
+        assert!(reg.provider_fingerprint(&"missing".into()).is_none());
+
+        // open_or_attach does not synthesize a fingerprint — a freshly opened
+        // session still has no cached fingerprint, so the caller knows to
+        // treat the next comparison as "unknown → reload required".
+        reg.open_or_attach("s".into(), PathBuf::from("/p")).unwrap();
+        assert!(reg.provider_fingerprint(&"s".into()).is_none());
+
+        // Explicit set is observable.
+        reg.set_provider_fingerprint(&"s".into(), Some("fp-a".into()));
+        assert_eq!(
+            reg.provider_fingerprint(&"s".into()).as_deref(),
+            Some("fp-a"),
+        );
+
+        // Overwriting a fingerprint reflects the new value (used after a
+        // successful reload).
+        reg.set_provider_fingerprint(&"s".into(), Some("fp-b".into()));
+        assert_eq!(
+            reg.provider_fingerprint(&"s".into()).as_deref(),
+            Some("fp-b"),
+        );
+
+        // Clearing returns to None so the next comparison can re-detect a
+        // bind-vs-request mismatch (e.g. when the runner is torn down).
+        reg.set_provider_fingerprint(&"s".into(), None);
+        assert!(reg.provider_fingerprint(&"s".into()).is_none());
     }
 }

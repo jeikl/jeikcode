@@ -176,8 +176,19 @@ pub fn existing_runner_handle(
             let dir = hub()
                 .execution_working_dir()
                 .unwrap_or_else(|| PathBuf::from("."));
+            // Mirror the hub binding's provider identity so a subsequent
+            // `/live/message` can compare against the requested provider
+            // without reaching back into the hub. `binding()` may return an
+            // error if the hub is mid-reconfigure — fall back to None in that
+            // case and let the next reload fix the cache.
+            let cached_fp = hub()
+                .binding()
+                .ok()
+                .filter(|b| b.session_id == session_id)
+                .map(|b| b.provider_fingerprint);
             let _ = reg.open_or_attach(session_id.to_string(), dir);
             let _ = reg.bind_handle(&session_id.to_string(), handle.clone(), None);
+            reg.set_provider_fingerprint(&session_id.to_string(), cached_fp);
             return Some(handle);
         }
     }
@@ -222,6 +233,7 @@ pub async fn ensure_registry_runner(
     if !config.selection_exists(&provider_name) {
         return Err(format!("provider {provider_name:?} not found"));
     }
+    let provider_fingerprint = provider_fingerprint(&config, &provider_name)?;
     let runtime_config: CodingRuntimeConfig =
         crate::live_api::live_runtime_config(&config, &provider_name, &working_dir, telemetry);
 
@@ -274,6 +286,9 @@ pub async fn ensure_registry_runner(
     let reg = atomcode_coding::session_runtime_registry::SessionRuntimeRegistry::global();
     let _ = reg.open_or_attach(session_id.clone(), working_dir.clone());
     let _ = reg.bind_handle(&session_id, handle.clone(), None);
+    // Cache the freshly bound provider identity so a follow-up `/live/message`
+    // can detect a stale-bound request without reaching into runtime config.
+    reg.set_provider_fingerprint(&session_id, Some(provider_fingerprint.clone()));
 
     let forward_id = session_id.clone();
     let forward_dir = working_dir;
@@ -997,6 +1012,14 @@ pub async fn ensure_headless_runtime(
     let reg = atomcode_coding::session_runtime_registry::SessionRuntimeRegistry::global();
     let _ = reg.open_or_attach(binding.session_id.clone(), binding.working_dir.clone());
     let _ = reg.bind_handle(&binding.session_id, handle, None);
+    // Mirror the binding's provider identity into the registry so `/live/message`
+    // can detect a stale bound provider on the next request without holding the
+    // hub binding. The hub itself is the authority on reload — the registry
+    // only caches for fast comparison.
+    reg.set_provider_fingerprint(
+        &binding.session_id,
+        Some(binding.provider_fingerprint.clone()),
+    );
     join().map_err(|error| format!("live hub join failed: {error:?}"))
 }
 

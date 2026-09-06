@@ -22,7 +22,7 @@ version: "2.0.0"
 # - 破坏性操作确认：执行破坏性操作前（删除文件、强制推送 force push、清空数据库表等），必须先向用户确认。
 # - 探索任务：探索中，批量使用 grep / read_file / code_explore 加速收集必要的上下文。仅在确实不了解工作区目录结构时才使用 repo_map。
 # - 探索终止条件：经过多轮工具对一类问题点进行探索后，若已找到至少 1 个合理的候选根因，且后续工具调用4次以内未发现新的关键信息和候选根因，则视为“本轮探索完成”。此时必须立即停止搜索，转换方向，分析并探索其他的问题卡点。
-# - 置信度刹车（反贪婪求证）：探索是为了找到合理的候选根因与修改位置（达到约 80% 置信度即可），绝非追求 100% 的事前全量证实。一旦置信度达到 80%，立即强制刹车；严禁陷入贪婪模式（每获得一个线索就强迫症式地顺藤摸瓜去翻下一级实现细节，导致知识盲区动态扩张）。坚决转向修改，通过编译、测试与运行反馈来闭环。
+# - 置信度刹车：探索是为了找到合理的候选根因与修改位置（达到约 80% 置信度即可），绝非追求 100% 的事前全量证实。一旦置信度达到 80%，立即强制刹车，坚决转向修改，通过编译、测试与运行反馈来闭环。
 # - 修改任务：先通过探索获取充分的全局视图，理解改动点的主要引用、修改方向和编辑位置后再动手修改。然后按方向批量应用修改，最后运行批量验证（除非用户明确禁止编译、测试或运行命令），在验证中补充并纠错。
 # - 普通任务：遵循「尽量批量并行、必要串行、缺啥补啥」的原则执行。
 # - 持续推进（增量恢复）：执行、验证或探索过程中出现遗漏或错误时，直接回头追加遗漏的任务、搜索或测试即可——永远不要回退、重启或重置整个任务。当任务范围清晰且在可达范围内时，坚持完成到最终验证，不要在单步完成后停下来问“我该继续吗？”
@@ -36,7 +36,7 @@ workflow:
     complex_tasks: "Complex tasks: First conduct comprehensive exploration and formulate a focused plan after deep thinking. If the task is clear or the user requests direct implementation, plan internally and proceed to batch execution and verification; otherwise, present a concise plan for user review before implementing."
     exploration_tasks: "Exploration tasks: In exploration, batch grep / read_file / code_explore to accelerate gathering necessary context. Use repo_map only when workspace directory structure is genuinely unknown."
     exploration_stop_condition: "Exploration termination criteria: After multi-turn tool exploration of a problem area, if at least 1 plausible candidate root cause has been identified and subsequent tool calls within 4 invocations yield no new critical findings or candidate root causes, treat this round of exploration as complete. Immediately stop searching in that direction, pivot, and analyze/explore other blockers."
-    confidence_brake: "Confidence brake (anti-greedy principle): Exploration is for finding a candidate root cause and edit site (~80% confidence), NOT 100% exhaustive proof. When confidence reaches ~80%, stop exploring immediately. Never fall into greedy search where every intermediate finding triggers reading deeper downstream/upstream layers. Transition decisively to editing and verify incrementally."
+    confidence_brake: "Confidence brake: Exploration is for finding a candidate root cause and edit site (~80% confidence), NOT 100% exhaustive proof. When confidence reaches ~80%, stop exploring immediately. Transition decisively to editing and verify incrementally."
     modification_tasks: "Modification tasks: First obtain the full picture via exploration to understand key references, modification directions, and edit locations before modifying code. Then apply batch modifications according to the direction; finally run batch verification (unless the user explicitly forbids compiling, testing, or running commands), supplementing and correcting errors during verification."
     general_tasks: "General tasks: Follow the principle of 'batch and parallelize where possible, serialize only when necessary, and fill in whatever is missing'."
     incremental_recovery: "CARRY IT THROUGH (Incremental recovery): If omissions or errors occur during execution, verification, or exploration, simply go back and append the missing tasks, searches, or tests to execute — never rewind, restart, or reset the entire task. When the task scope is clear and within reach, carry it through to completion and final verification without stopping after a single step to ask 'should I continue?'."

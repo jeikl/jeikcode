@@ -68,15 +68,16 @@ impl ReasoningPolicy {
         model: &str,
         base_url: &str,
     ) -> Result<Self, String> {
+        // Explicit `reasoning_history` override ("include" | "exclude") wins over `reasoning_model` flag
+        if let Some(parsed) = Self::from_config(reasoning_history)? {
+            return Ok(parsed);
+        }
         if let Some(explicit) = reasoning_model {
             return Ok(if explicit {
                 ReasoningPolicy::Include
             } else {
                 ReasoningPolicy::Exclude
             });
-        }
-        if let Some(parsed) = Self::from_config(reasoning_history)? {
-            return Ok(parsed);
         }
         Ok(Self::derive(model, base_url))
     }
@@ -196,24 +197,25 @@ mod tests {
     }
 
     #[test]
-    fn resolve_prioritizes_reasoning_model_then_config_then_derive() {
-        // Explicit reasoning_model = Some(true) forces Include even on deepseek-r1
+    fn resolve_prioritizes_config_then_reasoning_model_then_derive() {
+        // Explicit reasoning_history override wins even if reasoning_model is Some(true)
+        assert_eq!(
+            ReasoningPolicy::resolve(Some(true), Some("exclude"), "deepseek-r1", ""),
+            Ok(ReasoningPolicy::Exclude)
+        );
+        // Explicit reasoning_history = "include" wins even if reasoning_model is Some(false)
+        assert_eq!(
+            ReasoningPolicy::resolve(Some(false), Some("include"), "grok-4.6", ""),
+            Ok(ReasoningPolicy::Include)
+        );
+        // Explicit reasoning_model = Some(true) forces Include when reasoning_history is None
         assert_eq!(
             ReasoningPolicy::resolve(Some(true), None, "deepseek-r1", ""),
             Ok(ReasoningPolicy::Include)
         );
-        // Explicit reasoning_model = Some(false) forces Exclude even on grok
+        // Explicit reasoning_model = Some(false) forces Exclude when reasoning_history is None
         assert_eq!(
             ReasoningPolicy::resolve(Some(false), None, "grok-4.6", ""),
-            Ok(ReasoningPolicy::Exclude)
-        );
-        // reasoning_history override wins if reasoning_model is None
-        assert_eq!(
-            ReasoningPolicy::resolve(None, Some("include"), "gpt-4o", ""),
-            Ok(ReasoningPolicy::Include)
-        );
-        assert_eq!(
-            ReasoningPolicy::resolve(None, Some("exclude"), "grok-4.6", ""),
             Ok(ReasoningPolicy::Exclude)
         );
         // Fallback to derive

@@ -91,15 +91,16 @@ pub struct ResponsesProvider {
 impl ResponsesProvider {
     pub fn new(cfg: ResponsesConfig) -> Result<Self, ProviderError> {
         let policy = cfg
-            .reasoning_model
-            .map(|rm| {
-                if rm {
-                    ReasoningPolicy::Include
-                } else {
-                    ReasoningPolicy::Exclude
-                }
+            .reasoning_policy
+            .or_else(|| {
+                cfg.reasoning_model.map(|rm| {
+                    if rm {
+                        ReasoningPolicy::Include
+                    } else {
+                        ReasoningPolicy::Exclude
+                    }
+                })
             })
-            .or(cfg.reasoning_policy)
             .unwrap_or_else(|| ReasoningPolicy::derive(&cfg.model, &cfg.base_url));
         let connect_timeout = cfg.connect_timeout;
         let skip_tls_verify = cfg.skip_tls_verify;

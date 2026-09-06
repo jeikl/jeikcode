@@ -184,15 +184,16 @@ pub struct OpenAiCompatProvider {
 impl OpenAiCompatProvider {
     pub fn new(cfg: OpenAiCompatConfig) -> Result<Self, ProviderError> {
         let policy = cfg
-            .reasoning_model
-            .map(|rm| {
-                if rm {
-                    ReasoningPolicy::Include
-                } else {
-                    ReasoningPolicy::Exclude
-                }
+            .reasoning_policy
+            .or_else(|| {
+                cfg.reasoning_model.map(|rm| {
+                    if rm {
+                        ReasoningPolicy::Include
+                    } else {
+                        ReasoningPolicy::Exclude
+                    }
+                })
             })
-            .or(cfg.reasoning_policy)
             .unwrap_or_else(|| ReasoningPolicy::derive(&cfg.model, &cfg.base_url));
         // Capture only what the builder needs so the rebuild closure is `'static`
         // and doesn't borrow `cfg` (which moves into `Self`).

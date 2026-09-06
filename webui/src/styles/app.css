@@ -2977,6 +2977,10 @@ body {
   width: min(760px, 96vw);
   max-height: 92dvh;
 }
+.modal-card.modal-card-xl {
+  width: min(1040px, 95vw);
+  max-height: 90dvh;
+}
 
 .modal-header {
   display: flex;
@@ -3603,29 +3607,196 @@ body {
 .config-row .config-val { color: var(--app-primary-foreground); font-size: 12px; word-break: break-all; }
 .config-row .config-val.mono { font-family: var(--app-monospace-font-family); }
 
+/* === Model Config Dashboard / Overview & Model Management === */
+.model-config-overview {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 16px 20px;
+  background: color-mix(in srgb, var(--app-secondary-background) 75%, var(--app-brand) 3%);
+  border: 1px solid color-mix(in srgb, var(--app-input-border), var(--app-brand) 18%);
+  border-radius: var(--corner-radius-large, 12px);
+  box-shadow: 0 2px 10px rgba(0, 0, 0, 0.04);
+}
+
+.model-config-overview-top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  flex-wrap: wrap;
+}
+
+.model-config-overview-info {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  min-width: 0;
+}
+
+.model-config-overview-title {
+  font-size: 15px;
+  font-weight: 700;
+  color: var(--app-primary-foreground);
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.model-config-overview-desc {
+  font-size: 12px;
+  color: var(--app-secondary-foreground);
+  line-height: 1.4;
+}
+
+.model-config-overview-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
+}
+
+.model-config-overview-actions .btn {
+  white-space: nowrap;
+  font-size: 12px;
+  padding: 6px 14px;
+}
+
+.model-config-overview-stats {
+  display: flex;
+  align-items: center;
+  gap: 8px 12px;
+  flex-wrap: wrap;
+  padding-top: 10px;
+  border-top: 1px solid color-mix(in srgb, var(--app-input-border), transparent 50%);
+}
+
+.model-config-stat-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  padding: 3px 10px;
+  border-radius: 6px;
+  background: var(--app-primary-background);
+  border: 1px solid var(--app-input-border);
+  color: var(--app-primary-foreground);
+  white-space: nowrap;
+}
+
+.model-config-stat-chip.default-provider {
+  background: color-mix(in srgb, var(--app-brand), transparent 88%);
+  border-color: color-mix(in srgb, var(--app-brand), transparent 60%);
+  color: var(--app-brand);
+  font-weight: 600;
+}
+
+.model-config-stat-chip.config-path {
+  font-family: var(--app-monospace-font-family);
+  font-size: 11.5px;
+  color: var(--app-secondary-foreground);
+  max-width: 480px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* === Toolbar: Search + Controls === */
+.model-config-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-top: 4px;
+  margin-bottom: 2px;
+}
+
+.model-config-search-box {
+  position: relative;
+  flex: 1;
+  max-width: 380px;
+}
+
+.model-config-search-input {
+  width: 100%;
+  padding: 6px 28px 6px 30px;
+  font-size: 12px;
+  border-radius: 8px;
+  border: 1px solid var(--app-input-border);
+  background: var(--app-primary-background);
+  color: var(--app-primary-foreground);
+  outline: none;
+  box-sizing: border-box;
+  transition: border-color 0.15s, box-shadow 0.15s;
+}
+
+.model-config-search-input:focus {
+  border-color: var(--app-brand);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--app-brand), transparent 82%);
+}
+
+.model-config-search-icon {
+  position: absolute;
+  left: 9px;
+  top: 50%;
+  transform: translateY(-50%);
+  color: var(--app-secondary-foreground);
+  font-size: 12px;
+  pointer-events: none;
+}
+
+.model-config-search-clear {
+  position: absolute;
+  right: 8px;
+  top: 50%;
+  transform: translateY(-50%);
+  background: none;
+  border: none;
+  color: var(--app-secondary-foreground);
+  cursor: pointer;
+  font-size: 13px;
+  padding: 2px;
+  line-height: 1;
+}
+
+.model-config-toolbar-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.model-config-section-title {
+  font-size: 12.5px;
+  font-weight: 700;
+  color: var(--app-primary-foreground);
+  letter-spacing: 0.02em;
+}
+
 /* === Provider Accounts Group & Model Cards === */
 .provider-group {
   border: 1px solid var(--app-input-border);
-  border-radius: var(--corner-radius-normal, 8px);
+  border-radius: var(--corner-radius-large, 10px);
   background: var(--app-secondary-background);
   overflow: hidden;
   margin-bottom: 12px;
-  transition: border-color 0.2s;
+  transition: border-color 0.2s, box-shadow 0.2s;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.05);
 }
 
 .provider-group:hover {
-  border-color: var(--app-input-focus-border, var(--app-brand));
+  border-color: color-mix(in srgb, var(--app-brand), var(--app-input-border) 40%);
 }
 
 .provider-group-header {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 10px 14px;
-  background: color-mix(in srgb, var(--app-tool-background), transparent 20%);
+  padding: 12px 16px;
+  background: color-mix(in srgb, var(--app-tool-background), transparent 25%);
   cursor: pointer;
   user-select: none;
-  gap: 12px;
+  gap: 16px;
+  transition: background-color 0.15s;
 }
 
 .provider-group-header:hover {
@@ -3635,18 +3806,22 @@ body {
 .provider-group-info {
   display: flex;
   align-items: center;
-  gap: 10px;
+  gap: 12px;
   flex: 1;
   min-width: 0;
+  overflow: hidden;
 }
 
 .provider-group-toggle {
   font-size: 11px;
   color: var(--app-secondary-foreground);
-  transition: transform 0.2s ease;
-  width: 14px;
-  display: inline-block;
-  text-align: center;
+  transition: transform 0.2s cubic-bezier(0.2, 0, 0, 1);
+  width: 16px;
+  height: 16px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
 }
 
 .provider-group-toggle.open {
@@ -3654,73 +3829,136 @@ body {
 }
 
 .provider-group-title {
-  font-weight: 600;
-  font-size: 13px;
+  font-weight: 700;
+  font-size: 14px;
   color: var(--app-primary-foreground);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+  flex-shrink: 0;
+  max-width: 240px;
 }
 
 .provider-group-badge {
-  font-size: 10.5px;
-  padding: 1px 6px;
-  border-radius: 10px;
-  background: color-mix(in srgb, var(--app-brand), transparent 85%);
+  font-size: 11px;
+  padding: 2px 8px;
+  border-radius: 6px;
+  background: color-mix(in srgb, var(--app-brand), transparent 86%);
   color: var(--app-brand);
+  border: 1px solid color-mix(in srgb, var(--app-brand), transparent 72%);
   font-family: var(--app-monospace-font-family);
   white-space: nowrap;
+  flex-shrink: 0;
 }
 
 .provider-group-url {
-  font-size: 11px;
+  font-size: 11.5px;
   color: var(--app-secondary-foreground);
   font-family: var(--app-monospace-font-family);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
-  max-width: 220px;
+  max-width: 280px;
+  background: color-mix(in srgb, var(--app-primary-background) 70%, transparent);
+  padding: 2px 8px;
+  border-radius: 5px;
+  border: 1px solid color-mix(in srgb, var(--app-input-border), transparent 50%);
+}
+
+.provider-group-meta-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-shrink: 0;
+}
+
+.provider-status-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 11.5px;
+  font-weight: 500;
+  padding: 2px 8px;
+  border-radius: 12px;
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+
+.provider-status-badge.ok {
+  background: color-mix(in srgb, var(--app-success-foreground, #10b981) 12%, transparent);
+  color: var(--app-success-foreground, #10b981);
+  border: 1px solid color-mix(in srgb, var(--app-success-foreground, #10b981) 28%, transparent);
+}
+
+.provider-status-badge.nok {
+  background: color-mix(in srgb, var(--app-warning-foreground, #f59e0b) 12%, transparent);
+  color: var(--app-warning-foreground, #f59e0b);
+  border: 1px solid color-mix(in srgb, var(--app-warning-foreground, #f59e0b) 28%, transparent);
 }
 
 .provider-group-count {
-  font-size: 11px;
+  font-size: 11.5px;
   color: var(--app-secondary-foreground);
-  margin-left: auto;
+  background: color-mix(in srgb, var(--app-primary-background) 80%, transparent);
+  padding: 2px 8px;
+  border-radius: 6px;
+  border: 1px solid color-mix(in srgb, var(--app-input-border), transparent 40%);
   white-space: nowrap;
+  flex-shrink: 0;
 }
 
 .provider-group-actions {
   display: flex;
   align-items: center;
   gap: 6px;
+  flex-shrink: 0;
 }
 
 .provider-group-btn {
-  font-size: 11px;
-  padding: 3px 8px;
-  border-radius: 4px;
+  font-size: 11.5px;
+  font-weight: 500;
+  padding: 4px 10px;
+  border-radius: 6px;
   border: 1px solid var(--app-input-border);
   background: var(--app-primary-background);
   color: var(--app-primary-foreground);
   cursor: pointer;
-  transition: all 0.15s;
+  white-space: nowrap;
+  flex-shrink: 0;
+  transition: all 0.15s ease;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
 }
 
 .provider-group-btn:hover {
   border-color: var(--app-brand);
   color: var(--app-brand);
+  background: color-mix(in srgb, var(--app-brand) 8%, var(--app-primary-background));
+}
+
+.provider-group-btn.btn-accent {
+  background: color-mix(in srgb, var(--app-brand) 12%, var(--app-primary-background));
+  border-color: color-mix(in srgb, var(--app-brand) 35%, transparent);
+  color: var(--app-brand);
+}
+
+.provider-group-btn.btn-accent:hover {
+  background: color-mix(in srgb, var(--app-brand) 22%, var(--app-primary-background));
+  border-color: var(--app-brand);
 }
 
 .provider-group-btn.danger:hover {
   border-color: var(--app-error-foreground);
   color: var(--app-error-foreground);
+  background: color-mix(in srgb, var(--app-error-foreground) 8%, var(--app-primary-background));
 }
 
 .provider-group-models {
-  padding: 10px 14px;
+  padding: 12px 16px;
   display: flex;
   flex-direction: column;
-  gap: 8px;
+  gap: 10px;
   background: var(--app-primary-background);
   border-top: 1px solid var(--app-input-border);
 }
@@ -3729,89 +3967,134 @@ body {
   font-size: 12px;
   color: var(--app-secondary-foreground);
   text-align: center;
-  padding: 14px 0;
-  font-style: italic;
+  padding: 20px 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
 }
 
 .model-card {
   border: 1px solid var(--app-input-border);
-  border-radius: 6px;
-  padding: 8px 12px;
+  border-radius: var(--corner-radius-normal, 8px);
+  padding: 12px 16px;
   background: var(--app-secondary-background);
   display: flex;
   flex-direction: column;
-  gap: 4px;
-  transition: all 0.15s;
+  gap: 8px;
+  transition: all 0.15s ease;
+  position: relative;
 }
 
 .model-card:hover {
-  border-color: color-mix(in srgb, var(--app-brand), transparent 40%);
+  border-color: color-mix(in srgb, var(--app-brand), var(--app-input-border) 45%);
+  box-shadow: 0 2px 6px rgba(0, 0, 0, 0.04);
 }
 
 .model-card.default {
   border-color: var(--app-brand);
-  background: color-mix(in srgb, var(--app-brand), transparent 96%);
+  border-left: 4px solid var(--app-brand);
+  background: color-mix(in srgb, var(--app-brand) 3.5%, var(--app-secondary-background));
 }
 
 .model-card-head {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 8px;
+  gap: 16px;
 }
 
 .model-card-name-row {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: 10px;
   min-width: 0;
+  flex-wrap: wrap;
 }
 
 .model-card-name {
-  font-weight: 600;
-  font-size: 12.5px;
+  font-weight: 700;
+  font-size: 13.5px;
   color: var(--app-primary-foreground);
   font-family: var(--app-monospace-font-family);
+  letter-spacing: -0.01em;
+}
+
+.model-card-badge {
+  font-size: 11px;
+  padding: 2px 8px;
+  border-radius: 12px;
+  background: var(--app-brand);
+  color: #fff;
+  font-weight: 600;
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  white-space: nowrap;
 }
 
 .model-card-id {
   font-size: 11.5px;
   color: var(--app-secondary-foreground);
   font-family: var(--app-monospace-font-family);
-  background: color-mix(in srgb, var(--app-input-border), transparent 50%);
-  padding: 1px 5px;
-  border-radius: 4px;
-}
-
-.model-card-badge {
-  font-size: 10.5px;
-  padding: 1px 6px;
-  border-radius: 10px;
-  background: var(--app-brand);
-  color: #fff;
-  font-weight: 500;
+  background: color-mix(in srgb, var(--app-primary-background) 80%, transparent);
+  border: 1px solid color-mix(in srgb, var(--app-input-border), transparent 50%);
+  padding: 2px 8px;
+  border-radius: 6px;
+  white-space: nowrap;
 }
 
 .model-card-actions {
   display: flex;
   align-items: center;
   gap: 6px;
+  flex-shrink: 0;
 }
 
 .model-card-meta {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
-  gap: 12px;
-  font-size: 11px;
+  gap: 8px 12px;
+  font-size: 11.5px;
   color: var(--app-secondary-foreground);
-  margin-top: 2px;
+  padding-top: 6px;
+  border-top: 1px solid color-mix(in srgb, var(--app-input-border), transparent 60%);
 }
 
 .model-card-meta-item {
   display: inline-flex;
   align-items: center;
-  gap: 4px;
+  gap: 5px;
+  background: color-mix(in srgb, var(--app-primary-background) 60%, transparent);
+  padding: 2px 8px;
+  border-radius: 5px;
+  border: 1px solid color-mix(in srgb, var(--app-input-border), transparent 50%);
+}
+
+.model-card-meta-item .pk {
+  color: var(--app-secondary-foreground);
+}
+
+.model-card-meta-item .pv {
+  color: var(--app-primary-foreground);
+  font-weight: 500;
+  font-family: var(--app-monospace-font-family);
+}
+
+.model-config-empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  padding: 36px 20px;
+  text-align: center;
+  color: var(--app-secondary-foreground);
+  background: var(--app-secondary-background);
+  border: 1px dashed var(--app-input-border);
+  border-radius: 10px;
+  gap: 8px;
+  margin-top: 8px;
 }
 
 .provider-card {
@@ -4314,7 +4597,8 @@ body {
     padding: 0;
   }
   .modal-card,
-  .modal-card.modal-card-lg {
+  .modal-card.modal-card-lg,
+  .modal-card.modal-card-xl {
     width: 100%;
     max-width: 100%;
     max-height: 85dvh;

@@ -7,6 +7,9 @@ import {
   getConfig,
   ConfigInfo,
   ProviderInfo,
+  AccountInfo,
+  createOrUpdateAccount,
+  deleteAccount,
   createProvider,
   updateProvider,
   setDefaultProvider,
@@ -62,6 +65,7 @@ function SettingsModal({
   title,
   wide,
   large,
+  extraLarge,
   hideFooter,
   onClose,
   children,
@@ -69,13 +73,20 @@ function SettingsModal({
   title: string;
   wide?: boolean;
   large?: boolean;
+  extraLarge?: boolean;
   // 弹窗自带底部操作（如「添加模型」的 关闭/添加）时隐藏这里的页脚关闭，避免重复。
   hideFooter?: boolean;
   onClose: () => void;
   children: ComponentChildren;
 }) {
   const { t } = useSettings();
-  const sizeClass = large ? ' modal-card-lg' : wide ? '' : ' modal-card-sm';
+  const sizeClass = extraLarge
+    ? ' modal-card-xl'
+    : large
+    ? ' modal-card-lg'
+    : wide
+    ? ''
+    : ' modal-card-sm';
   return (
     <div
       class="modal-overlay"
@@ -212,6 +223,7 @@ function AccountFormDialog({
   return (
     <SettingsModal
       title={isEdit ? t('settings.editAccount') : t('settings.addAccount')}
+      large
       hideFooter
       onClose={onClose}
     >
@@ -349,48 +361,163 @@ export function ModelConfigDialog({ onClose }: { onClose: () => void }) {
     });
   }, [config]);
 
+  const [searchQuery, setSearchQuery] = useState('');
+
+  const filteredAccountGroups = useMemo(() => {
+    const q = searchQuery.trim().toLowerCase();
+    if (!q) return accountGroups;
+    return accountGroups
+      .map((group) => {
+        const accMatch =
+          group.account.id.toLowerCase().includes(q) ||
+          group.account.type.toLowerCase().includes(q) ||
+          (group.account.base_url && group.account.base_url.toLowerCase().includes(q));
+        const matchingModels = group.models.filter(
+          (m) =>
+            m.name.toLowerCase().includes(q) ||
+            m.model.toLowerCase().includes(q) ||
+            m.type.toLowerCase().includes(q)
+        );
+        if (accMatch) return group;
+        if (matchingModels.length > 0) {
+          return { ...group, models: matchingModels };
+        }
+        return null;
+      })
+      .filter((g): g is NonNullable<typeof g> => g !== null);
+  }, [accountGroups, searchQuery]);
+
+  const allCollapsed =
+    filteredAccountGroups.length > 0 &&
+    filteredAccountGroups.every((g) => Boolean(collapsedAccounts[g.account.id]));
+
+  const toggleAllCollapse = () => {
+    const next: Record<string, boolean> = {};
+    const target = !allCollapsed;
+    for (const g of accountGroups) {
+      next[g.account.id] = target;
+    }
+    setCollapsedAccounts(next);
+  };
+
   return (
     <>
-    <SettingsModal title={t('settings.menuModel')} wide onClose={onClose}>
-      <div class="field-group">
-        <span class="modal-label">{t('settings.modelConfig')}</span>
+    <SettingsModal title={t('settings.menuModel')} extraLarge onClose={onClose}>
+      <div class="field-group" style={{ gap: '14px' }}>
         {loadError && <div class="modal-error">{t('settings.loadFailed')}: {loadError}</div>}
         {!config && !loadError && <div class="modal-loading">{t('settings.loading')}</div>}
         {config && (
           <>
-            <div class="add-model-top" style={{ display: 'flex', gap: '8px', justifyContent: 'flex-start' }}>
-              <button
-                class="btn btn-primary"
-                type="button"
-                onClick={() => {
-                  setAddModelDefaultAccount(undefined);
-                  setShowAddModel(true);
-                }}
-              >
-                ＋ {t('settings.addModel')}
-              </button>
-              <button
-                class="btn"
-                type="button"
-                onClick={() => setShowAddAccount(true)}
-              >
-                ＋ {t('settings.addAccount')}
-              </button>
-            </div>
-            <Row label={t('settings.defaultProvider')} value={config.default_provider} />
-            {config.default_workdir && (
-              <Row label={t('settings.defaultWorkdir')} value={config.default_workdir} mono />
-            )}
-            <Row label={t('settings.configFile')} value={config.path} mono />
+            {/* Overview / Header Card */}
+            <div class="model-config-overview">
+              <div class="model-config-overview-top">
+                <div class="model-config-overview-info">
+                  <div class="model-config-overview-title">
+                    <span>⚡</span>
+                    <span>{t('settings.menuModel')}</span>
+                  </div>
+                  <div class="model-config-overview-desc">
+                    {t('settings.modelConfigSubtitle')}
+                  </div>
+                </div>
 
-            <div class="provider-list" style={{ marginTop: '14px' }}>
-              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '8px' }}>
-                <span class="modal-label" style={{ margin: 0 }}>
-                  {t('settings.accounts')} ({accountGroups.length}) · {t('settings.providers')} ({config.providers.length})
-                </span>
+                <div class="model-config-overview-actions">
+                  <button
+                    class="btn btn-primary"
+                    type="button"
+                    onClick={() => {
+                      setAddModelDefaultAccount(undefined);
+                      setShowAddModel(true);
+                    }}
+                  >
+                    ＋ {t('settings.addModel')}
+                  </button>
+                  <button
+                    class="btn"
+                    type="button"
+                    onClick={() => setShowAddAccount(true)}
+                  >
+                    ＋ {t('settings.addAccount')}
+                  </button>
+                </div>
               </div>
 
-              {accountGroups.map(({ account, models }) => {
+              <div class="model-config-overview-stats">
+                <div class="model-config-stat-chip default-provider" title={t('settings.activeDefaultModel')}>
+                  <span>🎯 {t('settings.activeDefaultModel')}:</span>
+                  <strong>{config.default_provider || '（未设置）'}</strong>
+                </div>
+                <div class="model-config-stat-chip">
+                  <span>🏢</span>
+                  <span>{t('settings.statsProviders', { n: accountGroups.length })}</span>
+                </div>
+                <div class="model-config-stat-chip">
+                  <span>🤖</span>
+                  <span>{t('settings.statsModels', { n: config.providers?.length ?? 0 })}</span>
+                </div>
+                {config.path && (
+                  <div class="model-config-stat-chip config-path" title={config.path}>
+                    <span>📄</span>
+                    <span>{config.path}</span>
+                  </div>
+                )}
+              </div>
+            </div>
+
+            {/* Toolbar: Search + Controls */}
+            <div class="model-config-toolbar">
+              <div class="model-config-search-box">
+                <span class="model-config-search-icon">🔍</span>
+                <input
+                  class="model-config-search-input"
+                  type="text"
+                  placeholder={t('settings.searchPlaceholder')}
+                  value={searchQuery}
+                  onInput={(e) => setSearchQuery((e.target as HTMLInputElement).value)}
+                />
+                {searchQuery && (
+                  <button
+                    class="model-config-search-clear"
+                    type="button"
+                    onClick={() => setSearchQuery('')}
+                    title="Clear"
+                  >
+                    ×
+                  </button>
+                )}
+              </div>
+
+              <div class="model-config-toolbar-actions">
+                <button
+                  class="provider-group-btn"
+                  type="button"
+                  onClick={toggleAllCollapse}
+                >
+                  {allCollapsed ? `▼ ${t('settings.expandAll')}` : `▲ ${t('settings.collapseAll')}`}
+                </button>
+              </div>
+            </div>
+
+            {/* Providers & Models List */}
+            <div class="provider-list">
+              {filteredAccountGroups.length === 0 && (
+                <div class="model-config-empty">
+                  <span style={{ fontSize: '26px' }}>🔍</span>
+                  <span>{t('settings.noSearchResults')}</span>
+                  {searchQuery && (
+                    <button
+                      class="provider-group-btn"
+                      type="button"
+                      onClick={() => setSearchQuery('')}
+                      style={{ marginTop: '6px' }}
+                    >
+                      {t('settings.resetSearch')}
+                    </button>
+                  )}
+                </div>
+              )}
+
+              {filteredAccountGroups.map(({ account, models }) => {
                 const isCollapsed = Boolean(collapsedAccounts[account.id]);
                 return (
                   <div key={account.id} class="provider-group">
@@ -402,49 +529,55 @@ export function ModelConfigDialog({ onClose }: { onClose: () => void }) {
                         <span class={`provider-group-toggle ${!isCollapsed ? 'open' : ''}`}>
                           ▶
                         </span>
-                        <span class="provider-group-title">{account.id}</span>
+                        <span class="provider-group-title" title={account.id}>
+                          {account.id}
+                        </span>
                         <span class="provider-group-badge">{account.type}</span>
                         {account.base_url && (
                           <span class="provider-group-url" title={account.base_url}>
-                            {account.base_url}
+                            🔗 {account.base_url}
                           </span>
                         )}
-                        <span class={account.has_api_key ? 'ok' : 'nok'} style={{ fontSize: '11px' }}>
-                          {account.has_api_key ? `● ${t('settings.configured')}` : `○ ${t('settings.notConfigured')}`}
+                      </div>
+
+                      <div class="provider-group-meta-actions" onClick={(e) => e.stopPropagation()}>
+                        <span class={`provider-status-badge ${account.has_api_key ? 'ok' : 'nok'}`}>
+                          <span style={{ fontSize: '9px' }}>●</span>
+                          <span>{account.has_api_key ? t('settings.apiKeyConfigured') : t('settings.apiKeyNotConfigured')}</span>
                         </span>
                         <span class="provider-group-count">
                           {t('settings.modelsCount', { n: models.length })}
                         </span>
-                      </div>
 
-                      <div class="provider-group-actions" onClick={(e) => e.stopPropagation()}>
-                        <button
-                          class="provider-group-btn"
-                          type="button"
-                          onClick={() => {
-                            setAddModelDefaultAccount(account.id);
-                            setShowAddModel(true);
-                          }}
-                          title={t('settings.addModel')}
-                        >
-                          ＋ {t('settings.model')}
-                        </button>
-                        <button
-                          class="provider-group-btn"
-                          type="button"
-                          onClick={() => setEditAccountTarget(account)}
-                          title={t('settings.edit')}
-                        >
-                          {t('settings.edit')}
-                        </button>
-                        <button
-                          class="provider-group-btn danger"
-                          type="button"
-                          onClick={() => setDeleteAccountTarget(account.id)}
-                          title={t('settings.delete')}
-                        >
-                          {t('settings.delete')}
-                        </button>
+                        <div class="provider-group-actions">
+                          <button
+                            class="provider-group-btn btn-accent"
+                            type="button"
+                            onClick={() => {
+                              setAddModelDefaultAccount(account.id);
+                              setShowAddModel(true);
+                            }}
+                            title={t('settings.addModel')}
+                          >
+                            ＋ {t('settings.model')}
+                          </button>
+                          <button
+                            class="provider-group-btn"
+                            type="button"
+                            onClick={() => setEditAccountTarget(account)}
+                            title={t('settings.edit')}
+                          >
+                            {t('settings.edit')}
+                          </button>
+                          <button
+                            class="provider-group-btn danger"
+                            type="button"
+                            onClick={() => setDeleteAccountTarget(account.id)}
+                            title={t('settings.delete')}
+                          >
+                            {t('settings.delete')}
+                          </button>
+                        </div>
                       </div>
                     </div>
 
@@ -452,7 +585,8 @@ export function ModelConfigDialog({ onClose }: { onClose: () => void }) {
                       <div class="provider-group-models">
                         {models.length === 0 ? (
                           <div class="provider-group-empty">
-                            {t('settings.noModels')}
+                            <span>ℹ️</span>
+                            <span>{t('settings.noModels')}</span>
                           </div>
                         ) : (
                           models
@@ -469,14 +603,14 @@ export function ModelConfigDialog({ onClose }: { onClose: () => void }) {
                                   <div class="model-card-name-row">
                                     <span class="model-card-name">{p.name}</span>
                                     {p.is_default && (
-                                      <span class="model-card-badge">{t('settings.default')}</span>
+                                      <span class="model-card-badge">★ {t('settings.default')}</span>
                                     )}
-                                    <span class="model-card-id">{p.model}</span>
+                                    <span class="model-card-id" title={p.model}>ID: {p.model}</span>
                                   </div>
                                   <div class="model-card-actions">
                                     {!p.is_default && (
                                       <button
-                                        class="provider-group-btn"
+                                        class="provider-group-btn btn-accent"
                                         type="button"
                                         onClick={async () => {
                                           await setDefaultProvider(p.name);
@@ -509,21 +643,27 @@ export function ModelConfigDialog({ onClose }: { onClose: () => void }) {
                                 <div class="model-card-meta">
                                   {p.context_window && (
                                     <div class="model-card-meta-item">
-                                      <span class="pk">{t('settings.contextWindow')}:</span>
+                                      <span class="pk">⚡ {t('settings.contextWindow')}:</span>
                                       <span class="pv">{(p.context_window / 1000).toFixed(0)}k</span>
                                     </div>
                                   )}
                                   <div class="model-card-meta-item">
-                                    <span class="pk">{t('settings.supportsVision')}:</span>
-                                    <span>{p.supports_vision ? t('settings.yes') : t('settings.no')}</span>
+                                    <span class="pk">🖼️ {t('settings.supportsVision')}:</span>
+                                    <span class="pv">{p.supports_vision ? t('settings.yes') : t('settings.no')}</span>
                                   </div>
                                   <div class="model-card-meta-item">
-                                    <span class="pk">{t('settings.reasoningModel')}:</span>
-                                    <span>{p.reasoning_model ? t('settings.yes') : t('settings.no')}</span>
+                                    <span class="pk">🧠 {t('settings.reasoningModel')}:</span>
+                                    <span class="pv">{p.reasoning_model ? t('settings.yes') : t('settings.no')}</span>
                                     {p.reasoning_model && p.reasoning_effort && (
                                       <span class="pv" style={{ marginLeft: '4px' }}>({p.reasoning_effort})</span>
                                     )}
                                   </div>
+                                  {p.reasoning_history && (
+                                    <div class="model-card-meta-item">
+                                      <span class="pk">💭 {t('settings.reasoningHistory')}:</span>
+                                      <span class="pv">{p.reasoning_history}</span>
+                                    </div>
+                                  )}
                                 </div>
                               </div>
                             ))

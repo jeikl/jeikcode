@@ -192,6 +192,23 @@ function freezeTodosIntoLastAssistant(msgs: Message[], items: TodoItem[]): Messa
   return msgs;
 }
 
+/** Find the most recent unfinished todo list across a message timeline. */
+function findLatestUnfinishedTodos(msgs: Message[]): TodoItem[] | null {
+  for (let i = msgs.length - 1; i >= 0; i--) {
+    const parts = msgs[i]!.parts;
+    if (!parts) continue;
+    for (let j = parts.length - 1; j >= 0; j--) {
+      const part = parts[j]!;
+      if (part.kind === 'todo_list' && part.items && part.items.length > 0) {
+        if (part.items.some((t) => t.status !== 'completed')) {
+          return part.items;
+        }
+      }
+    }
+  }
+  return null;
+}
+
 interface QueuedMessage {
   id: number;
   text: string;
@@ -699,15 +716,24 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
   // last assistant message) when the turn ends.
   const [turnStartedAt, setTurnStartedAt] = useState<number | null>(null);
   const turnStartedAtRef = useRef<number | null>(null);
+  const turnStartedAtBySessionRef = useRef<Map<string, number>>(new Map());
   const [nowMs, setNowMs] = useState(() => Date.now());
-  function startTurnClock() {
+  function startTurnClock(sessionId?: string | null) {
     if (turnStartedAtRef.current != null) return;
     const now = Date.now();
     turnStartedAtRef.current = now;
+    const targetId = sessionId ?? activeIdRef.current;
+    if (targetId) {
+      turnStartedAtBySessionRef.current.set(targetId, now);
+    }
     setTurnStartedAt(now);
   }
-  function finishTurnClock(opts?: { stamp?: boolean }) {
+  function finishTurnClock(opts?: { stamp?: boolean; sessionId?: string | null }) {
     const started = turnStartedAtRef.current;
+    const targetId = opts?.sessionId ?? activeIdRef.current;
+    if (targetId && opts?.stamp !== false) {
+      turnStartedAtBySessionRef.current.delete(targetId);
+    }
     turnStartedAtRef.current = null;
     setTurnStartedAt(null);
     if (started == null || opts?.stamp === false) return;
@@ -956,6 +982,7 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
   const [activeTodos, setActiveTodos] = useState<TodoItem[] | null>(null);
   const activeTodosRef = useRef<TodoItem[] | null>(null);
   activeTodosRef.current = activeTodos;
+  const activeTodosBySessionRef = useRef<Map<string, TodoItem[]>>(new Map());
   // Auxiliary persistence failures belong to application chrome, not the
   // assistant transcript. Replacing this value also deduplicates repeated
   // failures for the same session/path.
@@ -1570,6 +1597,11 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
         messages.length >= messagesRef.current.length ? messages : messagesRef.current;
       if (prevId && leavingMessages.length > 0) {
         const sticky = activeTodosRef.current;
+        if (sticky && sticky.length > 0 && sticky.some((t) => t.status !== 'completed')) {
+          activeTodosBySessionRef.current.set(prevId, sticky);
+        } else if (prevId) {
+          activeTodosBySessionRef.current.delete(prevId);
+        }
         let cached =
           sticky && sticky.length > 0
             ? freezeTodosIntoLastAssistant(leavingMessages, sticky)
@@ -1578,9 +1610,18 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
         // following setBusyAndClock(false) must NOT write elapsed onto the
         // destination session's messages.
         if (turnStartedAtRef.current != null) {
+          turnStartedAtBySessionRef.current.set(prevId, turnStartedAtRef.current);
           cached = stampLastAssistantElapsed(cached, Date.now() - turnStartedAtRef.current);
         }
         messageCacheRef.current.set(prevId, cached);
+      } else if (prevId) {
+        if (turnStartedAtRef.current != null) {
+          turnStartedAtBySessionRef.current.set(prevId, turnStartedAtRef.current);
+        }
+        const sticky = activeTodosRef.current;
+        if (sticky && sticky.length > 0 && sticky.some((t) => t.status !== 'completed')) {
+          activeTodosBySessionRef.current.set(prevId, sticky);
+        }
       }
 
       // Invalidate in-flight /chat event handlers for the session we are leaving
@@ -1639,12 +1680,19 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
         : createLiveLifecycleState();
       finishTurnClock({ stamp: false });
       if (destRunning) {
-        const started = resumeTurnStartedAt(Date.now(), destElapsed);
+        const sessionStarted = sessionId ? turnStartedAtBySessionRef.current.get(sessionId) : undefined;
+        const started = sessionStarted ?? resumeTurnStartedAt(Date.now(), destElapsed);
+        if (sessionId && !sessionStarted) {
+          turnStartedAtBySessionRef.current.set(sessionId, started);
+        }
         turnStartedAtRef.current = started;
         setTurnStartedAt(started);
         busyRef.current = true;
         setBusy(true);
       } else {
+        if (sessionId) {
+          turnStartedAtBySessionRef.current.delete(sessionId);
+        }
         busyRef.current = false;
         setBusy(false);
       }
@@ -1652,9 +1700,27 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
       setLivePending(null);
       setUserInputReq(null);
       onPermissionResolved?.(null);
-      // Sticky is live-only; history restores frozen todo_list under assistants.
-      setActiveTodos(null);
-      activeTodosRef.current = null;
+      // Restore active todos for this session if unfinished, otherwise fall back to cached messages
+      const stashedTodos = sessionId ? activeTodosBySessionRef.current.get(sessionId) : undefined;
+      const restoredTodos =
+        stashedTodos && stashedTodos.some((t) => t.status !== 'completed')
+          ? stashedTodos
+          : cached
+            ? findLatestUnfinishedTodos(cached)
+            : null;
+      if (restoredTodos && restoredTodos.length > 0) {
+        setActiveTodos(restoredTodos);
+        activeTodosRef.current = restoredTodos;
+        if (sessionId) {
+          activeTodosBySessionRef.current.set(sessionId, restoredTodos);
+        }
+      } else {
+        setActiveTodos(null);
+        activeTodosRef.current = null;
+        if (sessionId) {
+          activeTodosBySessionRef.current.delete(sessionId);
+        }
+      }
       if (cached && cached.length > 0) {
         messagesRef.current = cached;
         setMessages(cached);
@@ -1807,6 +1873,14 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
               // A newly loaded session starts at the bottom regardless of prior scroll state.
               setMessages(loaded);
               pinTimelineToBottom();
+            }
+            if (!activeTodosRef.current) {
+              const diskUnfinished = findLatestUnfinishedTodos(displayMessages);
+              if (diskUnfinished && diskUnfinished.length > 0) {
+                setActiveTodos(diskUnfinished);
+                activeTodosRef.current = diskUnfinished;
+                activeTodosBySessionRef.current.set(loadId, diskUnfinished);
+              }
             }
             applySessionTokens(loadId, displayMessages, sessionResult.value.token_usage ?? undefined);
           }
@@ -2197,6 +2271,9 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
     if (!items || items.length === 0) {
       setActiveTodos(null);
       activeTodosRef.current = null;
+      if (activeIdRef.current) {
+        activeTodosBySessionRef.current.delete(activeIdRef.current);
+      }
       return;
     }
     // If all tasks are completed, archive them onto the last assistant reply and clear sticky.
@@ -2206,8 +2283,14 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
     if (isAllDone) {
       activeTodosRef.current = null;
       setActiveTodos(null);
+      if (activeIdRef.current) {
+        activeTodosBySessionRef.current.delete(activeIdRef.current);
+      }
       setMessages((prev) => freezeTodosIntoLastAssistant(prev, items));
     } else {
+      if (activeIdRef.current) {
+        activeTodosBySessionRef.current.set(activeIdRef.current, items);
+      }
       // Also snapshot into assistant history for safety, but retain active sticky list.
       setMessages((prev) => freezeTodosIntoLastAssistant(prev, items));
     }
@@ -3537,7 +3620,17 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
           ...(subtasks ? { subtasks } : {}),
         });
         if (isTodoTool(event.name)) {
-          setActiveTodos((cur) => foldTodoToolCall(cur, event.name, argsStr));
+          setActiveTodos((cur) => {
+            const next = foldTodoToolCall(cur, event.name, argsStr);
+            if (activeIdRef.current) {
+              if (next && next.length > 0 && next.some((t) => t.status !== 'completed')) {
+                activeTodosBySessionRef.current.set(activeIdRef.current, next);
+              } else {
+                activeTodosBySessionRef.current.delete(activeIdRef.current);
+              }
+            }
+            return next;
+          });
         }
         break;
       }
@@ -3690,6 +3783,7 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
         transitionChatRecovery({ type: 'authoritative_terminal' });
         localTurnSessionsRef.current.delete(event.session_id);
         backgroundRunningSessionsRef.current.delete(event.session_id);
+        turnStartedAtBySessionRef.current.delete(event.session_id);
         if (activeIdRef.current === event.session_id) {
           saveTokenSnapshot(event.session_id, tokensAuthoritativeRef.current);
         }
@@ -3705,6 +3799,7 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
         if (activeIdRef.current) {
           backgroundRunningSessionsRef.current.delete(activeIdRef.current);
           localTurnSessionsRef.current.delete(activeIdRef.current);
+          turnStartedAtBySessionRef.current.delete(activeIdRef.current);
         }
         setBusyAndClock(false);
         finalizePendingToolsOnCanvas();
@@ -3719,6 +3814,7 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
         if (activeIdRef.current) {
           backgroundRunningSessionsRef.current.delete(activeIdRef.current);
           localTurnSessionsRef.current.delete(activeIdRef.current);
+          turnStartedAtBySessionRef.current.delete(activeIdRef.current);
         }
         setBusyAndClock(false);
         finalizePendingToolsOnCanvas();

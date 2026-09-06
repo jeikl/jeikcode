@@ -159,12 +159,13 @@ impl Tool for ReadFileTool {
                     "type": "integer",
                     "default": 1,
                     "minimum": 1,
-                    "description": "Start line, 1-based. Use when reading a targeted section around a known symbol or line."
+                    "description": "Start line, 1-based (default: 1). Use when reading a targeted section around a known symbol or line."
                 },
                 "limit": {
                     "type": "integer",
+                    "default": 1500,
                     "minimum": 1,
-                    "description": "Number of lines to read. Use bounded limits (e.g. 50-100) instead of reading whole large files."
+                    "description": "Number of lines to read (default: 1500). Use bounded limits (e.g. 50-100) instead of reading whole large files."
                 }
             },
             "required": ["file_path"]

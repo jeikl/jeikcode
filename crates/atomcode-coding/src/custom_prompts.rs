@@ -421,10 +421,12 @@ pub(crate) fn render_custom_rules_from(cfg: &CustomRulesConfig) -> String {
                 "medium_tasks" => 4,
                 "complex_tasks" => 5,
                 "exploration_tasks" => 6,
-                "modification_tasks" => 7,
-                "general_tasks" => 8,
-                "incremental_recovery" => 9,
-                _ => 10,
+                "exploration_stop_condition" => 7,
+                "confidence_brake" => 8,
+                "modification_tasks" => 9,
+                "general_tasks" => 10,
+                "incremental_recovery" => 11,
+                _ => 12,
             });
             for (_, v) in items {
                 out.push_str(&format!("- {v}\n"));
@@ -523,7 +525,7 @@ pub(crate) fn render_custom_rules_from(cfg: &CustomRulesConfig) -> String {
     if let Some(out_cfg) = &cfg.output {
         out.push_str("## OUTPUT:\n");
         if let Some(s) = &out_cfg.signposts {
-            out.push_str(&format!("- Progress Signposts: {s}\n"));
+            out.push_str(&format!("- Milestone Status: {s}\n"));
         }
         if let Some(c) = &out_cfg.conciseness {
             out.push_str(&format!("- Conciseness: {c}\n"));
@@ -656,6 +658,8 @@ doing_tasks:
         assert!(guide.contains_key("medium_tasks"));
         assert!(guide.contains_key("complex_tasks"));
         assert!(guide.contains_key("exploration_tasks"));
+        assert!(guide.contains_key("exploration_stop_condition"));
+        assert!(guide.contains_key("confidence_brake"));
         assert!(guide.contains_key("modification_tasks"));
         assert!(guide.contains_key("general_tasks"));
         assert!(guide.contains_key("incremental_recovery"));
@@ -678,6 +682,17 @@ doing_tasks:
                 .unwrap()
                 .contains("code_explore"),
             "explore_first is a live rules.yaml field"
+        );
+        assert!(
+            rules
+                .output
+                .as_ref()
+                .unwrap()
+                .signposts
+                .as_deref()
+                .unwrap()
+                .contains("key milestone"),
+            "signposts is a live rules.yaml field"
         );
     }
 

@@ -11,11 +11,10 @@ use atomcode_kernel::message::Conversation;
 pub const MCP_INSTRUCTIONS_HEADER: &str = "=== MCP SERVER INSTRUCTIONS ===";
 
 /// Injects the connected servers' current instructions into the session's
-/// independent system block (Block 4) at `session_start` and `turn_start`.
+/// independent system block (Block 4, order 40) at `session_start` and `turn_start`.
 ///
-/// Lands after the skill catalog (Block 3), before project instructions (Block 5).
-/// User-owned MCP guidance sits inside `sacred_floor`, so compaction cannot drain it.
-/// Service-level independent hot reload: MCP changes do not bust Block 1, 2, or 3.
+/// Lands after the skill catalog (Block 3, order 30) and before Baseline (Block 6, order 60).
+/// Reconciled as an independent system block so service-level changes keep the System prefix structured.
 pub(crate) struct McpInstructionsHook {
     registries: Vec<Arc<McpRegistry>>,
     mounted_tools: Arc<RwLock<Vec<String>>>,

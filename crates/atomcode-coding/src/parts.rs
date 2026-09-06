@@ -669,17 +669,17 @@ async fn prepare_with_plugin_hooks_reusing_lease(
         .map(atomcode_capabilities::mcp::SessionMcpLease::registry);
 
     // Hooks in the CANONICAL ORDER (registration order = HookChain execution order):
-    // 1. SessionContextHook — session_start: inject env + project-instructions + git
-    //    snapshot after persona as a System message. Rewrites in place on turn_start.
+    // 1. SessionContextHook — session_start: inject env + git snapshot as System (Block 6, order 60),
+    //    and project-instructions (AGENTS.md / glossary) as frozen synthetic User (Block 5) inside
+    //    sacred_floor. Rewrites instructions in place on turn_start.
     // 2. MemoryHook    — session_start: inject memory.md as a frozen synthetic User
     //    after the leading-system run (fresh inject / resume reconcile). Inside
     //    sacred_floor — compaction cannot drain it.
-    // 2b. SkillCatalogHook — session_start: inject the AVAILABLE SKILLS catalog as a
-    //    frozen synthetic User after memory. Same sacred-floor protection.
-    // 2b2. CodeToolsHook — leading-System `=== CODE TOOLS ===` routing card.
+    // 2b. SkillCatalogHook — session_start: inject AVAILABLE SKILLS catalog as an
+    //    independent System block (Block 3, order 30).
+    // 2b2. CodeToolsHook — leading-System `=== CODE TOOLS ===` routing card (Block 2.5, order 25).
     // 2c. McpInstructionsHook — session_start / turn_start: inject MCP server
-    //     instructions as a frozen synthetic User after skills. Unchanged bytes
-    //     keep the prompt-cache prefix stable; the user query stays at the tail.
+    //     instructions as an independent System block (Block 4, order 40).
     // 3. SnapshotHook  — turn_complete: persist .snapshot + .meta.
     // 4. TranscriptHook— turn_complete: append the .jsonl record. (No coupling with
     //    3 — the order is fixed purely for determinism.)
@@ -703,7 +703,7 @@ async fn prepare_with_plugin_hooks_reusing_lease(
     if opts.memory {
         hooks.push(Arc::new(MemoryHook::for_project(&cfg.working_dir)));
     }
-    // Skill catalog — frozen synthetic user (persona → context → memory → skills), so
+    // Skill catalog — independent System block (Block 3, order 30), so
     // the model sees which skills are installed and can trigger one on a description
     // match. `None` (no skills) makes the hook a no-op. Reconciles in place on resume.
     // Capture whether any skill is installed BEFORE the catalog is moved — SkillFirstHook

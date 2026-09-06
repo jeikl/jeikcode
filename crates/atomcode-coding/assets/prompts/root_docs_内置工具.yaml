@@ -56,8 +56,8 @@ tools:
 
   - name: "edit_file"
     category: "filesystem"
-    # 【中文】：在现有文件中批量执行精确字符串替换用于修改文件内容。切勿在未先通过 read_file 查看目标文件的情况下调用。
-    description: "Perform exact string replacements in existing files to modify content. Do not call without reading the target file via `read_file` first."
+    # 【中文】：在现有文件中批量执行精确字符串替换用于修改文件内容。
+    description: "Perform exact string replacements in existing files to modify content."
     parameters:
       file_path:
         type: "string"

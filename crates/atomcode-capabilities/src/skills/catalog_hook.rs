@@ -1,5 +1,5 @@
-//! `SkillCatalogHook` — injects the `=== AVAILABLE SKILLS ===` catalog as a
-//! frozen synthetic User message at session start.
+//! `SkillCatalogHook` — injects the `=== AVAILABLE SKILLS ===` catalog as an
+//! independent System block (Block 3, order 30) at session start.
 //!
 //! Why this exists: the v2 coding path registered the `use_skill` / `list_skills`
 //! tools but NEVER told the model which skills are installed — so a skill that
@@ -9,10 +9,9 @@
 //! (via the budget-gated, source-ranked [`super::render`]).
 //!
 //! Identified by [`super::render::CATALOG_HEADER`] so `--resume` reconciles it
-//! in place; lands in the frozen user prefix after persona + session context +
-//! memory. User-owned skills sit inside `sacred_floor`, so compaction cannot
-//! drain them. The catalog is frozen at session start (skills don't change
-//! mid-session; `/cd` is a new session).
+//! in place; lands as an independent System block (Block 3) after CodeTools (25)
+//! and before MCP (40) / Baseline (60). The catalog is frozen at session start
+//! (skills don't change mid-session; `/cd` is a new session), preserving prefix cache.
 
 use super::render::CATALOG_HEADER;
 use async_trait::async_trait;

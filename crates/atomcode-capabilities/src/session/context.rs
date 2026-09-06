@@ -1,5 +1,6 @@
 //! `SessionContextHook` — injects Block 5 (Authoritative Project Instructions & Knowledge)
-//! and Block 6 (Session Baseline) as independent leading `Role::System` messages.
+//! as a frozen synthetic User message inside `sacred_floor`, and Block 6 (Session Baseline)
+//! as an independent leading `Role::System` message.
 //!
 //! ## Hot-reload (every user turn)
 //!
@@ -186,15 +187,17 @@ impl SessionContextHook {
 impl LifecycleHooks for SessionContextHook {
     async fn session_start(&self, convo: &mut Conversation, resumed: bool) {
         if !resumed {
-            // FRESH: Reconcile Block 5 (instructions) and Block 6 (baseline)
-            convo.reconcile_system_block(INSTRUCTIONS_HEADER, self.render_instructions_block());
+            // FRESH: Reconcile instructions as frozen synthetic user block, and baseline as Block 6 System
+            convo.reconcile_system_block(INSTRUCTIONS_HEADER, None);
+            convo.reconcile_frozen_user_block(INSTRUCTIONS_HEADER, self.render_instructions_block());
             convo.reconcile_system_block(BASELINE_HEADER, Some(self.render_baseline()));
             return;
         }
 
         // RESUME:
-        // 1. Hot-reload instructions (Block 5)
-        convo.reconcile_system_block(INSTRUCTIONS_HEADER, self.render_instructions_block());
+        // 1. Hot-reload instructions into frozen synthetic user block (clean up legacy System if resuming from older session)
+        convo.reconcile_system_block(INSTRUCTIONS_HEADER, None);
+        convo.reconcile_frozen_user_block(INSTRUCTIONS_HEADER, self.render_instructions_block());
 
         // 2. Baseline (Block 6): Check if BASELINE_HEADER exists
         let leading = convo
@@ -230,8 +233,9 @@ impl LifecycleHooks for SessionContextHook {
 
     async fn turn_start(&self, convo: &mut Conversation) {
         // Every user send: re-read instructions & knowledge from disk.
-        // Block 6 (Baseline + Git) stays 100% frozen!
-        convo.reconcile_system_block(INSTRUCTIONS_HEADER, self.render_instructions_block());
+        // Clean up legacy System block if present, and update frozen user block in-place!
+        convo.reconcile_system_block(INSTRUCTIONS_HEADER, None);
+        convo.reconcile_frozen_user_block(INSTRUCTIONS_HEADER, self.render_instructions_block());
     }
 }
 
@@ -285,7 +289,10 @@ mod tests {
         convo.push(Message::system("persona"));
         hook.session_start(&mut convo, false).await;
         assert_eq!(convo.messages.len(), 3);
-        let ctx = &convo.messages[1].text;
+        assert!(convo.messages[1].text.starts_with(BASELINE_HEADER));
+        let ctx = &convo.messages[2].text;
+        assert_eq!(convo.messages[2].role, Role::User);
+        assert!(convo.messages[2].synthetic);
         let agents_pos = ctx.find("project-rule-A").expect("AGENTS body present");
         let client_pos = ctx
             .find("client-sys-B")
@@ -365,17 +372,19 @@ mod tests {
         assert_eq!(
             convo.messages.len(),
             4,
-            "instructions reconciled into leading system run"
+            "instructions reconciled into frozen synthetic user run"
         );
-        let instr_block = &convo.messages[1].text;
-        assert!(
-            instr_block.contains("new project rule Z"),
-            "project instructions re-rendered from disk on resume: {instr_block}"
-        );
-        let baseline_block = &convo.messages[2].text;
+        let baseline_block = &convo.messages[1].text;
         assert!(
             baseline_block.contains("HEAD: oldsha frozen commit"),
             "saved git section frozen (not refreshed): {baseline_block}"
+        );
+        let instr_block = &convo.messages[2].text;
+        assert_eq!(convo.messages[2].role, Role::User);
+        assert!(convo.messages[2].synthetic);
+        assert!(
+            instr_block.contains("new project rule Z"),
+            "project instructions re-rendered from disk on resume: {instr_block}"
         );
         assert_eq!(convo.messages[3].text, "earlier turn", "history untouched");
     }
@@ -433,10 +442,12 @@ mod tests {
         convo.push(Message::user("hi"));
         hook.session_start(&mut convo, true).await;
         assert_eq!(convo.messages.len(), 4);
-        assert!(convo.messages[1].text.starts_with(INSTRUCTIONS_HEADER));
-        assert!(convo.messages[1].text.contains("project rule legacy"));
-        assert!(convo.messages[2].text.starts_with(BASELINE_HEADER));
-        assert!(convo.messages[2].text.contains("HEAD: legacy-sha"));
+        assert!(convo.messages[1].text.starts_with(BASELINE_HEADER));
+        assert!(convo.messages[1].text.contains("HEAD: legacy-sha"));
+        assert!(convo.messages[2].text.starts_with(INSTRUCTIONS_HEADER));
+        assert!(convo.messages[2].text.contains("project rule legacy"));
+        assert_eq!(convo.messages[2].role, Role::User);
+        assert!(convo.messages[2].synthetic);
     }
 
     #[tokio::test]
@@ -450,9 +461,12 @@ mod tests {
         let mut convo = Conversation::new();
         convo.push(Message::system("persona"));
         hook.session_start(&mut convo, false).await;
-        assert_eq!(convo.messages.len(), 3); // persona, instructions, baseline
-        assert!(convo.messages[1].text.contains("rule-v1"));
-        assert!(convo.messages[1].text.contains("term-v1"));
+        assert_eq!(convo.messages.len(), 3); // persona, baseline, instructions (frozen synthetic user)
+        assert!(convo.messages[1].text.starts_with(BASELINE_HEADER));
+        assert!(convo.messages[2].text.contains("rule-v1"));
+        assert!(convo.messages[2].text.contains("term-v1"));
+        assert_eq!(convo.messages[2].role, Role::User);
+        assert!(convo.messages[2].synthetic);
 
         // Mid-session edits on disk.
         std::fs::write(d.path().join("AGENTS.md"), "rule-v2-hot").unwrap();
@@ -460,7 +474,7 @@ mod tests {
         convo.push(Message::user("next turn"));
         hook.turn_start(&mut convo).await;
 
-        let block = &convo.messages[1].text;
+        let block = &convo.messages[2].text;
         assert!(
             block.contains("rule-v2-hot") && !block.contains("rule-v1"),
             "AGENTS.md hot-reloaded on turn_start: {block}"
@@ -469,10 +483,12 @@ mod tests {
             block.contains("term-v2-hot") && !block.contains("term-v1"),
             "glossary hot-reloaded on turn_start: {block}"
         );
+        assert_eq!(convo.messages[2].role, Role::User);
+        assert!(convo.messages[2].synthetic);
         assert_eq!(
             convo.messages.len(),
             4,
-            "no extra messages; in-place rewrite (persona, instructions, baseline, user)"
+            "no extra messages; in-place rewrite (persona, baseline, instructions, user)"
         );
     }
 
@@ -487,13 +503,15 @@ mod tests {
         let frozen_baseline = format!(
             "{BASELINE_HEADER}\nWorking directory: /x\nPlatform: windows\nShell: bash\n\n=== GIT STATUS (snapshot at session start, not live) ===\nHEAD: frozen-abc"
         );
-        convo.messages[2] = Message::system(frozen_baseline);
+        convo.messages[1] = Message::system(frozen_baseline);
         convo.push(Message::user("hi"));
         hook.turn_start(&mut convo).await;
         assert!(
-            convo.messages[2].text.contains("HEAD: frozen-abc"),
+            convo.messages[1].text.contains("HEAD: frozen-abc"),
             "git must stay frozen across turn hot-reload"
         );
-        assert!(convo.messages[1].text.contains("PROJECT INSTRUCTIONS"));
+        assert!(convo.messages[2].text.contains("PROJECT INSTRUCTIONS"));
+        assert_eq!(convo.messages[2].role, Role::User);
+        assert!(convo.messages[2].synthetic);
     }
 }

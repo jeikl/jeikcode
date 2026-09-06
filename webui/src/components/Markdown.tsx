@@ -12,6 +12,107 @@ marked.use({ tokenizer: { del: () => undefined } });
 
 // Custom code-block renderer → matches the ported .code-block-wrapper CSS.
 const renderer = new marked.Renderer();
+
+/**
+ * 鲁棒性 Markdown 预处理器：
+ * 解决大模型生成 Markdown 时常见的格式瑕疵，避免 marked 解析退化为纯文本：
+ * 1. 保护代码块：被 ``` 或 ~~~ 包裹的行不作篡改；
+ * 2. 标题规范化：
+ *    - 补全 `#` 后的空格：如 `###三、修复方案` -> `### 三、修复方案`（CommonMark 严格要求 # 后跟空白符）；
+ *    - 保证标题前有空行，防止被上一段落文本吞并；
+ * 3. GFM 表格规范化：
+ *    - 保证表格前有空行：GFM 规定表格不能中断普通文本段落或引用块（缺少空行会导致整个表格渲染失败）；
+ *    - 保证表格后有空行：避免紧跟表格的文本破坏表格结构；
+ *    - 支持宽松表格分隔行（如 `|---|---|`、`---|---|` 等）；
+ */
+export function preprocessMarkdown(raw: string): string {
+  if (!raw) return '';
+  const lines = raw.replace(/\r\n/g, '\n').split('\n');
+  const result: string[] = [];
+  let inCodeBlock = false;
+  let codeFence = '';
+
+  // 辅助检测 GFM 表格分隔行，例如 `| :--- | :--- |` 或 `|---|---|` 或 `---|---|`
+  const isTableDelimiter = (line: string): boolean => {
+    const trimmed = line.trim();
+    if (!trimmed.includes('-')) return false;
+    return /^\|?\s*:?-+:?\s*(\|?\s*:?-+:?\s*)+\|?$/.test(trimmed);
+  };
+
+  // 辅助检测可能为表格数据行
+  const isTableRow = (line: string): boolean => {
+    const trimmed = line.trim();
+    return trimmed.startsWith('|') || (trimmed.endsWith('|') && trimmed.includes('|'));
+  };
+
+  for (let i = 0; i < lines.length; i++) {
+    let line = lines[i];
+    const trimmed = line.trim();
+
+    // 1. 处理代码块围栏
+    const fenceMatch = trimmed.match(/^(`{3,}|~{3,})/);
+    if (fenceMatch) {
+      if (!inCodeBlock) {
+        inCodeBlock = true;
+        codeFence = fenceMatch[1][0]; // '`' or '~'
+      } else if (trimmed.startsWith(codeFence.repeat(3))) {
+        inCodeBlock = false;
+        codeFence = '';
+      }
+      result.push(line);
+      continue;
+    }
+
+    if (inCodeBlock) {
+      result.push(line);
+      continue;
+    }
+
+    // 2. 修复无空格 ATX 标题，例如 `###三、修复方案` -> `### 三、修复方案`
+    const headingMatch = line.match(/^(\s*)(#{1,6})([^\s#].*)$/);
+    if (headingMatch) {
+      line = `${headingMatch[1]}${headingMatch[2]} ${headingMatch[3]}`;
+    }
+
+    // 保证独立标题行前有空行
+    const isHeading = /^\s*#{1,6}\s+/.test(line);
+    if (isHeading && result.length > 0) {
+      const prevLine = result[result.length - 1].trim();
+      if (prevLine !== '' && !prevLine.startsWith('#')) {
+        result.push('');
+      }
+    }
+
+    // 3. 修复 GFM 表格前缺少空行的问题
+    // 如果下一行是表格分隔行，说明当前行是表头
+    const nextLine = i + 1 < lines.length ? lines[i + 1] : null;
+    if (nextLine && isTableDelimiter(nextLine) && (line.includes('|') || isTableRow(line))) {
+      // 当前行是表头！检查上一行是否为空行
+      if (result.length > 0) {
+        const prev = result[result.length - 1].trim();
+        if (prev !== '' && !isTableRow(prev)) {
+          // 在表头前强行插入一个空行，激活 marked 的 GFM 表格解析
+          result.push('');
+        }
+      }
+    }
+
+    result.push(line);
+
+    // 4. 检查表格结束后是否紧贴非表格文本
+    if (isTableRow(line) || isTableDelimiter(line)) {
+      if (nextLine !== null) {
+        const nextTrimmed = nextLine.trim();
+        if (nextTrimmed !== '' && !isTableRow(nextTrimmed) && !isTableDelimiter(nextTrimmed)) {
+          // 表格紧跟文本，插入空行
+          result.push('');
+        }
+      }
+    }
+  }
+
+  return result.join('\n');
+}
 renderer.code = function (code: string, infostring?: string) {
   const text = code ?? '';
   if (!text.trim()) return '';
@@ -71,7 +172,8 @@ function highlightHtml(html: string, search: string): string {
 
 export function Markdown({ content, search }: { content: string; search?: string }) {
   const html = useMemo(() => {
-    const raw = marked.parse(content ?? '', { renderer }) as string;
+    const preprocessed = preprocessMarkdown(content ?? '');
+    const raw = marked.parse(preprocessed, { renderer }) as string;
     // SECURITY: model output is untrusted — sanitize before injecting as HTML.
     const sanitized = DOMPurify.sanitize(raw, { ADD_ATTR: ['data-copy'] });
     if (search && search.trim()) {

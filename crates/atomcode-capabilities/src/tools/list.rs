@@ -120,23 +120,13 @@ impl Tool for ListDirTool {
 /// Fold an oversized listing so the parts an agent actually needs survive:
 ///
 /// 1. EVERY top-level entry (depth 0 — the project/subdirectory names) is kept.
-///    A plain line-order head+tail fold drowns these in the elided middle: on a
-///    multi-project workspace the rows the model needs ("is there a
-///    `grok-build/`?") are exactly the ones that vanish, pushing it to fall
-///    back to `bash ls` for the same information.
-/// 2. The nested rows are then head+tail folded around a marker that states
-///    how many were elided and how to see them.
-///
-/// Falls back to a plain head+tail fold for pathological flat trees whose
-/// top-level rows alone overflow the budget.
+/// 2. Children appear directly under their corresponding parent directory,
+///    preserving the hierarchical tree structure instead of dumping children at the bottom.
+/// 3. An elided marker states how many entries were elided and how to see the rest.
 fn fold(lines: &[(usize, String)]) -> String {
-    let top: Vec<&str> = lines
-        .iter()
-        .filter(|(d, _)| *d == 0)
-        .map(|(_, l)| l.as_str())
-        .collect();
-    if top.len() >= MAX_ENTRIES {
-        // Flat tree (everything at depth 0): plain head+tail fold.
+    let top_count = lines.iter().filter(|(d, _)| *d == 0).count();
+    if top_count >= MAX_ENTRIES {
+        // Flat tree (top-level rows alone overflow the budget): plain head+tail fold.
         let head = lines[..FOLD_HALF]
             .iter()
             .map(|(_, l)| l.as_str())
@@ -153,45 +143,55 @@ fn fold(lines: &[(usize, String)]) -> String {
             lines.len()
         );
     }
-    let nested: Vec<&str> = lines
-        .iter()
-        .filter(|(d, _)| *d > 0)
-        .map(|(_, l)| l.as_str())
-        .collect();
-    let budget = MAX_ENTRIES.saturating_sub(top.len());
-    let mut parts: Vec<String> = Vec::new();
-    parts.extend(top.iter().map(|s| s.to_string()));
-    if nested.len() <= budget {
-        // Nothing actually elided — show all nested rows too.
-        parts.extend(nested.iter().map(|s| s.to_string()));
+
+    // Group tree by top-level entries to preserve tree hierarchy
+    let mut groups: Vec<(String, Vec<String>)> = Vec::new();
+    for (d, line) in lines {
+        if *d == 0 {
+            groups.push((line.clone(), Vec::new()));
+        } else if let Some(last) = groups.last_mut() {
+            last.1.push(line.clone());
+        }
+    }
+
+    let total_nested: usize = groups.iter().map(|g| g.1.len()).sum();
+    let budget = MAX_ENTRIES.saturating_sub(top_count);
+    if total_nested <= budget {
+        let mut parts = Vec::new();
+        for (header, children) in groups {
+            parts.push(header);
+            parts.extend(children);
+        }
         return parts.join("\n");
     }
-    let half = budget / 2;
-    let head_n = &nested[..half.min(nested.len())];
-    let tail_start = nested.len().saturating_sub(half);
-    let tail_n = &nested[tail_start..];
-    let elided = nested.len().saturating_sub(half * 2);
-    parts.extend(head_n.iter().map(|s| s.to_string()));
+
+    let dirs_with_children = groups.iter().filter(|g| !g.1.is_empty()).count();
+    let per_group_budget = if dirs_with_children > 0 {
+        (budget / dirs_with_children).max(1)
+    } else {
+        budget
+    };
+
+    let mut parts = Vec::new();
+    let mut shown_nested = 0;
+    for (header, children) in groups {
+        parts.push(header);
+        let take_count = children.len().min(per_group_budget);
+        parts.extend(children.into_iter().take(take_count));
+        shown_nested += take_count;
+    }
+
+    let elided = total_nested.saturating_sub(shown_nested);
     parts.push(format!(
         "  ... ({elided} entries elided; total {}; all top-level entries shown; pass a smaller `depth` or a subdirectory `path` to see the rest)",
         lines.len()
     ));
-    parts.extend(tail_n.iter().map(|s| s.to_string()));
     parts.join("\n")
 }
 
-/// Collect the tree as `(depth, line)` pairs with a structural budget:
-///
-/// 1. ALL top-level entries (depth 0) are always collected first — they are
-///    the rows an agent needs to orient ("is there a `grok-build/`?") and
-///    must never be starved out by a deep first subdirectory.
-/// 2. Nested entries share the remaining budget (COLLECT_CAP - top-level
-///    count), breadth-fairly: each directory gets a fair share of the nested
-///    budget before any directory can consume it all.
-///
-/// Depth-first + a global cap starves the LAST top-level projects (they
-/// appear after the first project's deep subtree ate the budget), which is
-/// exactly the "grok-build/ and opencode/ invisible" failure.
+/// Collect the tree as `(depth, line)` pairs in pre-order traversal:
+/// Each directory's children are collected immediately following that directory,
+/// preserving the true parent-child directory hierarchy.
 fn collect_tree(root: &Path, max_depth: usize) -> Vec<(usize, String)> {
     let mut out: Vec<(usize, String)> = Vec::new();
     let mut entries: Vec<_> = match std::fs::read_dir(root) {
@@ -199,43 +199,44 @@ fn collect_tree(root: &Path, max_depth: usize) -> Vec<(usize, String)> {
         Err(_) => return out,
     };
     entries.sort_by_key(|e| e.file_name());
-    let indent = String::new();
-    for e in &entries {
+
+    let top_count = entries.len();
+    let nested_budget = COLLECT_CAP.saturating_sub(top_count);
+    let dir_count = entries
+        .iter()
+        .filter(|e| e.file_type().map(|t| t.is_dir()).unwrap_or(false))
+        .count();
+    let per_dir_budget = if dir_count > 0 {
+        (nested_budget / dir_count).max(20)
+    } else {
+        nested_budget
+    };
+
+    for e in entries {
         if out.len() >= COLLECT_CAP {
             break;
         }
         let name = e.file_name().to_string_lossy().to_string();
-        if e.file_type().map(|t| t.is_dir()).unwrap_or(false) {
+        let is_dir = e.file_type().map(|t| t.is_dir()).unwrap_or(false);
+        if is_dir {
             if is_skip_dir(&name) {
-                out.push((0, format!("{indent}{name}/ (skipped)")));
+                out.push((0, format!("{name}/ (skipped)")));
                 continue;
             }
-            out.push((0, format!("{indent}{name}/")));
+            out.push((0, format!("{name}/")));
+            if max_depth >= 1 {
+                let remaining_global = COLLECT_CAP.saturating_sub(out.len());
+                let this_budget = per_dir_budget.min(remaining_global);
+                walk_nested(&e.path(), 1, max_depth, this_budget, &mut out);
+            }
         } else {
-            out.push((0, format!("{indent}{name}")));
+            out.push((0, name));
         }
     }
-    // Nested share: everything after the top-level rows.
-    let nested_budget = COLLECT_CAP.saturating_sub(out.len());
-    let mut nested: Vec<(usize, String)> = Vec::new();
-    for e in entries {
-        if !e.file_type().map(|t| t.is_dir()).unwrap_or(false) {
-            continue;
-        }
-        let name = e.file_name().to_string_lossy().to_string();
-        if is_skip_dir(&name) {
-            continue;
-        }
-        walk_nested(&e.path(), 1, max_depth, nested_budget, &mut nested);
-        if nested.len() >= nested_budget {
-            break;
-        }
-    }
-    out.extend(nested);
     out
 }
 
-/// Depth-first walk for nested rows, sharing the overall nested budget.
+/// Depth-first walk for nested rows, appending children immediately under parent.
 fn walk_nested(
     dir: &Path,
     depth: usize,
@@ -243,9 +244,10 @@ fn walk_nested(
     budget: usize,
     out: &mut Vec<(usize, String)>,
 ) {
-    if depth > max || out.len() >= budget {
+    if depth > max {
         return;
     }
+    let start_len = out.len();
     let mut entries: Vec<_> = match std::fs::read_dir(dir) {
         Ok(rd) => rd.filter_map(|e| e.ok()).collect(),
         Err(_) => return, // unreadable subtree → silently skip (e.g. permission denied)
@@ -253,8 +255,8 @@ fn walk_nested(
     entries.sort_by_key(|e| e.file_name());
     let indent = "  ".repeat(depth);
     for e in entries {
-        if out.len() >= budget {
-            return;
+        if out.len() - start_len >= budget {
+            break;
         }
         let name = e.file_name().to_string_lossy().to_string();
         let is_dir = e.file_type().map(|t| t.is_dir()).unwrap_or(false);
@@ -264,7 +266,8 @@ fn walk_nested(
                 continue;
             }
             out.push((depth, format!("{indent}{name}/")));
-            walk_nested(&e.path(), depth + 1, max, budget, out);
+            let remaining = budget.saturating_sub(out.len() - start_len);
+            walk_nested(&e.path(), depth + 1, max, remaining, out);
         } else {
             out.push((depth, format!("{indent}{name}")));
         }

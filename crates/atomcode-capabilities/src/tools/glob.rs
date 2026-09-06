@@ -1,7 +1,8 @@
 //! `glob` — find files by glob pattern under a base directory, gitignore-aware.
-//! Read-only ⇒ always `Safe`. Standard glob semantics (`**` crosses directories, `*`
-//! does not) via `globset` with `literal_separator(true)`. Build/VCS/cache dirs are
-//! skipped; results sorted, capped at 300 by default (raise `limit`).
+//! Read-only ⇒ always `Safe`. Standard ripgrep / grok-build glob semantics:
+//! - Patterns without `/` (e.g. `*.sh`, `*release*`) match against filename and recursively penetrate subdirectories.
+//! - Patterns with `/` (e.g. `scripts/*.sh`, `./*.rs`, `**/*.rs`) match against the relative path.
+//! Build/VCS/cache dirs are skipped; results sorted by modification time, capped at 300 by default (raise `limit`).
 
 use super::{err, is_absolute_path, is_skip_dir, not_found_hint, ok, resolve_path};
 use crate::tool_feedback::{format_path_not_found, parse_tool_args};
@@ -85,6 +86,7 @@ impl Tool for GlobTool {
             }
         }
 
+        let has_separator = match_pattern.contains('/') || match_pattern.contains('\\');
         let matcher = match GlobBuilder::new(&match_pattern)
             .literal_separator(true)
             .build()
@@ -139,9 +141,18 @@ impl Tool for GlobTool {
                 if !path.is_file() {
                     continue;
                 }
-                // Match the path RELATIVE to the base (standard glob semantics).
-                let rel = path.strip_prefix(&base2).unwrap_or(path);
-                if matcher.is_match(rel) {
+                // Match standard glob semantics (ripgrep / grok-build aligned):
+                // If pattern contains a path separator (e.g. "src/*.rs", "**/*.sh"), match the relative path.
+                // If pattern does not contain any path separator (e.g. "*.sh", "*release*", "Cargo.toml"),
+                // match against the file basename directly, enabling recursive auto-penetration across all subdirectories.
+                let matched = if has_separator {
+                    let rel = path.strip_prefix(&base2).unwrap_or(path);
+                    matcher.is_match(rel)
+                } else {
+                    matcher.is_match(entry.file_name())
+                };
+
+                if matched {
                     // Display relative to the working dir for usable paths.
                     let shown = crate::pathnorm::to_display(path.strip_prefix(&wd).unwrap_or(path));
                     let mtime = entry
@@ -332,18 +343,19 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn single_star_does_not_cross_dirs() {
+    async fn single_star_with_slash_does_not_cross_dirs() {
         let d = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(d.path().join("src")).unwrap();
         std::fs::write(d.path().join("top.rs"), "").unwrap();
         std::fs::write(d.path().join("src/deep.rs"), "").unwrap();
+        // Pattern with path separator (e.g. "src/*.rs") strictly matches that directory level
         let r = GlobTool
-            .execute(r#"{"pattern":"*.rs"}"#, &ctx(d.path()))
+            .execute(r#"{"pattern":"src/*.rs"}"#, &ctx(d.path()))
             .await;
-        assert!(r.content.contains("top.rs"), "{}", r.content);
+        assert!(r.content.contains("src/deep.rs"), "{}", r.content);
         assert!(
-            !r.content.contains("deep.rs"),
-            "* must not cross /: {}",
+            !r.content.contains("top.rs"),
+            "pattern with slash must not cross /: {}",
             r.content
         );
     }
@@ -437,5 +449,49 @@ mod tests {
             "new.txt should appear before old.txt due to mtime descending: {}",
             r.content
         );
+    }
+
+    #[tokio::test]
+    async fn pattern_without_slash_recursively_penetrates_subdirectories() {
+        // Aligned with ripgrep / grok-build glob semantics:
+        // Patterns without path separators (e.g. "*release*", "*.sh") automatically
+        // match across any subdirectory depth via basename matching.
+        let d = tempfile::tempdir().unwrap();
+        let sub_scripts = d.path().join("scripts");
+        let deep_dir = d.path().join("a/b/c");
+        std::fs::create_dir_all(&sub_scripts).unwrap();
+        std::fs::create_dir_all(&deep_dir).unwrap();
+
+        std::fs::write(d.path().join("root.sh"), "").unwrap();
+        std::fs::write(sub_scripts.join("release-self-update.sh"), "").unwrap();
+        std::fs::write(deep_dir.join("nested.sh"), "").unwrap();
+        std::fs::write(sub_scripts.join("other.txt"), "").unwrap();
+
+        // 1. "*.sh" matches root, scripts/, and deep a/b/c/
+        let r1 = GlobTool
+            .execute(r#"{"pattern":"*.sh"}"#, &ctx(d.path()))
+            .await;
+        assert!(!r1.is_error, "{}", r1.content);
+        assert!(r1.content.contains("root.sh"), "{}", r1.content);
+        assert!(r1.content.contains("release-self-update.sh"), "{}", r1.content);
+        assert!(r1.content.contains("nested.sh"), "{}", r1.content);
+        assert!(!r1.content.contains("other.txt"), "{}", r1.content);
+
+        // 2. "*release*" matches release-self-update.sh in scripts/
+        let r2 = GlobTool
+            .execute(r#"{"pattern":"*release*"}"#, &ctx(d.path()))
+            .await;
+        assert!(!r2.is_error, "{}", r2.content);
+        assert!(r2.content.contains("release-self-update.sh"), "{}", r2.content);
+        assert!(!r2.content.contains("root.sh"), "{}", r2.content);
+
+        // 3. Pattern with slash (e.g. "scripts/*.sh") preserves strict path matching
+        let r3 = GlobTool
+            .execute(r#"{"pattern":"scripts/*.sh"}"#, &ctx(d.path()))
+            .await;
+        assert!(!r3.is_error, "{}", r3.content);
+        assert!(r3.content.contains("release-self-update.sh"), "{}", r3.content);
+        assert!(!r3.content.contains("root.sh"), "{}", r3.content);
+        assert!(!r3.content.contains("nested.sh"), "{}", r3.content);
     }
 }

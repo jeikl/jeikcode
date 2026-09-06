@@ -1273,11 +1273,31 @@ body {
 .markdown-root ol { list-style: decimal; padding-inline-start: 1.5em; margin: 0.3em 0 0.5em; }
 .markdown-root li { margin-bottom: 3px; }
 .markdown-root li::marker { color: var(--app-secondary-foreground); }
-.markdown-root h1, .markdown-root h2, .markdown-root h3, .markdown-root h4 { margin: 0.8em 0 0.3em; font-weight: 600; line-height: 1.3; }
-.markdown-root h1 { font-size: 1.3em; }
-.markdown-root h2 { font-size: 1.15em; }
-.markdown-root h3 { font-size: 1.05em; }
-.markdown-root h4 { font-size: 1em; }
+.markdown-root h1, .markdown-root h2, .markdown-root h3, .markdown-root h4 {
+  font-weight: 650;
+  line-height: 1.35;
+  color: var(--app-primary-foreground);
+}
+.markdown-root h1 {
+  font-size: 1.45em;
+  margin: 1.1em 0 0.4em;
+  padding-bottom: 0.25em;
+  border-bottom: 1px solid var(--app-primary-border-color);
+}
+.markdown-root h2 {
+  font-size: 1.28em;
+  margin: 1.0em 0 0.35em;
+  padding-bottom: 0.2em;
+  border-bottom: 1px solid color-mix(in srgb, var(--app-primary-border-color), transparent 40%);
+}
+.markdown-root h3 {
+  font-size: 1.15em;
+  margin: 0.85em 0 0.3em;
+}
+.markdown-root h4 {
+  font-size: 1.05em;
+  margin: 0.7em 0 0.25em;
+}
 .markdown-root a { color: var(--app-link-color); text-decoration: none; }
 .markdown-root a:hover { text-decoration: underline; }
 .markdown-root blockquote { border-left: 3px solid var(--app-primary-border-color); padding-left: 12px; margin: 0.3em 0; color: var(--app-secondary-foreground); }
@@ -1295,23 +1315,26 @@ body {
 /* GFM tables */
 .markdown-root table {
   border-collapse: collapse;
-  margin: 0.5em 0;
-  font-size: 0.95em;
+  margin: 0.7em 0;
+  font-size: 0.92em;
   display: block;
   width: max-content;
   max-width: 100%;
   overflow-x: auto;
+  border-radius: 6px;
+  border: 1px solid var(--app-table-border);
 }
 .markdown-root th,
 .markdown-root td {
   border: 1px solid var(--app-table-border);
-  padding: 5px 10px;
+  padding: 6px 12px;
   text-align: left;
   vertical-align: top;
+  line-height: 1.45;
 }
 .markdown-root th {
-  background: color-mix(in srgb, var(--app-tool-background), var(--app-primary-background) 30%);
-  font-weight: 600;
+  background: color-mix(in srgb, var(--app-tool-background), var(--app-primary-background) 40%);
+  font-weight: 650;
 }
 .markdown-root tbody tr:nth-child(even) td {
   background: color-mix(in srgb, var(--app-secondary-background), transparent 55%);

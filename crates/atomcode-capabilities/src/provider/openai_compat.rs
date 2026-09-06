@@ -455,7 +455,7 @@ impl LlmProvider for OpenAiCompatProvider {
         } else {
             options
         };
-        let mut body = build_request_body(
+        let body = build_request_body(
             &self.cfg.model,
             messages,
             tools,
@@ -463,11 +463,6 @@ impl LlmProvider for OpenAiCompatProvider {
             &self.cfg,
             self.policy,
         );
-        if let Some(sid) = self.session_id.get().filter(|s| !s.is_empty()) {
-            if let Value::Object(map) = &mut body {
-                map.insert("prompt_cache_key".into(), json!(sid));
-            }
-        }
         super::wire_dump_request(&self.cfg.model, &body); // byte-level dump (ATOMCODE_WIRE_DUMP=1)
                                                           // Serialize once and reuse the exact bytes across retries (hence `.body()`
                                                           // with an explicit content-type rather than re-serializing via `.json()`).

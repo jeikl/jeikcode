@@ -272,7 +272,7 @@ function applyBatch(list: TodoItem[], actions: Record<string, unknown>[]): TodoI
     for (const action of actions) {
       if (actionKind(action) !== 'add') continue;
       const content = typeof action.content === 'string' ? normalizeTodoContent(action.content) : '';
-      if (!content) return list;
+      if (!content) continue;
       const added = upsertTodo(next, content, parseActionStatus(action), null);
       next = added.list;
       addLandings.push(added.landing);
@@ -289,12 +289,12 @@ function applyBatch(list: TodoItem[], actions: Record<string, unknown>[]): TodoI
   for (const action of actions) {
     if (actionKind(action) !== 'update') continue;
     const id = jsonId(action);
-    if (id === null) return list;
+    if (id === null) continue;
     const resolved = resolveUpdateId(id, visibleLen, addLandings, next.length);
-    if (resolved === null) return list;
+    if (resolved === null) continue;
     const status = parseActionStatus(action);
     const content = typeof action.content === 'string' ? normalizeTodoContent(action.content) : '';
-    if (!status && !content) return list;
+    if (!status && !content) continue;
     next = applyUpdateAt(next, resolved, status, content || null);
   }
   return next;

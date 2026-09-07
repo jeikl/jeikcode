@@ -639,13 +639,19 @@ fn format_messages(
 ) -> (Vec<String>, Vec<Value>) {
     // Leading System messages lift to the top-level `system` block array. Anthropic has no
     // system message ROLE on the wire.
-    let system_blocks: Vec<String> = messages
+    let mut system_blocks: Vec<String> = messages
         .iter()
         .filter(|m| m.role == Role::System)
         .map(|m| m.text.trim())
         .filter(|t| !t.is_empty())
         .map(|s| s.to_string())
         .collect();
+
+    // Check if there is an authoritative project instructions block injected as a synthetic user
+    // (Block 5, e.g. AGENTS.md / glossary). For Anthropic, to keep alternating roles intact
+    // and provide a clean first User message without combining project instructions into the human prompt,
+    // lift leading synthetic user instruction blocks into the top-level `system` block array.
+    const INSTRUCTIONS_HEADER: &str = "=== AUTHORITATIVE PROJECT INSTRUCTIONS";
 
     let mut out: Vec<Value> = Vec::with_capacity(messages.len());
     let mut i = 0;
@@ -654,6 +660,16 @@ fn format_messages(
         match m.role {
             Role::System => {} // lifted above
             Role::User => {
+                // If it is an authoritative instructions block (synthetic user before first real user),
+                // lift it into the system blocks array so Anthropic's first user message is purely human input.
+                if m.synthetic && m.text.starts_with(INSTRUCTIONS_HEADER) {
+                    let trimmed = m.text.trim();
+                    if !trimmed.is_empty() {
+                        system_blocks.push(trimmed.to_string());
+                    }
+                    i += 1;
+                    continue;
+                }
                 out.push(format_user_message(m));
                 i += 1;
                 continue;

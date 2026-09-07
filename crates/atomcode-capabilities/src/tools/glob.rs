@@ -86,9 +86,12 @@ impl Tool for GlobTool {
             }
         }
 
-        let has_separator = match_pattern.contains('/') || match_pattern.contains('\\');
-        let matcher = match GlobBuilder::new(&match_pattern)
+        // Normalize Windows backslashes so GlobBuilder doesn't treat `\` as an escape character
+        let normalized_pattern = match_pattern.replace('\\', "/");
+        let has_separator = normalized_pattern.contains('/');
+        let matcher = match GlobBuilder::new(&normalized_pattern)
             .literal_separator(true)
+            .case_insensitive(true)
             .build()
         {
             Ok(g) => g.compile_matcher(),
@@ -105,7 +108,8 @@ impl Tool for GlobTool {
             let mut hits: Vec<(String, std::time::SystemTime)> = Vec::new();
             let mut builder = WalkBuilder::new(&base2);
             builder
-                .hidden(true)
+                // Allow searching hidden files and directories unless gitignored
+                .hidden(false)
                 .git_ignore(true)
                 .git_global(true)
                 .git_exclude(true)
@@ -493,5 +497,35 @@ mod tests {
         assert!(r3.content.contains("release-self-update.sh"), "{}", r3.content);
         assert!(!r3.content.contains("root.sh"), "{}", r3.content);
         assert!(!r3.content.contains("nested.sh"), "{}", r3.content);
+    }
+
+    #[tokio::test]
+    async fn windows_backslash_and_case_insensitive_and_hidden_match() {
+        let work = tempfile::tempdir().unwrap();
+        let sub = work.path().join("src").join("components");
+        std::fs::create_dir_all(&sub).unwrap();
+        std::fs::write(sub.join("Chat.tsx"), "export const Chat = 1;\n").unwrap();
+        std::fs::write(work.path().join(".env.local"), "SECRET=123\n").unwrap();
+
+        // 1. Windows backslash matching
+        let r1 = GlobTool
+            .execute(r#"{"pattern":"src\\components\\*.tsx"}"#, &ctx(work.path()))
+            .await;
+        assert!(!r1.is_error, "r1 failed: {}", r1.content);
+        assert!(r1.content.contains("Chat.tsx"));
+
+        // 2. Case-insensitive matching
+        let r2 = GlobTool
+            .execute(r#"{"pattern":"src/**/*chat.tsx"}"#, &ctx(work.path()))
+            .await;
+        assert!(!r2.is_error, "r2 failed: {}", r2.content);
+        assert!(r2.content.contains("Chat.tsx"));
+
+        // 3. Hidden file matching
+        let r3 = GlobTool
+            .execute(r#"{"pattern":".env*"}"#, &ctx(work.path()))
+            .await;
+        assert!(!r3.is_error, "r3 failed: {}", r3.content);
+        assert!(r3.content.contains(".env.local"));
     }
 }

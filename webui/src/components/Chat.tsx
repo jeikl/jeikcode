@@ -1115,6 +1115,9 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
   const [hasOlder, setHasOlder] = useState(false);
   const [loadingOlder, setLoadingOlder] = useState(false);
   const [turnOutline, setTurnOutline] = useState<SessionTurnOutline[]>([]);
+  const turnOutlineRef = useRef(turnOutline);
+  turnOutlineRef.current = turnOutline;
+  const turnOutlineBySessionRef = useRef<Map<string, SessionTurnOutline[]>>(new Map());
   /** Stable turn-nav id pending a scroll-jump after older history loads. */
   const pendingJumpIdRef = useRef<string | null>(null);
   // While another client (OpenAI API) owns `/chat/active`:
@@ -1336,28 +1339,8 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
         if (session && Array.isArray(session.messages) && session.messages.length > 0) {
           const loaded = sessionMessagesToDisplay(session.messages, session.offset ?? historyOffsetRef.current);
           if (loaded.length > messagesRef.current.length) {
-            if (detachedWatchAbortRef.current) {
-              setMessages((prev) => {
-                const base = prev.length;
-                if (loaded.length <= base) return prev;
-                const tail = loaded.slice(base);
-                const last = prev[prev.length - 1];
-                if (
-                  last &&
-                  last.role === 'assistant' &&
-                  (!last.parts || last.parts.length === 0) &&
-                  tail.length > 0 &&
-                  tail[0].role === 'assistant'
-                ) {
-                  return [
-                    ...prev.slice(0, -1),
-                    loaded[base],
-                    ...loaded.slice(base + 1),
-                  ];
-                }
-                return [...prev, ...tail];
-              });
-            } else {
+            // 当 watch 实时流正常连接时，禁止盲目 append 磁盘快照，避免与 watch 重放事件冲突导致重复刷屏
+            if (!detachedWatchAbortRef.current) {
               setMessages(loaded);
               ensureAssistantBubbleForWatch();
             }
@@ -1601,6 +1584,13 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
       if (pendingSteersRef.current.length > 0 && prevId) {
         pendingSteersBySessionRef.current.set(prevId, [...pendingSteersRef.current]);
       }
+      if (prevId) {
+        if (turnOutlineRef.current.length > 0) {
+          turnOutlineBySessionRef.current.set(prevId, turnOutlineRef.current);
+        } else {
+          turnOutlineBySessionRef.current.delete(prevId);
+        }
+      }
       const detachedController = abortRef.current;
       const leavingMessages =
         messages.length >= messagesRef.current.length ? messages : messagesRef.current;
@@ -1690,8 +1680,10 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
       finishTurnClock({ stamp: false });
       if (destRunning) {
         const sessionStarted = sessionId ? turnStartedAtBySessionRef.current.get(sessionId) : undefined;
-        const started = sessionStarted ?? resumeTurnStartedAt(Date.now(), destElapsed);
-        if (sessionId && !sessionStarted) {
+        // Fallback to the latest user message's send timestamp if stashed clock is absent
+        const lastUserTs = [...(cached ?? [])].reverse().find((m) => m.role === 'user')?.ts;
+        const started = sessionStarted ?? lastUserTs ?? resumeTurnStartedAt(Date.now(), destElapsed);
+        if (sessionId) {
           turnStartedAtBySessionRef.current.set(sessionId, started);
         }
         turnStartedAtRef.current = started;
@@ -1699,9 +1691,8 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
         busyRef.current = true;
         setBusy(true);
       } else {
-        if (sessionId) {
-          turnStartedAtBySessionRef.current.delete(sessionId);
-        }
+        // Do NOT eagerly delete turnStartedAtBySessionRef here if the session might still be active
+        // or reconnecting via detached watch; only reset when truly idle or terminal
         busyRef.current = false;
         setBusy(false);
       }
@@ -1737,6 +1728,18 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
         messagesRef.current = [];
         setMessages([]);
       }
+
+      cancelTurnNavScroll();
+      setTurnNavQuery('');
+      setActiveTurnId(null);
+      turnNavPinUntilRef.current = 0;
+      setHasOlder(false);
+      setLoadingOlder(false);
+      historyOffsetRef.current = 0;
+      historyTotalRef.current = 0;
+      pendingJumpIdRef.current = null;
+      const cachedOutline = sessionId ? turnOutlineBySessionRef.current.get(sessionId) : undefined;
+      setTurnOutline(cachedOutline ?? []);
 
       // bot review P2: 切换会话时重置搜索状态,避免残留关键词过滤新会话、matchIdx 超界致计数错乱。
       setSearch('');
@@ -1847,6 +1850,7 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
             setHasOlder(diskOffset > 0);
             if (sessionResult.value.turns && sessionResult.value.turns.length > 0) {
               setTurnOutline(sessionResult.value.turns);
+              turnOutlineBySessionRef.current.set(loadId, sessionResult.value.turns);
             }
             let displayMessages: Message[] = currentCached && currentCached.length > 0 ? currentCached : loaded;
 
@@ -2285,9 +2289,10 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
       }
       return;
     }
-    // If all tasks are completed, archive them onto the last assistant reply and clear sticky.
-    // If some tasks remain unfinished/in_progress (e.g. aborted turn or multi-turn workflow),
-    // keep the sticky panel alive so the user and next turn can continue editing them!
+    // 只有当所有待办项都已经全部处于 completed 状态时，才将卡片归档沉淀到 assistant 回复的最底下，
+    // 并将输入框上方的 active sticky 清空消除。
+    // 如果存在未完成（pending 或 in_progress）的待办，绝对不贴到 assistant 消息尾部，
+    // 仅保留在输入框上方继续编辑推进！
     const isAllDone = items.every((t) => t.status === 'completed');
     if (isAllDone) {
       activeTodosRef.current = null;
@@ -2300,8 +2305,7 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
       if (activeIdRef.current) {
         activeTodosBySessionRef.current.set(activeIdRef.current, items);
       }
-      // Also snapshot into assistant history for safety, but retain active sticky list.
-      setMessages((prev) => freezeTodosIntoLastAssistant(prev, items));
+      // 未完成项保留在 activeTodos，绝不往 assistant 回复追加尾部 todo_list
     }
   }
 
@@ -2317,6 +2321,11 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
         return;
       }
       turnHadTodoCalls = false;
+      // 只有历史回合中的任务清单已经全部完成（All Completed）时，才贴在助手回复尾部；
+      // 若尚未全部完成，不贴在气泡底部，避免多回合未完成清单在气泡下方重复堆叠。
+      const isAllDone = sessionTodoList.length > 0 && sessionTodoList.every((t) => t.status === 'completed');
+      if (!isAllDone) return;
+
       for (let i = loaded.length - 1; i >= 0; i--) {
         if (loaded[i]!.role !== 'assistant') continue;
         loaded[i] = {
@@ -3061,18 +3070,7 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
       }
     }
   }
-  useEffect(() => {
-    cancelTurnNavScroll();
-    setTurnNavQuery('');
-    setActiveTurnId(null);
-    turnNavPinUntilRef.current = 0;
-    setHasOlder(false);
-    setLoadingOlder(false);
-    historyOffsetRef.current = 0;
-    historyTotalRef.current = 0;
-    pendingJumpIdRef.current = null;
-    setTurnOutline([]);
-  }, [sessionId]);
+  // 提问导航取消与滚动同步由主 session-switch effect 维护大纲生命周期。
   useEffect(() => () => cancelTurnNavScroll(), []);
   useEffect(() => {
     const id = requestAnimationFrame(() => syncTurnNavFromScroll());

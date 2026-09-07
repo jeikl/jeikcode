@@ -55,6 +55,7 @@ pub struct SecurityConfig {
 pub struct EnvironmentConfig {
     pub context_management: Option<String>,
     pub windows_platform: Option<String>,
+    pub platform_facts: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, Default)]
@@ -362,14 +363,226 @@ pub(crate) fn render_init_live_prefix_from(cfg: &CustomPromptConfig) -> Option<S
     }
 }
 
+/// Dynamically detect operating system, kernel/distro version, and architecture.
+pub fn detect_os_platform() -> String {
+    static CACHED: OnceLock<String> = OnceLock::new();
+    CACHED
+        .get_or_init(|| {
+            #[cfg(target_os = "windows")]
+            {
+                detect_windows_platform()
+            }
+            #[cfg(target_os = "linux")]
+            {
+                detect_linux_platform()
+            }
+            #[cfg(target_os = "macos")]
+            {
+                detect_macos_platform()
+            }
+            #[cfg(not(any(target_os = "windows", target_os = "linux", target_os = "macos")))]
+            {
+                format!("{} ({})", std::env::consts::OS, std::env::consts::ARCH)
+            }
+        })
+        .clone()
+}
+
+#[cfg(target_os = "windows")]
+fn detect_windows_platform() -> String {
+    let arch = std::env::var("PROCESSOR_ARCHITECTURE").unwrap_or_else(|_| match std::env::consts::ARCH {
+        "x86_64" => "AMD64".to_string(),
+        "aarch64" => "ARM64".to_string(),
+        other => other.to_string(),
+    });
+
+    let mut product_name = None;
+    let mut reg = std::process::Command::new("reg");
+    reg.args(["query", r"HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion", "/v", "ProductName"]);
+    atomcode_capabilities::process_utils::suppress_console_window_sync(&mut reg);
+    if let Ok(output) = reg.output() {
+        if output.status.success() {
+            let text = String::from_utf8_lossy(&output.stdout);
+            for line in text.lines() {
+                let trimmed = line.trim();
+                if trimmed.starts_with("ProductName") {
+                    if let Some(val) = trimmed.split("REG_SZ").nth(1) {
+                        let p = val.trim();
+                        if !p.is_empty() {
+                            product_name = Some(p.to_string());
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    let mut kernel_ver = None;
+    let mut cmd = std::process::Command::new("cmd.exe");
+    cmd.args(["/c", "ver"]);
+    atomcode_capabilities::process_utils::suppress_console_window_sync(&mut cmd);
+    if let Ok(output) = cmd.output() {
+        if output.status.success() {
+            let text = String::from_utf8_lossy(&output.stdout);
+            if let Some(start) = text.find("[Version ") {
+                let rest = &text[start + 9..];
+                if let Some(end) = rest.find(']') {
+                    let k = rest[..end].trim();
+                    if !k.is_empty() {
+                        kernel_ver = Some(k.to_string());
+                    }
+                }
+            }
+        }
+    }
+
+    match (product_name, kernel_ver) {
+        (Some(prod), Some(ver)) => format!("{prod} (Kernel {ver}, {arch})"),
+        (Some(prod), None) => format!("{prod} ({arch})"),
+        (None, Some(ver)) => format!("Windows (Kernel {ver}, {arch})"),
+        (None, None) => format!("Windows ({arch})"),
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn detect_linux_platform() -> String {
+    let arch = std::env::consts::ARCH;
+
+    for path in ["/etc/os-release", "/usr/lib/os-release"] {
+        if let Ok(content) = std::fs::read_to_string(path) {
+            let mut pretty_name = None;
+            let mut name = None;
+            let mut version_id = None;
+            for line in content.lines() {
+                let trimmed = line.trim();
+                if let Some(val) = trimmed.strip_prefix("PRETTY_NAME=") {
+                    pretty_name = Some(val.trim_matches('"').trim_matches('\'').to_string());
+                } else if let Some(val) = trimmed.strip_prefix("NAME=") {
+                    name = Some(val.trim_matches('"').trim_matches('\'').to_string());
+                } else if let Some(val) = trimmed.strip_prefix("VERSION_ID=") {
+                    version_id = Some(val.trim_matches('"').trim_matches('\'').to_string());
+                }
+            }
+
+            if let Some(pretty) = pretty_name {
+                if !pretty.is_empty() {
+                    return format!("{pretty} ({arch})");
+                }
+            }
+            if let (Some(n), Some(v)) = (name, version_id) {
+                if !n.is_empty() && !v.is_empty() {
+                    return format!("{n} {v} ({arch})");
+                }
+            }
+        }
+    }
+
+    format!("Linux ({arch})")
+}
+
+#[cfg(target_os = "macos")]
+fn detect_macos_platform() -> String {
+    let arch = match std::env::consts::ARCH {
+        "aarch64" => "arm64",
+        other => other,
+    };
+    let mut cmd = std::process::Command::new("sw_vers");
+    cmd.arg("-productVersion");
+    if let Ok(output) = cmd.output() {
+        if output.status.success() {
+            let ver = String::from_utf8_lossy(&output.stdout).trim().to_string();
+            if !ver.is_empty() {
+                return format!("macOS {ver} ({arch})");
+            }
+        }
+    }
+    format!("macOS ({arch})")
+}
+
+/// Dynamically determine command habit based on host OS.
+pub fn detect_command_habit() -> String {
+    #[cfg(target_os = "windows")]
+    {
+        "On Windows, use forward slashes \"/\" in all scenarios, and locate executables with `where`".to_string()
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        "Use forward slashes \"/\", and locate executables with `which`".to_string()
+    }
+}
+
+/// Dynamically detect current git branch from working directory.
+pub fn detect_git_branch(dir: &std::path::Path) -> Option<String> {
+    let mut cmd = std::process::Command::new("git");
+    cmd.args(["branch", "--show-current"]).current_dir(dir);
+    atomcode_capabilities::process_utils::suppress_console_window_sync(&mut cmd);
+    let out = cmd.output().ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let branch = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    if branch.is_empty() {
+        let mut head_cmd = std::process::Command::new("git");
+        head_cmd.args(["rev-parse", "--short", "HEAD"]).current_dir(dir);
+        atomcode_capabilities::process_utils::suppress_console_window_sync(&mut head_cmd);
+        if let Ok(head_out) = head_cmd.output() {
+            if head_out.status.success() {
+                let sha = String::from_utf8_lossy(&head_out.stdout).trim().to_string();
+                if !sha.is_empty() {
+                    return Some(format!("(detached at {sha})"));
+                }
+            }
+        }
+        return Some("(detached HEAD)".to_string());
+    }
+    Some(branch)
+}
+
+/// Render environment section with dynamic placeholder injection.
+pub fn render_init_environment(working_dir: Option<&std::path::Path>) -> Option<String> {
+    let cfg = get_custom_prompt_config()?;
+    render_init_environment_from(&cfg, working_dir)
+}
+
+pub(crate) fn render_init_environment_from(
+    cfg: &CustomPromptConfig,
+    working_dir: Option<&std::path::Path>,
+) -> Option<String> {
+    let env = cfg.environment.as_ref()?;
+    let raw = env.platform_facts.as_deref().or(env.windows_platform.as_deref())?;
+    let raw = raw.trim();
+    if raw.is_empty() {
+        return None;
+    }
+
+    let os_platform = detect_os_platform();
+    let command_habit = detect_command_habit();
+    let cwd = working_dir
+        .map(|p| atomcode_capabilities::pathnorm::to_display(p))
+        .unwrap_or_else(|| {
+            std::env::current_dir()
+                .map(|p| atomcode_capabilities::pathnorm::to_display(&p))
+                .unwrap_or_else(|_| ".".to_string())
+        });
+    let git_branch = working_dir
+        .and_then(detect_git_branch)
+        .or_else(|| std::env::current_dir().ok().as_deref().and_then(detect_git_branch))
+        .unwrap_or_else(|| "(not a git repo)".to_string());
+
+    let platform_info = format!("{os_platform} (Command habit: {command_habit})");
+    let rendered = raw
+        .replace("{platform_info}", &platform_info)
+        .replace("{os_platform}", &os_platform)
+        .replace("{command_habit}", &command_habit)
+        .replace("{working_dir}", &cwd)
+        .replace("{git_branch}", &git_branch);
+
+    Some(rendered)
+}
+
 /// Windows platform line from live `init.yaml`. `None` when unset or not loaded.
 pub fn render_init_windows_platform() -> Option<String> {
-    let cfg = get_custom_prompt_config()?;
-    cfg.environment
-        .as_ref()
-        .and_then(|e| e.windows_platform.clone())
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty())
+    render_init_environment(None)
 }
 
 /// Render rules from `rules.yaml` if available, formatted as markdown sections.
@@ -651,38 +864,30 @@ doing_tasks:
             wf.principle
                 .as_deref()
                 .unwrap()
-                .contains("Determine the final goal first")
+                .to_lowercase()
+                .contains("determine the final goal")
+        );
+        assert!(
+            wf.principle
+                .as_deref()
+                .unwrap()
+                .contains("<workflow_and_execution_discipline>")
         );
         let guide = wf.guidelines.as_ref().unwrap();
-        assert!(guide.contains_key("simple_tasks"));
-        assert!(guide.contains_key("medium_tasks"));
-        assert!(guide.contains_key("complex_tasks"));
         assert!(guide.contains_key("todolist_closure"));
-        assert!(guide.contains_key("best_effort_drive"));
-        assert!(guide.contains_key("incremental_recovery"));
+        assert!(guide.contains_key("disambiguation"));
         assert!(guide.contains_key("concurrency"));
         assert!(guide.contains_key("exploration_tasks"));
+        assert!(guide.contains_key("targeted_exploration"));
         assert!(guide.contains_key("modification_tasks"));
-        assert!(guide.contains_key("destructive_confirmation"));
         assert!(
             rules
                 .prohibitions
                 .as_ref()
                 .unwrap()
                 .iter()
-                .any(|p| p.contains("bash cat")),
+                .any(|p| p.contains("bash")),
             "prohibitions is a live rules.yaml field"
-        );
-        assert!(
-            rules
-                .locating_code
-                .as_ref()
-                .unwrap()
-                .explore_first
-                .as_deref()
-                .unwrap()
-                .contains("code_explore"),
-            "explore_first is a live rules.yaml field"
         );
         assert!(
             rules
@@ -705,16 +910,16 @@ doing_tasks:
         let prefix = render_init_live_prefix_from(&init).expect("init live prefix");
         assert!(prefix.contains("## SYSTEM REMINDERS:"), "{prefix}");
         assert!(prefix.contains("## MCP SERVER INSTRUCTIONS:"), "{prefix}");
-        assert!(
-            init.environment
-                .as_ref()
-                .unwrap()
-                .windows_platform
-                .as_deref()
-                .unwrap()
-                .contains("where"),
-            "windows_platform is live"
-        );
+        let env_facts = render_init_environment_from(&init, None).expect("init environment facts");
+        assert!(env_facts.contains("Operating environment facts:"), "{env_facts}");
+        assert!(env_facts.contains("Platform:"), "{env_facts}");
+        assert!(env_facts.contains("Git branch:"), "{env_facts}");
+        assert!(env_facts.contains("</environment>"), "{env_facts}");
+
+        let os = detect_os_platform();
+        assert!(!os.is_empty(), "OS platform detection must not be empty");
+        let habit = detect_command_habit();
+        assert!(habit.contains("forward slashes"), "{habit}");
     }
 
     #[test]

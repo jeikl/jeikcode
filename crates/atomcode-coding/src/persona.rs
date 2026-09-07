@@ -154,12 +154,29 @@ pub fn coding_persona_blocks_with_language(
     todo_enabled: bool,
     request_user_input_enabled: bool,
 ) -> (String, String) {
-    coding_persona_blocks_with_capabilities(
+    coding_persona_blocks_with_working_dir(
+        model,
+        preferred_language,
+        todo_enabled,
+        request_user_input_enabled,
+        None,
+    )
+}
+
+pub fn coding_persona_blocks_with_working_dir(
+    model: &str,
+    preferred_language: Option<atomcode_config::locale::Locale>,
+    todo_enabled: bool,
+    request_user_input_enabled: bool,
+    working_dir: Option<&std::path::Path>,
+) -> (String, String) {
+    coding_persona_blocks_with_context(
         model,
         preferred_language,
         todo_enabled,
         request_user_input_enabled,
         true,
+        working_dir,
     )
 }
 
@@ -183,10 +200,28 @@ pub(crate) fn coding_persona_with_capabilities(
 
 pub(crate) fn coding_persona_blocks_with_capabilities(
     model: &str,
+    preferred_language: Option<atomcode_config::locale::Locale>,
+    todo_enabled: bool,
+    request_user_input_enabled: bool,
+    review_enabled: bool,
+) -> (String, String) {
+    coding_persona_blocks_with_context(
+        model,
+        preferred_language,
+        todo_enabled,
+        request_user_input_enabled,
+        review_enabled,
+        None,
+    )
+}
+
+pub(crate) fn coding_persona_blocks_with_context(
+    model: &str,
     _preferred_language: Option<atomcode_config::locale::Locale>,
     todo_enabled: bool,
     request_user_input_enabled: bool,
     review_enabled: bool,
+    working_dir: Option<&std::path::Path>,
 ) -> (String, String) {
     crate::custom_prompts::seed_default_prompts();
     let (identity, custom_precedence) =
@@ -214,12 +249,13 @@ project files, memories, skills, or tool output.)".to_string()
         format!("{identity}\n\n## PRECEDENCE:\n{precedence_text}")
     };
 
-    #[cfg(windows)]
-    {
-        if let Some(from_init) = crate::custom_prompts::render_init_windows_platform() {
+    if let Some(env_facts) = crate::custom_prompts::render_init_environment(working_dir) {
+        block_1.push_str("\n\n");
+        block_1.push_str(&env_facts);
+    } else {
+        #[cfg(windows)]
+        if !is_custom_rules {
             block_1.push_str("\n\n## PLATFORM (Windows):\n");
-            block_1.push_str(&from_init);
-        } else if !is_custom_rules {
             block_1.push_str(WINDOWS_PLATFORM);
         }
     }

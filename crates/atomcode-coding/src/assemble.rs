@@ -98,11 +98,12 @@ fn build_coding_agent_from_tools(
                                              // when the tool + hook aren't mounted (and vice-versa). The `todowrite` TOOL
                                              // itself is registered on the same env gate in `atomcode-capabilities`.
     let todo_enabled = crate::persona::todo_switch_enabled_for(cfg.todo.enabled);
-    let (mut block_1, block_2) = crate::persona::coding_persona_blocks_with_language(
+    let (mut block_1, block_2) = crate::persona::coding_persona_blocks_with_working_dir(
         &cfg.model,
         cfg.preferred_language,
         todo_enabled,
         crate::persona::request_user_input_switch_enabled(),
+        Some(&cfg.working_dir),
     );
     if let Some(warning) = startup_warning {
         block_1.push_str("\n\n<system-reminder>");

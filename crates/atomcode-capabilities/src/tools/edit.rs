@@ -38,6 +38,9 @@ pub(crate) struct EditHunk {
     pub(crate) new_string: String,
     #[serde(default)]
     pub(crate) replace_all: bool,
+    /// 1-based match index when `old_string` is not unique. 0 means unset.
+    #[serde(default)]
+    pub(crate) occurrence: u32,
 }
 
 #[async_trait]
@@ -61,7 +64,8 @@ impl Tool for EditFileTool {
                         "properties": {
                             "old_string": { "type": "string", "description": "Exact text to find and replace." },
                             "new_string": { "type": "string", "description": "Replacement text." },
-                            "replace_all": { "type": "boolean", "description": "Replace all occurrences (default false)." }
+                            "replace_all": { "type": "boolean", "description": "Replace all occurrences (default false)." },
+                            "occurrence": { "type": "integer", "minimum": 1, "description": "1-based match index when old_string appears more than once. Use this when two sites need different replacements; use replace_all to change every match." }
                         },
                         "required": ["old_string", "new_string"]
                     }
@@ -95,6 +99,7 @@ impl Tool for EditFileTool {
                 old_string: a.old_string,
                 new_string: a.new_string,
                 replace_all: a.replace_all,
+                occurrence: 0,
             }]
         } else {
             Vec::new()
@@ -155,8 +160,14 @@ impl Tool for EditFileTool {
         let mut total = 0usize;
         let mut kinds: Vec<&str> = Vec::new();
         let mut auto_healed_old_strings: Vec<String> = Vec::new();
+        let mut skipped: Vec<String> = Vec::new();
         for (i, h) in hunks.iter().enumerate() {
-            match apply_hunk(&buf, &h.old_string, &h.new_string, h.replace_all) {
+            if !h.old_string.is_empty() && h.old_string == h.new_string {
+                skipped.push(format!("{} (identical old/new)", i + 1));
+                kinds.push("skipped-identical");
+                continue;
+            }
+            match apply_hunk(&buf, &h.old_string, &h.new_string, h.replace_all, h.occurrence) {
                 Ok((next, n, kind, actual_matched)) => {
                     buf = next;
                     total += n;
@@ -189,6 +200,16 @@ impl Tool for EditFileTool {
                     }
                 }
             }
+        }
+        if total == 0 && buf == content {
+            let skip_note = if skipped.is_empty() {
+                String::new()
+            } else {
+                format!(" skipped hunks: {}.", skipped.join(", "))
+            };
+            return ok(format!(
+                "edit_file: no replacements applied; the file was not modified.{skip_note}"
+            ));
         }
         if let Err(msg) = write_encoded(&path, &buf, file_encoding).await {
             return err(msg);
@@ -226,6 +247,11 @@ impl Tool for EditFileTool {
             ));
         }
 
+        if !skipped.is_empty() {
+            out.push_str("skipped hunks: ");
+            out.push_str(&skipped.join(", "));
+            out.push('\n');
+        }
         out.push_str(&format!(
             "Edited {} ({total} replacement{}{kind_note})\n{}",
             crate::pathnorm::to_display(&path),
@@ -335,9 +361,10 @@ fn apply_hunk(
     old_string: &str,
     new_string: &str,
     replace_all: bool,
+    occurrence: u32,
 ) -> Result<(String, usize, &'static str, Option<String>), String> {
     if !old_string.is_empty() {
-        return apply_text_hunk(content, old_string, new_string, replace_all);
+        return apply_text_hunk(content, old_string, new_string, replace_all, occurrence);
     }
     Err("edit_file: provide a non-empty `old_string` in each edit hunk.".into())
 }
@@ -348,7 +375,7 @@ pub(crate) fn apply_hunk_direct(
     new_string: &str,
     replace_all: bool,
 ) -> Result<(String, usize, &'static str, Option<String>), String> {
-    apply_hunk(content, old_string, new_string, replace_all)
+    apply_hunk(content, old_string, new_string, replace_all, 0)
 }
 
 /// Topologically sorts multiple edit hunks within a file:
@@ -568,6 +595,7 @@ fn apply_text_hunk(
     old_string: &str,
     new_string: &str,
     replace_all: bool,
+    occurrence: u32,
 ) -> Result<(String, usize, &'static str, Option<String>), String> {
     if old_string == new_string {
         return Err("old_string and new_string are identical — nothing to change.".into());
@@ -591,7 +619,7 @@ fn apply_text_hunk(
         if let Some(clean_old) = strip_line_prefix_hints(old_string) {
             let clean_new =
                 strip_line_prefix_hints(new_string).unwrap_or_else(|| new_string.to_string());
-            if let Ok(res) = apply_text_hunk(content, &clean_old, &clean_new, replace_all) {
+            if let Ok(res) = apply_text_hunk(content, &clean_old, &clean_new, replace_all, occurrence) {
                 let actual = res.3.unwrap_or(clean_old);
                 return Ok((res.0, res.1, "stripped-arrow prefix match", Some(actual)));
             }
@@ -634,8 +662,19 @@ fn apply_text_hunk(
         return Err(format!("old_string not found in file.\n{hint}"));
     }
     if count > 1 && !replace_all {
+        if occurrence >= 1 {
+            if occurrence as usize > count {
+                return Err(format!(
+                    "occurrence {occurrence} is out of range (1..={count}).\n{}",
+                    format_match_sites(content, &old_match)
+                ));
+            }
+            let updated = replace_nth(content, &old_match, &new_match, occurrence as usize);
+            return Ok((updated, 1, "exact-occurrence", None));
+        }
         return Err(format!(
-            "old_string appears {count} times — it must be unique. Add surrounding context, or set replace_all=true."
+            "old_string appears {count} times — it must be unique. Add surrounding context, set replace_all=true, or set occurrence to 1..={count}.\n{}",
+            format_match_sites(content, &old_match)
         ));
     }
     if old_match == new_match {
@@ -650,6 +689,58 @@ fn apply_text_hunk(
     };
     let replaced = if replace_all { count } else { 1 };
     Ok((updated, replaced, "exact", None))
+}
+
+fn replace_nth(content: &str, old: &str, new: &str, n: usize) -> String {
+    let mut from = 0usize;
+    let mut seen = 0usize;
+    while let Some(rel) = content[from..].find(old) {
+        seen += 1;
+        let at = from + rel;
+        if seen == n {
+            let mut out = String::with_capacity(content.len() - old.len() + new.len());
+            out.push_str(&content[..at]);
+            out.push_str(new);
+            out.push_str(&content[at + old.len()..]);
+            return out;
+        }
+        from = at + old.len().max(1);
+    }
+    content.to_string()
+}
+
+fn format_match_sites(content: &str, needle: &str) -> String {
+    let lines: Vec<&str> = content.lines().collect();
+    let mut out = String::from("Matches:");
+    let mut from = 0usize;
+    let mut idx = 0usize;
+    while let Some(rel) = content[from..].find(needle) {
+        idx += 1;
+        let at = from + rel;
+        let line_no = content[..at].bytes().filter(|&b| b == b'\n').count() + 1;
+        let span = needle.lines().count().max(1);
+        let start = line_no.saturating_sub(1).saturating_sub(2);
+        let end = (line_no - 1 + span + 2).min(lines.len());
+        out.push_str(&format!("\n  [{idx}] line {line_no}:"));
+        for (i, line) in lines[start..end].iter().enumerate() {
+            let n = start + i + 1;
+            let mark = if n >= line_no && n < line_no + span {
+                ">>>"
+            } else {
+                "   "
+            };
+            out.push_str(&format!("\n  {mark} {n:>4}| {line}"));
+        }
+        from = at + needle.len().max(1);
+        if idx >= 8 {
+            let rest = content[from..].matches(needle).count();
+            if rest > 0 {
+                out.push_str(&format!("\n  ... and {rest} more"));
+            }
+            break;
+        }
+    }
+    out
 }
 
 /// Write edited text back to `path` in its original on-disk `encoding`. Refuses (Err
@@ -1597,6 +1688,9 @@ mod tests {
             .await;
         assert!(r.is_error, "{}", r.content);
         assert!(r.content.contains("appears 2 times"), "{}", r.content);
+        assert!(r.content.contains("Matches:"), "{}", r.content);
+        assert!(r.content.contains("[1] line"), "{}", r.content);
+        assert!(r.content.contains("occurrence"), "{}", r.content);
         // file unchanged
         assert_eq!(
             std::fs::read_to_string(d.path().join("a.txt")).unwrap(),
@@ -1605,7 +1699,65 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn identical_hunk_is_skipped_without_failing_the_batch() {
+        let d = tempfile::tempdir().unwrap();
+        std::fs::write(d.path().join("a.rs"), "fn a() { 1 }\nfn b() { 2 }\n").unwrap();
+        let args = serde_json::json!({
+            "file_path": "a.rs",
+            "edits": [
+                {"old_string": "fn a() { 1 }", "new_string": "fn a() { 1 }"},
+                {"old_string": "fn b() { 2 }", "new_string": "fn b() { 20 }"}
+            ]
+        });
+        let r = EditFileTool.execute(&args.to_string(), &ctx(d.path())).await;
+        assert!(!r.is_error, "identical hunk must skip, not fail: {}", r.content);
+        assert!(r.content.contains("skipped hunks"), "{}", r.content);
+        assert_eq!(
+            std::fs::read_to_string(d.path().join("a.rs")).unwrap(),
+            "fn a() { 1 }\nfn b() { 20 }\n"
+        );
+    }
+
+    #[tokio::test]
+    async fn all_identical_hunks_leave_file_untouched() {
+        let d = tempfile::tempdir().unwrap();
+        std::fs::write(d.path().join("a.rs"), "fn a() { 1 }\n").unwrap();
+        let args = serde_json::json!({
+            "file_path": "a.rs",
+            "edits": [
+                {"old_string": "fn a() { 1 }", "new_string": "fn a() { 1 }"}
+            ]
+        });
+        let r = EditFileTool.execute(&args.to_string(), &ctx(d.path())).await;
+        assert!(!r.is_error, "noop batch should not be an error: {}", r.content);
+        assert!(r.content.contains("not modified"), "{}", r.content);
+        assert_eq!(
+            std::fs::read_to_string(d.path().join("a.rs")).unwrap(),
+            "fn a() { 1 }\n"
+        );
+    }
+
+    #[tokio::test]
+    async fn occurrence_selects_the_nth_match() {
+        let d = tempfile::tempdir().unwrap();
+        std::fs::write(d.path().join("a.rs"), "dup\nkeep\ndup\n").unwrap();
+        let args = serde_json::json!({
+            "file_path": "a.rs",
+            "edits": [
+                {"old_string": "dup", "new_string": "second", "occurrence": 2}
+            ]
+        });
+        let r = EditFileTool.execute(&args.to_string(), &ctx(d.path())).await;
+        assert!(!r.is_error, "{}", r.content);
+        assert_eq!(
+            std::fs::read_to_string(d.path().join("a.rs")).unwrap(),
+            "dup\nkeep\nsecond\n"
+        );
+    }
+
+    #[tokio::test]
     async fn replace_all_handles_duplicates() {
+
         let d = tempfile::tempdir().unwrap();
         std::fs::write(d.path().join("a.txt"), "dup\ndup\ndup\n").unwrap();
         let r = EditFileTool

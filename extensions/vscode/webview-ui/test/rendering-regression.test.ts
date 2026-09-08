@@ -1124,6 +1124,34 @@ function testMarkdownTableRepairKeepsMarkedOneColumnRows() {
   assert.doesNotMatch(html, /<p>plain<\/p>/);
 }
 
+function testMarkdownTableRepairsSingleColumnDelimiter() {
+  const markdown = [
+    '| 目标 | 协议 |',
+    '|---|',
+    '| 思考完整回传 | Gemini |',
+    '客户端配置示例:',
+  ].join('\n');
+  const html = renderMarkdownForTest(prepareMarkdownForRender(markdown, false));
+
+  assert.match(html, /<table>/);
+  assert.match(html, /<th>目标<\/th>/);
+  assert.match(html, /<td>Gemini<\/td>/);
+  assert.match(html, /<\/table>\s*<p>客户端配置示例:<\/p>/);
+}
+
+function testMarkdownTableInsertsMissingDelimiter() {
+  const markdown = [
+    '| A | B |',
+    '| x | y |',
+    '后续内容',
+  ].join('\n');
+  const html = renderMarkdownForTest(prepareMarkdownForRender(markdown, false));
+
+  assert.match(html, /<table>/);
+  assert.match(html, /<td>x<\/td>/);
+  assert.match(html, /<\/table>\s*<p>后续内容<\/p>/);
+}
+
 function testGenerationDoneReloadsFinishedSessionHistory() {
   const source = readFileSync(join(process.cwd(), 'src/chat/provider.ts'), 'utf8');
   const onDone = source.match(/onDone:\s*\([^)]*\)\s*=>\s*\{[\s\S]*?\n\s*\},\n\s*onStopped:/)?.[0] ?? '';
@@ -1189,6 +1217,8 @@ testMarkdownTableDoesNotSwallowFollowingFencedCode();
 testMarkdownTableRepairDoesNotChangeFencedCodeSamples();
 testMarkdownTableRepairDoesNotChangeHtmlBlocks();
 testMarkdownTableRepairKeepsMarkedOneColumnRows();
+testMarkdownTableRepairsSingleColumnDelimiter();
+testMarkdownTableInsertsMissingDelimiter();
 testGenerationDoneReloadsFinishedSessionHistory();
 testLogoutRequiresSetupOnlyForLoginDependentProvider();
 testToolDurationFormattingUsesMillisecondsBelowOneSecond();

@@ -116,6 +116,12 @@ fn repair_stringified_structured_fields(args: &str, schema: &serde_json::Value) 
             if wants_array && schema_items_are_strings(property_schema) && !raw.trim().is_empty() {
                 arguments.insert(name.clone(), serde_json::Value::Array(vec![raw.into()]));
                 changed = true;
+            } else if wants_array && name == "edits" {
+                let hunks = extract_edit_hunks_from_text(raw);
+                if !hunks.is_empty() {
+                    arguments.insert(name.clone(), serde_json::Value::Array(hunks));
+                    changed = true;
+                }
             }
             continue;
         };
@@ -974,26 +980,36 @@ pub fn repair_json(s: &str) -> String {
         result = format!("{{{}}}", result);
     }
 
-    // Count braces and add missing closing ones. Only structural
-    // `{`/`}` count — a string value containing source code with
-    // `{ … }` is balanced from the JSON envelope's perspective and
-    // must not provoke extra `}` appends.
-    let rchars: Vec<char> = result.chars().collect();
-    let mask = structural_mask(&rchars);
-    let mut open_braces = 0usize;
-    let mut close_braces = 0usize;
-    for (i, &c) in rchars.iter().enumerate() {
-        if !mask[i] {
-            continue;
+    // Close unclosed structural `{` / `[` in reverse open order. Only
+    // structural delimiters count — source braces inside a string value
+    // must not provoke extra closers. Mixed nesting (`[{` vs `{[`) needs
+    // a stack: dumping all `}` then all `]` would turn `{[` into `{[}]`.
+    {
+        let rchars: Vec<char> = result.chars().collect();
+        let mask = structural_mask(&rchars);
+        let mut stack: Vec<char> = Vec::new();
+        for (i, &c) in rchars.iter().enumerate() {
+            if !mask[i] {
+                continue;
+            }
+            match c {
+                '{' | '[' => stack.push(c),
+                '}' => {
+                    if stack.last() == Some(&'{') {
+                        stack.pop();
+                    }
+                }
+                ']' => {
+                    if stack.last() == Some(&'[') {
+                        stack.pop();
+                    }
+                }
+                _ => {}
+            }
         }
-        if c == '{' {
-            open_braces += 1;
-        } else if c == '}' {
-            close_braces += 1;
+        for open in stack.into_iter().rev() {
+            result.push(if open == '{' { '}' } else { ']' });
         }
-    }
-    for _ in 0..(open_braces.saturating_sub(close_braces)) {
-        result.push('}');
     }
 
     result
@@ -1116,58 +1132,137 @@ pub fn extract_json_fields(s: &str) -> serde_json::Value {
     serde_json::Value::Object(map)
 }
 
+/// Locate `"key"` followed by `:`, returning the byte index of the key quote.
+fn find_json_key(haystack: &str, key: &str) -> Option<usize> {
+    let needle = format!("\"{key}\"");
+    let mut from = 0;
+    while let Some(rel) = haystack[from..].find(&needle) {
+        let at = from + rel;
+        let after = haystack[at + needle.len()..].trim_start();
+        if after.starts_with(':') {
+            return Some(at);
+        }
+        from = at + needle.len();
+    }
+    None
+}
+
+/// Parse a JSON string value at the start of `raw`. `None` if the quotes never
+/// close — a truncated `new_string` must not be applied as a file edit.
+fn take_complete_quoted_value(raw: &str) -> Option<String> {
+    let t = raw.trim();
+    if !t.starts_with('"') {
+        let s = t
+            .trim_end_matches(|c: char| c == ',' || c == '}' || c == ']' || c.is_whitespace())
+            .trim();
+        if s.is_empty() {
+            return None;
+        }
+        return Some(s.to_string());
+    }
+    let mut escaped = false;
+    for (i, c) in t[1..].char_indices() {
+        if escaped {
+            escaped = false;
+            continue;
+        }
+        if c == '\\' {
+            escaped = true;
+            continue;
+        }
+        if c == '"' {
+            return Some(unescape_json_string_contents(&t[1..1 + i]));
+        }
+    }
+    None
+}
+
+/// Recover complete `{old_string,new_string}` hunks from a possibly truncated
+/// or stringified `edits` payload. A hunk whose quoted value never closes is
+/// dropped — applying a cut-off `new_string` would write the wrong bytes.
+pub(crate) fn extract_edit_hunks_from_text(raw: &str) -> Vec<serde_json::Value> {
+    let mut hunks = Vec::new();
+    let mut search_from = 0usize;
+    while let Some(rel) = find_json_key(&raw[search_from..], "old_string") {
+        let old_key = search_from + rel;
+        let Some(colon) = raw[old_key..].find(':') else {
+            break;
+        };
+        let old_val_at = old_key + colon + 1;
+        let Some(old_string) = take_complete_quoted_value(&raw[old_val_at..]) else {
+            break;
+        };
+        let Some(rel_new) = find_json_key(&raw[old_val_at..], "new_string") else {
+            break;
+        };
+        let new_key = old_val_at + rel_new;
+        let Some(new_colon) = raw[new_key..].find(':') else {
+            break;
+        };
+        let new_val_at = new_key + new_colon + 1;
+        let Some(new_string) = take_complete_quoted_value(&raw[new_val_at..]) else {
+            break;
+        };
+        if old_string.is_empty() && new_string.is_empty() {
+            search_from = new_val_at.max(old_key + 1);
+            continue;
+        }
+        let after_new = &raw[new_val_at..];
+        let next_old = find_json_key(after_new, "old_string");
+        let replace_window = match next_old {
+            Some(n) => &after_new[..n],
+            None => after_new,
+        };
+        let replace_all = find_json_key(replace_window, "replace_all").is_some_and(|at| {
+            replace_window[at..]
+                .split(':')
+                .nth(1)
+                .is_some_and(|v| v.trim_start().starts_with("true"))
+        });
+        hunks.push(serde_json::json!({
+            "old_string": old_string,
+            "new_string": new_string,
+            "replace_all": replace_all,
+        }));
+        search_from = match next_old {
+            Some(n) => new_val_at + n,
+            None => raw.len(),
+        };
+        if search_from <= old_key {
+            break;
+        }
+    }
+    hunks
+}
+
+fn extract_simple_string_field(raw: &str, key: &str) -> Option<String> {
+    let at = find_json_key(raw, key)?;
+    let colon = raw[at..].find(':')?;
+    take_complete_quoted_value(&raw[at + colon + 1..]).filter(|v| !v.is_empty())
+}
+
 /// Specialized parser for edit_file arguments when JSON parsing fails.
 /// Models often generate old_string/new_string with unescaped quotes/newlines.
 /// This parser uses the known field order to extract content by position.
 pub fn extract_edit_file_args(raw: &str) -> Option<serde_json::Value> {
-    let fp_marker = raw.find("\"file_path\"")?;
-    let old_marker = raw.find("\"old_string\"")?;
-    let new_marker = raw.find("\"new_string\"")?;
-    if old_marker <= fp_marker || new_marker <= old_marker {
+    let file_path = extract_simple_string_field(raw, "file_path")
+        .or_else(|| extract_simple_string_field(raw, "path"))?;
+    let hunks = extract_edit_hunks_from_text(raw);
+    if hunks.is_empty() {
+        // Truncated or missing hunks: never salvage a cut-off new_string.
         return None;
     }
-
-    // Extract file_path (simple quoted string before old_string)
-    let fp_region = &raw[fp_marker + 11..old_marker];
-    let fp_colon = fp_region.find(':')?;
-    let fp_val = fp_region[fp_colon + 1..]
-        .trim()
-        .trim_matches(|c| c == '"' || c == ',')
-        .trim();
-    if fp_val.is_empty() {
-        return None;
-    }
-    let file_path = fp_val.to_string();
-
-    // Extract old_string: everything between "old_string": " and ", "new_string"
-    let old_colon = raw[old_marker..].find(':')?;
-    let old_start = old_marker + old_colon + 1;
-    let old_raw = &raw[old_start..new_marker];
-    let old_string = unescape_field_value(old_raw);
-
-    // Extract new_string: everything after "new_string": " to the end
-    let new_colon = raw[new_marker..].find(':')?;
-    let new_start = new_marker + new_colon + 1;
-    let new_raw = &raw[new_start..];
-    let new_string = unescape_field_value_end(new_raw);
-
-    if old_string.is_empty() && new_string.is_empty() {
-        return None;
-    }
-
-    let replace_all = raw.contains("\"replace_all\"")
-        && raw.rfind("true").map_or(false, |t| {
-            raw.rfind("\"replace_all\"").map_or(false, |r| t > r)
-        });
-
+    let first = &hunks[0];
     Some(serde_json::json!({
         "file_path": file_path,
-        "old_string": old_string,
-        "new_string": new_string,
-        "replace_all": replace_all,
+        "edits": hunks,
+        "old_string": first["old_string"],
+        "new_string": first["new_string"],
+        "replace_all": first["replace_all"],
     }))
 }
 
+#[allow(dead_code)] // kept for last-resort sibling-field recovery
 fn unescape_field_value(raw: &str) -> String {
     let t = raw.trim().trim_end_matches(',').trim();
     let inner = if t.starts_with('"') { &t[1..] } else { t };
@@ -1175,6 +1270,7 @@ fn unescape_field_value(raw: &str) -> String {
     unescape_json_string_contents(inner)
 }
 
+#[allow(dead_code)]
 fn unescape_field_value_end(raw: &str) -> String {
     let t = raw.trim();
     let inner = if t.starts_with('"') { &t[1..] } else { t };
@@ -1362,6 +1458,60 @@ mod tests {
         let input = r#"{"file_path": "/src/lib.rs", "old_string": "foo", "new_string": "bar", "replace_all": true}"#;
         let result = extract_edit_file_args(input).expect("should parse");
         assert_eq!(result["replace_all"], true);
+    }
+
+    #[test]
+    fn extract_edit_hunks_recovers_truncated_array_closers() {
+        let input = r#"[{"old_string":"fn a() { 1 }","new_string":"fn a() { 10 }""#;
+        let hunks = extract_edit_hunks_from_text(input);
+        assert_eq!(hunks.len(), 1, "{hunks:?}");
+        assert_eq!(hunks[0]["old_string"], "fn a() { 1 }");
+        assert_eq!(hunks[0]["new_string"], "fn a() { 10 }");
+    }
+
+    #[test]
+    fn extract_edit_hunks_drops_truncated_new_string() {
+        let input = r#"[{"old_string":"keep-me","new_string":"cut-off"#;
+        let hunks = extract_edit_hunks_from_text(input);
+        assert!(hunks.is_empty(), "truncated new_string must not become a hunk: {hunks:?}");
+    }
+
+    #[test]
+    fn extract_edit_hunks_keeps_complete_prefix_when_later_hunk_is_cut() {
+        let input = concat!(
+            r#"[{"old_string":"aaa","new_string":"bbb"},"#,
+            r#"{"old_string":"ccc","new_string":"dd"#,
+        );
+        let hunks = extract_edit_hunks_from_text(input);
+        assert_eq!(hunks.len(), 1, "{hunks:?}");
+        assert_eq!(hunks[0]["new_string"], "bbb");
+    }
+
+    #[test]
+    fn extract_edit_file_args_from_edits_array_form() {
+        let input = r#"{"file_path":"/src/lib.rs","edits":[{"old_string":"foo","new_string":"bar"}]}"#;
+        let result = extract_edit_file_args(input).expect("should parse edits array");
+        assert_eq!(result["file_path"], "/src/lib.rs");
+        assert_eq!(result["old_string"], "foo");
+        assert_eq!(result["new_string"], "bar");
+        assert!(result["edits"].is_array());
+    }
+
+    #[test]
+    fn repair_json_closes_truncated_array() {
+        let repaired = repair_json(r#"[{"k":"v""#);
+        let v: serde_json::Value = serde_json::from_str(&repaired)
+            .unwrap_or_else(|e| panic!("array closer missing: {repaired:?}: {e}"));
+        assert!(v.is_array(), "{repaired}");
+        assert_eq!(v[0]["k"], "v");
+    }
+
+    #[test]
+    fn repair_json_closes_mixed_object_then_array() {
+        let repaired = repair_json(r#"{"items":[{"k":"v""#);
+        let v: serde_json::Value = serde_json::from_str(&repaired)
+            .unwrap_or_else(|e| panic!("mixed closer missing: {repaired:?}: {e}"));
+        assert_eq!(v["items"][0]["k"], "v");
     }
 
     // --- repair_tool_args tests ---

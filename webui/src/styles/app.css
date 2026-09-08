@@ -1194,28 +1194,52 @@ body {
 .tool-annotation.waiting { color: var(--app-warning-accent); }
 
 /* === Code Block (markdown / mono) === */
-.code-block-wrapper { position: relative; margin: 10px 0; }
+.code-block-wrapper {
+  position: relative;
+  margin: 10px 0;
+  border-radius: 6px;
+  border: 1px solid var(--app-input-border);
+  background: color-mix(in srgb, var(--app-tool-background), var(--app-primary-background) 30%);
+  overflow: hidden;
+  max-width: 100%;
+}
+.code-block-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  min-height: 28px;
+  padding: 2px 6px 2px 12px;
+  border-bottom: 1px solid var(--app-input-border);
+  background: color-mix(in srgb, var(--app-secondary-background), transparent 35%);
+}
+.code-block-lang {
+  font-size: 11px;
+  line-height: 1;
+  color: var(--app-secondary-foreground);
+  text-transform: lowercase;
+  font-family: var(--app-monospace-font-family);
+  user-select: none;
+}
 
 .code-block-wrapper pre {
   overflow-x: auto;
   white-space: pre;
-  border-radius: 6px;
-  padding: 14px 16px;
+  border-radius: 0;
+  padding: 12px 16px;
   max-width: 100%;
   margin: 0;
   font-family: var(--app-monospace-font-family);
   font-size: var(--app-monospace-font-size);
   line-height: 1.65;
-  background: color-mix(in srgb, var(--app-tool-background), var(--app-primary-background) 30%);
-  border: 1px solid var(--app-input-border);
+  background: transparent;
+  border: none;
   color: var(--app-primary-foreground);
 }
 
 .code-block-wrapper .copy-button {
-  position: absolute;
-  top: 6px;
-  right: 6px;
-  opacity: 0.55;
+  position: static;
+  opacity: 0.7;
   transition: opacity 0.15s, background 0.15s;
   background: var(--app-secondary-background);
   border: 1px solid var(--app-input-border);
@@ -1239,6 +1263,11 @@ body {
 
 .tool-code-block {
   margin: 0 0 4px;
+}
+.tool-code-block .copy-button {
+  position: absolute;
+  top: 6px;
+  right: 6px;
 }
 .tool-code-block pre {
   max-height: min(50vh, 360px);
@@ -1273,7 +1302,8 @@ body {
 .markdown-root ol { list-style: decimal; padding-inline-start: 1.5em; margin: 0.3em 0 0.5em; }
 .markdown-root li { margin-bottom: 3px; }
 .markdown-root li::marker { color: var(--app-secondary-foreground); }
-.markdown-root h1, .markdown-root h2, .markdown-root h3, .markdown-root h4 {
+.markdown-root h1, .markdown-root h2, .markdown-root h3, .markdown-root h4,
+.markdown-root h5, .markdown-root h6 {
   font-weight: 650;
   line-height: 1.35;
   color: var(--app-primary-foreground);
@@ -1298,6 +1328,15 @@ body {
   font-size: 1.05em;
   margin: 0.7em 0 0.25em;
 }
+.markdown-root h5 {
+  font-size: 1em;
+  margin: 0.6em 0 0.2em;
+}
+.markdown-root h6 {
+  font-size: 0.92em;
+  margin: 0.55em 0 0.2em;
+  color: var(--app-secondary-foreground);
+}
 .markdown-root a { color: var(--app-link-color); text-decoration: none; }
 .markdown-root a:hover { text-decoration: underline; }
 .markdown-root blockquote { border-left: 3px solid var(--app-primary-border-color); padding-left: 12px; margin: 0.3em 0; color: var(--app-secondary-foreground); }
@@ -1312,6 +1351,71 @@ body {
   color: var(--app-primary-foreground);
 }
 .markdown-root pre code { padding: 0; background: none; }
+.markdown-root img {
+  max-width: 100%;
+  height: auto;
+  border-radius: 6px;
+  margin: 0.4em 0;
+}
+.markdown-root kbd {
+  font-family: var(--app-monospace-font-family);
+  font-size: 0.85em;
+  padding: 1px 5px;
+  border-radius: 4px;
+  border: 1px solid var(--app-input-border);
+  background: color-mix(in srgb, var(--app-secondary-background), transparent 30%);
+  box-shadow: 0 1px 0 var(--app-input-border);
+}
+.markdown-root mark.md-highlight {
+  background: color-mix(in srgb, var(--app-warning-accent), transparent 78%);
+  color: inherit;
+  padding: 0 0.15em;
+  border-radius: 2px;
+}
+.markdown-root details {
+  margin: 0.4em 0;
+  padding: 0.35em 0.6em;
+  border: 1px solid var(--app-primary-border-color);
+  border-radius: 6px;
+}
+.markdown-root summary {
+  cursor: pointer;
+  font-weight: 600;
+}
+.markdown-root li:has(> input[type="checkbox"]) {
+  list-style: none;
+  margin-left: -1.15em;
+}
+.markdown-root li > input[type="checkbox"] {
+  margin-right: 0.45em;
+  vertical-align: middle;
+}
+.markdown-root .md-alert {
+  border-left-width: 4px;
+  padding: 8px 12px;
+  border-radius: 0 6px 6px 0;
+}
+.markdown-root .md-alert-title {
+  font-weight: 700;
+  margin: 0 0 0.25em;
+  letter-spacing: 0.01em;
+}
+.markdown-root .md-alert-note { border-left-color: var(--app-link-color); background: color-mix(in srgb, var(--app-link-color), transparent 92%); }
+.markdown-root .md-alert-tip { border-left-color: var(--app-success-foreground); background: color-mix(in srgb, var(--app-success-foreground), transparent 92%); }
+.markdown-root .md-alert-important { border-left-color: var(--app-primary-foreground); background: color-mix(in srgb, var(--app-secondary-background), transparent 35%); }
+.markdown-root .md-alert-warning { border-left-color: var(--app-warning-accent); background: color-mix(in srgb, var(--app-warning-accent), transparent 90%); }
+.markdown-root .md-alert-caution { border-left-color: var(--app-error-foreground); background: color-mix(in srgb, var(--app-error-foreground), transparent 92%); }
+.markdown-root .md-footnote-ref {
+  font-size: 0.75em;
+  line-height: 0;
+}
+.markdown-root .md-footnotes {
+  margin-top: 0.8em;
+  font-size: 0.88em;
+  color: var(--app-secondary-foreground);
+}
+.markdown-root .md-footnotes ol { padding-inline-start: 1.3em; }
+.markdown-root .md-footnote-back { text-decoration: none; }
 /* GFM tables */
 .markdown-root table {
   border-collapse: collapse;
@@ -1331,7 +1435,12 @@ body {
   text-align: left;
   vertical-align: top;
   line-height: 1.45;
+  overflow-wrap: anywhere;
 }
+.markdown-root th[align="center"],
+.markdown-root td[align="center"] { text-align: center; }
+.markdown-root th[align="right"],
+.markdown-root td[align="right"] { text-align: right; }
 .markdown-root th {
   background: color-mix(in srgb, var(--app-tool-background), var(--app-primary-background) 40%);
   font-weight: 650;

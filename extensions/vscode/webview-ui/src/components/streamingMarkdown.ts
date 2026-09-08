@@ -142,9 +142,50 @@ function hasUnescapedPipe(line: string): boolean {
   return false;
 }
 
+function splitTableCells(line: string): string[] {
+  const row = line.replace(/\|/g, (match, offset, str: string) => {
+    let escaped = false;
+    let curr = offset as number;
+    while (--curr >= 0 && str[curr] === '\\') escaped = !escaped;
+    return escaped ? '|' : ' |';
+  });
+  const cells = row.split(/ \|/);
+  if (cells.length && !cells[0].trim()) cells.shift();
+  if (cells.length && !cells[cells.length - 1].trim()) cells.pop();
+  return cells.map((cell) => cell.trim().replace(/\\\|/g, '|'));
+}
+
+function isDelimiterCell(cell: string): boolean {
+  return /^\s*:?-+:?\s*$/.test(cell) && cell.includes('-');
+}
+
+function isAnyTableDelimiterLine(line: string): boolean {
+  const cells = splitTableCells(line.trim());
+  return cells.length >= 1 && cells.every(isDelimiterCell);
+}
+
 function isTableDelimiterLine(line: string): boolean {
-  const cells = line.trim().replace(/^\|/, '').replace(/\|$/, '').split('|');
-  return cells.length >= 2 && cells.every((cell) => /^\s*:?-+:?\s*$/.test(cell));
+  const cells = splitTableCells(line.trim());
+  return cells.length >= 2 && cells.every(isDelimiterCell);
+}
+
+function isStrictPipeRow(line: string): boolean {
+  const trimmed = line.trim();
+  return trimmed.startsWith('|') && trimmed.endsWith('|') && splitTableCells(trimmed).length >= 2;
+}
+
+function buildTableDelimiter(columns: number, existingCells: string[] = []): string {
+  const parts: string[] = [];
+  for (let i = 0; i < columns; i++) {
+    const raw = (existingCells[i] ?? '').trim();
+    const left = raw.startsWith(':');
+    const right = raw.endsWith(':');
+    if (left && right) parts.push(':---:');
+    else if (right) parts.push('---:');
+    else if (left) parts.push(':---');
+    else parts.push('---');
+  }
+  return `| ${parts.join(' | ')} |`;
 }
 
 type HtmlBlockState = { kind: 'untilBlank' } | { kind: 'untilPattern'; pattern: RegExp };
@@ -257,8 +298,93 @@ function separateTableFromFollowingParagraph(source: string): string {
   return output.join('\n');
 }
 
+/** 修复模型常写的「表头 N 列、分隔行 1 列」以及缺分隔行，让 marked GFM 能认出表格。 */
+function repairGfmTableDelimiters(source: string): string {
+  const lines = String(source ?? '').split('\n');
+  const output: string[] = [];
+  let openFence: FenceState | null = null;
+  let openHtmlBlock: HtmlBlockState | null = null;
+  let inTable = false;
+
+  for (let i = 0; i < lines.length; i += 1) {
+    const line = lines[i];
+    const nextLine = lines[i + 1];
+
+    if (openHtmlBlock) {
+      output.push(line);
+      if (htmlBlockClose(line, openHtmlBlock)) openHtmlBlock = null;
+      continue;
+    }
+    if (openFence) {
+      output.push(line);
+      if (fenceClose(line, openFence)) openFence = null;
+      continue;
+    }
+    const openingFence = fenceOpen(line);
+    if (openingFence) {
+      output.push(line);
+      openFence = openingFence;
+      inTable = false;
+      continue;
+    }
+    const openingHtmlBlock = htmlBlockOpen(line);
+    if (openingHtmlBlock) {
+      output.push(line);
+      openHtmlBlock = htmlBlockClose(line, openingHtmlBlock) ? null : openingHtmlBlock;
+      inTable = false;
+      continue;
+    }
+
+    if (inTable) {
+      if (!line.trim() || (isMarkdownBlockStart(line) && !hasUnescapedPipe(line))) {
+        inTable = false;
+      } else if (hasUnescapedPipe(line) || isAnyTableDelimiterLine(line)) {
+        output.push(line);
+        continue;
+      } else {
+        inTable = false;
+      }
+    }
+
+    if (nextLine != null && hasUnescapedPipe(line) && isAnyTableDelimiterLine(nextLine)) {
+      const columns = splitTableCells(line).length;
+      const delimRaw = nextLine.trim();
+      if (columns >= 1 && (delimRaw.includes('|') || delimRaw.includes(':') || line.trim().startsWith('|'))) {
+        output.push(line);
+        const delimCells = splitTableCells(nextLine);
+        if (delimCells.length !== columns || !/[:|]/.test(delimRaw)) {
+          output.push(buildTableDelimiter(columns, delimCells));
+          i += 1;
+        }
+        inTable = true;
+        continue;
+      }
+    }
+
+    if (
+      nextLine != null &&
+      isStrictPipeRow(line) &&
+      isStrictPipeRow(nextLine) &&
+      !isAnyTableDelimiterLine(nextLine)
+    ) {
+      const columns = splitTableCells(line).length;
+      if (columns >= 2) {
+        output.push(line);
+        output.push(buildTableDelimiter(columns));
+        inTable = true;
+        continue;
+      }
+    }
+
+    output.push(line);
+  }
+
+  return output.join('\n');
+}
+
 export function prepareMarkdownForRender(source: string, streaming: boolean): string {
-  const tableSafeSource = separateTableFromFollowingParagraph(source);
+  const repairedTables = repairGfmTableDelimiters(source);
+  const tableSafeSource = separateTableFromFollowingParagraph(repairedTables);
   const protectedSource = protectInlineCodeFenceLines(tableSafeSource);
   return streaming ? repairStreamingMarkdown(protectedSource) : protectedSource;
 }

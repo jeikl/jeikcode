@@ -269,8 +269,41 @@ fn parse_edits_value(value: serde_json::Value) -> Result<Vec<EditHunk>, String> 
     }
 }
 
+fn unwrap_stringified_json_layers(s: &str) -> String {
+    let mut cur = s.trim().to_string();
+    for _ in 0..3 {
+        let t = cur.trim();
+        if t.len() < 2 || !t.starts_with('"') {
+            break;
+        }
+        let Ok(inner) = serde_json::from_str::<String>(t) else {
+            break;
+        };
+        let inner_trim = inner.trim_start();
+        if inner == cur
+            || !(inner_trim.starts_with('[')
+                || inner_trim.starts_with('{')
+                || inner_trim.starts_with('"'))
+        {
+            break;
+        }
+        cur = inner;
+    }
+    cur
+}
+
+fn hunks_from_recovered_values(values: Vec<serde_json::Value>) -> Result<Vec<EditHunk>, String> {
+    values
+        .into_iter()
+        .map(|v| {
+            serde_json::from_value::<EditHunk>(v).map_err(|e| format!("edits array items: {e}"))
+        })
+        .collect()
+}
+
 fn parse_edits_string(s: &str) -> Result<Vec<EditHunk>, String> {
-    let t = s.trim();
+    let t = unwrap_stringified_json_layers(s);
+    let t = t.trim();
     if t.is_empty() {
         return Ok(Vec::new());
     }
@@ -278,13 +311,22 @@ fn parse_edits_string(s: &str) -> Result<Vec<EditHunk>, String> {
         serde_json::from_str::<serde_json::Value>(&crate::tools::repair::repair_json(t))
     });
     match parsed {
-        Ok(v) => match v {
-            serde_json::Value::Array(_) | serde_json::Value::Object(_) => parse_edits_value(v),
-            _ => Err("stringified edits decoded but was not a JSON array or object".into()),
-        },
-        Err(e) => Err(format!(
-            "edits was a string (expected a JSON array). Could not decode: {e}"
-        )),
+        Ok(v) if v.is_array() || v.is_object() => {
+            if let Some(inner) = v.get("edits") {
+                return parse_edits_value(inner.clone());
+            }
+            parse_edits_value(v)
+        }
+        Ok(_) => Err("stringified edits decoded but was not a JSON array or object".into()),
+        Err(e) => {
+            let recovered = crate::tools::repair::extract_edit_hunks_from_text(t);
+            if !recovered.is_empty() {
+                return hunks_from_recovered_values(recovered);
+            }
+            Err(format!(
+                "edits was a string (expected a JSON array). Could not decode: {e}"
+            ))
+        }
     }
 }
 
@@ -2150,6 +2192,65 @@ mod tests {
         assert_eq!(
             std::fs::read_to_string(d.path().join("a.rs")).unwrap(),
             "let x = 9;\nlet y = 2;\n"
+        );
+    }
+
+    #[tokio::test]
+    async fn stringified_edits_missing_closers_is_repaired() {
+        let d = tempfile::tempdir().unwrap();
+        std::fs::write(d.path().join("a.rs"), "fn a() { 1 }\n").unwrap();
+        let inner = r#"[{"old_string":"fn a() { 1 }","new_string":"fn a() { 10 }""#;
+        let args = serde_json::json!({
+            "file_path": "a.rs",
+            "edits": inner
+        })
+        .to_string();
+        let r = EditFileTool.execute(&args, &ctx(d.path())).await;
+        assert!(!r.is_error, "truncated closers must still apply: {}", r.content);
+        assert_eq!(
+            std::fs::read_to_string(d.path().join("a.rs")).unwrap(),
+            "fn a() { 10 }\n"
+        );
+    }
+
+    #[tokio::test]
+    async fn stringified_edits_truncated_new_string_is_rejected() {
+        let d = tempfile::tempdir().unwrap();
+        std::fs::write(d.path().join("a.rs"), "fn a() { 1 }\n").unwrap();
+        let inner = r#"[{"old_string":"fn a() { 1 }","new_string":"fn a() { 10"#;
+        let args = serde_json::json!({
+            "file_path": "a.rs",
+            "edits": inner
+        })
+        .to_string();
+        let r = EditFileTool.execute(&args, &ctx(d.path())).await;
+        assert!(r.is_error, "truncated new_string must not write: {}", r.content);
+        assert_eq!(
+            std::fs::read_to_string(d.path().join("a.rs")).unwrap(),
+            "fn a() { 1 }\n",
+            "file must stay untouched"
+        );
+    }
+
+    #[tokio::test]
+    async fn stringified_edits_wrapped_as_full_args_object_is_unwrapped() {
+        let d = tempfile::tempdir().unwrap();
+        std::fs::write(d.path().join("a.rs"), "fn a() { 1 }\n").unwrap();
+        let inner = serde_json::json!({
+            "file_path": "ignored.rs",
+            "edits": [{"old_string":"fn a() { 1 }","new_string":"fn a() { 10 }"}]
+        })
+        .to_string();
+        let args = serde_json::json!({
+            "file_path": "a.rs",
+            "edits": inner
+        })
+        .to_string();
+        let r = EditFileTool.execute(&args, &ctx(d.path())).await;
+        assert!(!r.is_error, "nested args object must unwrap edits: {}", r.content);
+        assert_eq!(
+            std::fs::read_to_string(d.path().join("a.rs")).unwrap(),
+            "fn a() { 10 }\n"
         );
     }
 

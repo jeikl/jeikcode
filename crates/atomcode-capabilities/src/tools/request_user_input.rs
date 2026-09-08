@@ -241,8 +241,9 @@ impl Tool for RequestUserInputTool {
     }
 
     fn description(&self) -> &str {
-        "Prompt the user with a structured single, multiple-choice, or text input modal to obtain their intended direction. \
-         Trigger only when key information is missing from the user's intent, when encountering ambiguity, when changes have broad impact, or when decisions and confirmations are strictly required."
+        "Present a single-choice, multiple-choice, or text input prompt to collect user input. \
+         Use when information is insufficient, multiple approaches exist, secrets or tokens are needed, or destructive actions require confirmation. \
+         Inquiring about matters that can be determined autonomously is not supported."
     }
 
     fn parameters_schema(&self) -> serde_json::Value {

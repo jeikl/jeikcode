@@ -236,14 +236,14 @@ mod tests {
             .find(|p| p.name == "AtomGit-GLM-5.2")
             .unwrap();
         assert!(glm.is_default);
-        assert!(glm.requires_login, "gateway base_url ⇒ requires login");
+        assert!(!glm.requires_login, "gateway signing is retired");
         assert_eq!(glm.model, "GLM-5.2");
     }
 
     #[test]
     fn provider_info_reports_login_dependency_from_gateway() {
         assert!(
-            provider_info(
+            !provider_info(
                 "renamed",
                 &provider("https://llm-api.atomgit.com/v1"),
                 "renamed"

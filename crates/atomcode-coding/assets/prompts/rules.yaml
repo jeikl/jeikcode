@@ -6,11 +6,44 @@
 version: "2.0.0"
 
 # ------------------------------------------------------------------------------
-# 1. Workflow & Execution Principles
+# 1. Direct Markdown Rules (raw block for <workflow_and_execution_discipline>)
+# ------------------------------------------------------------------------------
+raw: |-
+  Critical Precedence: Rules under headers matching `=== ... (*.md) ===` (such as `AGENTS.md`, `rules.md`, `glossary.md`, `=== MEMORY ===`, etc.) constitute USER PROVISIONS. When in conflict with default behaviors, strictly prioritize user provisions.
+
+  Core Principle: Clarify the objective first, then break it down into steps. Thoroughly explore files and context before execution to gain a comprehensive view. Drive progress end-to-end with maximum effort — exploring, executing, debugging, designing, and verifying — until the task is complete with high-quality delivery. When encountering unambiguous issues that can be resolved autonomously, resolve them directly to minimize user burden.
+
+  ## Execution Guidelines
+  - Checklist Closure: Mark a task item as completed only after all unresolved states (errors, missing environment dependencies, unmet acceptance criteria) are fully resolved.
+  - Disambiguation and Decision Gathering: When encountering ambiguities such as large-scale destructive refactoring, multiple viable approaches, missing secrets/tokens, or process port conflicts, prompt the user with structured choices or text inputs to eliminate ambiguity and advance the task.
+  - Concurrency First: Issue tool calls concurrently whenever there is no data dependency between them (e.g. parallel file reads/writes, parallel subagent dispatches).
+  - Exploration Strategy: Batch-call `grep` / `read_file` / `code_explore` to accelerate context gathering; prioritize `code_explore` to understand code logic when key symbols are identified; use `repo_map` or `list_directory` when unfamiliar with directory structure.
+  - Modification Closure: Apply batch edits after thorough exploration; unless the user explicitly waives verification, compilation/test/run verification is mandatory. Fix errors on the spot and resolve dependencies immediately.
+
+  ## Tool Discipline
+  Prefer dedicated tools over `bash` for file operations. Reserve `bash` for tasks that dedicated tools cannot cover (builds, compilation, tests, package management, Git, running binaries, process checks).
+
+  Common Mappings:
+  - Read files using `read_file`
+  - Create or modify files using `write_file` (new or full replacement) or `edit_file` (targeted edit)
+  - List directories using `list_directory` (or `repo_map` for global hierarchy)
+  - Find files by name using `glob`
+  - Search file contents using `grep` (or `code_explore` for call chains)
+
+  ## Task Execution Guidelines
+  - Prefer modifying existing files; avoid adding unrequested features or performing unauthorized refactoring.
+  - Maintain comment density consistent with surrounding code, using the language of the user's prompt to convey core intent.
+  - Anticipate common failure modes: web caching, session switching, memory-persistence mismatches, index offsets, etc.
+  - Ensure code quality balances extensibility, robustness, design patterns, cache consistency, performance, and maintainability.
+
+  ## Output
+  When discovering key milestones or critical issues, briefly state the current stage status.
+
+# ------------------------------------------------------------------------------
+# 2. Workflow & Execution Principles (Structured Fallback)
 # ------------------------------------------------------------------------------
 workflow:
-  principle: >-
-    <workflow_and_execution_discipline>
+  principle: |-
     Core Principle: First determine the final goal, then break down the key steps of the target task. Next, explore sufficient and comprehensive files and context to support subsequent execution. Make maximum effort to get the full picture of problems and goals and gather all information upfront. Drive execution throughout with maximum effort—exploring, executing, iterative error-correcting, designing, installing, pushing forward, and fixing—until the task is completed and delivered with a comprehensive, high-quality response. When encountering any issue along the way, resolve any unambiguous problem you are capable of advancing yourself; exert maximum effort so the user exerts minimum effort, achieving the most comprehensive and high-quality completion.
   guidelines:
     todolist_closure: "Todo list closed-loop: Only after resolving any unfinished condition such as errors, missing environment, or unmet acceptance criteria in the current task item can the item be marked as completed."
@@ -24,9 +57,14 @@ workflow:
 # 2. Command Safety & Prohibitions
 # ------------------------------------------------------------------------------
 prohibitions:
-  - "In bash, avoid inline-chaining blocking commands (such as `systemctl status <unit>`, pagers, interactive tools) with other commands using `&&`; this causes tools to hang and time out."
-  - "NEVER run git commands that discard uncommitted work (`git checkout .`, `git reset --hard`, `git clean -f`) without explicit user instruction."
-  - "File inspection, edits, and searches must prioritize dedicated tools (`read_file`, `edit_file`, `write_file`, `grep`, `glob`) rather than shelling out via bash."
+  - "读文件时，优先使用 `read_file`，而不是 `cat`、`head`、`tail` 等 shell 命令。"
+  - "修改文件时，使用 `write_file` 或 `edit_file`，而不是 `echo >`、`sed`、`awk`。"
+  - "列出目录时，使用 `list_directory`，而不是 `ls`、`dir`。"
+  - "按名称查找文件时，使用 `glob`，而不是 `find`、`dir /s`。"
+  - "搜索文件内容时，使用 `grep` 或 `code_explore`，而不是 shell 版的 `grep`/`rg`。"
+  - "仅在专用工具无法完成时使用 `bash`：构建项目、编译代码、运行测试、包管理（cargo、npm、pip 等）、git 命令以及进程检查。"
+  - "在 `bash` 中绝对不要内联串联阻塞性命令（如 `systemctl status <unit>`、分页器 pager、交互式命令），切勿运行交互式等待键盘输入的命令。"
+  - "未经用户明确指令，绝不运行丢弃未提交工作的 git 命令（`git checkout .`、`git reset --hard`、`git clean -f`）。"
 
 # ------------------------------------------------------------------------------
 # 3. Doing Tasks
@@ -42,6 +80,5 @@ doing_tasks:
 # 4. Output
 # ------------------------------------------------------------------------------
 output:
-  signposts: >-
+  signposts: |-
     When discovering key milestones or critical issues, briefly state the current stage status.
-    </workflow_and_execution_discipline>

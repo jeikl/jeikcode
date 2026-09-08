@@ -671,7 +671,11 @@ impl Conversation {
 }
 
 fn system_block_order(text: &str) -> u8 {
-    if text.starts_with("=== CODE TOOLS") {
+    if text.starts_with("<environment>") {
+        10
+    } else if text.starts_with("<workflow_and_execution_discipline>") {
+        20
+    } else if text.starts_with("=== CODE TOOLS") {
         25
     } else if text.starts_with("=== AVAILABLE SKILLS") {
         30

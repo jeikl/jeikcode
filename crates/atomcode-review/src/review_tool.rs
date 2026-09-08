@@ -358,11 +358,8 @@ impl Tool for ReviewTool {
         "code_review"
     }
     fn description(&self) -> &str {
-        "Run a rigorous READ-ONLY code review of the current changes and return prioritized \
-         findings (correctness > security > reliability). Resolve only the requested scope, \
-         then invoke this tool without pre-reviewing the diff. Large scopes return a preflight \
-         instead of starting; only echo `confirm_scope` after the user explicitly accepts that \
-         exact scope. Runs a separate reviewer agent and never modifies files."
+        "Run a read-only review of workspace or Git changes, ranking risks by correctness, security, and reliability. \
+         Use for pre-merge inspection or pre-commit self-checks."
     }
     fn parameters_schema(&self) -> serde_json::Value {
         json!({

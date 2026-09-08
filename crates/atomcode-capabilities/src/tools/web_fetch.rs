@@ -76,9 +76,8 @@ impl Tool for WebFetchTool {
         "web_fetch"
     }
     fn description(&self) -> &str {
-        "Fetch a web page over http(s) and convert its content to Markdown. \
-         Use when user input contains a web link and explicitly requests answering based on its content, \
-         or when viewing content from links found during web search."
+        "Fetch an HTTP/HTTPS webpage and convert its content to Markdown. \
+         Use to retrieve documentation or pages from user-provided URLs or search results."
     }
     fn parameters_schema(&self) -> serde_json::Value {
         json!({
@@ -1086,9 +1085,8 @@ mod tests {
     #[test]
     fn description_prefers_web_fetch_for_user_supplied_urls() {
         let description = WebFetchTool.description();
-        assert!(description.contains("user provides a specific http(s) URL"));
-        assert!(description.contains("prefer it over running `curl` or `wget`"));
-        assert!(description.contains("more specific, dedicated skill"));
+        assert!(description.contains("HTTP/HTTPS"));
+        assert!(description.contains("Markdown"));
     }
 
     #[test]

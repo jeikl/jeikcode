@@ -12,8 +12,11 @@ use atomcode_capabilities::tools::{
     OpenFileWorkspaceGate, RepairToolArgsMiddleware, WriteApprovalGate,
 };
 use atomcode_kernel::agent::Agent;
+use atomcode_kernel::hook::LifecycleHooks;
+use atomcode_kernel::message::{Conversation, Message, Role};
 use atomcode_kernel::provider::LlmProvider;
 use atomcode_kernel::tool::{MountedTools, ToolRegistry};
+use std::path::PathBuf;
 use std::sync::Arc;
 
 /// Assemble a runnable, self-correcting coding agent from `cfg` — the MINIMAL sync
@@ -105,9 +108,9 @@ fn build_coding_agent_from_tools(
         crate::persona::request_user_input_switch_enabled(),
         Some(&cfg.working_dir),
     );
-    if let Some(warning) = startup_warning {
+    if let Some(ref warning) = startup_warning {
         block_1.push_str("\n\n<system-reminder>");
-        block_1.push_str(&warning);
+        block_1.push_str(warning);
         block_1.push_str("</system-reminder>");
     }
     let turn_execution_policy = Arc::new(TurnExecutionPolicy::new());
@@ -132,6 +135,16 @@ fn build_coding_agent_from_tools(
         .middleware(Arc::new(WriteApprovalGate::pinned(cfg.working_dir.clone())))
         // Approval runs after all argument rewriting.
         .middleware(Arc::new(ApprovalMiddleware::in_memory()))
+        // Live persona & rules hot-reload hook (mtime based on init.yaml & rules.yaml)
+        .hook(Arc::new(CodingPersonaHook::new(
+            &cfg.model,
+            cfg.preferred_language,
+            todo_enabled,
+            crate::persona::request_user_input_switch_enabled(),
+            true,
+            cfg.working_dir.clone(),
+            startup_warning,
+        )))
         // Env / project-instructions / git context at session start (after persona).
         // Optional client system append (OpenAI/Anthropic compat) after AGENTS/glossary/db.
         .hook(Arc::new(
@@ -239,6 +252,102 @@ fn base_coding_tools(
         .map(|name| (*name).to_string())
         .collect();
     (registry, names, todo_live)
+}
+
+/// Lifecycle hook that dynamically reconciles Block 1 (<environment>) and Block 2
+/// (<workflow_and_execution_discipline>) into Conversation system messages on each turn
+/// based on mtime of init.yaml and rules.yaml.
+pub(crate) struct CodingPersonaHook {
+    model: String,
+    preferred_language: Option<atomcode_config::locale::Locale>,
+    todo_enabled: bool,
+    request_user_input_enabled: bool,
+    review_enabled: bool,
+    working_dir: PathBuf,
+    startup_warning: Option<String>,
+}
+
+impl CodingPersonaHook {
+    pub(crate) fn new(
+        model: impl Into<String>,
+        preferred_language: Option<atomcode_config::locale::Locale>,
+        todo_enabled: bool,
+        request_user_input_enabled: bool,
+        review_enabled: bool,
+        working_dir: impl Into<PathBuf>,
+        startup_warning: Option<String>,
+    ) -> Self {
+        Self {
+            model: model.into(),
+            preferred_language,
+            todo_enabled,
+            request_user_input_enabled,
+            review_enabled,
+            working_dir: working_dir.into(),
+            startup_warning,
+        }
+    }
+
+    fn reconcile_persona(&self, convo: &mut Conversation) {
+        let (mut block_1, block_2) = crate::persona::coding_persona_blocks_with_context(
+            &self.model,
+            self.preferred_language,
+            self.todo_enabled,
+            self.request_user_input_enabled,
+            self.review_enabled,
+            Some(&self.working_dir),
+        );
+        if let Some(warning) = &self.startup_warning {
+            block_1.push_str("\n\n<system-reminder>");
+            block_1.push_str(warning);
+            block_1.push_str("</system-reminder>");
+        }
+        let existing_b1 = convo
+            .messages
+            .iter()
+            .enumerate()
+            .take_while(|(_, m)| m.role == Role::System)
+            .find(|(_, m)| {
+                m.text.starts_with("<environment>")
+                    || m.text.starts_with("You are JeikCode")
+                    || m.text.starts_with("You are AtomCode")
+            })
+            .map(|(i, _)| i);
+
+        if let Some(idx) = existing_b1 {
+            convo.messages[idx] = Message::system(block_1);
+        } else {
+            convo.reconcile_system_block("<environment>", Some(block_1));
+        }
+
+        let existing_b2 = convo
+            .messages
+            .iter()
+            .enumerate()
+            .take_while(|(_, m)| m.role == Role::System)
+            .find(|(_, m)| {
+                m.text.starts_with("<workflow_and_execution_discipline>")
+                    || m.text.contains("CRITICAL PRECEDENCE")
+            })
+            .map(|(i, _)| i);
+
+        if let Some(idx) = existing_b2 {
+            convo.messages[idx] = Message::system(block_2);
+        } else {
+            convo.reconcile_system_block("<workflow_and_execution_discipline>", Some(block_2));
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl LifecycleHooks for CodingPersonaHook {
+    async fn session_start(&self, convo: &mut Conversation, _resumed: bool) {
+        self.reconcile_persona(convo);
+    }
+
+    async fn turn_start(&self, convo: &mut Conversation) {
+        self.reconcile_persona(convo);
+    }
 }
 
 #[cfg(test)]

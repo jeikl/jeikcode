@@ -142,7 +142,7 @@ import {
   type ChatRecoveryEvent,
   type ChatRecoveryState,
 } from '../lib/chatTerminal';
-import { formatTurnElapsed, stampLastAssistantElapsed, turnDurationMs } from '../lib/turnTimer';
+import { formatTurnElapsed, stampLastAssistantElapsed, turnDurationMs, turnTotalElapsedMs } from '../lib/turnTimer';
 import {
   acknowledgeLiveSteers,
   pendingSteersToDraft,
@@ -5310,9 +5310,8 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
               isLastInTurn && busy && isLast
                 ? turnDurationMs(userTs ?? turnStartedAt ?? undefined, nowMs)
                 : undefined;
-            const fromUser = turnDurationMs(userTs, msg.ts);
             const doneTotal = isLastInTurn && !busy
-              ? (fromUser && fromUser > 0 ? fromUser : msg.elapsedMs)
+              ? turnTotalElapsedMs(userTs, msg.ts, msg.elapsedMs)
               : undefined;
 
             return (

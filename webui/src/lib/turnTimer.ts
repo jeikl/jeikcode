@@ -26,6 +26,18 @@ export function turnDurationMs(userTs?: number, endTs?: number): number | undefi
   return endTs - userTs;
 }
 
+/** Done-turn "用时": prefer user-bubble → final answer, else the stamped
+ *  full-turn elapsed (never a lone last-round kernel duration when a span exists). */
+export function turnTotalElapsedMs(
+  userTs?: number,
+  endTs?: number,
+  elapsedMs?: number,
+): number | undefined {
+  const fromUser = turnDurationMs(userTs, endTs);
+  if (fromUser && fromUser > 0) return fromUser;
+  return elapsedMs;
+}
+
 /** Stamp `elapsedMs` (and optional completion time) onto the latest assistant
  *  message that does not already have a duration. */
 export function stampLastAssistantElapsed<T extends { role: string; elapsedMs?: number; ts?: number }>(

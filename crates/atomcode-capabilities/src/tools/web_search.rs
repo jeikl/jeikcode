@@ -129,9 +129,9 @@ impl Tool for WebSearchTool {
         "web_search"
     }
     fn description(&self) -> &str {
-        "Search the web for information — returns titles, URLs, and snippets. \
-         Trigger when the user explicitly requests searching online for authoritative documentation, or when encountering unfamiliar external library APIs, latest error solutions, or tech developments not present in the local codebase. \
-         Prefer searching local code first when local project information can resolve the issue."
+        "Search the web and return titles, URLs, and snippets. \
+         Use to consult technical documentation, external dependency issues, or recent information. \
+         Searching the web for issues resolvable via local code and docs is not supported."
     }
     fn parameters_schema(&self) -> serde_json::Value {
         json!({

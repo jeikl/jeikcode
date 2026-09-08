@@ -72,9 +72,8 @@ impl Tool for RepoMapTool {
     }
 
     fn description(&self) -> &str {
-        "Generate a complete repository directory structure tree. \
-         Use to explore unfamiliar codebase architecture and layouts. \
-         Do not use when the target file or module structure is already known."
+        "Generate a repository directory tree structure, supporting `tree`, `full`, and `symbols` output modes. \
+         Use to quickly understand overall project layout and module hierarchy."
     }
 
     fn parameters_schema(&self) -> serde_json::Value {

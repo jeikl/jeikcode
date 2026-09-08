@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { formatTurnElapsed, stampLastAssistantElapsed, turnDurationMs } from './turnTimer.ts';
+import { formatTurnElapsed, stampLastAssistantElapsed, turnDurationMs, turnTotalElapsedMs } from './turnTimer.ts';
 
 test('formatTurnElapsed stays in seconds until 60, then rolls to m:ss', () => {
   assert.equal(formatTurnElapsed(0), '0s');
@@ -38,4 +38,11 @@ test('turnDurationMs is user-bubble to end, not per-agent-round', () => {
   assert.equal(turnDurationMs(1000, 46000), 45000);
   assert.equal(turnDurationMs(undefined, 46000), undefined);
   assert.equal(turnDurationMs(5000, 4000), undefined);
+});
+
+test('turnTotalElapsedMs prefers the user-bubble span, else stamped full-turn elapsed', () => {
+  assert.equal(turnTotalElapsedMs(1000, 1_201_000, 18_000), 1_200_000);
+  assert.equal(turnTotalElapsedMs(undefined, undefined, 1_200_000), 1_200_000);
+  assert.equal(turnTotalElapsedMs(5000, 5000, 1_200_000), 1_200_000);
+  assert.equal(turnTotalElapsedMs(undefined, 9, undefined), undefined);
 });

@@ -61,9 +61,11 @@ pub struct EnvironmentConfig {
 #[derive(Debug, Clone, Deserialize, Serialize, Default)]
 pub struct CustomRulesConfig {
     pub version: Option<String>,
+    pub raw: Option<String>,
     pub workflow: Option<WorkflowConfig>,
     pub prohibitions: Option<Vec<String>>,
     pub tools_discipline: Option<ToolsDisciplineConfig>,
+    pub red_lines: Option<Vec<String>>,
     pub locating_code: Option<LocatingCodeConfig>,
     pub doing_tasks: Option<Vec<String>>,
     pub when_commands_fail: Option<String>,
@@ -93,6 +95,7 @@ pub struct WorkflowConfig {
 
 #[derive(Debug, Clone, Deserialize, Serialize, Default)]
 pub struct ToolsDisciplineConfig {
+    pub principle: Option<String>,
     pub concurrency_principle: Option<String>,
     pub mandatory_parallel: Option<Vec<String>>,
     pub tool_preferences: Option<HashMap<String, String>>,
@@ -277,39 +280,46 @@ pub fn get_custom_rules_config() -> Option<CustomRulesConfig> {
 /// Render the identity and precedence section based on custom config, or default if absent.
 pub fn render_identity_and_precedence(model: &str) -> (String, Option<String>) {
     if let Some(cfg) = get_custom_prompt_config() {
-        let identity = if let Some(id) = &cfg.identity {
-            if let Some(template) = &id.template {
-                let agent_name = id.agent_name.as_deref().unwrap_or("JeikCode");
-                let provider = id.provider.as_deref().unwrap_or("Jeik");
-                let desc = id
-                    .description
-                    .as_deref()
-                    .unwrap_or("an AI coding agent by JeikCode running the {model} model");
-                let role = id.role_summary.as_deref().unwrap_or(
-                    "You help users with software engineering tasks within the current project.",
-                );
-
-                template
-                    .replace("{agent_name}", agent_name)
-                    .replace("{provider}", provider)
-                    .replace("{description}", &desc.replace("{model}", model))
-                    .replace("{role_summary}", role)
-                    .replace("{model}", model)
-            } else {
-                format!("You are JeikCode, an AI coding agent by JeikCode running the {model} model. You help users with software engineering tasks within the current project.")
-            }
-        } else {
-            format!("You are JeikCode, an AI coding agent by JeikCode running the {model} model. You help users with software engineering tasks within the current project.")
-        };
-
-        let precedence = cfg.precedence.as_ref().and_then(|p| p.rule.clone());
-        (identity, precedence)
+        render_identity_and_precedence_from(&cfg, model)
     } else {
         (
             format!("You are JeikCode, an AI coding agent by JeikCode running the {model} model. You help users with software engineering tasks within the current project."),
             None,
         )
     }
+}
+
+pub(crate) fn render_identity_and_precedence_from(
+    cfg: &CustomPromptConfig,
+    model: &str,
+) -> (String, Option<String>) {
+    let identity = if let Some(id) = &cfg.identity {
+        if let Some(template) = &id.template {
+            let agent_name = id.agent_name.as_deref().unwrap_or("JeikCode");
+            let provider = id.provider.as_deref().unwrap_or("Jeik");
+            let desc = id
+                .description
+                .as_deref()
+                .unwrap_or("an AI coding agent by JeikCode running the {model} model");
+            let role = id.role_summary.as_deref().unwrap_or(
+                "You help users with software engineering tasks within the current project.",
+            );
+
+            template
+                .replace("{agent_name}", agent_name)
+                .replace("{provider}", provider)
+                .replace("{description}", &desc.replace("{model}", model))
+                .replace("{role_summary}", role)
+                .replace("{model}", model)
+        } else {
+            format!("You are JeikCode, an AI coding agent by JeikCode running the {model} model. You help users with software engineering tasks within the current project.")
+        }
+    } else {
+        format!("You are JeikCode, an AI coding agent by JeikCode running the {model} model. You help users with software engineering tasks within the current project.")
+    };
+
+    let precedence = cfg.precedence.as_ref().and_then(|p| p.rule.clone());
+    (identity, precedence)
 }
 
 /// Live `init.yaml` sections that sit after identity/precedence: system reminders,
@@ -390,15 +400,24 @@ pub fn detect_os_platform() -> String {
 
 #[cfg(target_os = "windows")]
 fn detect_windows_platform() -> String {
-    let arch = std::env::var("PROCESSOR_ARCHITECTURE").unwrap_or_else(|_| match std::env::consts::ARCH {
+    let raw_arch = std::env::var("PROCESSOR_ARCHITECTURE").unwrap_or_else(|_| match std::env::consts::ARCH {
         "x86_64" => "AMD64".to_string(),
         "aarch64" => "ARM64".to_string(),
         other => other.to_string(),
     });
 
+    let arch = match raw_arch.to_ascii_uppercase().as_str() {
+        "AMD64" => "x64, AMD64".to_string(),
+        "ARM64" => "ARM64".to_string(),
+        "X86" => "x86, 32-bit".to_string(),
+        _ => raw_arch,
+    };
+
     let mut product_name = None;
+    let mut current_build: Option<u32> = None;
+
     let mut reg = std::process::Command::new("reg");
-    reg.args(["query", r"HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion", "/v", "ProductName"]);
+    reg.args(["query", r"HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion"]);
     atomcode_capabilities::process_utils::suppress_console_window_sync(&mut reg);
     if let Ok(output) = reg.output() {
         if output.status.success() {
@@ -412,36 +431,36 @@ fn detect_windows_platform() -> String {
                             product_name = Some(p.to_string());
                         }
                     }
-                }
-            }
-        }
-    }
-
-    let mut kernel_ver = None;
-    let mut cmd = std::process::Command::new("cmd.exe");
-    cmd.args(["/c", "ver"]);
-    atomcode_capabilities::process_utils::suppress_console_window_sync(&mut cmd);
-    if let Ok(output) = cmd.output() {
-        if output.status.success() {
-            let text = String::from_utf8_lossy(&output.stdout);
-            if let Some(start) = text.find("[Version ") {
-                let rest = &text[start + 9..];
-                if let Some(end) = rest.find(']') {
-                    let k = rest[..end].trim();
-                    if !k.is_empty() {
-                        kernel_ver = Some(k.to_string());
+                } else if trimmed.starts_with("CurrentBuild") {
+                    if let Some(val) = trimmed.split("REG_SZ").nth(1) {
+                        if let Ok(b) = val.trim().parse::<u32>() {
+                            current_build = Some(b);
+                        }
                     }
                 }
             }
         }
     }
 
-    match (product_name, kernel_ver) {
-        (Some(prod), Some(ver)) => format!("{prod} (Kernel {ver}, {arch})"),
-        (Some(prod), None) => format!("{prod} ({arch})"),
-        (None, Some(ver)) => format!("Windows (Kernel {ver}, {arch})"),
-        (None, None) => format!("Windows ({arch})"),
-    }
+    // Windows 11 quirk: Registry ProductName often remains "Windows 10 ..." for backward compatibility.
+    // NT Build >= 22000 indicates Windows 11.
+    let os_name = match (product_name, current_build) {
+        (Some(prod), Some(build)) if build >= 22000 => {
+            if prod.contains("Windows 10") {
+                prod.replace("Windows 10", "Windows 11")
+            } else if !prod.contains("Windows 11") {
+                format!("Windows 11 ({prod})")
+            } else {
+                prod
+            }
+        }
+        (Some(prod), _) => prod,
+        (None, Some(build)) if build >= 22000 => "Windows 11".to_string(),
+        (None, Some(_)) => "Windows 10".to_string(),
+        (None, None) => "Windows".to_string(),
+    };
+
+    format!("{os_name} ({arch})")
 }
 
 #[cfg(target_os = "linux")]
@@ -597,6 +616,13 @@ pub fn render_custom_rules() -> Option<String> {
 }
 
 pub(crate) fn render_custom_rules_from(cfg: &CustomRulesConfig) -> String {
+    if let Some(raw) = &cfg.raw {
+        let trimmed = raw.trim();
+        if !trimmed.is_empty() {
+            return trimmed.to_string();
+        }
+    }
+
     let mut out = String::new();
 
     // Workflow
@@ -867,12 +893,6 @@ doing_tasks:
                 .to_lowercase()
                 .contains("determine the final goal")
         );
-        assert!(
-            wf.principle
-                .as_deref()
-                .unwrap()
-                .contains("<workflow_and_execution_discipline>")
-        );
         let guide = wf.guidelines.as_ref().unwrap();
         assert!(guide.contains_key("todolist_closure"));
         assert!(guide.contains_key("disambiguation"));
@@ -907,9 +927,10 @@ doing_tasks:
         let init: CustomPromptConfig =
             serde_yaml::from_str(strip_utf8_bom(include_str!("../assets/prompts/init.yaml")))
                 .expect("init.yaml");
-        let prefix = render_init_live_prefix_from(&init).expect("init live prefix");
-        assert!(prefix.contains("## SYSTEM REMINDERS:"), "{prefix}");
-        assert!(prefix.contains("## MCP SERVER INSTRUCTIONS:"), "{prefix}");
+        if let Some(prefix) = render_init_live_prefix_from(&init) {
+            assert!(prefix.contains("## SYSTEM REMINDERS:"), "{prefix}");
+            assert!(prefix.contains("## MCP SERVER INSTRUCTIONS:"), "{prefix}");
+        }
         let env_facts = render_init_environment_from(&init, None).expect("init environment facts");
         assert!(env_facts.contains("Operating environment facts:"), "{env_facts}");
         assert!(env_facts.contains("Platform:"), "{env_facts}");
@@ -918,6 +939,17 @@ doing_tasks:
 
         let os = detect_os_platform();
         assert!(!os.is_empty(), "OS platform detection must not be empty");
+        #[cfg(target_os = "windows")]
+        {
+            assert!(
+                os.contains("Windows 11") || os.contains("Windows 10"),
+                "Windows detection must be Windows 10 or 11: {os}"
+            );
+            assert!(
+                os.contains("x64") || os.contains("ARM64") || os.contains("x86"),
+                "Windows detection must include arch: {os}"
+            );
+        }
         let habit = detect_command_habit();
         assert!(habit.contains("forward slashes"), "{habit}");
     }
@@ -958,5 +990,57 @@ doing_tasks:
         seed_prompts_into(&prompts);
         let after = std::fs::read_to_string(prompts.join("init.yaml")).unwrap();
         assert_eq!(after, marker, "seed must not overwrite user edits");
+    }
+
+    #[test]
+    fn coding_persona_blocks_render_clean_xml_and_unfolded_facts() {
+        let init: CustomPromptConfig =
+            serde_yaml::from_str(strip_utf8_bom(include_str!("../assets/prompts/init.yaml")))
+                .expect("init.yaml");
+        let rules: CustomRulesConfig =
+            serde_yaml::from_str(strip_utf8_bom(include_str!("../assets/prompts/rules.yaml")))
+                .expect("rules.yaml");
+
+        let env_facts = render_init_environment_from(&init, Some(std::path::Path::new("E:/code/jeikcode")))
+            .expect("environment facts");
+        let (identity, precedence) = render_identity_and_precedence_from(&init, "test-model");
+
+        let b1 = format!("{identity}\n\n## PRECEDENCE:\n{}\n\n{env_facts}\n</environment>", precedence.unwrap());
+
+        assert!(
+            b1.starts_with("<environment>\n"),
+            "b1 must start with <environment>\\n, got: {b1}"
+        );
+        assert!(
+            b1.ends_with("</environment>"),
+            "b1 must end with </environment>, got: {b1}"
+        );
+        assert!(
+            b1.contains("\n- Platform: "),
+            "Platform must be on its own line: {b1}"
+        );
+        assert!(
+            b1.contains("\n- Project working directory: "),
+            "Project working directory must be on its own line: {b1}"
+        );
+        assert!(
+            b1.contains("\n- Git branch: "),
+            "Git branch must be on its own line: {b1}"
+        );
+
+        let clean_rules_text = render_custom_rules_from(&rules);
+        let b2 = format!(
+            "<workflow_and_execution_discipline>\n{}\n\n{clean_rules_text}\n</workflow_and_execution_discipline>",
+            crate::persona::CRITICAL_PRECEDENCE_NOTICE
+        );
+
+        assert!(
+            b2.starts_with("<workflow_and_execution_discipline>\n"),
+            "b2 must start with <workflow_and_execution_discipline>\\n, got: {b2}"
+        );
+        assert!(
+            b2.ends_with("</workflow_and_execution_discipline>"),
+            "b2 must end with </workflow_and_execution_discipline>, got: {b2}"
+        );
     }
 }

@@ -36,7 +36,7 @@ impl Tool for GlobalSearchReplaceTool {
         "global_search_replace"
     }
     fn description(&self) -> &str {
-        "Search and batch replace text with specified content across all matching files in a target directory or workspace."
+        "Batch search and replace text across directories. Use for project-wide string replacements and cross-file modifications."
     }
     fn parameters_schema(&self) -> serde_json::Value {
         json!({

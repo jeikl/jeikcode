@@ -436,8 +436,8 @@ export interface SessionMessage {
    *  on older daemons and on live/snapshot turns (the webui injects Date.now()
    *  there). Optional + `?` so historical payloads without it still parse. */
   created_at?: number;
-  /** Assistant-turn duration in ms (kernel MessageMeta.elapsed_ms). Survives
-   *  refresh / session switch. */
+  /** Whole user-turn wall-clock duration in ms (user send → final answer).
+   *  Survives refresh / session switch. Not a single LLM round. */
   elapsed_ms?: number;
 }
 

@@ -690,26 +690,9 @@ impl TodoTool {
     }
 }
 
-const TODOWRITE_DESCRIPTION: &str = "Maintain a structured multi-step task checklist for the target objective to ensure steps are neither omitted nor erroneous, delivering high quality. Trigger when a task requires rigorous, high-quality development, is evaluated as having 3 or more steps, or during execution when a significant new problem is uncovered, new steps must be inserted, obsolete steps removed, or progress updated upon completing one or more steps.\n\
-Prefer ONE `actions` array per turn for every REAL change of the SAME kind you already know.\n\
-Do NOT call this tool unless the list must change. Never re-mark an item already in that status \
-(no-op — wasted turn). A successful result reprints the numbered list — use THOSE ids next; \
-a failed result reprints the unchanged list — fix ids from it, do not retry blindly.\n\
-Titles (`content`) are unique: adding an existing title updates that row instead of duplicating it.\n\
-When EVERY item is completed, the next `add` starts a NEW plan at id 1 (closed plan is cleared).\n\
-In the same `add`+`update` batch you may address a new item as either its post-add id (1…) \
-or as if it appended after the list you last saw (old_len+1…).\n\
-Legal mixes only:\n\
-- `add` + `update` (add appends; existing ids do not shift unless the plan was already all-completed). First plan: add… + update #1 in_progress. `add` may set `status` directly.\n\
-- `clear` + `add` + `update` (`clear` ALWAYS runs first, then add, then update). Use this to replace a plan in ONE call.\n\
-- `insert` + `update` (internally inserts/re-ranks first, then updates — `id` is AFTER inserts). Insert of an existing title MOVES it.\n\
-- several `update` (any order; `id` is the current list).\n\
-- several `delete` (any order; `id` is the current list). Do NOT mix delete with anything else.\n\
-- `insert` stays with inserts/updates only. Do NOT mix insert with add/clear/delete.\n\
-Internal apply order is always: clear → delete → add → insert → update. Do not depend on JSON order for mixed kinds.\n\
-`id`/`position` are 1-based. update/delete order in the JSON does not matter.\n\
-The MOMENT you START a task set it `in_progress`; the MOMENT it is verified done set it `completed`.\n\
-Keep EXACTLY ONE task `in_progress` after the batch (enforced).";
+const TODOWRITE_DESCRIPTION: &str = "Create or maintain a multi-step checklist for a task. \
+Checklists are automatically cleared once all items are completed. \
+Use to plan tasks, track progress, and improve delivery quality.";
 
 #[async_trait]
 impl Tool for TodoTool {
@@ -1807,16 +1790,8 @@ mod tests {
     fn description_covers_both_plan_and_update_modes() {
         let t = TodoTool::new();
         let d = t.description();
-        assert!(d.contains("actions"), "prefers batch actions: {d}");
-        assert!(
-            d.contains("add") && d.contains("update") && d.contains("insert"),
-            "covers add/update/insert: {d}"
-        );
-        assert!(d.contains("in_progress"), "sets in_progress rule: {d}");
-        assert!(
-            d.contains("already in that status") && d.contains("do not retry"),
-            "discourages no-op / blind retry: {d}"
-        );
+        assert!(d.contains("checklist"), "covers checklist: {d}");
+        assert!(d.contains("task"), "covers task: {d}");
     }
 
     #[tokio::test]

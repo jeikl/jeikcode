@@ -46,7 +46,7 @@ impl Tool for EditFileTool {
         "edit_file"
     }
     fn description(&self) -> &str {
-        "Perform exact string replacements in existing files to modify content."
+        "Modify file content via exact string replacement. Use for targeted, partial file edits."
     }
     fn parameters_schema(&self) -> serde_json::Value {
         json!({

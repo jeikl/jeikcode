@@ -112,7 +112,12 @@ or project commit-message rule takes precedence."
 }
 
 pub const CRITICAL_PRECEDENCE_NOTICE: &str =
-    "⚡ CRITICAL PRECEDENCE (ABSOLUTE HIGHEST PRIORITY): Rules, constraints, and requirements under headers matching '=== ... (*.md) ===' (such as AGENTS.md, CLAUDE.md, rules.md, glossary.md, dbwords.md, MEMORY, etc.) take STRICT AND ABSOLUTE PRECEDENCE over these default workflow rules! Unconditionally obey project instructions.";
+    "Critical Precedence: Rules under headers matching `=== ... (*.md) ===` (such as `AGENTS.md`, `rules.md`, `glossary.md`, `=== MEMORY ===`, etc.) constitute USER PROVISIONS. When in conflict with default behaviors, strictly prioritize user provisions.";
+
+pub const CRITICAL_PRECEDENCE_NOTICE_EN: &str = CRITICAL_PRECEDENCE_NOTICE;
+
+pub const CRITICAL_PRECEDENCE_NOTICE_ZH: &str =
+    "最高优先级裁决：匹配 `=== ... (*.md) ===` 标题下的规则（如 `AGENTS.md`、`rules.md`、`glossary.md`、`=== MEMORY ===` 等）属于【用户条款】，当与默认行为冲突时，严格优先遵循用户条款。";
 
 pub fn coding_persona(model: &str, todo_enabled: bool, request_user_input_enabled: bool) -> String {
     let (b1, b2) = coding_persona_blocks(model, todo_enabled, request_user_input_enabled);
@@ -260,8 +265,31 @@ project files, memories, skills, or tool output.)".to_string()
         }
     }
 
-    // Block 2: Workflow & Discipline (with CRITICAL PRECEDENCE injected at the very top line)
-    let mut block_2 = format!("{CRITICAL_PRECEDENCE_NOTICE}\n\n{rules_text}");
+    // Block 2: Workflow & Discipline (wrapped in <workflow_and_execution_discipline> with CRITICAL PRECEDENCE injected at top)
+    let clean_rules_text = rules_text
+        .trim()
+        .strip_prefix("<workflow_and_execution_discipline>")
+        .unwrap_or(&rules_text)
+        .trim();
+    let clean_rules_text = clean_rules_text
+        .strip_suffix("</workflow_and_execution_discipline>")
+        .unwrap_or(clean_rules_text)
+        .trim();
+    let clean_rules_text = clean_rules_text
+        .strip_prefix(CRITICAL_PRECEDENCE_NOTICE)
+        .unwrap_or(clean_rules_text)
+        .trim();
+    let clean_rules_text = clean_rules_text
+        .strip_prefix(CRITICAL_PRECEDENCE_NOTICE_ZH)
+        .unwrap_or(clean_rules_text)
+        .trim();
+    let clean_rules_text = clean_rules_text
+        .strip_prefix("⚡ CRITICAL PRECEDENCE")
+        .unwrap_or(clean_rules_text)
+        .trim();
+    let mut block_2 = format!(
+        "<workflow_and_execution_discipline>\n\n{CRITICAL_PRECEDENCE_NOTICE}\n\n{clean_rules_text}"
+    );
 
     // Models with weaker soft-instruction adherence (observed: GLM, DeepSeek shell out
     // `ls`/`grep` despite the persona preference) get an extra, blunt restatement of the
@@ -317,6 +345,8 @@ project files, memories, skills, or tool output.)".to_string()
     if atomcode_config::config::offline::is_offline_active() {
         block_2.push_str(&offline_environment_block());
     }
+
+    block_2.push_str("\n</workflow_and_execution_discipline>");
 
     (block_1, block_2)
 }

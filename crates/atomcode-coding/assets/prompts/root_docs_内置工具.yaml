@@ -16,8 +16,8 @@ tools:
   # ============================================================================
   - name: "read_file"
     category: "filesystem"
-    # 【中文】：读取指定文件的内容。输出为带有行号的前缀文本，格式为 '<line_number>→<content>'。
-    description: "Read file contents. Output is line-numbered text formatted as '<line_number>→<content>'."
+    # 【中文】：读取指定文件的内容并返回带行号的内容（格式为 '<line_number>→<content>'），支持通过 offset 和 limit 截取指定行范围。用于读取文件内容或代码上下文。
+    description: "Read file contents with line-number prefix formatted as '<line_number>→<content>', with support for offset and limit. Use to read file contents and code context."
     parameters:
       file_path:
         type: "string"
@@ -39,8 +39,8 @@ tools:
 
   - name: "write_file"
     category: "filesystem"
-    # 【中文】：将完整内容写入文件，若文件已存在则全量覆写，不存在时则自动创建目录和文件。用于创建全新文件，或对现有文件进行完全重写。切勿在未事先使用 read_file 读取现有文件的情况下直接覆写，禁止用于局部代码修改。
-    description: "Write full content to a file, overwriting existing files or automatically creating directories and files if absent. Use for creating new files or full rewrites. Never overwrite without reading via `read_file` first, and do not use for partial edits."
+    # 【中文】：向文件写入完整内容，若文件不存在则自动创建所需父目录。必须先使用 read_file 读取文件内容后再写入。用于创建全新文件或完全覆写现有文件，局部修改是不支持的。
+    description: "Write full content to a file, automatically creating parent directories if absent. Read the file with `read_file` before writing. Use for creating new files or fully replacing existing files; partial modifications are not supported."
     parameters:
       file_path:
         type: "string"
@@ -56,8 +56,8 @@ tools:
 
   - name: "edit_file"
     category: "filesystem"
-    # 【中文】：在现有文件中批量执行精确字符串替换用于修改文件内容。
-    description: "Perform exact string replacements in existing files to modify content."
+    # 【中文】：通过精确字符串匹配替换现有文件中的代码片段。修改前请先使用 read_file 获取精确内容。用于局部修改文件内容。
+    description: "Perform exact string replacements in existing files. Read the file with `read_file` before editing. Use for partial file modifications."
     parameters:
       file_path:
         type: "string"
@@ -90,8 +90,8 @@ tools:
 
   - name: "list_directory"
     category: "filesystem"
-    # 【中文】：列出指定目录下的直接文件与子目录（感知 .gitignore）。用于检查某一个已知具体目录的直接子项，如果是初次探索工作区，建议并行配合 repomap工具 共同检索。
-    description: "List immediate files and subdirectories in a directory (respects .gitignore). Use to inspect direct children of a known directory. For initial workspace exploration, pair with repo_map."
+    # 【中文】：列出指定目录下的直接子文件与子目录，自动忽略 .gitignore 中的条目。用于检查已知目录的下一层结构。查看宏观项目布局时配合 repo_map 使用。
+    description: "List immediate files and subdirectories in a directory, automatically ignoring `.gitignore` entries. Use to inspect the direct children of a known directory. Pair with `repo_map` when viewing overall project layout."
     parameters:
       target_directory:
         type: "string"
@@ -108,8 +108,8 @@ tools:
 
   - name: "glob"
     category: "filesystem"
-    # 【中文】：跨目录查找匹配通配符模式的文件。用于按文件名、扩展名或目录结构定位文件路径。
-    description: "Find files matching a glob pattern across directories. Use to locate file paths by name, extension, or directory layout."
+    # 【中文】：跨目录按通配符模式匹配文件路径。用于按文件名、扩展名或路径模式查找文件位置。通过文件名寻找符号定义时配合 grep 或 code_explore 使用。
+    description: "Match file paths across directories using glob patterns. Use to find file locations by name, extension, or path pattern. Pair with `grep` or `code_explore` when locating symbol definitions by filename."
     parameters:
       pattern:
         type: "string"
@@ -131,8 +131,8 @@ tools:
 
   - name: "global_search_replace"
     category: "filesystem"
-    # 【中文】：在指定目录或工作区下全局搜索并批量替换所有匹配文件中的文本为指定内容。
-    description: "Search and batch replace text with specified content across all matching files in a target directory or workspace."
+    # 【中文】：在指定目录或工作区下，跨文件批量查找并替换所有匹配的文本。支持正则捕获组。修改前请先充分检索。用于大规模重构与跨文件重命名。
+    description: "Search and batch-replace text across matching files in a directory or workspace, supporting regex capture groups. Thoroughly search before modifying. Use for large-scale refactoring and project-wide renames."
     parameters:
       search:
         type: "string"
@@ -164,8 +164,8 @@ tools:
 
   - name: "grep"
     category: "filesystem"
-    # 【中文】：通过正则表达式或字面字符串搜索文件内容。用于跨文件检索精确文本、报错或符号定义。定位到具体符号时建议换用 code_explore 查看调用关系。
-    description: "Search file contents by regular expression or literal string. Use to search for exact text, error strings, or symbols across files. When identifying a specific code symbol, switch to `code_explore`."
+    # 【中文】：使用正则或纯文本在文件中搜索内容，支持上下文行输出、忽略大小写与文件过滤。用于查找错误日志、精确文本片段或符号名。探索代码调用关系时请使用 code_explore。
+    description: "Search file contents by regular expression or literal text, supporting context lines, case-insensitivity, and glob filtering. Use to find error messages, exact text snippets, or symbol names. Use `code_explore` when tracing call relationships."
     parameters:
       pattern:
         type: "string"
@@ -204,8 +204,8 @@ tools:
 
   - name: "open_file"
     category: "filesystem"
-    # 【中文】：在操作系统默认程序中打开或预览本地文件。
-    description: "Open/preview a local file in default system GUI."
+    # 【中文】：在系统默认程序中打开文件、目录或网址。用户明确要求预览内容、查看目录或任务过程中需要启动外部程序时使用。
+    description: "Open a file, directory, or URL in the default system application. Use when the user explicitly requests previewing content, opening a directory, or launching an external application during a task."
     parameters:
       path:
         type: "string"
@@ -215,8 +215,8 @@ tools:
 
   - name: "bash"
     category: "system"
-    # 【中文】：在工作目录下执行终端命令，返回标准输出和退出码。用于 git、编译构建、包管理、跑测试和后台进程。文件读写与修改请用专用文件工具，禁止用 shell 命令修改文件。
-    description: "Run a shell command in the working directory and return its combined stdout/stderr and exit code. Output streams live while it runs. Prefer dedicated tools over bash for file operations. Reserve bash for real shell work — git, builds, package managers, running test suites, system inspection, dev servers, background processes."
+    # 【中文】：在工作目录下执行终端命令并返回标准输出、标准错误和退出码。用于编译构建、测试、包管理、Git 操作、运行二进制与检查进程状态。不支持使用 && 串联多条命令（请使用分号 ; 隔开）。不可在此工具中调用 read_file、grep、glob、list_directory 等文件工具。此终端不具备键盘交互输入，不支持分页器、REPL、tail -f 及需要按键确认的命令。
+    description: "Execute a shell command and return stdout, stderr, and exit code. Use for builds, tests, package management, Git operations, binaries, and process checks. Chaining commands with `&&` is not supported; use `;` instead. `read_file`, `grep`, `glob`, `list_directory`, `ls`, `head`, `tail`, `sed`, `awk`, and `find` are not available in this shell tool. Shell pipelines and aggregation (such as wc, sort, uniq, git log) are supported. This shell has no keyboard input; pagers, REPLs, `tail -f`, and commands requiring keyboard interaction are not supported."
     parameters:
       command:
         type: "string"
@@ -232,8 +232,8 @@ tools:
 
   - name: "long_bash_keyword_actions"
     category: "system"
-    # 【中文】：添加或删除被视作长任务超时的 Bash 命令关键字（如 mvn、cargo、ninja 等），提升其超时限制以避免被判定为空闲而终止。当慢速编译构建、测试命令因超时挂起需加入白名单时触发。禁止用于常驻服务或后台守护进程。
-    description: "Add or remove command keywords treated as long-running batch jobs (e.g. `mvn`, `cargo`, `ninja`) to prevent idle timeouts. Trigger when whitelisting slow build or test commands. Do not use for resident services or background daemons."
+    # 【中文】：为长时间运行的命令注册或注销超时白名单关键字（如 cargo、npm、pytest），避免被视为空闲而终止。仅用于耗时较长的编译构建和测试命令。常驻服务或守护进程是不支持的。
+    description: "Register or unregister timeout-whitelist keywords for long-running batch commands (such as `cargo`, `npm`, `pytest`) to avoid being terminated as idle. Use for lengthy compilation, builds, and test suites. Resident services and daemons are not supported."
     parameters:
       action:
         type: "string"
@@ -255,8 +255,8 @@ tools:
 
   - name: "bash_kill_by_id"
     category: "system"
-    # 【中文】：通过 bashid 强制终止后台正在运行的终端命令进程。当后台命令卡住、超时挂起或不再需要时触发。
-    description: "Terminate a running background bash command by its `bashid`. Trigger when stopping a stuck, timed-out, or unwanted background bash task."
+    # 【中文】：通过命令 ID 强制终止后台正在运行的终端任务。用于终止无响应、超时挂起或不再需要的后台命令。
+    description: "Terminate a background shell task by its command ID. Use to stop unresponsive, hung, or unneeded background processes."
     parameters:
       bashid:
         type: "string"
@@ -269,8 +269,8 @@ tools:
   # ============================================================================
   - name: "repo_map"
     category: "codeintel"
-    # 【中文】：生成完整仓库目录结构树。用于探索不熟悉的代码整体架构布局。当目标文件或所在模块结构明确已知时请勿使用。
-    description: "Generate a complete repository directory structure tree. Use to explore unfamiliar codebase architecture and layouts. Do not use when the target file or module structure is already known."
+    # 【中文】：生成仓库目录树结构，支持 tree、full 和 symbols 输出模式。用于快速理解全局项目布局与模块层级。
+    description: "Generate a repository directory tree structure, supporting `tree`, `full`, and `symbols` output modes. Use to quickly understand overall project layout and module hierarchy."
     parameters:
       path:
         type: "string"
@@ -294,8 +294,8 @@ tools:
 
   - name: "code_explore"
     category: "codeintel"
-    # 【中文】：在当前代码仓库、指定目录、指定文件下进行代码图谱检索，可以通过局部的答案关联检索出整个当前工作目录中的代码全景调用链路、逻辑、关系，比 grep 高效。当用户提问涉及业务关键词（支持中英文），或在 grep、read_file、glob 等操作时发现相关中英文注释、精确代码符号、代码符号关键词、业务术语黑话等关键信息时触发。
-    description: "Perform semantic code-graph retrieval across the repository, a specific directory, or a target file. Resolves complete call graphs, logic flows, and symbol relationships from localized clues to explore how a business logic actually operates, far more efficient than grep. Trigger when user queries involve business keywords (Chinese or English), or when previous operations (`grep`, `read_file`, `glob`) reveal relevant comments, exact symbols, symbol keywords, or domain jargon/terminology."
+    # 【中文】：通过语义代码图谱检索代码调用关系与业务流转，支持中英文自然语言查询。用于顺藤摸瓜排查业务关键词、注释或符号在全库中的流转，以及追踪调用链路、变量引用和逻辑脉络。
+    description: "Retrieve code call relationships and business flows using a semantic code graph, supporting natural-language queries in Chinese and English. Use to trace how business keywords, comments, or symbols operate across the codebase, as well as tracking call chains, variable references, and logic flows."
     parameters:
       path:
         type: "string"
@@ -321,8 +321,8 @@ tools:
   # ============================================================================
   - name: "todowrite"
     category: "task"
-    # 【中文】：为任务目标规划、创建、管理一个多步骤的任务清单，保证任务步骤不疏漏、不出错、高质量交付。当一个任务需要严格、高质量开发、评估有 3 步以上操作时，或在执行过程中，发现了新的一个比较大块的问题，或需要插入若干新步骤、删除某些没必要的步骤、或完成一个及以上步骤需要同步更新进度时触发。
-    description: "Maintain a structured multi-step task checklist for the target objective to ensure steps are neither omitted nor erroneous, delivering high quality. Trigger when a task requires rigorous, high-quality development, is evaluated as having 3 or more steps, or during execution when a significant new problem is uncovered, new steps must be inserted, obsolete steps removed, or progress updated upon completing one or more steps."
+    # 【中文】：为目标任务建立或维护结构化的多步骤清单，所有项完成后自动清空重置。用于规划任务、跟踪进度并提升交付质量。
+    description: "Create or maintain a multi-step checklist for a task. Checklists are automatically cleared once all items are completed. Use to plan tasks, track progress, and improve delivery quality."
     parameters:
       actions:
         type: "array"
@@ -360,8 +360,8 @@ tools:
 
   - name: "request_user_input"
     category: "interaction"
-    # 【中文】：向用户弹出结构化单选、多选或文本输入弹窗，让用户提供出他想要的方向。仅在遇到用户的方向缺失关键信息、遇到歧义、改动涉及面较大或出现必须用户决策确认的方案、问题时等情况时调用。
-    description: "Prompt the user with a structured single, multiple-choice, or text input modal to obtain their intended direction. Trigger only when key information is missing from the user's intent, when encountering ambiguity, when changes have broad impact, or when decisions and confirmations are strictly required."
+    # 【中文】：弹出单选、多选或纯文本输入框以收集用户输入。用于信息不全、存在多种可行方案、缺失密钥/Token 或执行破坏性操作需用户确认时。向用户询问可自主决定的事项是不支持的。
+    description: "Present a single-choice, multiple-choice, or text input prompt to collect user input. Use when information is insufficient, multiple approaches exist, secrets or tokens are needed, or destructive actions require confirmation. Inquiring about matters that can be determined autonomously is not supported."
     parameters:
       questions:
         type: "array"
@@ -405,20 +405,10 @@ tools:
         required: false
         description: "Note content."
 
-  - name: "recall"
-    category: "memory"
-    # 【中文】：检索与当前任务相关的跨会话历史记忆与用户偏好。当需要回顾历史决策、用户习惯或之前会话明确记录的规范时触发。
-    description: "Recall past session conversation context."
-    parameters:
-      query:
-        type: "string"
-        required: true
-        description: "Search keywords."
-
   - name: "task"
     category: "subagent"
-    # 【中文】：派生子代理。参数是 tasks 数组，不是顶层 subagent_type。
-    description: "Spawn isolated subagents. Pass tasks:[{description,prompt,subagent_type,scope?}]. JSON array, not a string."
+    # 【中文】：派发子代理执行独立的子任务。explore 为只读探查，worker 可修改文件且必须声明 scope 限定写入范围。用于复杂探索和适合独立推进的并行任务。
+    description: "Dispatch subagents to execute isolated subtasks. `explore` is read-only for research and findings; `worker` can edit files and must declare a `scope` to restrict write access. Use for complex exploration and parallel tasks that benefit from independent execution."
     parameters:
       tasks:
         type: "array"
@@ -442,8 +432,8 @@ tools:
 
   - name: "code_review"
     category: "subagent"
-    # 【中文】：触发代码评审子代理审查已暂存或未提交的代码变更质量与规范。在完成大范围重构、核心逻辑修改准备交付时触发。
-    description: "Run code review on staged or uncommitted changes."
+    # 【中文】：对工作区或 Git 变更执行只读代码评审，按正确性、安全性、可靠性排序风险。用于合并前检查或提交前的自检。
+    description: "Run a read-only review of workspace or Git changes, ranking risks by correctness, security, and reliability. Use for pre-merge inspection or pre-commit self-checks."
     parameters:
       scope:
         type: "string"
@@ -452,8 +442,8 @@ tools:
 
   - name: "fetch_output"
     category: "utility"
-    # 【中文】：根据工件 ID 取回之前被折叠截断的超长工具完整输出内容。当某次工具调用的输出过长被截断且需要深入分析未显示的日志或代码时触发。
-    description: "Fetch folded tool output by artifact ID."
+    # 【中文】：分片获取之前被截断的工具输出内容。用于前序工具输出末尾带有 artifact_id 截断标记时获取剩余内容。
+    description: "Fetch remaining chunks of truncated tool output. Use when a previous tool result ends with an `artifact_id` truncation marker."
     parameters:
       artifact_id:
         type: "string"
@@ -462,8 +452,8 @@ tools:
 
   - name: "jeikcode_config_guide"
     category: "utility"
-    # 【中文】：查询 JeikCode 官方配置教程、规范及目录说明。当用户请求协助新增或编辑模型、提供商、模型参数（如 reasoning_effort、token、上下文限制等）、提示词、MCP、Skills 时触发。请勿用于查询当前已挂载了哪些 MCP、Skill 或工具，请直接基于当前上下文回答。
-    description: "Query JeikCode configuration tutorials, specifications, and directory descriptions. Trigger when the user requests help adding or editing models, providers, model parameters (such as reasoning_effort, token, context limits), prompts, MCP, or Skills. Do not use to query which MCPs, Skills, or tools are currently mounted; answer based on your active context instead."
+    # 【中文】：查询 JeikCode 配置指南、目录布局与架构规范。用于用户询问如何配置模型、新增提供商、调整 reasoning effort、挂载 MCP、编写 Skill 或管理规则时。查询当前会话已挂载的 MCP 或技能是不支持的（已包含在当前上下文中）。
+    description: "Query JeikCode configuration guides, directory layouts, and architecture specifications. Use when the user asks how to configure models, add providers, adjust reasoning effort, mount MCP servers, write skills, or manage rules. Querying currently mounted MCP servers or skills is not supported as they are already available in the context."
     parameters:
       topic:
         type: "string"
@@ -472,13 +462,25 @@ tools:
         # 【中文】：待检索的主题分类
         description: "Category of configuration guide to retrieve: 'overview', 'prompts', 'models', 'providers', 'mcp', 'skills', 'thesaurus', 'tools', 'directories', 'project', 'updates', or 'all'."
 
+  - name: "jeikcode_config_reload"
+    category: "utility"
+    # 【中文】：在当前会话中热重载配置而无需重启。用于修改并保存 ~/.atomcode 或项目目录下的配置文件（如 config.toml、mcp.json 等）后使其立即生效。
+    description: "Hot-reload configuration in the active session without restarting. Use after modifying and saving configuration files (such as `config.toml` or `mcp.json`) under `~/.atomcode` or project directories."
+    parameters:
+      scope:
+        type: "string"
+        required: false
+        enum: ["all", "mcp", "config"]
+        # 【中文】：可选的作用域提示（'all', 'mcp', 'config'）
+        description: "Optional scope hint ('all', 'mcp', 'config'). The runtime reloads config.toml, MCP, and skills together."
+
   # ============================================================================
   # 四、网络与技能 (Web & Skills)
   # ============================================================================
   - name: "web_fetch"
     category: "web"
-    # 【中文】：通过 http(s) 抓取网页并提取转换其内容为 Markdown。当用户提问中包含网页链接且明确要求基于该网页内容回答，或查看网络搜索结果中的具体链接内容时使用。
-    description: "Fetch a web page over http(s) and convert its content to Markdown. Use when user input contains a web link and explicitly requests answering based on its content, or when viewing content from links found during web search."
+    # 【中文】：通过 HTTP/HTTPS 抓取网页并提取转换为 Markdown 格式。用于获取用户提供链接的网页内容或查看网络搜索结果中的页面。
+    description: "Fetch an HTTP/HTTPS webpage and convert its content to Markdown. Use to retrieve documentation or pages from user-provided URLs or search results."
     parameters:
       url:
         type: "string"
@@ -488,8 +490,8 @@ tools:
 
   - name: "web_search"
     category: "web"
-    # 【中文】：通过搜索引擎检索互联网公开信息与最新技术资料。当用户明确要求上网查权威资料、或遇到本地项目代码且自己不知道的外部库用法、最新错误解决方案或技术动态时触发。已有项目内信息可解决时请优先检索本地代码。
-    description: "Search the web for information — returns titles, URLs, and snippets. Trigger when the user explicitly requests searching online for authoritative documentation, or when encountering unfamiliar external library APIs, latest error solutions, or tech developments not present in the local codebase. Prefer searching local code first when local project information can resolve the issue."
+    # 【中文】：搜索互联网公开信息并返回标题、网址与摘要。用于查阅外部技术文档、第三方依赖问题或最新资讯。通过本地代码和文档可解决的问题，联网搜索是不支持的。
+    description: "Search the web and return titles, URLs, and snippets. Use to consult technical documentation, external dependency issues, or recent information. Searching the web for issues resolvable via local code and docs is not supported."
     parameters:
       query:
         type: "string"

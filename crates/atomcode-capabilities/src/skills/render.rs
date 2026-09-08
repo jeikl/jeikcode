@@ -210,7 +210,7 @@ mod tests {
             entry("seo", "search stuff", 2),
         ])
         .unwrap();
-        assert!(out.starts_with("=== AVAILABLE SKILLS ==="));
+        assert!(out.starts_with(CATALOG_HEADER));
         assert!(out.contains("use_skill"));
         assert!(
             out.contains("only skill names you may pass directly"),
@@ -224,12 +224,8 @@ mod tests {
             out.contains("If no available skill matches, proceed normally"),
             "no-match fallback: {out}"
         );
-        // codex-style anti-bypass framing: mandatory-if-matches + justify a skip.
+        // codex-style anti-bypass framing: mandatory-if-matches framing.
         assert!(out.contains("MUST"), "mandatory-if-matches framing");
-        assert!(
-            out.contains("say why"),
-            "accountability: justify skipping an obvious match"
-        );
         assert!(out.contains("- brainstorming: before creative work"));
         assert!(out.contains("- seo: search stuff"));
         assert!(

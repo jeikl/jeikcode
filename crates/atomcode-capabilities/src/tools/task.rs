@@ -364,17 +364,10 @@ impl Tool for TaskTool {
     }
 
     fn description(&self) -> &str {
-        "Dispatch one or more subtasks to isolated subagents. Each task: {description, \
-prompt, subagent_type: 'explore'|'worker', difficulty: 'simple'|'hard'}. 'explore' = \
-read-only investigation returning findings; 'worker' = edits files then stops (you review \
-the diff afterward). 'simple' runs on the fast model, 'hard' on the capable model. Give \
-each worker a TIGHTLY-specified task and non-overlapping file scopes when dispatching \
-several. Subagents run in parallel and cannot themselves dispatch. The WHOLE batch is \
-emitted as ONE JSON payload, so keep each `prompt` concise and dispatch in small batches \
-(a few at a time): many long prompts in one call can overflow the model's output and be \
-rejected as invalid JSON — prefer several smaller calls over one huge one. Each `worker` \
-MUST declare a `scope` (working-dir-relative globs) listing the files it may write; give \
-parallel workers NON-OVERLAPPING scopes."
+        "Dispatch subagents to execute isolated subtasks. \
+         `explore` is read-only for research and findings; \
+         `worker` can edit files and must declare a `scope` to restrict write access. \
+         Use for complex exploration and parallel tasks that benefit from independent execution."
     }
 
     fn parameters_schema(&self) -> serde_json::Value {

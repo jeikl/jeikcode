@@ -1471,6 +1471,7 @@ fn live_stream_from_registry(
         .iter()
         .map(crate::MessageInfo::from_kernel)
         .collect();
+    crate::stamp_turn_elapsed_on_last_assistants(&mut snapshot_messages, &[]);
     crate::attach_display_images(&mut snapshot_messages, &working_dir, &session_id);
     let _ = tx.send(LiveWireEvent::Snapshot {
         messages: snapshot_messages,
@@ -1577,6 +1578,7 @@ fn live_stream_from_hub_join(join: crate::live_hub::LiveJoin) -> axum::response:
         .iter()
         .map(crate::MessageInfo::from_kernel)
         .collect();
+    crate::stamp_turn_elapsed_on_last_assistants(&mut snapshot_messages, &[]);
     // Re-attach display-only images (VL-preprocessed originals) so a refresh — which
     // rebuilds from the kernel snapshot (image stripped) — shows the thumbnail, not the
     // "missing image" placeholder. Same sidecar the HTTP session-load path reads.

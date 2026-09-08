@@ -27,7 +27,7 @@ use atomcode_capabilities::memory::MemoryHook;
 
 use atomcode_capabilities::session::snapshot::SnapshotPersistenceStatus;
 use atomcode_capabilities::session::{
-    DisplayAnchor, PresentationEntry, PresentationFile, PresentationRole, RecallTool,
+    DisplayAnchor, PresentationEntry, PresentationFile, PresentationRole,
     SessionContextHook, SessionLease, SessionManager, SessionMeta, SnapshotHook,
     StatusReminderHook, StorageOwner, TranscriptHook,
 };
@@ -645,10 +645,6 @@ async fn prepare_with_plugin_hooks_reusing_lease(
         if let Ok(path) = b.manager.bashkw_path(&b.id) {
             atomcode_capabilities::tools::bind_session_long_keywords(path, keywords);
         }
-        registry.register(Arc::new(
-            RecallTool::new().with_sessions_dir(b.manager.root()),
-        ));
-        names.push("recall".into());
     }
 
     let session_mcp_lease = if opts.mcp {
@@ -669,9 +665,9 @@ async fn prepare_with_plugin_hooks_reusing_lease(
         .map(atomcode_capabilities::mcp::SessionMcpLease::registry);
 
     // Hooks in the CANONICAL ORDER (registration order = HookChain execution order):
-    // 1. SessionContextHook — session_start: inject env + git snapshot as System (Block 6, order 60),
-    //    and project-instructions (AGENTS.md / glossary) as frozen synthetic User (Block 5) inside
-    //    sacred_floor. Rewrites instructions in place on turn_start.
+    // 1. SessionContextHook — session_start: inject project-instructions (AGENTS.md /
+    //    glossary) as frozen synthetic User inside sacred_floor; purges redundant baseline.
+    //    Rewrites instructions in place on turn_start.
     // 2. MemoryHook    — session_start: inject memory.md as a frozen synthetic User
     //    after the leading-system run (fresh inject / resume reconcile). Inside
     //    sacred_floor — compaction cannot drain it.
@@ -1422,12 +1418,16 @@ pub fn assemble(
             .register(Arc::new(FetchOutputTool::new(store.clone())));
     }
 
-    let (block_1, block_2) = crate::persona::coding_persona_blocks_with_capabilities(
+    // Must pass cfg.working_dir: the live/WebUI path never std::env::set_current_dir,
+    // so falling back to process cwd leaves Block 1 stuck on the launch directory
+    // after a path-picker /cd (tools follow the new workspace, the model does not).
+    let (block_1, block_2) = crate::persona::coding_persona_blocks_with_context(
         &cfg.model,
         cfg.preferred_language,
         parts.todo_enabled,
         parts.request_user_input_enabled,
         parts.review_provider.is_some(),
+        Some(&cfg.working_dir),
     );
     let mut builder = Agent::builder()
         .provider(provider)
@@ -1584,6 +1584,18 @@ pub fn assemble(
     if let Some(d) = cfg.request_timeout {
         builder = builder.request_timeout(d);
     }
+    // Live Block 1/2 reconciliation (init.yaml / rules.yaml mtime + working_dir).
+    // Wired here rather than `prepare` so a /model swap (assemble-only) rebuilds
+    // the hook against the current model, and a /cd reprepare picks up the new cwd.
+    builder = builder.hook(Arc::new(crate::CodingPersonaHook::new(
+        &cfg.model,
+        cfg.preferred_language,
+        parts.todo_enabled,
+        parts.request_user_input_enabled,
+        parts.review_provider.is_some(),
+        cfg.working_dir.clone(),
+        None,
+    )));
     for h in &parts.hooks {
         builder = builder.hook(h.clone());
     }
@@ -1717,7 +1729,8 @@ fn is_persona_block_1(message: &Message) -> bool {
     if message.role != Role::System {
         return false;
     }
-    message.text.starts_with(ATOMCODE_PERSONA_PREFIX)
+    message.text.starts_with("<environment>")
+        || message.text.starts_with(ATOMCODE_PERSONA_PREFIX)
         || message.text.starts_with("You are JeikCode")
         || message.text.starts_with("You are AtomCode")
         || (message.text.contains(" running the ")
@@ -1729,7 +1742,8 @@ fn is_persona_block_2(message: &Message) -> bool {
     if message.role != Role::System {
         return false;
     }
-    message.text.starts_with(crate::persona::CRITICAL_PRECEDENCE_NOTICE)
+    message.text.starts_with("<workflow_and_execution_discipline>")
+        || message.text.starts_with(crate::persona::CRITICAL_PRECEDENCE_NOTICE)
         || message.text.starts_with("⚡ CRITICAL PRECEDENCE")
         || message.text.starts_with("# WORKFLOW & DISCIPLINE")
         || (message.text.contains("## WORKFLOW:") && !is_persona_block_1(message))
@@ -1749,12 +1763,13 @@ fn reconcile_coding_persona(
     request_user_input_enabled: bool,
     review_enabled: bool,
 ) {
-    let (block_1, block_2) = crate::persona::coding_persona_blocks_with_capabilities(
+    let (block_1, block_2) = crate::persona::coding_persona_blocks_with_context(
         &cfg.model,
         cfg.preferred_language,
         todo_enabled,
         request_user_input_enabled,
         review_enabled,
+        Some(&cfg.working_dir),
     );
     let is_persona = |message: &Message| is_persona_message(message);
     let is_model_change = |message: &Message| {
@@ -1960,6 +1975,44 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial(atomcode_home)]
+    fn reconcile_persona_embeds_config_working_dir_not_process_cwd() {
+        let home = tempfile::tempdir().unwrap();
+        std::env::set_var("ATOMCODE_HOME", home.path());
+        let prompts = home.path().join("prompts");
+        std::fs::create_dir_all(&prompts).unwrap();
+        std::fs::write(
+            prompts.join("init.yaml"),
+            include_str!("../assets/prompts/init.yaml"),
+        )
+        .unwrap();
+
+        let process_cwd = std::env::current_dir().expect("process cwd");
+        let switched = std::path::PathBuf::from("E:/switched-workspace");
+        assert_ne!(
+            atomcode_capabilities::pathnorm::to_display(&process_cwd),
+            atomcode_capabilities::pathnorm::to_display(&switched),
+            "test requires the config cwd to differ from process cwd"
+        );
+
+        let mut cfg = agent_config("test-model");
+        cfg.working_dir = switched;
+        let mut snapshot = SessionSnapshot::new(vec![Message::system("SESSION CONTEXT")]);
+        reconcile_coding_persona(&mut snapshot, &cfg, true, true, true);
+
+        let block_1 = &snapshot.messages[0].text;
+        assert!(
+            block_1.contains("Project working directory: E:/switched-workspace"),
+            "Block 1 must embed cfg.working_dir after a workspace switch:\n{block_1}"
+        );
+        let process_display = atomcode_capabilities::pathnorm::to_display(&process_cwd);
+        assert!(
+            !block_1.contains(&format!("Project working directory: {process_display}")),
+            "Block 1 must not fall back to process cwd {process_display}:\n{block_1}"
+        );
+    }
+
+    #[test]
     fn resume_adds_persona_before_legacy_session_context() {
         let mut snapshot = SessionSnapshot::new(vec![Message::system("SESSION CONTEXT")]);
 
@@ -2072,10 +2125,14 @@ mod tests {
         // the persona string (captured and reconciled).  We hold the serial lock, so this
         // is safe.
         let _rui_guard = std::env::remove_var("ATOMCODE_REQUEST_USER_INPUT");
-        let (b1, b2) = crate::persona::coding_persona_blocks(
+        let cfg = agent_config("deepseek-v4-flash");
+        let (b1, b2) = crate::persona::coding_persona_blocks_with_context(
             "deepseek-v4-flash",
+            cfg.preferred_language,
             crate::persona::todo_switch_enabled(),
             crate::persona::request_user_input_switch_enabled(),
+            true,
+            Some(&cfg.working_dir),
         );
         let mut snapshot = SessionSnapshot::new(vec![
             Message::system(b1.clone()),
@@ -2085,7 +2142,7 @@ mod tests {
 
         reconcile_coding_persona(
             &mut snapshot,
-            &agent_config("deepseek-v4-flash"),
+            &cfg,
             true,
             true,
             true,

@@ -114,10 +114,7 @@ impl Tool for GrepTool {
         "grep"
     }
     fn description(&self) -> &str {
-        "Search file contents by regular expression or literal string. \
-         Use to search for exact text, error strings, or symbols across files. \
-         Supports `-A` (after_context), `-B` (before_context), `-C` (context), `type` (e.g. rust, ts, js, py, go, c#, vue, react), and `output_mode='files_with_matches'` to only list matching files. \
-         When identifying a specific code symbol and its call graph, switch to `code_explore`."
+        "Search file contents using regex or exact text. Supports context lines, file type filters, and output modes (`content`, `files_with_matches`, or `count`). Use to locate occurrences and surrounding context of a string in a directory. Use `code_explore` when tracing call graphs or business flows."
     }
     fn parameters_schema(&self) -> serde_json::Value {
         json!({

@@ -137,9 +137,7 @@ impl Tool for OpenFileTool {
         "open_file"
     }
     fn description(&self) -> &str {
-        "Open a local file or URL in the default OS desktop application. \
-         When to use: Trigger when the user explicitly asks to open or preview a file, or when installation, \
-         system configuration, or workflow tasks strictly require launching an external program."
+        "Open a file, directory, or URL in the default system application. Use when the user explicitly requests previewing content, viewing a directory, or when a task requires launching an external program."
     }
     fn parameters_schema(&self) -> serde_json::Value {
         json!({

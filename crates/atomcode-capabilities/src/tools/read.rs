@@ -148,7 +148,7 @@ impl Tool for ReadFileTool {
         "read_file"
     }
     fn description(&self) -> &str {
-        "Read file contents. Output is text with sparse line anchors formatted as '<line_number>→<content>' on the first returned line and every 10th line (other lines show content only). Count from the nearest anchor to identify line numbers. For large files, use `grep` to find target symbols first, then read a bounded slice with `offset` and `limit`."
+        "Read file contents with sparse line-number anchors. Supports `offset` and `limit` to inspect specific ranges. Use when reading file content or code context."
     }
     fn parameters_schema(&self) -> serde_json::Value {
         json!({

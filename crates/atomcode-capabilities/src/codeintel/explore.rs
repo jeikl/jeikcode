@@ -403,13 +403,8 @@ impl Tool for CodeExploreTool {
     }
 
     fn description(&self) -> &str {
-        "Perform semantic code-graph retrieval across the repository, a specific directory, or a target file. \
-         Resolves complete call graphs, logic flows, and symbol relationships from localized clues to explore \
-         how a business logic actually operates, far more efficient than grep. \
-         Trigger when user queries involve business keywords (Chinese or English), or \
-         when previous operations (`grep`, `read_file`, `glob`) reveal relevant comments, exact symbols, \
-         symbol keywords, or domain jargon/terminology. \
-         For workspace directory layout only, use `repo_map` instead."
+        "Retrieve code call relationships and business flows using a semantic code graph, supporting natural-language queries in Chinese and English. \
+         Use to trace how business keywords, comments, or symbols operate across the codebase, as well as tracking call chains, variable references, and logic flows."
     }
 
     fn parameters_schema(&self) -> serde_json::Value {

@@ -35,9 +35,7 @@ impl Tool for GlobTool {
         "glob"
     }
     fn description(&self) -> &str {
-        "Find files matching a glob pattern across directories. \
-         Returns matching file paths sorted by modification time (most recent first). \
-         Use to locate file paths by name, extension, or directory layout."
+        "Find files matching a glob pattern. Use to locate file paths by filename, extension, or directory layout."
     }
     fn parameters_schema(&self) -> serde_json::Value {
         json!({

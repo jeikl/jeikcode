@@ -1136,6 +1136,7 @@ mod tests {
     use atomcode_config::config::Config;
 
     #[tokio::test]
+    #[serial_test::serial]
     async fn patch_provider_works_on_new_schema_model() {
         update_config(|config| {
             config.provider_accounts.insert(

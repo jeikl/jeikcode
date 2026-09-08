@@ -25,9 +25,7 @@ impl Tool for WriteFileTool {
         "write_file"
     }
     fn description(&self) -> &str {
-        "Write full content to a file, overwriting existing files or automatically creating directories and files if absent. \
-         Use for creating new files or full rewrites. \
-         Never overwrite without reading via `read_file` first, and do not use for partial edits."
+        "Write full content to a file, automatically creating parent directories if absent. Read the file before writing. Use for creating new files or completely replacing existing file contents. Partial modifications are not supported."
     }
     fn parameters_schema(&self) -> serde_json::Value {
         json!({

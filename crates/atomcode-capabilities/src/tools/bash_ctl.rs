@@ -32,9 +32,7 @@ impl Tool for LongBashKeywordActionsTool {
         "long_bash_keyword_actions"
     }
     fn description(&self) -> &str {
-        "Add or remove command keywords treated as long-running batch jobs (e.g. `mvn`, `cargo`, `ninja`) to prevent idle timeouts. \
-         Trigger when whitelisting slow build or test commands. \
-         Do not use for resident services or background daemons."
+        "Add or remove long-running command keywords to prevent idle timeouts. Use to whitelist slow build or test commands. Resident services and daemons are not supported."
     }
     fn parameters_schema(&self) -> serde_json::Value {
         json!({
@@ -164,8 +162,7 @@ impl Tool for BashKillByIdTool {
         "bash_kill_by_id"
     }
     fn description(&self) -> &str {
-        "Terminate a running background bash command by its `bashid`. \
-         Trigger when stopping a stuck, timed-out, or unwanted background bash task."
+        "Terminate a running background shell process by its `bashid`. Use to stop hung, timed-out, or unneeded background tasks."
     }
     fn parameters_schema(&self) -> serde_json::Value {
         json!({

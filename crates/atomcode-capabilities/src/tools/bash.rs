@@ -664,25 +664,12 @@ fn shell_tool_description(
     // macro (not a `const`) because `concat!` only splices literals.
     macro_rules! base {
         () => {
-            "Run a shell command in the working directory and return its combined \
-             stdout/stderr and exit code. The command runs until \
-             it exits or hits config max_timeout_secs. Output streams live while it runs.\n\
-             Destructive \
-             commands (recursive force delete, sudo, dd, history rewrites, …) are flagged \
-             risky and may require approval.\n\
-             Prefer the dedicated tools over bash for file operations — they are \
-             gitignore-aware, cross-platform, and cheaper: read_file to read a file (NOT \
-             cat/head/tail), grep to search file contents (NOT grep/rg), glob to find \
-             files by name (NOT find/fd), list_directory to list one directory like ls \
-             (NOT bash ls; workspace tree is repo_map), \
-             edit_file to MODIFY a file and write_file to create/overwrite one. NEVER edit \
-             a file with a shell command (sed/awk/perl -i, or `>`/`>>`/tee redirection) — \
-             it corrupts indentation and encoding (especially on Windows) and cascades; if \
-             edit_file reports it can't find your text, RE-READ the file and copy the exact \
-             text, or rewrite the whole file with write_file — do not fall back to sed. \
-             Reserve bash for real shell work — git, builds, package managers, running \
-             commands — and for pipelines / aggregation (wc, sort, uniq, awk, git log) \
-             the dedicated tools can't do."
+            "Execute a shell command and return stdout, stderr, and exit code. \
+             Use for builds, tests, package management, Git operations, binaries, and process checks. \
+             Chaining commands with `&&` is not supported; use `;` instead. \
+             `read_file`, `grep`, `glob`, `list_directory`, `ls`, `head`, `tail`, `sed`, `awk`, and `find` are not available in this shell tool. \
+             Shell pipelines and aggregation (such as wc, sort, uniq, git log) are supported. \
+             This shell has no keyboard input; pagers, REPLs, `tail -f`, and commands requiring keyboard interaction are not supported."
         };
     }
     macro_rules! hang_suffix {

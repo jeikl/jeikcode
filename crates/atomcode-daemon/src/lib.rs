@@ -1645,8 +1645,11 @@ pub struct MessageInfo {
     /// (kernel 内部 `Session.created_at` 为秒, API 响应边界乘 1000 转换, bot review P2)。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub created_at: Option<u64>,
-    /// Assistant-turn wall-clock duration from kernel `MessageMeta.elapsed_ms`.
-    /// Survives refresh / session switch so the WebUI can show "用时 Xs".
+    /// Wall-clock duration of the whole user turn (user send → final answer),
+    /// not a single LLM round. Kernel `MessageMeta.elapsed_ms` is per-round;
+    /// [`stamp_turn_elapsed_on_last_assistants`] rewrites the last assistant of
+    /// each turn from `TurnStat.duration_ms` (or the user/assistant timestamp
+    /// span) so refresh / session switch still shows the live "用时" total.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub elapsed_ms: Option<u64>,
 }
@@ -3137,6 +3140,58 @@ pub(crate) fn attach_display_images(
     attach_image_sets(messages, sets);
 }
 
+fn is_visible_user_turn_start(msg: &MessageInfo) -> bool {
+    msg.role == "user" && !msg.synthetic
+}
+
+fn is_visible_assistant_reply(msg: &MessageInfo) -> bool {
+    msg.role == "assistant" && msg.internal_origin.as_deref() != Some("turn_diagnostic")
+}
+
+/// Stamp each user-turn's last assistant with the full agent-loop wall clock.
+///
+/// Live WebUI measures user-bubble → final answer. Kernel `MessageMeta.elapsed_ms`
+/// is only the last LLM round, so a reload would otherwise shrink "用时 20min"
+/// down to the last reply. Prefer persisted [`TurnStat::duration_ms`], then the
+/// user/assistant `created_at` span.
+pub(crate) fn stamp_turn_elapsed_on_last_assistants(
+    messages: &mut [MessageInfo],
+    turn_stats: &[atomcode_capabilities::session::TurnStat],
+) {
+    let mut i = 0usize;
+    let mut turn_i = 0usize;
+    while i < messages.len() {
+        if !is_visible_user_turn_start(&messages[i]) {
+            i += 1;
+            continue;
+        }
+        let user_ts = messages[i].created_at;
+        let mut last_asst = None;
+        let mut j = i + 1;
+        while j < messages.len() && !is_visible_user_turn_start(&messages[j]) {
+            if is_visible_assistant_reply(&messages[j]) {
+                last_asst = Some(j);
+            }
+            j += 1;
+        }
+        if let Some(ai) = last_asst {
+            let from_ts = match (user_ts, messages[ai].created_at) {
+                (Some(user), Some(asst)) if asst > user => Some(asst - user),
+                _ => None,
+            };
+            let from_stat = turn_stats
+                .get(turn_i)
+                .map(|stat| stat.duration_ms)
+                .filter(|ms| *ms > 0);
+            if let Some(total) = from_stat.or(from_ts) {
+                messages[ai].elapsed_ms = Some(total);
+            }
+        }
+        turn_i += 1;
+        i = j;
+    }
+}
+
 /// Pure matcher (see [`attach_display_images`]): replace each VL-marker user message's
 /// "missing image" placeholder with the next sidecar image set, IN ORDER. Real images and
 /// non-user messages are left untouched.
@@ -3267,6 +3322,7 @@ fn merge_catalog_session_messages_for_display(
         std::path::Path::new(&session.meta.working_dir),
         &session.meta.id,
     );
+    stamp_turn_elapsed_on_last_assistants(&mut messages, &session.meta.turn_stats);
     Ok(messages)
 }
 
@@ -9850,6 +9906,89 @@ mod tests {
         let asst = MessageInfo::from_kernel(&assistant);
         assert_eq!(asst.created_at, Some(1_700_000_012_000));
         assert_eq!(asst.elapsed_ms, Some(12_000));
+    }
+
+    fn history_msg(role: &str, elapsed_ms: Option<u64>) -> MessageInfo {
+        MessageInfo {
+            role: role.into(),
+            content: role.into(),
+            reasoning: None,
+            synthetic: false,
+            internal_origin: None,
+            tool_calls: None,
+            tool_result: None,
+            artifacts: None,
+            images: None,
+            created_at: None,
+            elapsed_ms,
+        }
+    }
+
+    #[test]
+    fn stamp_turn_elapsed_uses_full_turn_stat_not_last_round() {
+        use atomcode_capabilities::session::TurnStat;
+
+        let mut messages = vec![
+            history_msg("user", None),
+            history_msg("assistant", Some(5_000)),
+            history_msg("assistant", Some(18_000)),
+            history_msg("user", None),
+            history_msg("assistant", Some(2_000)),
+        ];
+        let stats = vec![
+            TurnStat {
+                after_message: 3,
+                position_valid: true,
+                turn_id: 1,
+                round_count: 2,
+                tool_call_count: 4,
+                duration_ms: 1_200_000,
+                total_tokens: 1,
+                errored: false,
+                used_tokens: 1,
+                ctx_window: 1,
+                model_usage: vec![],
+            },
+            TurnStat {
+                after_message: 5,
+                position_valid: true,
+                turn_id: 2,
+                round_count: 1,
+                tool_call_count: 0,
+                duration_ms: 40_000,
+                total_tokens: 1,
+                errored: false,
+                used_tokens: 1,
+                ctx_window: 1,
+                model_usage: vec![],
+            },
+        ];
+        stamp_turn_elapsed_on_last_assistants(&mut messages, &stats);
+        assert_eq!(messages[1].elapsed_ms, Some(5_000), "mid-turn round stays per-round");
+        assert_eq!(
+            messages[2].elapsed_ms,
+            Some(1_200_000),
+            "last assistant of turn 1 must be the full agent-loop wall clock"
+        );
+        assert_eq!(messages[4].elapsed_ms, Some(40_000));
+    }
+
+    #[test]
+    fn stamp_turn_elapsed_falls_back_to_created_at_span() {
+        let mut messages = vec![
+            {
+                let mut m = history_msg("user", None);
+                m.created_at = Some(1_000);
+                m
+            },
+            {
+                let mut m = history_msg("assistant", Some(18_000));
+                m.created_at = Some(1_241_000);
+                m
+            },
+        ];
+        stamp_turn_elapsed_on_last_assistants(&mut messages, &[]);
+        assert_eq!(messages[1].elapsed_ms, Some(1_240_000));
     }
 
     #[test]

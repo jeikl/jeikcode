@@ -38,9 +38,8 @@ impl Tool for JeikcodeConfigReloadTool {
     }
 
     fn description(&self) -> &str {
-        "Hot-reload configuration in the active running session without restarting. \
-         When to use: Trigger immediately after modifying and saving any configuration file \
-         (such as config.toml, mcp.json, etc.) under system-level or project-level ~/.atomcode or ~/.jeikcode."
+        "Hot-reload configuration in the active session without restarting. \
+         Use after modifying and saving configuration files (such as `config.toml` or `mcp.json`) under `~/.atomcode` or project directories."
     }
 
     fn parameters_schema(&self) -> serde_json::Value {

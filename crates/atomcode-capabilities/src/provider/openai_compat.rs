@@ -714,6 +714,7 @@ async fn open_stream(
         // Stable session id → lets the forwarding gateway pin this conversation to
         // one upstream for prefix-cache affinity. Empty ⇒ omitted (sub-agent/summary).
         if !session_id.is_empty() {
+            req = req.header("x-atomcode-session-id", session_id);
             req = req.header("x-jeikcode-sessionid", session_id);
             // grok2api / LiteLLM pin prefix-cache affinity on this name; JeikCode's
             // own header is kept for product-side diagnostics.
@@ -3592,6 +3593,10 @@ mod tests {
 
         let head = captured.lock().unwrap().to_lowercase();
         assert!(
+            head.contains("x-atomcode-session-id: sess-abc-123"),
+            "legacy session-affinity header must be forwarded: {head}"
+        );
+        assert!(
             head.contains("x-jeikcode-sessionid: sess-abc-123"),
             "session-affinity header must be forwarded: {head}"
         );
@@ -3620,6 +3625,10 @@ mod tests {
         let _ = handle.join();
 
         let head = captured.lock().unwrap().to_lowercase();
+        assert!(
+            !head.contains("x-atomcode-session-id"),
+            "no session id ⇒ legacy affinity header must be omitted: {head}"
+        );
         assert!(
             !head.contains("x-jeikcode-sessionid"),
             "no session id ⇒ affinity header must be omitted: {head}"

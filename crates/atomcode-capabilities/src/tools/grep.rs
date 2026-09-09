@@ -1,8 +1,9 @@
 //! `grep` — regex content search under a directory, gitignore-aware. Read-only ⇒
-//! always `Safe`. Smart-case (case-insensitive unless the pattern has an uppercase
-//! letter); an invalid regex falls back to a literal search. Build/VCS/cache dirs and
-//! `.log` files are skipped. Neutral core — the production graph/semantic annotations
-//! are dropped.
+//! always `Safe`. Smart-case when `case_insensitive` is omitted (insensitive unless
+//! the pattern has an uppercase letter); `true`/`false` force the mode. An invalid
+//! regex falls back to a literal search. Build/VCS/cache dirs and `.log` files are
+//! skipped. A `path` pointing at a single file ignores `glob`/`type` so models that
+//! pass both do not get a spurious "0 files searched".
 
 use super::read::lenient_usize;
 use super::{err, is_skip_dir, not_found_hint, ok, resolve_path};
@@ -66,7 +67,7 @@ struct Args {
     #[serde(default, alias = "file_type")]
     r#type: Option<String>,
     #[serde(default, alias = "i", alias = "ignore_case", alias = "-i")]
-    case_insensitive: bool,
+    case_insensitive: Option<bool>,
     #[serde(default)]
     output_mode: OutputMode,
 }
@@ -131,7 +132,7 @@ impl Tool for GrepTool {
                 },
                 "glob": {
                     "type": "string",
-                    "description": "File glob pattern to restrict search (e.g. '*.rs', '*.{ts,tsx}')."
+                    "description": "File glob pattern to restrict search (e.g. '*.rs', '*.{ts,tsx}'). Ignored when `path` is a single file — omit glob in that case (or pass the parent directory as `path`)."
                 },
                 "type": {
                     "type": "string",
@@ -169,8 +170,7 @@ impl Tool for GrepTool {
                 },
                 "case_insensitive": {
                     "type": "boolean",
-                    "default": false,
-                    "description": "Case-insensitive matching (default: false; smart-case if omitted)."
+                    "description": "Case-insensitive matching. Omitted: smart-case (insensitive unless the pattern contains an uppercase letter). true: always insensitive. false: always sensitive."
                 },
                 "max_results": {
                     "type": "integer",
@@ -195,13 +195,17 @@ impl Tool for GrepTool {
         };
         let raw = a.path.clone().unwrap_or_else(|| ".".to_string());
         let root = resolve_path(&raw, &ctx.working_dir);
-        if tokio::fs::metadata(&root).await.is_err() {
-            let hint = not_found_hint(&root, &ctx.working_dir).await;
-            return err(format!(
-                "{}{hint}",
-                format_path_not_found("grep", &raw, &root, &ctx.working_dir)
-            ));
-        }
+        let root_meta = match tokio::fs::metadata(&root).await {
+            Ok(m) => m,
+            Err(_) => {
+                let hint = not_found_hint(&root, &ctx.working_dir).await;
+                return err(format!(
+                    "{}{hint}",
+                    format_path_not_found("grep", &raw, &root, &ctx.working_dir)
+                ));
+            }
+        };
+        let root_is_file = root_meta.is_file();
         let max = a
             .max_results
             .unwrap_or(DEFAULT_MAX_RESULTS)
@@ -229,16 +233,29 @@ impl Tool for GrepTool {
                     .filter(|s| !s.is_empty())
                     .map(file_type_to_glob)
             });
-        let glob_filter = match effective_glob.as_deref() {
-            None => None,
-            Some(g) => match GlobBuilder::new(g).literal_separator(true).build() {
-                Ok(glob) => Some((glob.compile_matcher(), g.to_string())),
-                Err(e) => return err(format!("grep: invalid glob '{g}': {e}")),
-            },
+        // A `path` that names a single file must still be searched even if the model
+        // also sent `glob`/`type` (the common "path=file.rs + glob=*.rs" trap: the
+        // walk root is the file, strip_prefix is empty, glob matches nothing →
+        // "0 files searched"). Ignore the filter and tell the model to omit it next time.
+        let glob_ignored_on_file = root_is_file && effective_glob.is_some();
+        let glob_filter = if glob_ignored_on_file {
+            None
+        } else {
+            match effective_glob.as_deref() {
+                None => None,
+                Some(g) => match GlobBuilder::new(g).literal_separator(true).build() {
+                    Ok(glob) => Some((glob.compile_matcher(), g.to_string())),
+                    Err(e) => return err(format!("grep: invalid glob '{g}': {e}")),
+                },
+            }
         };
 
-        // Smart-case + literal fallback, as a streaming ripgrep matcher.
-        let is_case_insensitive = a.case_insensitive || !a.pattern.chars().any(|c| c.is_uppercase());
+        // Smart-case when the flag is omitted; explicit true/false force the mode.
+        let is_case_insensitive = match a.case_insensitive {
+            Some(true) => true,
+            Some(false) => false,
+            None => !a.pattern.chars().any(|c| c.is_uppercase()),
+        };
         let matcher = match RegexMatcherBuilder::new()
             .case_insensitive(is_case_insensitive)
             .build(&a.pattern)
@@ -278,6 +295,16 @@ impl Tool for GrepTool {
                 let mut msg = format!(
                     "No matches found for '{pattern}' in {display_path} ({files} files searched)"
                 );
+                if files == 0 && effective_glob.is_some() && !glob_ignored_on_file {
+                    msg.push_str(
+                        "\n[0 files searched — `glob`/`type` matched nothing under this path. Drop them, or if `path` is a single file omit `glob` (it is ignored for files).]",
+                    );
+                }
+                if glob_ignored_on_file {
+                    msg.push_str(
+                        "\n[grep: `path` is a file — `glob`/`type` ignored; omit them on single-file searches]",
+                    );
+                }
                 if timed_out {
                     msg.push_str(
                         "\n[Search timed out; narrow `path` / `glob` or use code_explore]",
@@ -297,14 +324,7 @@ impl Tool for GrepTool {
                     OutputMode::Count | OutputMode::Content => lines.join("\n"),
                 };
                 if out.len() > MAX_OUTPUT_BYTES {
-                    let mut end = MAX_OUTPUT_BYTES.min(out.len());
-                    while end > 0 && !out.is_char_boundary(end) {
-                        end -= 1;
-                    }
-                    out.truncate(end);
-                    out.push_str(
-                        "\n\n[Output truncated to 40KB. Raise `max_results` is not enough — add `glob` / `type` / a more specific `path`, or use output_mode='files_with_matches'.]",
-                    );
+                    out = truncate_grep_output(&lines, a.output_mode);
                 } else if capped {
                     let entity = if a.output_mode == OutputMode::FilesWithMatches {
                         "files"
@@ -319,6 +339,11 @@ impl Tool for GrepTool {
                     out.push_str(&format!(
                         "\n[Search timed out after {search_secs}s; showing matches collected so far. Narrow `path`/`glob` or use code_explore.]"
                     ));
+                }
+                if glob_ignored_on_file {
+                    out = format!(
+                        "[grep: `path` is a file — `glob`/`type` ignored; omit them on single-file searches]\n{out}"
+                    );
                 }
                 if let Some(note) = recovered {
                     out = format!("{note}\n{out}");
@@ -503,12 +528,92 @@ fn next_constraint_field_start(rest: &str) -> usize {
     cut
 }
 
+/// When content mode blows the 40KB display budget, return a file-list summary plus a
+/// short prefix of matches. Raising `max_results` cannot increase this byte cap.
+fn truncate_grep_output(lines: &[String], mode: OutputMode) -> String {
+    let mut files: Vec<String> = Vec::new();
+    for line in lines {
+        if let Some(path) = grep_match_path(line) {
+            if !files.iter().any(|f| f == path) {
+                files.push(path.to_string());
+            }
+        }
+    }
+    let mut summary = format!(
+        "[Content exceeded 40KB ({} output lines across {} files). `max_results` does not increase this byte budget — use output_mode='files_with_matches', then grep individual files without `glob`/`-C`.]\nFiles with matches:\n",
+        lines.len(),
+        files.len()
+    );
+    const FILE_LIST_CAP: usize = 80;
+    for f in files.iter().take(FILE_LIST_CAP) {
+        summary.push_str(f);
+        summary.push('\n');
+    }
+    if files.len() > FILE_LIST_CAP {
+        summary.push_str(&format!("… +{} more files\n", files.len() - FILE_LIST_CAP));
+    }
+    if mode == OutputMode::FilesWithMatches {
+        return summary;
+    }
+    summary.push_str("\nFirst matches (byte-capped):\n");
+    let budget = MAX_OUTPUT_BYTES.saturating_sub(summary.len().saturating_add(80));
+    let mut body = String::new();
+    for line in lines {
+        if body.len().saturating_add(line.len()).saturating_add(1) > budget {
+            break;
+        }
+        body.push_str(line);
+        body.push('\n');
+    }
+    summary.push_str(&body);
+    summary
+}
+
+/// Best-effort path extraction from a grep output line:
+/// - `path:12:text` (match) / `path-12-text` (context) / `path: 3 matches` (count)
+/// - `path` (files_with_matches)
+fn grep_match_path(line: &str) -> Option<&str> {
+    if line == "--" || line.is_empty() {
+        return None;
+    }
+    if let Some(idx) = line.find(": ") {
+        if line[idx + 2..].contains("match") {
+            return Some(&line[..idx]);
+        }
+    }
+    for (i, ch) in line.char_indices() {
+        if ch != ':' && ch != '-' {
+            continue;
+        }
+        let rest = &line[i + 1..];
+        let digits = rest.bytes().take_while(u8::is_ascii_digit).count();
+        if digits == 0 {
+            continue;
+        }
+        let after = rest.get(digits..).unwrap_or("");
+        let sep_ok = match (ch, after.chars().next()) {
+            (':', Some(':')) | ('-', Some('-')) => true,
+            (':', None) => true,
+            _ => false,
+        };
+        if sep_ok {
+            return Some(&line[..i]);
+        }
+    }
+    Some(line)
+}
+
 /// Returns (formatted match+context lines, match count, files searched). Stops once
 /// `max` matches are collected. Each file is searched by a STREAMING searcher (never
 /// loads the whole file into memory; `heap_limit` caps the per-line buffer), so a huge
 /// file — or a huge single line — can't OOM the process.
 /// Ripgrep-style glob: `*.rs` matches at any depth; `src/**/*.rs` is path-relative.
 fn grep_glob_matches(rel: &Path, matcher: &GlobMatcher, pattern: &str) -> bool {
+    // WalkBuilder on a single-file root yields that file; strip_prefix is empty, and
+    // `*.rs` would otherwise match nothing. An explicitly named file always searches.
+    if rel.as_os_str().is_empty() {
+        return true;
+    }
     if matcher.is_match(rel) {
         return true;
     }
@@ -1206,5 +1311,95 @@ mod tests {
             .execute(r#"{"pattern":"COMMON_MARKER","type":"js","after_context":1}"#, &ctx(d.path()))
             .await;
         assert!(r_alias.content.contains("index.js"), "{}", r_alias.content);
+    }
+
+    /// P0: `path` naming a file + `glob` used to yield "0 files searched" because
+    /// strip_prefix of the file against itself is empty and `*.rs` matches nothing.
+    #[tokio::test]
+    async fn file_path_with_glob_still_searches_the_file() {
+        let d = tempfile::tempdir().unwrap();
+        std::fs::write(d.path().join("event.rs"), "cached tokens here\n").unwrap();
+        let r = GrepTool
+            .execute(
+                r#"{"pattern":"cached","path":"event.rs","glob":"*.rs"}"#, 
+                &ctx(d.path()),
+            )
+            .await;
+        assert!(!r.is_error, "{}", r.content);
+        assert!(
+            r.content.contains("event.rs:1:"),
+            "must search the named file: {}",
+            r.content
+        );
+        assert!(
+            r.content.contains("`path` is a file"),
+            "must explain glob was ignored: {}",
+            r.content
+        );
+        assert!(
+            !r.content.contains("0 files searched"),
+            "must not report zero files: {}",
+            r.content
+        );
+    }
+
+    #[tokio::test]
+    async fn glob_matching_nothing_explains_zero_files() {
+        let d = tempfile::tempdir().unwrap();
+        std::fs::write(d.path().join("a.rs"), "NEEDLE\n").unwrap();
+        let r = GrepTool
+            .execute(r#"{"pattern":"NEEDLE","glob":"*.zig"}"#, &ctx(d.path()))
+            .await;
+        assert!(!r.is_error, "{}", r.content);
+        assert!(r.content.contains("0 files searched"), "{}", r.content);
+        assert!(
+            r.content.contains("`glob`/`type` matched nothing"),
+            "{}",
+            r.content
+        );
+    }
+
+    #[tokio::test]
+    async fn explicit_case_sensitive_false_disables_smart_case() {
+        let d = tempfile::tempdir().unwrap();
+        std::fs::write(d.path().join("a.txt"), "Hello\nhello\n").unwrap();
+        let r_smart = GrepTool
+            .execute(r#"{"pattern":"hello"}"#, &ctx(d.path()))
+            .await;
+        assert!(r_smart.content.contains("Hello"), "{}", r_smart.content);
+        assert!(r_smart.content.contains("hello"), "{}", r_smart.content);
+        let r_strict = GrepTool
+            .execute(
+                r#"{"pattern":"hello","case_insensitive":false}"#, 
+                &ctx(d.path()),
+            )
+            .await;
+        assert!(r_strict.content.contains(":hello"), "{}", r_strict.content);
+        assert!(
+            !r_strict.content.contains("Hello"),
+            "explicit false must not match Hello: {}",
+            r_strict.content
+        );
+    }
+
+    #[test]
+    fn grep_match_path_parses_content_context_and_count() {
+        assert_eq!(grep_match_path("src/foo.rs:12:hello"), Some("src/foo.rs"));
+        assert_eq!(grep_match_path("src/foo.rs-12-hello"), Some("src/foo.rs"));
+        assert_eq!(grep_match_path("src/foo.rs: 3 matches"), Some("src/foo.rs"));
+        assert_eq!(grep_match_path("src/foo.rs"), Some("src/foo.rs"));
+        assert_eq!(grep_match_path("--"), None);
+    }
+
+    #[test]
+    fn truncate_grep_output_lists_files_and_does_not_mention_max_results_raise() {
+        let lines: Vec<String> = (0..50)
+            .map(|i| format!("file_{i}.rs:1:MATCH {}", "x".repeat(900)))
+            .collect();
+        let out = truncate_grep_output(&lines, OutputMode::Content);
+        assert!(out.contains("Files with matches:"), "{out}");
+        assert!(out.contains("file_0.rs"), "{out}");
+        assert!(out.contains("does not increase this byte budget"), "{out}");
+        assert!(!out.contains("Raise `max_results` is not enough"), "{out}");
     }
 }

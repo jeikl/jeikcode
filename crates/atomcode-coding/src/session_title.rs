@@ -7,7 +7,7 @@ use atomcode_kernel::stream::StreamEvent;
 use futures::StreamExt;
 
 const MAX_TITLE_CHARS: usize = 40;
-const TITLE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(8);
+pub const TITLE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 
 /// First-line provisional title from the user's raw (unwrapped) input.
 /// Used at first Submit so the session is catalog-visible before the turn ends.
@@ -125,7 +125,7 @@ pub fn should_accept_ai_name(user_renamed: bool, ai_named: bool) -> bool {
     !user_renamed && !ai_named
 }
 
-pub(crate) async fn generate_session_title(
+pub async fn generate_session_title(
     provider: Arc<dyn LlmProvider>,
     conversation: String,
 ) -> Option<String> {

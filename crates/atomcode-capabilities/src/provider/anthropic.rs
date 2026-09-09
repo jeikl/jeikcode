@@ -355,6 +355,7 @@ async fn open_stream(
             .json(body);
         // Stable session id → gateway prefix-cache affinity. Empty ⇒ omitted.
         if !session_id.is_empty() {
+            req = req.header("x-atomcode-session-id", session_id);
             req = req.header("x-jeikcode-sessionid", session_id);
             req = req.header("x-session-id", session_id);
         }
@@ -2489,6 +2490,10 @@ mod tests {
         assert!(
             head.contains("x-api-key: ak"),
             "anthropic auth must remain: {head}"
+        );
+        assert!(
+            head.contains("x-atomcode-session-id: sess-anthropic"),
+            "legacy session header must be forwarded: {head}"
         );
         assert!(
             head.contains("x-jeikcode-sessionid: sess-anthropic"),

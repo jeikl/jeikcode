@@ -148,7 +148,7 @@ impl Tool for ReadFileTool {
         "read_file"
     }
     fn description(&self) -> &str {
-        "Read file contents with sparse line-number anchors. Supports `offset` and `limit` to inspect specific ranges. Use when reading file content or code context."
+        "Read file contents with line numbers. Pages of 200 lines or fewer number every line; larger pages use sparse anchors (first + every 10th). Supports `offset` and `limit`. Directory paths list names with a `/` suffix."
     }
     fn parameters_schema(&self) -> serde_json::Value {
         json!({
@@ -309,6 +309,11 @@ impl Tool for ReadFileTool {
 
         let mut out = String::new();
         let mut end_idx = start_idx;
+        // Small pages (explicit small `limit`, or a short file) number every line so
+        // the model can cite exact ranges. Large pages keep sparse anchors to save tokens.
+        const DENSE_LINE_NUMBER_CAP: usize = 200;
+        let page_lines = requested_end_idx.saturating_sub(start_idx);
+        let dense_numbers = page_lines <= DENSE_LINE_NUMBER_CAP;
         for (i, line) in text
             .lines()
             .skip(start_idx)
@@ -316,7 +321,7 @@ impl Tool for ReadFileTool {
             .enumerate()
         {
             let n = start + i;
-            let is_anchor = i == 0 || n % 10 == 0;
+            let is_anchor = dense_numbers || i == 0 || n % 10 == 0;
             let rendered = if line.chars().count() > MAX_LINE_LEN {
                 let head: String = line.chars().take(MAX_LINE_LEN).collect();
                 if is_anchor {
@@ -523,8 +528,8 @@ mod tests {
             .await;
         assert!(!r.is_error);
         assert!(r.content.contains("1→first"), "{}", r.content);
-        assert!(r.content.contains("third"), "{}", r.content);
-        assert!(!r.content.contains("3→third"), "{}", r.content);
+        assert!(r.content.contains("2→second"), "{}", r.content);
+        assert!(r.content.contains("3→third"), "{}", r.content);
     }
 
     #[tokio::test]
@@ -598,8 +603,7 @@ mod tests {
             )
             .await;
         assert!(r.content.contains("2→l2"), "{}", r.content);
-        assert!(r.content.contains("l3"), "{}", r.content);
-        assert!(!r.content.contains("3→l3"), "{}", r.content);
+        assert!(r.content.contains("3→l3"), "{}", r.content);
         assert!(!r.content.contains("→l1"), "{}", r.content);
         assert!(!r.content.contains("→l4"), "{}", r.content);
         assert!(
@@ -851,8 +855,7 @@ mod tests {
             .await;
         assert!(!r.is_error, "{}", r.content);
         assert!(r.content.contains("2→l2"), "{}", r.content);
-        assert!(r.content.contains("l3"), "{}", r.content);
-        assert!(!r.content.contains("3→l3"), "{}", r.content);
+        assert!(r.content.contains("3→l3"), "{}", r.content);
         assert!(!r.content.contains("→l4"), "{}", r.content);
     }
 
@@ -942,7 +945,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn sparse_line_anchors_emit_on_first_and_every_tenth_line() {
+    async fn small_pages_number_every_line() {
         let d = tempfile::tempdir().unwrap();
         let text = (1..=25)
             .map(|n| format!("content_{n}"))
@@ -958,17 +961,35 @@ mod tests {
             .await;
 
         assert!(!r.is_error, "{}", r.content);
-        // Line 5 is the first visible line -> must have anchor "5→"
         assert!(r.content.contains("5→content_5"), "{}", r.content);
-        // Line 6-9 must NOT have line number anchor
+        assert!(r.content.contains("6→content_6"), "{}", r.content);
+        assert!(r.content.contains("15→content_15"), "{}", r.content);
+        assert!(r.content.contains("20→content_20"), "{}", r.content);
+    }
+
+    #[tokio::test]
+    async fn sparse_line_anchors_emit_on_large_pages() {
+        let d = tempfile::tempdir().unwrap();
+        let text = (1..=250)
+            .map(|n| format!("content_{n}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        std::fs::write(d.path().join("anchors.txt"), text).unwrap();
+
+        let r = ReadFileTool::default()
+            .execute(
+                r#"{"file_path":"anchors.txt","offset":5,"limit":220}"#,
+                &ctx(d.path()),
+            )
+            .await;
+
+        assert!(!r.is_error, "{}", r.content);
+        assert!(r.content.contains("5→content_5"), "{}", r.content);
         assert!(r.content.contains("\ncontent_6\n"), "{}", r.content);
         assert!(!r.content.contains("6→"), "{}", r.content);
-        // Line 10 is multiple of 10 -> must have anchor "10→"
         assert!(r.content.contains("10→content_10"), "{}", r.content);
-        // Line 15 -> not anchor
         assert!(r.content.contains("\ncontent_15\n"), "{}", r.content);
         assert!(!r.content.contains("15→"), "{}", r.content);
-        // Line 20 is multiple of 10 -> must have anchor "20→"
         assert!(r.content.contains("20→content_20"), "{}", r.content);
     }
 

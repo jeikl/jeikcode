@@ -27,6 +27,12 @@ struct Args {
     path: Option<String>,
     #[serde(default, deserialize_with = "super::read::lenient_usize")]
     limit: Option<usize>,
+    /// Default false = case-insensitive (Windows-friendly). Set true to match literally.
+    #[serde(default)]
+    case_sensitive: bool,
+    /// Default false = files only. Set true to also return matching directories.
+    #[serde(default)]
+    include_dirs: bool,
 }
 
 #[async_trait]
@@ -35,15 +41,25 @@ impl Tool for GlobTool {
         "glob"
     }
     fn description(&self) -> &str {
-        "Find files matching a glob pattern. Use to locate file paths by filename, extension, or directory layout."
+        "Find files matching a glob pattern. Use to locate file paths by filename, extension, or directory layout. `path` must be a directory (not a file). Default match is case-insensitive; set `case_sensitive` to disable that. Set `include_dirs` to also return matching directories."
     }
     fn parameters_schema(&self) -> serde_json::Value {
         json!({
             "type": "object",
             "properties": {
                 "pattern": { "type": "string", "description": "Glob pattern." },
-                "path": { "type": "string", "default": ".", "description": "Directory scope to match." },
-                "limit": { "type": "integer", "default": 300, "description": "Maximum paths to return." }
+                "path": { "type": "string", "default": ".", "description": "Directory scope to match. Must be a directory, not a file." },
+                "limit": { "type": "integer", "default": 300, "description": "Maximum paths to return." },
+                "case_sensitive": {
+                    "type": "boolean",
+                    "default": false,
+                    "description": "Case-sensitive matching (default: false, case-insensitive). Set true on Linux to avoid matching README.RS for *.rs."
+                },
+                "include_dirs": {
+                    "type": "boolean",
+                    "default": false,
+                    "description": "Also return matching directories (default: files only). Directory paths are shown with a trailing '/'."
+                }
             },
             "required": ["pattern"]
         })
@@ -75,7 +91,13 @@ impl Tool for GlobTool {
         };
         match tokio::fs::metadata(&base).await {
             Ok(m) if m.is_dir() => {}
-            _ => {
+            Ok(_) => {
+                return err(format!(
+                    "glob: `path` must be a directory, but '{display_base}' is a file (resolved to {}). Use the parent directory as `path` and put the filename in `pattern` (e.g. {{\"pattern\":\"*.rs\",\"path\":\"src\"}}).",
+                    crate::pathnorm::to_display(&base)
+                ));
+            }
+            Err(_) => {
                 let hint = not_found_hint(&base, &ctx.working_dir).await;
                 return err(format!(
                     "{}{hint}",
@@ -89,7 +111,7 @@ impl Tool for GlobTool {
         let has_separator = normalized_pattern.contains('/');
         let matcher = match GlobBuilder::new(&normalized_pattern)
             .literal_separator(true)
-            .case_insensitive(true)
+            .case_insensitive(!a.case_sensitive)
             .build()
         {
             Ok(g) => g.compile_matcher(),
@@ -99,6 +121,7 @@ impl Tool for GlobTool {
         let wd = ctx.working_dir.clone();
         let base2 = base.clone();
         let pattern = a.pattern.clone();
+        let include_dirs = a.include_dirs;
         let search_secs = super::tool_timeouts().search_secs;
         let res = tokio::task::spawn_blocking(move || {
             let deadline = Instant::now() + Duration::from_secs(search_secs);
@@ -140,7 +163,16 @@ impl Tool for GlobTool {
                     break;
                 }
                 let path = entry.path();
-                if !path.is_file() {
+                let is_dir = entry.file_type().map(|t| t.is_dir()).unwrap_or(false);
+                let is_file = entry.file_type().map(|t| t.is_file()).unwrap_or(false);
+                if path == base2 {
+                    continue; // never list the search root itself
+                }
+                if is_file {
+                    // keep
+                } else if include_dirs && is_dir {
+                    // keep
+                } else {
                     continue;
                 }
                 // Match standard glob semantics (ripgrep / grok-build aligned):
@@ -156,7 +188,11 @@ impl Tool for GlobTool {
 
                 if matched {
                     // Display relative to the working dir for usable paths.
-                    let shown = crate::pathnorm::to_display(path.strip_prefix(&wd).unwrap_or(path));
+                    let mut shown =
+                        crate::pathnorm::to_display(path.strip_prefix(&wd).unwrap_or(path));
+                    if is_dir && !shown.ends_with('/') {
+                        shown.push('/');
+                    }
                     let mtime = entry
                         .metadata()
                         .ok()
@@ -174,7 +210,8 @@ impl Tool for GlobTool {
 
         match res {
             Ok((hits, timed_out)) if hits.is_empty() => {
-                let mut msg = format!("No files matching \"{pattern}\"");
+                let noun = if include_dirs { "paths" } else { "files" };
+                let mut msg = format!("No {noun} matching \"{pattern}\"");
                 if timed_out {
                     msg.push_str(&format!(
                         "\n[Search timed out after {search_secs}s; narrow the pattern/path]"
@@ -192,10 +229,11 @@ impl Tool for GlobTool {
                 if total > cap {
                     hits.truncate(cap);
                 }
-                let mut out = format!("{total} files found (sorted by modification time, most recent first):\n{}", hits.join("\n"));
+                let noun = if include_dirs { "paths" } else { "files" };
+                let mut out = format!("{total} {noun} found (sorted by modification time, most recent first):\n{}", hits.join("\n"));
                 if extra > 0 {
                     out.push_str(&format!(
-                        "\n[{extra} more files not shown; raise `limit` or narrow the pattern/path]"
+                        "\n[{extra} more {noun} not shown; raise `limit` or narrow the pattern/path]"
                     ));
                 }
                 if timed_out {
@@ -525,5 +563,72 @@ mod tests {
             .await;
         assert!(!r3.is_error, "r3 failed: {}", r3.content);
         assert!(r3.content.contains(".env.local"));
+    }
+
+    #[tokio::test]
+    async fn path_pointing_at_file_explains_usage() {
+        let d = tempfile::tempdir().unwrap();
+        std::fs::write(d.path().join("event.rs"), "").unwrap();
+        let r = GlobTool
+            .execute(
+                r#"{"pattern":"*","path":"event.rs"}"#, 
+                &ctx(d.path()),
+            )
+            .await;
+        assert!(r.is_error, "{}", r.content);
+        assert!(r.content.contains("must be a directory"), "{}", r.content);
+        assert!(r.content.contains("is a file"), "{}", r.content);
+        assert!(
+            !r.content.contains("path does not exist"),
+            "must not look like a missing path: {}",
+            r.content
+        );
+    }
+
+    #[tokio::test]
+    async fn case_sensitive_does_not_match_different_case() {
+        let d = tempfile::tempdir().unwrap();
+        std::fs::write(d.path().join("Chat.tsx"), "").unwrap();
+        let r_ci = GlobTool
+            .execute(r#"{"pattern":"chat.tsx"}"#, &ctx(d.path()))
+            .await;
+        assert!(r_ci.content.contains("Chat.tsx"), "{}", r_ci.content);
+        let r_cs = GlobTool
+            .execute(
+                r#"{"pattern":"chat.tsx","case_sensitive":true}"#, 
+                &ctx(d.path()),
+            )
+            .await;
+        assert!(
+            !r_cs.content.contains("Chat.tsx"),
+            "case-sensitive must not match Chat.tsx: {}",
+            r_cs.content
+        );
+    }
+
+    #[tokio::test]
+    async fn include_dirs_returns_matching_directories() {
+        let d = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(d.path().join("src/sub")).unwrap();
+        std::fs::write(d.path().join("src/a.rs"), "").unwrap();
+        let r_files = GlobTool
+            .execute(r#"{"pattern":"src/**"}"#, &ctx(d.path()))
+            .await;
+        assert!(r_files.content.contains("src/a.rs"), "{}", r_files.content);
+        assert!(
+            !r_files.content.contains("src/sub/"),
+            "dirs omitted by default: {}",
+            r_files.content
+        );
+        let r_dirs = GlobTool
+            .execute(
+                r#"{"pattern":"src/**","include_dirs":true}"#, 
+                &ctx(d.path()),
+            )
+            .await;
+        assert!(!r_dirs.is_error, "{}", r_dirs.content);
+        assert!(r_dirs.content.contains("src/a.rs"), "{}", r_dirs.content);
+        assert!(r_dirs.content.contains("src/sub/"), "{}", r_dirs.content);
+        assert!(r_dirs.content.contains("paths found"), "{}", r_dirs.content);
     }
 }

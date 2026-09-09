@@ -404,7 +404,8 @@ impl Tool for CodeExploreTool {
 
     fn description(&self) -> &str {
         "Retrieve code call relationships and business flows using a semantic code graph, supporting natural-language queries in Chinese and English. \
-         Use to trace how business keywords, comments, or symbols operate across the codebase, as well as tracking call chains, variable references, and logic flows."
+         Use to trace how business keywords, comments, or symbols operate across the codebase, as well as tracking call chains, variable references, and logic flows. \
+         For a field or identifier (e.g. `turn_cached_tokens`), lists definition and likely write/use sites before the call graph."
     }
 
     fn parameters_schema(&self) -> serde_json::Value {
@@ -417,7 +418,7 @@ impl Tool for CodeExploreTool {
                 },
                 "query": {
                     "type": "string",
-                    "description": "Natural-language question or precise symbol lookup in Chinese or English. Examples:\n- path='crates/atomcode-coding' query='CodeExploreTool'\n- path='src/auth' query='用户登录如何校验'\n- path='.' query='会话压缩如何工作'\n- path='src/auth.rs' query='TokenClaims'"
+                    "description": "Natural-language question or precise symbol lookup in Chinese or English. Examples:\n- path='crates/atomcode-coding' query='CodeExploreTool'\n- path='src/auth' query='用户登录如何校验'\n- path='.' query='会话压缩如何工作'\n- path='src/auth.rs' query='TokenClaims'\n- path='crates/atomcode-coding' query='turn_cached_tokens' (field read/write sites)"
                 },
                 "max_files": {
                     "type": "integer",
@@ -1250,7 +1251,7 @@ fn score_workspace_symbols(
                     let graph_mass = ((callers_cnt + callees_cnt) as f64).min(12.0);
 
                     // 4. AST Role & Active Logic weighting
-                    let kind_weight = match node.kind {
+                    let mut kind_weight: f64 = match node.kind {
                         SymbolKind::SqlStatement => 1.50,
                         _ if node.metrics.has_sql_or_qs || branch_comment_sim >= 20.0 => 1.45,
                         SymbolKind::Enum => 1.30,
@@ -1274,6 +1275,28 @@ fn score_workspace_symbols(
                         _ if node.metrics.is_pure_dto => 0.45,
                         _ => 0.7,
                     };
+                    // Exact identifier / field lookup: definition sites must beat popular helpers.
+                    let exact_ident = tokens.raw_query.eq_ignore_ascii_case(&node.name)
+                        || tokens
+                            .code_identifiers
+                            .iter()
+                            .any(|id| id.eq_ignore_ascii_case(&node.name));
+                    if exact_ident {
+                        kind_weight = kind_weight.max(1.45);
+                    } else if matches!(
+                        node.kind,
+                        SymbolKind::Property
+                            | SymbolKind::Variable
+                            | SymbolKind::Constant
+                            | SymbolKind::ConfigProperty
+                    ) {
+                        if tokens.code_identifiers.iter().any(|id| {
+                            let id_l = id.to_ascii_lowercase();
+                            id_l.len() >= 4 && node_name_lower.contains(&id_l)
+                        }) {
+                            kind_weight = kind_weight.max(1.25);
+                        }
+                    }
 
                     let active_bonus = if node.metrics.is_active_logic {
                         let b = (node.metrics.branch_count as f64 * 6.0).min(18.0);
@@ -2358,6 +2381,104 @@ fn auction_evidence<'a>(
     picked
 }
 
+const MAX_IDENT_HITS: usize = 24;
+
+struct IdentHit {
+    ident: String,
+    role: &'static str,
+    file: PathBuf,
+    name: String,
+    kind: SymbolKind,
+    line: usize,
+}
+
+fn identifier_query_terms(tokens: &SearchTokens) -> Vec<String> {
+    let mut terms: Vec<String> = Vec::new();
+    for id in &tokens.code_identifiers {
+        if id.len() >= 4 && !terms.iter().any(|t| t.eq_ignore_ascii_case(id)) {
+            terms.push(id.clone());
+        }
+    }
+    terms
+}
+
+fn ident_role(name: &str, ident: &str) -> &'static str {
+    let n = name.to_ascii_lowercase();
+    let id = ident.to_ascii_lowercase();
+    if n == id {
+        return "def";
+    }
+    const WRITE_MARKERS: &[&str] = &[
+        "set_",
+        "update_",
+        "add_",
+        "push_",
+        "insert_",
+        "accumul",
+        "increment",
+        "_mut",
+        "assign",
+    ];
+    if n.contains(&id) && WRITE_MARKERS.iter().any(|m| n.contains(m)) {
+        return "write";
+    }
+    "use"
+}
+
+fn collect_identifier_hits(
+    graph: &CodeGraph,
+    tokens: &SearchTokens,
+    scope: Option<&Path>,
+) -> Vec<IdentHit> {
+    let idents = identifier_query_terms(tokens);
+    if idents.is_empty() {
+        return Vec::new();
+    }
+    let mut hits: Vec<IdentHit> = Vec::new();
+    for (name, ids) in &graph.by_name {
+        let name_l = name.to_ascii_lowercase();
+        for ident in &idents {
+            let id_l = ident.to_ascii_lowercase();
+            if name_l != id_l && !name_l.contains(&id_l) {
+                continue;
+            }
+            for id in ids {
+                let Some(node) = graph.nodes.get(id) else {
+                    continue;
+                };
+                if let Some(sc) = scope {
+                    if !path_matches_scope(&node.file, sc) {
+                        continue;
+                    }
+                }
+                hits.push(IdentHit {
+                    ident: ident.clone(),
+                    role: ident_role(name, ident),
+                    file: node.file.clone(),
+                    name: node.name.clone(),
+                    kind: node.kind.clone(),
+                    line: node.start_line,
+                });
+            }
+        }
+    }
+    hits.sort_by(|a, b| {
+        let rank = |r: &str| match r {
+            "def" => 0,
+            "write" => 1,
+            _ => 2,
+        };
+        rank(a.role)
+            .cmp(&rank(b.role))
+            .then_with(|| a.file.cmp(&b.file))
+            .then_with(|| a.line.cmp(&b.line))
+            .then_with(|| a.name.cmp(&b.name))
+    });
+    hits.dedup_by(|a, b| a.file == b.file && a.name == b.name && a.line == b.line);
+    hits.truncate(MAX_IDENT_HITS);
+    hits
+}
+
 fn grep_query_terms(tokens: &SearchTokens) -> Vec<String> {
     let mut terms: Vec<String> = Vec::new();
     for id in &tokens.code_identifiers {
@@ -2633,6 +2754,37 @@ fn render_explore_output(
     let coverage_idx = out.len();
     out.extend(card);
     out.push("".to_string());
+
+    let ident_hits = collect_identifier_hits(graph, tokens, scope);
+    if !ident_hits.is_empty() {
+        let idents: Vec<&str> = {
+            let mut v: Vec<&str> = ident_hits.iter().map(|h| h.ident.as_str()).collect();
+            v.sort();
+            v.dedup();
+            v
+        };
+        out.push(format!(
+            "### 🧷 IDENTIFIER HITS: `{}`",
+            idents.join("` `")
+        ));
+        out.push("| Role | File | Symbol | Kind | Line |".to_string());
+        out.push("| :--- | :--- | :--- | :--- | ---: |".to_string());
+        for h in &ident_hits {
+            out.push(format!(
+                "| {} | `{}` | `{}` | {:?} | L{} |",
+                h.role,
+                rel_disp(&h.file, root),
+                h.name,
+                h.kind,
+                h.line
+            ));
+        }
+        out.push(format!(
+            "> Next: grep  pattern={}  path={}  (literal occurrences, including assignments)\n",
+            idents.first().copied().unwrap_or(query),
+            scope.map(|s| rel_disp(s, root)).unwrap_or_else(|| ".".to_string())
+        ));
+    }
 
     out.push(format!("### 🔗 LAYERS: \"{query}\""));
     if connected && !business_hops.is_empty() {
@@ -3149,6 +3301,84 @@ mod tests {
             !out.contains("```mermaid"),
             "mermaid dump must not appear:\n{out}"
         );
+    }
+
+    #[test]
+    fn identifier_hits_list_field_def_and_write_sites() {
+        use super::super::graph::{SymbolKind, Visibility};
+
+        let mut graph = CodeGraph::new();
+        graph.add_symbol(SymbolNode {
+            id: 1,
+            name: "turn_cached_tokens".into(),
+            kind: SymbolKind::Property,
+            visibility: Visibility::Public,
+            file: PathBuf::from("crates/coding/src/commands.rs"),
+            start_line: 5378,
+            end_line: 5378,
+            signature: None,
+            ..Default::default()
+        });
+        graph.add_symbol(SymbolNode {
+            id: 2,
+            name: "set_turn_cached_tokens".into(),
+            kind: SymbolKind::Function,
+            visibility: Visibility::Public,
+            file: PathBuf::from("crates/coding/src/commands.rs"),
+            start_line: 5401,
+            end_line: 5410,
+            signature: None,
+            ..Default::default()
+        });
+        graph.add_symbol(SymbolNode {
+            id: 3,
+            name: "format_messages".into(),
+            kind: SymbolKind::Function,
+            visibility: Visibility::Public,
+            file: PathBuf::from("crates/coding/src/format.rs"),
+            start_line: 12,
+            end_line: 80,
+            signature: None,
+            ..Default::default()
+        });
+
+        let mut tokens = SearchTokens::default();
+        tokens.raw_query = "turn_cached_tokens 如何累计".into();
+        tokens.code_identifiers = vec!["turn_cached_tokens".into()];
+
+        let hits = collect_identifier_hits(&graph, &tokens, None);
+        assert!(
+            hits.iter().any(|h| h.role == "def" && h.name == "turn_cached_tokens"),
+            "def site missing: {:?}",
+            hits.iter().map(|h| (&h.role, &h.name)).collect::<Vec<_>>()
+        );
+        assert!(
+            hits.iter().any(|h| h.role == "write" && h.name == "set_turn_cached_tokens"),
+            "write site missing"
+        );
+        assert!(
+            hits.iter().all(|h| h.name != "format_messages"),
+            "unrelated helper must not appear"
+        );
+
+        let out = render_explore_output(
+            &graph,
+            Path::new("."),
+            "turn_cached_tokens 如何累计",
+            &[],
+            &[],
+            false,
+            8,
+            None,
+            &tokens,
+            None,
+            None,
+            None,
+        );
+        assert!(out.contains("IDENTIFIER HITS"), "section missing:\n{out}");
+        assert!(out.contains("turn_cached_tokens"), "{out}");
+        assert!(out.contains("set_turn_cached_tokens"), "{out}");
+        assert!(!out.contains("| format_messages |"), "{out}");
     }
 
     #[test]

@@ -265,6 +265,7 @@ async fn open_responses_stream(
             }
         }
         if !session_id.is_empty() {
+            req = req.header("x-atomcode-session-id", session_id);
             req = req.header("x-jeikcode-sessionid", session_id);
             req = req.header("x-session-id", session_id);
         }

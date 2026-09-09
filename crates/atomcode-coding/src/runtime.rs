@@ -2474,7 +2474,7 @@ fn spawn_runtime_owner_with_optional_agent(
     let mut wakeup_rx = wakeup_rx.unwrap_or(closed_wakeup_rx);
     let (goal_eval_tx, mut goal_eval_rx) = mpsc::unbounded_channel::<EvalOutcome>();
     let (loop_fire_tx, mut loop_fire_rx) = mpsc::unbounded_channel::<(u64, u64, WakeupRequest)>();
-    let (_session_name_tx, mut session_name_rx) = mpsc::unbounded_channel::<(u64, String)>();
+    let (session_name_tx, mut session_name_rx) = mpsc::unbounded_channel::<(u64, Option<String>)>();
     let (next_prompt_tx, mut next_prompt_rx) =
         mpsc::unbounded_channel::<NextPromptSuggestionOutcome>();
     let mut generation = 0;
@@ -2528,30 +2528,7 @@ fn spawn_runtime_owner_with_optional_agent(
         let mut loop_state: Option<LoopState> = None;
         let mut pending_wakeup: Option<WakeupRequest> = None;
         let mut held_turn: Option<(u64, StopReason, Arc<SessionSnapshot>, RuntimeTurnStats)> = None;
-        let mut ai_name_attempted = resources
-            .as_ref()
-            .and_then(|runtime| {
-                runtime.parts.session.as_ref().and_then(|binding| {
-                    let resumed_user_turns = binding
-                        .resume
-                        .as_ref()
-                        .map(|s| {
-                            s.messages.iter().filter(|m| {
-                                matches!(m.role, atomcode_kernel::message::Role::User)
-                                    && !m.synthetic
-                                    && !atomcode_capabilities::reminder::is_system_reminder(&m.text)
-                            }).count()
-                        })
-                        .unwrap_or(0);
-                    if resumed_user_turns > 0 {
-                        return Some(true);
-                    }
-                    binding.manager.read_meta(&binding.id).ok().map(|meta| {
-                        meta.ai_named || meta.user_renamed || meta.turn_count > 0
-                    })
-                })
-            })
-            .unwrap_or(false);
+        let mut ai_name_in_flight = false;
         let mut persistence_failure = None;
         if agent_available {
             replay_pending_resume_prompt(
@@ -2827,7 +2804,9 @@ fn spawn_runtime_owner_with_optional_agent(
                     }
                 }
                 suggestion = session_name_rx.recv(), if native_protocol => {
-                    let Some((name_generation, name)) = suggestion else { continue };
+                    ai_name_in_flight = false;
+                    let Some((name_generation, maybe_name)) = suggestion else { continue };
+                    let Some(name) = maybe_name else { continue };
                     if name_generation == generation {
                         if let Some(runtime) = resources.as_mut() {
                             if let Some(binding) = runtime.parts.session.as_mut() {
@@ -4388,7 +4367,7 @@ fn spawn_runtime_owner_with_optional_agent(
                         // A same-directory ChangeDirectory resolves to no input: the current
                         // runtime remains authoritative, with no candidate session, generation
                         // advance, or reconfiguration events.
-                        let Some((mut input, prepared_lease)) = resolved else {
+                        let Some((input, prepared_lease)) = resolved else {
                             let unchanged = session_changed(generation, &runtime);
                             resources = Some(runtime);
                             let _ = done.send(Ok(unchanged));
@@ -4638,7 +4617,7 @@ fn spawn_runtime_owner_with_optional_agent(
                             operation,
                             ReconfigureKind::FreshSession
                         ) {
-                            ai_name_attempted = false;
+                            ai_name_in_flight = false;
                         }
                         let changed = session_changed(generation, &runtime);
                         let cwd = runtime.config.working_dir.clone();
@@ -5656,11 +5635,6 @@ fn spawn_runtime_owner_with_optional_agent(
                                     let stats = std::mem::take(&mut turn_stats);
                                     let turn_id = active_turn.unwrap_or_default();
                                     let mut completion_reason = reason;
-                                    let user_turn_count = snapshot.messages.iter().filter(|m| {
-                                        matches!(m.role, atomcode_kernel::message::Role::User)
-                                            && !m.synthetic
-                                            && !atomcode_capabilities::reminder::is_system_reminder(&m.text)
-                                    }).count();
                                     let already_named = resources.as_ref().and_then(|runtime| {
                                         runtime.parts.session.as_ref().and_then(|binding| {
                                             binding.manager.read_meta(&binding.id).ok().map(|meta| {
@@ -5669,11 +5643,10 @@ fn spawn_runtime_owner_with_optional_agent(
                                         })
                                     }).unwrap_or(false);
                                     let should_name = reason != StopReason::Cancelled
-                                        && !ai_name_attempted
-                                        && !already_named
-                                        && user_turn_count <= 1;
-                                    ai_name_attempted = true;
+                                        && !ai_name_in_flight
+                                        && !already_named;
                                     if should_name {
+                                        ai_name_in_flight = true;
                                         let working_dir = resources
                                             .as_ref()
                                             .map(|runtime| runtime.config.working_dir.as_path())
@@ -5698,7 +5671,7 @@ fn spawn_runtime_owner_with_optional_agent(
                                                     )
                                                     .map(|config| {
                                                         atomcode_config::config::ai_session_naming_enabled(
-                                                            &config,
+                                                             &config,
                                                         )
                                                     })
                                                     .unwrap_or(false)
@@ -5712,33 +5685,17 @@ fn spawn_runtime_owner_with_optional_agent(
                                                         .ok()
                                                 });
                                                 if let Some(provider) = provider {
-                                                    if let Some(name) =
-                                                        crate::session_title::generate_session_title(
-                                                            provider,
-                                                            conversation,
-                                                        )
-                                                        .await
-                                                    {
-                                                        if let Some(runtime) = resources.as_mut() {
-                                                            if let Some(binding) = runtime.parts.session.as_mut() {
-                                                                let _ = binding.manager.update_meta(&binding.id, |meta| {
-                                                                    if !crate::session_title::should_accept_ai_name(
-                                                                        meta.user_renamed,
-                                                                        meta.ai_named,
-                                                                    ) {
-                                                                        return None;
-                                                                    }
-                                                                    let old_name = std::mem::replace(&mut meta.name, name.clone());
-                                                                    meta.ai_named = true;
-                                                                    meta.updated_at = atomcode_capabilities::session::now_ms();
-                                                                    Some(old_name)
-                                                                });
-                                                            }
-                                                        }
-                                                        let _ = runtime_event_tx.send(
-                                                            CodingRuntimeEvent::SessionNameSuggested { name },
-                                                        );
-                                                    }
+                                                    let tx = session_name_tx.clone();
+                                                    let name_generation = generation;
+                                                    tokio::spawn(async move {
+                                                        let name =
+                                                            crate::session_title::generate_session_title(
+                                                                provider,
+                                                                conversation,
+                                                            )
+                                                            .await;
+                                                        let _ = tx.send((name_generation, name));
+                                                    });
                                                 }
                                             }
                                         }

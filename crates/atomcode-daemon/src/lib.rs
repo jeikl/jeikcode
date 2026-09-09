@@ -5241,7 +5241,8 @@ impl ChatRuntimeProjector {
             CodingRuntimeEvent::PersistenceWarning(message) => {
                 vec![ChatEvent::PersistenceWarning { message }]
             }
-            CodingRuntimeEvent::SessionNameSuggested { name } => {
+            CodingRuntimeEvent::SessionNameSuggested { name }
+            | CodingRuntimeEvent::SessionTitleSeeded { name } => {
                 vec![ChatEvent::SessionRenamed {
                     session_id: permission_session_id.to_string(),
                     name,
@@ -5255,7 +5256,6 @@ impl ChatRuntimeProjector {
             | CodingRuntimeEvent::Reconfigured { .. }
             | CodingRuntimeEvent::ProviderChanged { .. }
             | CodingRuntimeEvent::ProviderUnavailable { .. }
-            | CodingRuntimeEvent::SessionTitleSeeded { .. }
             | CodingRuntimeEvent::SessionChanged(_)
             | CodingRuntimeEvent::WorkingDirectoryChanged(_)
             | CodingRuntimeEvent::GoalChanged(_)
@@ -5706,7 +5706,19 @@ async fn process_chat_request(
         is_new_session,
         &event_tx,
         req.session_title.as_deref(),
+        Some(&req.message),
     )?;
+
+    maybe_spawn_async_session_title(
+        &working_dir,
+        &session_id,
+        &config,
+        &provider_name,
+        &req.message,
+        &initial_messages,
+        telemetry.clone(),
+        event_tx.clone(),
+    );
 
     // Key used to route interactive permission decisions back to this turn's
     // decider. We use the *actual* session id (not req.session_id, which may be
@@ -5920,7 +5932,9 @@ fn publish_chat_session_assignment(
     is_new_session: bool,
     event_tx: &mpsc::UnboundedSender<ChatEvent>,
     session_title: Option<&str>,
+    first_user_prompt: Option<&str>,
 ) -> anyhow::Result<()> {
+    let mut provisional_name = None;
     if is_new_session {
         let manager = NativeSessionManager::for_project(working_dir);
         let lease = manager.acquire_lease(session_id)?;
@@ -5936,6 +5950,11 @@ fn publish_chat_session_assignment(
             // Pin API / client-provided titles (including the stable "default"
             // key) so turn-complete auto-name and AI naming leave them alone.
             meta.user_renamed = true;
+        } else if let Some(provisional) = first_user_prompt
+            .and_then(atomcode_coding::session_title::provisional_title_from_user_input)
+        {
+            meta.name = provisional.clone();
+            provisional_name = Some(provisional);
         }
         manager.commit_native_import(
             &lease,
@@ -5947,7 +5966,154 @@ fn publish_chat_session_assignment(
     let _ = event_tx.send(ChatEvent::SessionAssigned {
         session_id: session_id.to_string(),
     });
+    if let Some(name) = provisional_name {
+        let _ = event_tx.send(ChatEvent::SessionRenamed {
+            session_id: session_id.to_string(),
+            name,
+        });
+    }
     Ok(())
+}
+
+static IN_FLIGHT_TITLES: std::sync::OnceLock<std::sync::Mutex<std::collections::HashSet<String>>> =
+    std::sync::OnceLock::new();
+
+fn in_flight_titles() -> &'static std::sync::Mutex<std::collections::HashSet<String>> {
+    IN_FLIGHT_TITLES.get_or_init(|| std::sync::Mutex::new(std::collections::HashSet::new()))
+}
+
+struct TitleInFlightGuard(String);
+impl Drop for TitleInFlightGuard {
+    fn drop(&mut self) {
+        if let Ok(mut set) = in_flight_titles().lock() {
+            set.remove(&self.0);
+        }
+    }
+}
+
+fn maybe_spawn_async_session_title(
+    working_dir: &std::path::Path,
+    session_id: &str,
+    config: &atomcode_config::config::Config,
+    provider_name: &str,
+    user_prompt: &str,
+    initial_messages: &[atomcode_kernel::message::Message],
+    telemetry: std::sync::Arc<atomcode_telemetry::Telemetry>,
+    event_tx: mpsc::UnboundedSender<ChatEvent>,
+) {
+    if !atomcode_config::config::ai_session_naming_enabled(config) {
+        return;
+    }
+
+    let manager = NativeSessionManager::for_project(working_dir);
+    let should_name = manager
+        .read_meta(session_id)
+        .map(|meta| {
+            atomcode_coding::session_title::should_accept_ai_name(meta.user_renamed, meta.ai_named)
+        })
+        .unwrap_or(false);
+
+    if !should_name {
+        return;
+    }
+
+    {
+        let mut set = match in_flight_titles().lock() {
+            Ok(s) => s,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        if set.contains(session_id) {
+            return;
+        }
+        set.insert(session_id.to_string());
+    }
+
+    let working_dir = working_dir.to_path_buf();
+    let session_id = session_id.to_string();
+    let project_bucket = NativeSessionManager::project_hash(&working_dir);
+    let config = config.clone();
+    let provider_name = provider_name.to_string();
+    let prompt = user_prompt.to_string();
+    let conversation_context = atomcode_coding::session_title::first_exchange_text_in(
+        initial_messages,
+        &working_dir,
+    )
+    .unwrap_or_else(|| format!("User: {prompt}"));
+
+    tokio::spawn(async move {
+        let _guard = TitleInFlightGuard(session_id.clone());
+
+        let coding_cfg = crate::kernel_runtime::coding_config_from_runtime(
+            &crate::live_api::chat_runtime_config(
+                &config,
+                &provider_name,
+                &working_dir,
+                telemetry,
+            ),
+        );
+        let factory = crate::runtime_host::coding_provider_factory();
+        let sid = session_id.clone();
+        let provider_res = tokio::task::spawn_blocking(move || factory.build(&coding_cfg, Some(&sid))).await;
+
+        let provider = match provider_res {
+            Ok(Ok(p)) => p,
+            Ok(Err(e)) => {
+                tracing::warn!("Failed to build provider for session title: {e}");
+                return;
+            }
+            Err(e) => {
+                tracing::warn!("Provider build panicked for session title: {e}");
+                return;
+            }
+        };
+
+        if let Some(name) = atomcode_coding::session_title::generate_session_title(provider, conversation_context).await {
+            let renamed = crate::legacy_convert::apply_ai_catalog_name_in_project(
+                &project_bucket,
+                &session_id,
+                &name,
+            )
+            .unwrap_or(false);
+
+            if !renamed {
+                let manager = NativeSessionManager::for_project(&working_dir);
+                let _ = manager.update_meta(&session_id, |meta| {
+                    if !atomcode_coding::session_title::should_accept_ai_name(
+                        meta.user_renamed,
+                        meta.ai_named,
+                    ) {
+                        return None;
+                    }
+                    let old = std::mem::replace(&mut meta.name, name.clone());
+                    meta.ai_named = true;
+                    meta.updated_at = atomcode_capabilities::session::now_ms();
+                    Some(old)
+                });
+            }
+
+            // 1. Broadcast to active turn SSE stream
+            let _ = event_tx.send(ChatEvent::SessionRenamed {
+                session_id: session_id.clone(),
+                name: name.clone(),
+            });
+
+            // 2. Broadcast to live registry for watch / live viewers
+            let reg = atomcode_coding::session_runtime_registry::SessionRuntimeRegistry::global();
+            let _ = reg.push_runtime_event(
+                &session_id,
+                0,
+                atomcode_coding::CodingRuntimeEvent::SessionNameSuggested { name: name.clone() },
+            );
+
+            // 3. Broadcast to native live hub
+            if let Ok(binding) = crate::native_live::binding() {
+                let _ = crate::native_live::publish_unsequenced(
+                    &binding,
+                    atomcode_coding::CodingRuntimeEvent::SessionNameSuggested { name },
+                );
+            }
+        }
+    });
 }
 
 /// Build system prompt for daemon/API mode.
@@ -8704,7 +8870,7 @@ mod tests {
         let session_id = "11111111-1111-4111-8111-111111111111";
         let (event_tx, mut event_rx) = mpsc::unbounded_channel();
 
-        publish_chat_session_assignment(&working_dir, session_id, true, &event_tx, Some("jeik"))
+        publish_chat_session_assignment(&working_dir, session_id, true, &event_tx, Some("jeik"), None)
             .unwrap();
 
         let manager = NativeSessionManager::for_project(&working_dir);
@@ -8715,6 +8881,39 @@ mod tests {
         assert!(matches!(
             event_rx.try_recv(),
             Ok(ChatEvent::SessionAssigned { session_id: assigned }) if assigned == session_id
+        ));
+    }
+
+    #[test]
+    fn new_chat_assignment_seeds_provisional_title_when_no_title_given() {
+        let home = ScopedChatHome::new();
+        let working_dir = home._dir.path().join("project");
+        std::fs::create_dir_all(&working_dir).unwrap();
+        let session_id = "33333333-3333-4333-8333-333333333333";
+        let (event_tx, mut event_rx) = mpsc::unbounded_channel();
+
+        publish_chat_session_assignment(
+            &working_dir,
+            session_id,
+            true,
+            &event_tx,
+            None,
+            Some("帮我写一个快速排序算法"),
+        )
+        .unwrap();
+
+        let manager = NativeSessionManager::for_project(&working_dir);
+        let loaded = manager.load_native_session(session_id).unwrap();
+        assert_eq!(loaded.meta.name, "帮我写一个快速排序算法");
+        assert!(!loaded.meta.user_renamed);
+        assert!(!loaded.meta.ai_named);
+        assert!(matches!(
+            event_rx.try_recv(),
+            Ok(ChatEvent::SessionAssigned { session_id: assigned }) if assigned == session_id
+        ));
+        assert!(matches!(
+            event_rx.try_recv(),
+            Ok(ChatEvent::SessionRenamed { session_id: assigned, name }) if assigned == session_id && name == "帮我写一个快速排序算法"
         ));
     }
 
@@ -8733,6 +8932,7 @@ mod tests {
             true,
             &event_tx,
             Some("default"),
+            None,
         );
 
         assert!(result.is_err());

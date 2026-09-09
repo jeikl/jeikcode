@@ -166,7 +166,7 @@ pub struct OpenAiCompatProvider {
     client: std::sync::Arc<SwappableClient>,
     url: String,
     /// Stable per-conversation id, bound ONCE via [`bind_session_id`] when the kernel
-    /// spawns the owning Agent. Forwarded as the `x-atomcode-session-id` header so a
+    /// spawns the owning Agent. Forwarded as the `x-jeikcode-sessionid` and `x-session-id` headers so a
     /// gateway can pin the conversation to one upstream for prefix-cache affinity.
     /// `OnceLock` (not a lock-on-read mutex) because the id is constant for the
     /// provider's life — a `/session` switch rebuilds the provider, never re-binds.
@@ -714,8 +714,8 @@ async fn open_stream(
         // Stable session id → lets the forwarding gateway pin this conversation to
         // one upstream for prefix-cache affinity. Empty ⇒ omitted (sub-agent/summary).
         if !session_id.is_empty() {
-            req = req.header("x-atomcode-session-id", session_id);
-            // grok2api / LiteLLM pin prefix-cache affinity on this name; AtomCode's
+            req = req.header("x-jeikcode-sessionid", session_id);
+            // grok2api / LiteLLM pin prefix-cache affinity on this name; JeikCode's
             // own header is kept for product-side diagnostics.
             req = req.header("x-session-id", session_id);
         }
@@ -1583,7 +1583,8 @@ fn map_usage(u: ChunkUsage) -> TokenUsage {
     let cached = u
         .prompt_cache_hit_tokens // DeepSeek
         .or(u.cached_tokens) // GLM / Zhipu
-        .or_else(|| u.prompt_tokens_details.and_then(|d| d.cached_tokens)) // OpenAI
+        .or_else(|| u.prompt_tokens_details.and_then(|d| d.cached_tokens)) // OpenAI Chat
+        .or_else(|| u.input_tokens_details.and_then(|d| d.cached_tokens)) // OpenAI Responses / Generic
         .unwrap_or(0);
     TokenUsage {
         prompt: u.prompt_tokens.unwrap_or(0),
@@ -1662,9 +1663,11 @@ struct ChunkUsage {
     cached_tokens: Option<u32>,
     #[serde(default)]
     prompt_tokens_details: Option<PromptTokensDetails>,
+    #[serde(default)]
+    input_tokens_details: Option<PromptTokensDetails>,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Clone, Copy)]
 struct PromptTokensDetails {
     #[serde(default)]
     cached_tokens: Option<u32>,
@@ -3589,7 +3592,7 @@ mod tests {
 
         let head = captured.lock().unwrap().to_lowercase();
         assert!(
-            head.contains("x-atomcode-session-id: sess-abc-123"),
+            head.contains("x-jeikcode-sessionid: sess-abc-123"),
             "session-affinity header must be forwarded: {head}"
         );
         assert!(
@@ -3618,8 +3621,12 @@ mod tests {
 
         let head = captured.lock().unwrap().to_lowercase();
         assert!(
-            !head.contains("x-atomcode-session-id"),
+            !head.contains("x-jeikcode-sessionid"),
             "no session id ⇒ affinity header must be omitted: {head}"
+        );
+        assert!(
+            !head.contains("x-session-id"),
+            "no session id ⇒ gateway header must be omitted: {head}"
         );
         assert!(
             head.contains("user-agent: atomcode"),

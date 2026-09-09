@@ -339,6 +339,7 @@ export function App() {
   function handleSessionRenamed(id: string, name: string) {
     if (id === sessionId) {
       setActiveSession((prev) => (prev ? { ...prev, name } : prev));
+      setOptimisticSession((prev) => (prev && prev.id === id ? { ...prev, name } : prev));
     }
   }
 
@@ -511,7 +512,11 @@ export function App() {
             onCwdChanged={handleCwdChanged}
             onLanding={setIsLanding}
             skillInsert={skillInsert}
-            onSessionRenamed={(name) => setActiveSession((prev) => prev ? { ...prev, name } : prev)}
+            onSessionRenamed={(name) => {
+              setActiveSession((prev) => (prev ? { ...prev, name } : prev));
+              setOptimisticSession((prev) => (prev ? { ...prev, name } : prev));
+              setSessionListVersion((v) => v + 1);
+            }}
             onOpenSidebar={() => setSidebarOpen(true)}
             onNewSession={handleNewSession}
           />

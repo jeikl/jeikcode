@@ -265,7 +265,7 @@ async fn open_responses_stream(
             }
         }
         if !session_id.is_empty() {
-            req = req.header("x-atomcode-session-id", session_id);
+            req = req.header("x-jeikcode-sessionid", session_id);
             req = req.header("x-session-id", session_id);
         }
         let sent = match tokio::time::timeout(open_timeout, req.send()).await {
@@ -699,13 +699,22 @@ impl ResponsesSseDecoder {
                     _ => Some(vec![]),
                 }
             }
-            "response.completed" => {
+            "response.completed" | "response.done" => {
                 let mut evs = self.flush_calls();
-                if let Some(usage) = v.pointer("/response/usage") {
+                if let Some(usage) = v.pointer("/response/usage").or_else(|| v.get("usage")) {
                     evs.push(StreamEvent::Usage(parse_usage(usage)));
                 }
                 self.emitted_done = true;
                 evs.push(StreamEvent::Done { truncated: false });
+                Some(evs)
+            }
+            "response.incomplete" => {
+                let mut evs = self.flush_calls();
+                if let Some(usage) = v.pointer("/response/usage").or_else(|| v.get("usage")) {
+                    evs.push(StreamEvent::Usage(parse_usage(usage)));
+                }
+                self.emitted_done = true;
+                evs.push(StreamEvent::Done { truncated: true });
                 Some(evs)
             }
             "response.failed" | "error" => {

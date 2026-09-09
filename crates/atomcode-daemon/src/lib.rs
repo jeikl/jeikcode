@@ -4295,6 +4295,12 @@ pub enum ChatEvent {
         #[serde(default)]
         server_message: Option<String>,
     },
+    /// AI session title generated / renamed
+    #[serde(rename = "session_renamed")]
+    SessionRenamed {
+        session_id: String,
+        name: String,
+    },
 }
 
 pub(crate) fn stop_reason_wire(reason: atomcode_kernel::event::StopReason) -> &'static str {
@@ -5235,6 +5241,12 @@ impl ChatRuntimeProjector {
             CodingRuntimeEvent::PersistenceWarning(message) => {
                 vec![ChatEvent::PersistenceWarning { message }]
             }
+            CodingRuntimeEvent::SessionNameSuggested { name } => {
+                vec![ChatEvent::SessionRenamed {
+                    session_id: permission_session_id.to_string(),
+                    name,
+                }]
+            }
             CodingRuntimeEvent::CompactionStarted { .. }
             | CodingRuntimeEvent::CompactionFinished { .. }
             | CodingRuntimeEvent::RuntimeStopped(_)
@@ -5243,7 +5255,6 @@ impl ChatRuntimeProjector {
             | CodingRuntimeEvent::Reconfigured { .. }
             | CodingRuntimeEvent::ProviderChanged { .. }
             | CodingRuntimeEvent::ProviderUnavailable { .. }
-            | CodingRuntimeEvent::SessionNameSuggested { .. }
             | CodingRuntimeEvent::SessionTitleSeeded { .. }
             | CodingRuntimeEvent::SessionChanged(_)
             | CodingRuntimeEvent::WorkingDirectoryChanged(_)

@@ -93,6 +93,7 @@ export type SSEEvent =
   | { type: 'artifact_start'; id: string; artifact_type: string; language?: string | null; title?: string | null }
   | { type: 'artifact_content'; id: string; content: string }
   | { type: 'artifact_end'; id: string }
+  | { type: 'session_renamed'; session_id: string; name: string }
   | { type: 'command_output'; text: string };
 
 export interface ModelInfo {
@@ -1006,7 +1007,7 @@ export interface ApprovalModeResponse {
 }
 
 export type LiveWireEvent =
-  | { type: 'snapshot'; messages: SessionMessage[]; session_id: string; project_hash: string; provider: string; mode: ApprovalMode }
+  | { type: 'snapshot'; messages: SessionMessage[]; session_id: string; session_name?: string; project_hash: string; provider: string; mode: ApprovalMode; working_dir?: string }
   | { type: 'provider'; provider: string }
   | { type: 'mode'; mode: ApprovalMode }
   | { type: 'user'; text: string; images?: ImageData[]; client_input_id?: string }

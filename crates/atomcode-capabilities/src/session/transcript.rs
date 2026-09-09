@@ -235,9 +235,11 @@ impl LifecycleHooks for TranscriptHook {
             b.turn_id = meta.turn_id;
             // Turn-aggregate usage: the last round's `prompt` is the cumulative context
             // the turn reached; `completion` sums the output produced across rounds.
-            b.usage.prompt = meta.tokens.prompt;
+            if meta.tokens.prompt > 0 {
+                b.usage.prompt = meta.tokens.prompt;
+                b.usage.cached = meta.tokens.cached;
+            }
             b.usage.completion = b.usage.completion.saturating_add(meta.tokens.completion);
-            b.usage.cached = b.usage.cached.max(meta.tokens.cached);
         }
     }
 

@@ -8486,7 +8486,7 @@ pub async fn run_loop(mut ctx: LoopCtx, renderer: &mut dyn Renderer) -> Result<E
 
     // Bind the initial session's persistent id onto the agent + telemetry so
     // even a brand-new session uses its session-file id for the
-    // x-atomcode-session-id header (not Agent::new's bootstrap). Makes a later
+    // x-jeikcode-sessionid / x-session-id headers (not Agent::new's bootstrap). Makes a later
     // /resume reuse the SAME id. The -c replay block below rebinds if present.
     commands::bind_telemetry_to_session(&ctx, &ctx.current_session);
 

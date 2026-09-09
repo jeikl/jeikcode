@@ -797,9 +797,11 @@ pub(crate) async fn run_chat_turn_v2(
                         "session naming failed: {error}"
                     )));
                 }
+                let _ = runtime_event_tx.send(CodingRuntimeEvent::SessionNameSuggested { name });
             }
-            CodingRuntimeEvent::SessionTitleSeeded { .. } => {
-                // Disk title was already seeded at publish; no further catalog write.
+            CodingRuntimeEvent::SessionTitleSeeded { name } => {
+                // Disk title was already seeded at publish; forward so live views see the provisional title.
+                let _ = runtime_event_tx.send(CodingRuntimeEvent::SessionTitleSeeded { name });
             }
             CodingRuntimeEvent::RuntimeStopped(_) => {
                 send_chat_runtime_error(

@@ -2539,6 +2539,9 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
         onSessionId(e.session_id);
         restorePendingInteractive(e.session_id, sessionGenerationRef.current);
       }
+      if (e.session_name) {
+        onSessionRenamed?.(e.session_name);
+      }
       return;
     }
     // Provider events belong to the live runtime's session only. Other open
@@ -2577,7 +2580,7 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
     // 实时流是进程级广播，会到达所有 tab；仅当被改名的正是本 tab 正在
     // 查看的会话时才应用，否则会把别的会话的名字盖到当前标题头上。
     if (e.type === 'session_renamed') {
-      if (e.session_id === liveSessionIdRef.current) {
+      if (!liveSessionIdRef.current || e.session_id === liveSessionIdRef.current || e.session_id === activeIdRef.current) {
         onSessionRenamed?.(e.name);
       }
       return;
@@ -3536,6 +3539,11 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
         break;
       case 'command_output':
         pushCommandNotice(event.text);
+        break;
+      case 'session_renamed':
+        if (!activeIdRef.current || event.session_id === activeIdRef.current) {
+          onSessionRenamed?.(event.name);
+        }
         break;
 
       case 'user': {
@@ -4750,7 +4758,7 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
             const stepPct = formatCacheHitRate(cached, prompt, isEstimated);
             const loopPct = formatCacheHitRate(loopCached, loopPrompt, isEstimated);
             const multiStep = loopPrompt > prompt;
-            const cachedPct = multiStep && loopPct ? loopPct : stepPct;
+            const cachedPct = stepPct;
             const pctOfLimit = contextLimit && contextLimit > 0 ? Math.min(100, Math.round((total / contextLimit) * 100)) : null;
             const billable = completion + Math.max(0, prompt - cached);
 
@@ -4775,7 +4783,7 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
               }
             }
             if (multiStep && loopPct) {
-              tooltipLines.push(`⚡ 本轮综合命中: ${loopCached.toLocaleString()} / ${loopPrompt.toLocaleString()} (${loopPct})`);
+              tooltipLines.push(`⚡ 本轮多次调用综合节省: ${loopCached.toLocaleString()} / ${loopPrompt.toLocaleString()} (${loopPct})`);
             }
             if (reasoning > 0) {
               const contentTokens = Math.max(0, completion - reasoning);
@@ -4825,7 +4833,7 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
                       class={'token-pill token-cached' + (isEstimated ? ' is-estimated' : '')}
                       title={
                         multiStep && loopPct
-                          ? `本轮综合命中: ${loopCached.toLocaleString()} / ${loopPrompt.toLocaleString()} (${loopPct})`
+                          ? `最新单帧命中: ${cachedStr} / ${promptStr} (${stepPct ?? '0%'})\n本轮综合节省: ${loopCached.toLocaleString()} / ${loopPrompt.toLocaleString()} (${loopPct})`
                           : isEstimated
                             ? `预估缓存: ${cachedStr} (${stepPct} 预估)`
                             : `在线缓存命中: ${cachedStr} (${stepPct})`

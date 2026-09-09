@@ -1623,7 +1623,7 @@ pub fn assemble(
     }
     if let Some(b) = &parts.session {
         builder = builder.session_id(&b.id);
-        // Share the parent's `x-atomcode-session-id` with the subagent tier providers so a
+        // Share the parent's `x-jeikcode-sessionid` / `x-session-id` with the subagent tier providers so a
         // `task` fan-out's children run within the SAME gateway window as the main
         // conversation — otherwise each session-less child is a distinct window and GLM-5.2's
         // multi-window guard serializes the strong-tier subtasks. (Single-model users already

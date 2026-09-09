@@ -979,7 +979,7 @@ impl Agent {
         };
         // Bind the session id onto the provider before the turn loop starts so an
         // adapter can forward it as the gateway prefix-cache-affinity header
-        // (`x-atomcode-session-id`). This is the ONE place every driver's Agent is
+        // (`x-jeikcode-sessionid` / `x-session-id`). This is the ONE place every driver's Agent is
         // spawned — bridge, native tuix, ACP, headless all route through
         // `coding::assemble` → here — so no driver re-wires it and there is no
         // divergence. Mirrors core v1, which set the id on its provider at startup.

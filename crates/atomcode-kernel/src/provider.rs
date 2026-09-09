@@ -128,7 +128,7 @@ pub trait LlmProvider: Send + Sync {
     /// this at spawn — the single point where the session id (allocated by the coding
     /// layer's `prepare`, threaded in via `AgentBuilder::session_id`) meets the
     /// provider — so no driver re-threads it. An adapter forwards it as the
-    /// `x-atomcode-session-id` header, letting a forwarding gateway (LiteLLM) pin the
+    /// `x-jeikcode-sessionid` and `x-session-id` headers, letting a forwarding gateway (LiteLLM) pin the
     /// whole conversation to one upstream for prefix-cache affinity.
     ///
     /// This is a one-shot binding, NOT a mutable setter: the session id is constant

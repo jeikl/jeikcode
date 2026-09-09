@@ -7,7 +7,7 @@ use atomcode_kernel::stream::StreamEvent;
 use futures::StreamExt;
 
 const MAX_TITLE_CHARS: usize = 40;
-const TITLE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+const TITLE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(8);
 
 /// First-line provisional title from the user's raw (unwrapped) input.
 /// Used at first Submit so the session is catalog-visible before the turn ends.

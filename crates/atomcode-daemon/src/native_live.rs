@@ -294,8 +294,16 @@ pub async fn ensure_registry_runner(
     let forward_dir = working_dir;
     tokio::spawn(async move {
         let reg = atomcode_coding::session_runtime_registry::SessionRuntimeRegistry::global();
-        let _ = reg.open_or_attach(forward_id.clone(), forward_dir);
+        let _ = reg.open_or_attach(forward_id.clone(), forward_dir.clone());
         while let Some(envelope) = events.recv().await {
+            if let atomcode_coding::CodingRuntimeEvent::SessionNameSuggested { name } = &envelope.event {
+                let bucket = atomcode_capabilities::session::SessionManager::project_hash(&forward_dir);
+                let _ = crate::legacy_convert::apply_ai_catalog_name_in_project(
+                    &bucket,
+                    &forward_id,
+                    name,
+                );
+            }
             let _ = reg.push_runtime_event(&forward_id, envelope.generation, envelope.event);
         }
         let _ = task.await;
@@ -972,6 +980,14 @@ pub async fn ensure_headless_runtime(
                 }
                 _ => None,
             };
+            if let atomcode_coding::CodingRuntimeEvent::SessionNameSuggested { name } = &event.event {
+                let bucket = atomcode_capabilities::session::SessionManager::project_hash(&event_binding.working_dir);
+                let _ = crate::legacy_convert::apply_ai_catalog_name_in_project(
+                    &bucket,
+                    &event_binding.session_id,
+                    name,
+                );
+            }
             match publish(&event_binding, event) {
                 Ok(()) => {}
                 Err(HubError::StaleEvent) => {

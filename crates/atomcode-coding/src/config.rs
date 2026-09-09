@@ -520,7 +520,7 @@ struct TierInner {
     /// on every dispatch). One `Mutex` over both fields makes `get`/`reset` atomic and prevents
     /// a concurrent double-build.
     cache: Option<Option<Arc<dyn atomcode_kernel::provider::LlmProvider>>>,
-    /// The parent conversation's `x-atomcode-session-id` (set once at assemble). Bound onto the
+    /// The parent conversation's `x-jeikcode-sessionid` / `x-session-id` (set once at assemble). Bound onto the
     /// tier provider when it's built so a `task` fan-out's children send the SAME session id as
     /// the main conversation — the AtomGit gateway then treats them as one window and permits
     /// their concurrent requests (GLM-5.2 rejects concurrent DISTINCT-session requests, which
@@ -564,7 +564,7 @@ impl TierProvider {
             }
         }
         // Bind the parent session id onto the freshly-built provider so subtask children carry
-        // the main conversation's `x-atomcode-session-id` (one gateway window ⇒ concurrent OK).
+        // the main conversation's `x-jeikcode-sessionid` / `x-session-id` (one gateway window ⇒ concurrent OK).
         if let (Some(sid), Some(p)) = (&g.session_id, &built) {
             p.bind_session_id(sid);
         }

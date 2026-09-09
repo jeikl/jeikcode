@@ -628,6 +628,8 @@ function formatToolDetail(name: string, argsJson: string): string {
     case 'bash':
       return getStr('command');
     case 'list_directory':
+      // Schema primary key is `target_directory`; `path` is a serde alias for older calls.
+      return getStr('target_directory') || getStr('path') || '.';
     case 'change_dir':
       return getStr('path') || '.';
     case 'web_fetch':

@@ -2047,7 +2047,12 @@ fn format_tool_args(tool_name: &str, args_json: &str) -> String {
             }
         }
         "list_directory" => {
-            let path = args.get("path").and_then(|v| v.as_str()).unwrap_or(".");
+            // Schema primary key is `target_directory`; `path` is a serde alias for older calls.
+            let path = args
+                .get("target_directory")
+                .or_else(|| args.get("path"))
+                .and_then(|v| v.as_str())
+                .unwrap_or(".");
             short_path(path)
         }
         "grep" => {

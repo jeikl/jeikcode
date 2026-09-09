@@ -7016,6 +7016,26 @@ mod tool_format_tests {
     }
 
     #[test]
+    fn format_tool_detail_list_directory_prefers_target_directory() {
+        let args = r#"{"target_directory":"crates/atomcode-capabilities/assets/teaches"}"#;
+        assert_eq!(
+            format_tool_detail("list_directory", args),
+            "crates/atomcode-capabilities/assets/teaches"
+        );
+    }
+
+    #[test]
+    fn format_tool_detail_list_directory_falls_back_to_path_alias() {
+        let args = r#"{"path":"crates/foo"}"#;
+        assert_eq!(format_tool_detail("list_directory", args), "crates/foo");
+    }
+
+    #[test]
+    fn format_tool_detail_list_directory_defaults_to_dot() {
+        assert_eq!(format_tool_detail("list_directory", "{}"), ".");
+    }
+
+    #[test]
     fn format_tool_detail_edit_file_omits_old_string_preview() {
         let args = r#"{"file_path":"/abs/path/to/test.txt","old_string":"4","new_string":"1888"}"#;
         assert_eq!(format_tool_detail("edit_file", args), "test.txt");
@@ -24400,7 +24420,11 @@ pub(crate) fn format_tool_detail(name: &str, args_json: &str) -> String {
         "bash" => get_str("command")
             .map(|c| crate::width::truncate_with_ellipsis(&c, 500))
             .unwrap_or_default(),
-        "list_directory" | "change_dir" => get_str("path").unwrap_or_else(|| ".".into()),
+        // Schema primary key is `target_directory`; `path` is a serde alias for older calls.
+        "list_directory" => get_str("target_directory")
+            .or_else(|| get_str("path"))
+            .unwrap_or_else(|| ".".into()),
+        "change_dir" => get_str("path").unwrap_or_else(|| ".".into()),
         "code_review" => {
             if let Some(scope) = v.get("scope") {
                 return match scope.get("kind").and_then(|kind| kind.as_str()) {

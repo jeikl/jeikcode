@@ -68,7 +68,7 @@ export function groupSessionsByDate<T extends { updated_at?: string | number; cr
   return groups;
 }
 
-const DISPLAY_FIELDS = ['command', 'file_path', 'pattern', 'query', 'url', 'search', 'path', 'name'];
+const DISPLAY_FIELDS = ['command', 'file_path', 'pattern', 'query', 'url', 'search', 'target_directory', 'path', 'name'];
 
 export function formatToolArgs(_name: string, argsJson: string): string {
   try {

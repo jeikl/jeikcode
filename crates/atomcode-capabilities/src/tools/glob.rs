@@ -12,7 +12,7 @@ use globset::GlobBuilder;
 use ignore::WalkBuilder;
 use serde::Deserialize;
 use serde_json::json;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 const DEFAULT_MAX_RESULTS: usize = 300;
@@ -230,7 +230,10 @@ impl Tool for GlobTool {
                     hits.truncate(cap);
                 }
                 let noun = if include_dirs { "paths" } else { "files" };
-                let mut out = format!("{total} {noun} found (sorted by modification time, most recent first):\n{}", hits.join("\n"));
+                let mut out = format!(
+                    "{total} {noun} found (sorted by modification time, most recent first):\n{}",
+                    hits.join("\n")
+                );
                 if extra > 0 {
                     out.push_str(&format!(
                         "\n[{extra} more {noun} not shown; raise `limit` or narrow the pattern/path]"
@@ -264,16 +267,10 @@ fn split_absolute_base(pattern: &str) -> Option<(PathBuf, String)> {
     // A `~`-prefixed base is an absolute location too (parity with the `path` arg,
     // which resolves `~` via resolve_path); expand it so `glob("~/proj/**/*.rs")`
     // isn't silently walked relative to cwd.
-    let base = if let Some(home) = crate::pathutil::expand_tilde(dir) {
-        home
-    } else if !dir.is_empty() && (is_absolute_path(dir) || dir.starts_with('/')) {
-        // `starts_with('/')` covers the Unix-root form on Windows builds: the
-        // cross-platform `is_absolute_path` recognizes drive/UNC roots but a bare
-        // `/abs/dir` (Git-Bash-style, or pasted from a Linux prompt) is NOT
-        // absolute to `Path::is_absolute` on Windows. Treating it as a base keeps
-        // the "pasted absolute path" affordance consistent across platforms
-        // (and keeps the unit test reproducible on Windows).
-        PathBuf::from(dir)
+    let base = if crate::pathutil::expand_tilde(dir).is_some() || is_absolute_path(dir) {
+        // Same resolver as read_file: `~`, POSIX `/tmp`, MSYS `/c/Users`, Windows
+        // drive/UNC. Dummy cwd is unused for these absolute/tilde forms.
+        resolve_path(dir, Path::new("."))
     } else {
         return None;
     };
@@ -513,7 +510,11 @@ mod tests {
             .await;
         assert!(!r1.is_error, "{}", r1.content);
         assert!(r1.content.contains("root.sh"), "{}", r1.content);
-        assert!(r1.content.contains("release-self-update.sh"), "{}", r1.content);
+        assert!(
+            r1.content.contains("release-self-update.sh"),
+            "{}",
+            r1.content
+        );
         assert!(r1.content.contains("nested.sh"), "{}", r1.content);
         assert!(!r1.content.contains("other.txt"), "{}", r1.content);
 
@@ -522,7 +523,11 @@ mod tests {
             .execute(r#"{"pattern":"*release*"}"#, &ctx(d.path()))
             .await;
         assert!(!r2.is_error, "{}", r2.content);
-        assert!(r2.content.contains("release-self-update.sh"), "{}", r2.content);
+        assert!(
+            r2.content.contains("release-self-update.sh"),
+            "{}",
+            r2.content
+        );
         assert!(!r2.content.contains("root.sh"), "{}", r2.content);
 
         // 3. Pattern with slash (e.g. "scripts/*.sh") preserves strict path matching
@@ -530,7 +535,11 @@ mod tests {
             .execute(r#"{"pattern":"scripts/*.sh"}"#, &ctx(d.path()))
             .await;
         assert!(!r3.is_error, "{}", r3.content);
-        assert!(r3.content.contains("release-self-update.sh"), "{}", r3.content);
+        assert!(
+            r3.content.contains("release-self-update.sh"),
+            "{}",
+            r3.content
+        );
         assert!(!r3.content.contains("root.sh"), "{}", r3.content);
         assert!(!r3.content.contains("nested.sh"), "{}", r3.content);
     }
@@ -570,10 +579,7 @@ mod tests {
         let d = tempfile::tempdir().unwrap();
         std::fs::write(d.path().join("event.rs"), "").unwrap();
         let r = GlobTool
-            .execute(
-                r#"{"pattern":"*","path":"event.rs"}"#, 
-                &ctx(d.path()),
-            )
+            .execute(r#"{"pattern":"*","path":"event.rs"}"#, &ctx(d.path()))
             .await;
         assert!(r.is_error, "{}", r.content);
         assert!(r.content.contains("must be a directory"), "{}", r.content);
@@ -595,7 +601,7 @@ mod tests {
         assert!(r_ci.content.contains("Chat.tsx"), "{}", r_ci.content);
         let r_cs = GlobTool
             .execute(
-                r#"{"pattern":"chat.tsx","case_sensitive":true}"#, 
+                r#"{"pattern":"chat.tsx","case_sensitive":true}"#,
                 &ctx(d.path()),
             )
             .await;
@@ -622,7 +628,7 @@ mod tests {
         );
         let r_dirs = GlobTool
             .execute(
-                r#"{"pattern":"src/**","include_dirs":true}"#, 
+                r#"{"pattern":"src/**","include_dirs":true}"#,
                 &ctx(d.path()),
             )
             .await;

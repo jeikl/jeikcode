@@ -2912,7 +2912,7 @@ pub(crate) fn headless_auto_approve(
     if strict_unattended {
         return false; // scheduled: deny everything that was escalated to approval
     }
-    skip_permissions || tool == "bash" // -p: current behaviour unchanged
+    skip_permissions || atomcode_capabilities::tools::is_shell_tool_name(tool) // -p: current behaviour unchanged
 }
 
 pub(crate) async fn run_native_headless(

@@ -707,7 +707,7 @@ impl ToolMiddleware for BashWorkspaceGate {
         tool: &Arc<dyn Tool>,
         rt: &RequestCtx,
     ) -> BeforeOutcome {
-        if tool.name() != "bash" {
+        if !super::is_shell_tool_name(tool.name()) {
             return BeforeOutcome::Proceed; // not ours
         }
         let Some(command) = bash_command(&call.arguments) else {

@@ -75,7 +75,10 @@ static FILE_HISTORY: LazyLock<Mutex<HashMap<PathBuf, VersionRing>>> =
 
 /// Record a version snapshot for `path`.
 pub fn record_version(path: &Path, content: &str) {
-    let Ok(canonical) = path.canonicalize().or_else(|_| Ok::<_, std::io::Error>(path.to_path_buf())) else {
+    let Ok(canonical) = path
+        .canonicalize()
+        .or_else(|_| Ok::<_, std::io::Error>(path.to_path_buf()))
+    else {
         return;
     };
     let mut map = FILE_HISTORY.lock().unwrap_or_else(|e| e.into_inner());
@@ -85,7 +88,10 @@ pub fn record_version(path: &Path, content: &str) {
 /// Clear history for a file (useful in tests).
 #[cfg(test)]
 pub fn clear_history(path: &Path) {
-    let Ok(canonical) = path.canonicalize().or_else(|_| Ok::<_, std::io::Error>(path.to_path_buf())) else {
+    let Ok(canonical) = path
+        .canonicalize()
+        .or_else(|_| Ok::<_, std::io::Error>(path.to_path_buf()))
+    else {
         return;
     };
     let mut map = FILE_HISTORY.lock().unwrap_or_else(|e| e.into_inner());
@@ -159,14 +165,25 @@ pub fn perform_3way_rebase(base: &str, ours: &str, theirs: &str) -> Option<Rebas
     for op in diff_bt.ops() {
         match *op {
             similar::DiffOp::Equal { .. } => {}
-            similar::DiffOp::Delete { old_index, old_len, .. } => {
+            similar::DiffOp::Delete {
+                old_index, old_len, ..
+            } => {
                 theirs_changes.push((old_index, old_index + old_len, Vec::<&str>::new()));
             }
-            similar::DiffOp::Insert { old_index, new_index, new_len } => {
+            similar::DiffOp::Insert {
+                old_index,
+                new_index,
+                new_len,
+            } => {
                 let repl = theirs_lines[new_index..new_index + new_len].to_vec();
                 theirs_changes.push((old_index, old_index, repl));
             }
-            similar::DiffOp::Replace { old_index, old_len, new_index, new_len } => {
+            similar::DiffOp::Replace {
+                old_index,
+                old_len,
+                new_index,
+                new_len,
+            } => {
                 let repl = theirs_lines[new_index..new_index + new_len].to_vec();
                 theirs_changes.push((old_index, old_index + old_len, repl));
             }
@@ -188,7 +205,9 @@ pub fn perform_3way_rebase(base: &str, ours: &str, theirs: &str) -> Option<Rebas
         for op in diff_bo.ops() {
             match *op {
                 similar::DiffOp::Equal { .. } => {}
-                similar::DiffOp::Delete { old_index, old_len, .. } => {
+                similar::DiffOp::Delete {
+                    old_index, old_len, ..
+                } => {
                     let o_start = old_index;
                     let o_end = old_index + old_len;
                     if ranges_overlap(t_start, t_end, o_start, o_end) {
@@ -201,7 +220,9 @@ pub fn perform_3way_rebase(base: &str, ours: &str, theirs: &str) -> Option<Rebas
                         return None;
                     }
                 }
-                similar::DiffOp::Replace { old_index, old_len, .. } => {
+                similar::DiffOp::Replace {
+                    old_index, old_len, ..
+                } => {
                     let o_start = old_index;
                     let o_end = old_index + old_len;
                     if ranges_overlap(t_start, t_end, o_start, o_end) {
@@ -216,7 +237,13 @@ pub fn perform_3way_rebase(base: &str, ours: &str, theirs: &str) -> Option<Rebas
     // For each (t_start, t_end), find corresponding (o_start, o_end) in `ours`.
     let mut mapped_changes = Vec::new();
     for (t_start, t_end, repl) in theirs_changes {
-        let (o_start, o_end) = map_base_range_to_ours(t_start, t_end, diff_bo.ops(), base_lines.len(), ours_lines.len())?;
+        let (o_start, o_end) = map_base_range_to_ours(
+            t_start,
+            t_end,
+            diff_bo.ops(),
+            base_lines.len(),
+            ours_lines.len(),
+        )?;
         mapped_changes.push((o_start, o_end, repl));
     }
 
@@ -285,22 +312,39 @@ fn map_base_range_to_ours(
         }
         for op in ops {
             match *op {
-                similar::DiffOp::Equal { old_index, new_index, len } => {
+                similar::DiffOp::Equal {
+                    old_index,
+                    new_index,
+                    len,
+                } => {
                     if pos >= old_index && pos <= old_index + len {
                         return new_index + (pos - old_index);
                     }
                 }
-                similar::DiffOp::Delete { old_index, old_len, new_index } => {
+                similar::DiffOp::Delete {
+                    old_index,
+                    old_len,
+                    new_index,
+                } => {
                     if pos >= old_index && pos <= old_index + old_len {
                         return new_index;
                     }
                 }
-                similar::DiffOp::Insert { old_index, new_index, .. } => {
+                similar::DiffOp::Insert {
+                    old_index,
+                    new_index,
+                    ..
+                } => {
                     if pos == old_index {
                         return new_index;
                     }
                 }
-                similar::DiffOp::Replace { old_index, old_len, new_index, new_len } => {
+                similar::DiffOp::Replace {
+                    old_index,
+                    old_len,
+                    new_index,
+                    new_len,
+                } => {
                     if pos >= old_index && pos <= old_index + old_len {
                         return new_index + new_len;
                     }
@@ -361,8 +405,20 @@ mod tests {
 
         let all = ring.all_versions_reverse();
         // The most recent 32 plus the initial base
-        assert_eq!(all.len(), 33, "should hold 32 recent versions + 1 pinned initial base");
-        assert_eq!(all.first().unwrap(), "fn step_40() { 40 }", "newest version first");
-        assert_eq!(all.last().unwrap(), &v0, "pinned initial base must remain at the end");
+        assert_eq!(
+            all.len(),
+            33,
+            "should hold 32 recent versions + 1 pinned initial base"
+        );
+        assert_eq!(
+            all.first().unwrap(),
+            "fn step_40() { 40 }",
+            "newest version first"
+        );
+        assert_eq!(
+            all.last().unwrap(),
+            &v0,
+            "pinned initial base must remain at the end"
+        );
     }
 }

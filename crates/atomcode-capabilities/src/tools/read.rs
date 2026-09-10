@@ -356,11 +356,7 @@ impl Tool for ReadFileTool {
             end_idx = candidate_end;
         }
         if end_idx < total {
-            out.push_str(&continuation_footer(
-                start,
-                end_idx,
-                total,
-            ));
+            out.push_str(&continuation_footer(start, end_idx, total));
         } else if start > 1 {
             out.push_str(&format!(
                 "\n[Showing lines {start}-{end_idx} of {total} (end)]"
@@ -631,7 +627,8 @@ mod tests {
         assert!(r.content.contains("1500→line 1500"), "{}", r.content);
         assert!(!r.content.contains("line 1501"), "{}", r.content);
         assert!(
-            r.content.contains("Showing lines 1-1500 of 3505. 2005 lines remaining.")
+            r.content
+                .contains("Showing lines 1-1500 of 3505. 2005 lines remaining.")
                 && !r.content.contains("read_file("),
             "{}",
             r.content
@@ -644,7 +641,11 @@ mod tests {
             )
             .await;
         assert!(!page2.is_error, "{}", page2.content);
-        assert!(page2.content.contains("1501→line 1501"), "{}", page2.content);
+        assert!(
+            page2.content.contains("1501→line 1501"),
+            "{}",
+            page2.content
+        );
         assert!(!page2.content.contains("read_file("), "{}", page2.content);
     }
 
@@ -1008,7 +1009,8 @@ mod tests {
 
         assert!(!r.is_error, "{}", r.content);
         assert!(
-            r.content.contains("Showing lines 1-1500 of 1800. 300 lines remaining."),
+            r.content
+                .contains("Showing lines 1-1500 of 1800. 300 lines remaining."),
             "{}",
             r.content
         );

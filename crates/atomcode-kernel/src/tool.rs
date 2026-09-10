@@ -181,6 +181,12 @@ impl ToolContext {
 #[async_trait]
 pub trait Tool: Send + Sync {
     fn name(&self) -> &str;
+    /// Alternate names the model (or an old transcript) may emit. Empty by default.
+    /// The registry indexes these so `get("bash")` still resolves a tool whose
+    /// canonical name is `run_command`. Only `name()` is advertised in tool defs.
+    fn aliases(&self) -> &'static [&'static str] {
+        &[]
+    }
     fn description(&self) -> &str;
     fn parameters_schema(&self) -> serde_json::Value;
     /// Risk classification for THIS call — arg-aware, so e.g. a bash tool can rate
@@ -254,7 +260,10 @@ impl ToolRegistry {
             Ok(tools) => tools,
             Err(poisoned) => poisoned.into_inner(),
         };
-        tools.insert(tool.name().to_string(), tool);
+        tools.insert(tool.name().to_string(), tool.clone());
+        for alias in tool.aliases() {
+            tools.insert((*alias).to_string(), tool.clone());
+        }
     }
     /// Select the subset exposed to the LLM. Unmounted tools never produce a
     /// ToolDef and are not resolvable during a turn → zero effect on the agent.
@@ -314,8 +323,10 @@ pub struct MountedToolsSnapshot {
 
 impl MountedToolsSnapshot {
     fn new(revision: ToolCatalogRevision, selected: BTreeMap<String, Arc<dyn Tool>>) -> Self {
+        let mut seen = std::collections::BTreeSet::new();
         let defs = selected
             .values()
+            .filter(|t| seen.insert(t.name().to_string()))
             .map(|t| ToolDef {
                 name: t.name().to_string(),
                 description: t.description().to_string(),
@@ -339,7 +350,15 @@ impl MountedToolsSnapshot {
     }
 
     pub fn get(&self, name: &str) -> Option<Arc<dyn Tool>> {
-        self.selected.get(name).cloned()
+        if let Some(tool) = self.selected.get(name) {
+            return Some(tool.clone());
+        }
+        self.selected
+            .values()
+            .find(|tool| {
+                tool.name() == name || tool.aliases().iter().any(|alias| *alias == name)
+            })
+            .cloned()
     }
 }
 

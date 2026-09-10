@@ -422,7 +422,7 @@ async fn prepare_with_plugin_hooks_reusing_lease(
                 "read_file",
                 "edit_file",
                 "write_file",
-                "bash",
+                "run_command",
                 "grep",
                 "glob",
                 "global_search_replace",

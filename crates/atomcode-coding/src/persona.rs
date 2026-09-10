@@ -378,16 +378,16 @@ pub(crate) fn model_needs_firm_execution(model: &str) -> bool {
 /// carve-out keeps audit-style shell pipelines legitimate.
 const FIRM_TOOL_DISCIPLINE: &str = "\n\n## TOOL DISCIPLINE (MANDATORY):\n\
 Do NOT shell out for file work:\n\
-- List a directory → list_directory (NOT `bash ls`).\n\
-- Find files by name → glob (NOT `bash find`).\n\
-- Search file contents → grep (NOT `bash grep` / `rg`).\n\
-- Read a file → read_file (NOT `bash cat`).\n\
-Use bash ONLY for git, builds, package managers, running commands, and pipelines / \
+- List a directory → list_directory (NOT `run_command ls`).\n\
+- Find files by name → glob (NOT `run_command find`).\n\
+- Search file contents → grep (NOT `run_command grep` / `rg`).\n\
+- Read a file → read_file (NOT `run_command cat`).\n\
+Use run_command ONLY for git, builds, package managers, running commands, and pipelines / \
 aggregation (wc, sort, uniq, awk, git log) the dedicated tools cannot do.\n\
 Never run a pager, follow/watch (`tail -f`, `journalctl -f`, `watch`), REPL, or \
 `systemctl status` of a large unit — those wait for a key/Ctrl+C and hang. Use \
 `--no-pager` and one-shot flags (`systemctl is-active`/`show`, `ss`/`lsof`). Do not \
-chain a blocking command with later steps in one bash call.";
+chain a blocking command with later steps in one run_command call.";
 
 /// Blunt, point-of-decision restatement of the EXECUTION guardrails, appended only for the
 /// model flagged by [`model_needs_firm_execution`] (DeepSeek only — GLM excluded). The soft rules in
@@ -454,12 +454,12 @@ what's left\".";
 /// Windows-only platform rules, appended on Windows builds (v1 `config/mod.rs` parity).
 ///
 /// Deliberately SHELL-NEUTRAL: the actual shell (Git Bash when installed, else cmd.exe)
-/// varies per machine, so the `bash` tool's OWN description states which shell it uses and
+/// varies per machine, so the `run_command` tool's OWN description states which shell it uses and
 /// the syntax to write. Claiming a shell here would re-introduce the "told cmd, ran bash"
 /// contradiction. This keeps only Windows-general advice that holds under either shell.
 #[cfg(windows)]
 const WINDOWS_PLATFORM: &str = "\n\n## PLATFORM (Windows):\n\
-The `bash` tool's own description states which shell actually runs (Git Bash if installed, \
+The `run_command` tool's own description states which shell actually runs (Git Bash if installed, \
 else cmd.exe) and which syntax to use — follow it, and don't assume cmd.exe. \
 Install tools with winget/choco; locate executables with `where` (not `which`); a venv's \
 tools live under `Scripts\\` (not `bin/`).";
@@ -628,12 +628,12 @@ Core Principle: Determine the final goal first, evaluate complexity, and plan by
 - Destructive operations confirmation: Before executing destructive operations (deleting files, git push --force, clearing database tables, etc.), must ask for confirmation from the user first.
 
 ## PROHIBITIONS (MANDATORY):
-- Do NOT use `bash cat` to read files; use `read_file`.
-- Do NOT use `bash ls` to inspect directories; use `list_directory`.
-- Do NOT use `bash find` to search files; use `glob`.
-- Do NOT use `bash grep` / `rg` to search content; use `grep`.
+- Do NOT use `run_command cat` to read files; use `read_file`.
+- Do NOT use `run_command ls` to inspect directories; use `list_directory`.
+- Do NOT use `run_command find` to search files; use `glob`.
+- Do NOT use `run_command grep` / `rg` to search content; use `grep`.
 - Never mutate a file with terminal scripts (`sed`/`awk`/redirects); use `edit_file` / `write_file`.
-- In bash, NEVER inline blocking commands (such as `systemctl status <unit>`, pagers, interactive tools) with other commands using `&&`; it causes hangs and timeouts.
+- In run_command, NEVER inline blocking commands (such as `systemctl status <unit>`, pagers, interactive tools) with other commands using `&&`; it causes hangs and timeouts.
 - NEVER run git commands that discard uncommitted work (`git checkout .`, `git reset --hard`, `git clean -f`) without explicit user instruction.
 
 ## LOCATING CODE:
@@ -943,7 +943,7 @@ mod tests {
             "edit_file",
             "grep",
             "glob",
-            "bash",
+            "run_command",
             "list_directory",
             "open_file",
         ] {
@@ -1319,10 +1319,10 @@ mod tests {
     fn persona_prefers_builtin_tools_over_shell_equivalents() {
         let p = coding_persona("m", true, false);
         for phrase in [
-            "bash cat",
-            "bash ls",
-            "bash find",
-            "bash grep",
+            "run_command cat",
+            "run_command ls",
+            "run_command find",
+            "run_command grep",
         ] {
             assert!(
                 p.contains(phrase),
@@ -1351,8 +1351,8 @@ mod tests {
             "the vague escape hatch must be gone: {p}"
         );
         assert!(
-            p.contains("`bash ls`"),
-            "must prohibit bash ls"
+            p.contains("`run_command ls`"),
+            "must prohibit run_command ls"
         );
         assert!(
             p.contains("list_directory"),

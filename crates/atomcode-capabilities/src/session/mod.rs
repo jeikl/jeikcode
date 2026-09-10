@@ -34,6 +34,7 @@ pub mod status_reminder;
 pub mod transcript;
 mod usage_provider;
 pub mod user_wrap;
+pub use crate::tools::write_state::WriteStateHook;
 pub use context::SessionContextHook;
 pub use manager::{
     aggregate_session_cost, CatalogDiagnostic, CatalogDiagnosticKind, CatalogEntry,
@@ -56,7 +57,6 @@ pub use status_reminder::StatusReminderHook;
 pub use transcript::{ToolRecord, TranscriptHook, TurnRecord, UsageRecord};
 pub use usage_provider::UsageRecordingProvider;
 pub use user_wrap::UserWrapHook;
-pub use crate::tools::write_state::WriteStateHook;
 
 /// User-facing transcript text: unwrap `user-wrap.md` and drop injected
 /// `<system-reminder>` tails. Provider snapshots keep the assembled form.

@@ -12,12 +12,12 @@
 //!    - Directly returns the file's latest 1500 lines formatted with line anchors.
 //!    - If total lines > 1500, informs how many lines remain and instructs reading the remainder via offset/limit.
 
-use std::collections::HashMap;
-use std::path::{Path, PathBuf};
-use std::sync::{LazyLock, Mutex};
 use async_trait::async_trait;
 use atomcode_kernel::hook::LifecycleHooks;
 use atomcode_kernel::message::Conversation;
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
+use std::sync::{LazyLock, Mutex};
 
 const DEFAULT_READ_LIMIT: usize = 1500;
 const MAX_LINE_LEN: usize = 2000;
@@ -57,9 +57,8 @@ impl Default for WriteStateMachine {
     }
 }
 
-static STATE_MACHINE: LazyLock<Mutex<WriteStateMachine>> = LazyLock::new(|| {
-    Mutex::new(WriteStateMachine::default())
-});
+static STATE_MACHINE: LazyLock<Mutex<WriteStateMachine>> =
+    LazyLock::new(|| Mutex::new(WriteStateMachine::default()));
 
 fn canon(path: &Path) -> PathBuf {
     crate::pathnorm::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
@@ -107,12 +106,18 @@ pub fn record_read(path: &Path) {
     let p = canon(path);
     let mut lock = STATE_MACHINE.lock().unwrap();
     let turn = get_turn_for_path(&p, &lock);
-    let entry = lock.files.entry(p).or_insert((turn, FileTurnState::default()));
+    let entry = lock
+        .files
+        .entry(p)
+        .or_insert((turn, FileTurnState::default()));
     if entry.0 != turn {
-        *entry = (turn, FileTurnState {
-            read_confirmed: false,
-            last_op: Some(FileOpKind::Read),
-        });
+        *entry = (
+            turn,
+            FileTurnState {
+                read_confirmed: false,
+                last_op: Some(FileOpKind::Read),
+            },
+        );
     } else {
         entry.1.last_op = Some(FileOpKind::Read);
     }
@@ -123,12 +128,18 @@ pub fn record_edit(path: &Path) {
     let p = canon(path);
     let mut lock = STATE_MACHINE.lock().unwrap();
     let turn = get_turn_for_path(&p, &lock);
-    let entry = lock.files.entry(p).or_insert((turn, FileTurnState::default()));
+    let entry = lock
+        .files
+        .entry(p)
+        .or_insert((turn, FileTurnState::default()));
     if entry.0 != turn {
-        *entry = (turn, FileTurnState {
-            read_confirmed: false,
-            last_op: Some(FileOpKind::Edit),
-        });
+        *entry = (
+            turn,
+            FileTurnState {
+                read_confirmed: false,
+                last_op: Some(FileOpKind::Edit),
+            },
+        );
     } else {
         entry.1.last_op = Some(FileOpKind::Edit);
     }
@@ -139,7 +150,10 @@ pub fn record_write_success(path: &Path) {
     let p = canon(path);
     let mut lock = STATE_MACHINE.lock().unwrap();
     let turn = get_turn_for_path(&p, &lock);
-    let entry = lock.files.entry(p).or_insert((turn, FileTurnState::default()));
+    let entry = lock
+        .files
+        .entry(p)
+        .or_insert((turn, FileTurnState::default()));
     entry.0 = turn;
     entry.1.read_confirmed = true;
     entry.1.last_op = Some(FileOpKind::Write);
@@ -150,7 +164,10 @@ pub fn record_read_confirmed(path: &Path) {
     let p = canon(path);
     let mut lock = STATE_MACHINE.lock().unwrap();
     let turn = get_turn_for_path(&p, &lock);
-    let entry = lock.files.entry(p).or_insert((turn, FileTurnState::default()));
+    let entry = lock
+        .files
+        .entry(p)
+        .or_insert((turn, FileTurnState::default()));
     entry.0 = turn;
     entry.1.read_confirmed = true;
     entry.1.last_op = Some(FileOpKind::Read);
@@ -173,7 +190,10 @@ pub fn check_write_permitted(path: &Path) -> WritePermission {
     let p = canon(path);
     let mut lock = STATE_MACHINE.lock().unwrap();
     let turn = get_turn_for_path(&p, &lock);
-    let entry = lock.files.entry(p).or_insert((turn, FileTurnState::default()));
+    let entry = lock
+        .files
+        .entry(p)
+        .or_insert((turn, FileTurnState::default()));
     if entry.0 != turn {
         // Reset for new turn
         *entry = (turn, FileTurnState::default());

@@ -124,11 +124,7 @@ impl Tool for RepoMapTool {
 
         let target_dir = match a.path {
             Some(ref p) if !p.trim().is_empty() => {
-                let resolved = if Path::new(p).is_absolute() {
-                    PathBuf::from(p)
-                } else {
-                    ctx.working_dir.join(p)
-                };
+                let resolved = crate::pathutil::resolve_path(p, &ctx.working_dir);
                 crate::pathnorm::canonicalize(&resolved).unwrap_or(resolved)
             }
             _ => crate::pathnorm::canonicalize(&ctx.working_dir)

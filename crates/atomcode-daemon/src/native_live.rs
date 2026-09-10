@@ -157,9 +157,30 @@ pub fn session_draft_working_dir(session_id: &str) -> Option<PathBuf> {
         .cloned()
 }
 
-fn runtime_start_is_session_in_use(error: &atomcode_coding::RuntimeStartError) -> bool {
+pub(crate) fn runtime_start_is_session_in_use(
+    error: &atomcode_coding::RuntimeStartError,
+) -> bool {
     matches!(error, atomcode_coding::RuntimeStartError::SessionInUse { .. })
         || error.to_string().contains("already in use")
+}
+
+/// How a chat view should join `session_id`'s unique in-process runtime.
+///
+/// Views are observers: they never take a second storage lease. If any client
+/// already runs this session, later clients attach and submit/steer on that
+/// handle so streaming, stop, and approvals fan out to every observer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum UniqueRuntimePlan {
+    Observe,
+    Spawn,
+}
+
+pub(crate) fn unique_runtime_plan(has_existing_handle: bool) -> UniqueRuntimePlan {
+    if has_existing_handle {
+        UniqueRuntimePlan::Observe
+    } else {
+        UniqueRuntimePlan::Spawn
+    }
 }
 
 /// In-process handle of the unique runtime for `session_id`, if any view
@@ -1175,6 +1196,31 @@ mod tests {
         ));
         assert!(!super::prefer_registry_decision(
             "sess-b", false, None, true, false, false,
+        ));
+    }
+
+    #[test]
+    fn unique_runtime_plan_observes_an_existing_handle() {
+        assert_eq!(
+            super::unique_runtime_plan(true),
+            super::UniqueRuntimePlan::Observe
+        );
+        assert_eq!(
+            super::unique_runtime_plan(false),
+            super::UniqueRuntimePlan::Spawn
+        );
+    }
+
+    #[test]
+    fn session_in_use_detects_prepare_wrapped_lease_error() {
+        let error = atomcode_coding::RuntimeStartError::Prepare(std::io::Error::other(
+            r#"session "ed6dc9be-9d25-491f-bab3-c62a8a3ed9f4" is already in use by another runtime"#,
+        ));
+        assert!(super::runtime_start_is_session_in_use(&error));
+        assert!(super::runtime_start_is_session_in_use(
+            &atomcode_coding::RuntimeStartError::SessionInUse {
+                id: "ed6dc9be-9d25-491f-bab3-c62a8a3ed9f4".into(),
+            }
         ));
     }
 }

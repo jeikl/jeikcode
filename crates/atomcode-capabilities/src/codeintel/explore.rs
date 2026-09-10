@@ -502,23 +502,17 @@ impl Tool for CodeExploreTool {
 
         let scope_path = if !parsed_query.path_filters.is_empty() {
             let p = &parsed_query.path_filters[0];
-            let pb = Path::new(p);
             if is_workspace_root_token(p) {
                 Some(root.clone())
-            } else if pb.is_absolute() {
-                Some(canonical(pb))
             } else {
-                Some(canonical(&root.join(pb)))
+                Some(canonical(&crate::pathutil::resolve_path(p, &root)))
             }
         } else {
             a.path.as_deref().map(|p| {
-                let pb = Path::new(p);
                 if is_workspace_root_token(p) {
                     root.clone()
-                } else if pb.is_absolute() {
-                    canonical(pb)
                 } else {
-                    canonical(&root.join(pb))
+                    canonical(&crate::pathutil::resolve_path(p, &root))
                 }
             })
         };
@@ -2763,10 +2757,7 @@ fn render_explore_output(
             v.dedup();
             v
         };
-        out.push(format!(
-            "### 🧷 IDENTIFIER HITS: `{}`",
-            idents.join("` `")
-        ));
+        out.push(format!("### 🧷 IDENTIFIER HITS: `{}`", idents.join("` `")));
         out.push("| Role | File | Symbol | Kind | Line |".to_string());
         out.push("| :--- | :--- | :--- | :--- | ---: |".to_string());
         for h in &ident_hits {
@@ -2782,7 +2773,9 @@ fn render_explore_output(
         out.push(format!(
             "> Next: grep  pattern={}  path={}  (literal occurrences, including assignments)\n",
             idents.first().copied().unwrap_or(query),
-            scope.map(|s| rel_disp(s, root)).unwrap_or_else(|| ".".to_string())
+            scope
+                .map(|s| rel_disp(s, root))
+                .unwrap_or_else(|| ".".to_string())
         ));
     }
 
@@ -3348,12 +3341,14 @@ mod tests {
 
         let hits = collect_identifier_hits(&graph, &tokens, None);
         assert!(
-            hits.iter().any(|h| h.role == "def" && h.name == "turn_cached_tokens"),
+            hits.iter()
+                .any(|h| h.role == "def" && h.name == "turn_cached_tokens"),
             "def site missing: {:?}",
             hits.iter().map(|h| (&h.role, &h.name)).collect::<Vec<_>>()
         );
         assert!(
-            hits.iter().any(|h| h.role == "write" && h.name == "set_turn_cached_tokens"),
+            hits.iter()
+                .any(|h| h.role == "write" && h.name == "set_turn_cached_tokens"),
             "write site missing"
         );
         assert!(
@@ -3982,8 +3977,6 @@ mod tests {
             ok.content
         );
     }
-
-
 
     fn scored(node: SymbolNode, score: f64) -> ScoredSymbol {
         ScoredSymbol {

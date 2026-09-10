@@ -511,6 +511,7 @@ mod tests {
             "write_file",
             "edit_file",
             "bash",
+            "run_command",
             "change_dir",
             "global_search_replace",
             "search_replace",

@@ -213,10 +213,10 @@ tools:
         # 【中文】：目标文件路径。
         description: "Path to open."
 
-  - name: "bash"
+  - name: "run_command"
     category: "system"
-    # 【中文】：在工作目录下执行终端命令并返回标准输出、标准错误和退出码。用于编译构建、测试、包管理、Git 操作、运行二进制与检查进程状态。不支持使用 && 串联多条命令（请使用分号 ; 隔开）。不可在此工具中调用 read_file、grep、glob、list_directory 等文件工具。此终端不具备键盘交互输入，不支持分页器、REPL、tail -f 及需要按键确认的命令。
-    description: "Execute a shell command and return stdout, stderr, and exit code. Use for builds, tests, package management, Git operations, binaries, and process checks. Chaining commands with `&&` is not supported; use `;` instead. `read_file`, `grep`, `glob`, `list_directory`, `ls`, `head`, `tail`, `sed`, `awk`, and `find` are not available in this shell tool. Shell pipelines and aggregation (such as wc, sort, uniq, git log) are supported. This shell has no keyboard input; pagers, REPLs, `tail -f`, and commands requiring keyboard interaction are not supported."
+    # 【中文】：在工作目录下执行终端命令并返回标准输出、标准错误和退出码。用于编译构建、测试、包管理、Git 操作、运行二进制与检查进程状态。文件读写/搜索请用 read_file、grep、glob、list_directory、edit_file、write_file。不支持使用 && 串联多条命令（请使用分号 ; 隔开）。此终端不具备键盘交互输入，不支持分页器、REPL、tail -f 及需要按键确认的命令。
+    description: "Run a shell command and return stdout, stderr, and exit code. Use for builds, tests, package management, Git operations, binaries, and process checks. Prefer dedicated tools for files: `read_file`, `grep`, `glob`, `list_directory`, `edit_file`, `write_file`. Chaining commands with `&&` is not supported; use `;` instead. Shell pipelines and aggregation (such as wc, sort, uniq, git log) are supported. This shell has no keyboard input; pagers, REPLs, `tail -f`, and commands requiring keyboard interaction are not supported."
     parameters:
       command:
         type: "string"

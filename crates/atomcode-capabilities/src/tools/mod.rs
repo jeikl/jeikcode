@@ -25,7 +25,7 @@
 //! round-trips the driver for a decision.
 
 use atomcode_kernel::tool::{ToolRegistry, ToolResult};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::Arc;
 
 /// Last-resort per-turn high-water mark for composed child agents. Products can
@@ -60,6 +60,7 @@ pub mod report_finding;
 pub mod request_user_input;
 pub mod search_replace;
 pub mod sensitive_path;
+pub(crate) mod shell_route;
 pub mod task;
 pub mod todo;
 /// Network tools (`web_fetch` / `web_search`). Opt-in `web` feature (HTTP stack).
@@ -108,6 +109,7 @@ pub use read::ReadFileTool;
 pub use repair::{repair_tool_args, RepairToolArgsMiddleware};
 pub use report_finding::{Finding, ReportFindingTool};
 pub use search_replace::{GlobalSearchReplaceTool, SearchReplaceTool};
+pub use shell_route::{is_shell_tool_name, SHELL_TOOL_ALIASES, SHELL_TOOL_NAME};
 pub use sensitive_path::{path_is_sensitive, references_sensitive_path, SensitivePathGate};
 pub use task::TaskTool;
 pub use todo::{bind_todowrite, TodoLive, TodoTool};
@@ -141,7 +143,7 @@ pub fn coding_tool_names() -> &'static [&'static str] {
             "edit_file",
             "list_directory",
             "open_file",
-            "bash",
+            "run_command",
             "long_bash_keyword_actions",
             "bash_kill_by_id",
             "grep",
@@ -163,7 +165,7 @@ pub fn coding_tool_names() -> &'static [&'static str] {
             "edit_file",
             "list_directory",
             "open_file",
-            "bash",
+            "run_command",
             "long_bash_keyword_actions",
             "bash_kill_by_id",
             "grep",
@@ -329,21 +331,8 @@ pub(crate) async fn output_with_timeout_secs(
     }
 }
 
-/// Resolve a model-supplied path: leading `~`/`~/` → home dir; absolute → as-is;
-/// relative → joined to `working_dir`. NO escape enforcement (see the module
-/// trust-model note). `~` expansion (via the crate-shared [`crate::pathutil`], so
-/// `tools` and `codeintel` agree) gives parity with the shell the `bash` tool relies
-/// on — fixing `read_file("~/.atomcode/x")` resolving to the broken `<cwd>/~/…`.
-pub(crate) fn resolve_path(raw: &str, working_dir: &Path) -> PathBuf {
-    if let Some(home) = crate::pathutil::expand_tilde(raw) {
-        return home;
-    }
-    if is_absolute_path(raw) {
-        PathBuf::from(raw)
-    } else {
-        working_dir.join(raw)
-    }
-}
+/// Resolve a model-supplied path. Shared with `codeintel` via [`crate::pathutil`].
+pub(crate) use crate::pathutil::{is_absolute_path, resolve_path};
 
 /// Max entries listed in a not-found hint before it is truncated.
 const HINT_MAX_ENTRIES: usize = 40;
@@ -452,26 +441,6 @@ pub(crate) fn coerce_eol(s: &str, eol: &str) -> String {
     } else {
         s.replace("\r\n", "\n")
     }
-}
-
-/// Windows-aware absolute-path test. `Path::is_absolute()` is **platform-dependent**:
-/// on a Unix build it rejects `G:\foo` (treats the whole thing as one relative name),
-/// so `working_dir.join("G:\\…")` silently produces garbage. A coding agent receives
-/// paths for the USER's platform, which may differ from the build target (and tests
-/// must be reproducible off Windows), so we additionally recognize Windows roots:
-/// drive-letter (`C:\`, `C:/`) and UNC (`\\server\share`).
-pub(crate) fn is_absolute_path(raw: &str) -> bool {
-    if Path::new(raw).is_absolute() {
-        return true;
-    }
-    let b = raw.as_bytes();
-    // Drive-rooted: `X:\` or `X:/` (a bare `X:` is drive-RELATIVE, not absolute).
-    if b.len() >= 3 && b[0].is_ascii_alphabetic() && b[1] == b':' && (b[2] == b'\\' || b[2] == b'/')
-    {
-        return true;
-    }
-    // UNC: `\\server\share` (the `//…` form is already caught by is_absolute on Unix).
-    b.len() >= 2 && b[0] == b'\\' && b[1] == b'\\'
 }
 
 /// Directories never descended into during a walk (build artifacts / VCS / caches).
@@ -687,32 +656,6 @@ mod tests {
         assert!(got, "a fast closure returns its real value");
     }
 
-    #[test]
-    fn resolve_path_treats_windows_drive_and_unc_as_absolute() {
-        let wd = Path::new("/work/proj");
-        // A Windows drive path (either slash style) must NOT be joined onto the
-        // working dir — doing so produces garbage like `/work/proj/G:\VR2024\…`
-        // and makes the agent report an existing file as "does not exist".
-        assert_eq!(
-            resolve_path(r"G:\VR2024\keystore", wd),
-            PathBuf::from(r"G:\VR2024\keystore")
-        );
-        assert_eq!(
-            resolve_path("G:/VR2024/keystore", wd),
-            PathBuf::from("G:/VR2024/keystore")
-        );
-        // UNC paths are absolute too.
-        assert_eq!(
-            resolve_path(r"\\server\share\f", wd),
-            PathBuf::from(r"\\server\share\f")
-        );
-        // Plain relative paths still join onto the working dir.
-        assert_eq!(
-            resolve_path("src/main.rs", wd),
-            PathBuf::from("/work/proj/src/main.rs")
-        );
-    }
-
     /// A model that guesses a conventional layout (`app/src/main/java` for a Gradle project)
     /// gets `path not found` and nothing else — so it guesses again, deeper. The hint gives it
     /// the one fact that ends the guessing: where the path stops existing, and what is actually
@@ -820,7 +763,7 @@ mod tests {
         "edit_file",
         "list_directory",
         "open_file",
-        "bash",
+        "run_command",
         "long_bash_keyword_actions",
         "bash_kill_by_id",
         "grep",
@@ -939,6 +882,12 @@ mod tests {
         let mounted = reg.mount(subset);
         assert!(mounted.get("read_file").is_some());
         assert!(mounted.get("bash").is_some());
+        assert!(mounted.get("run_command").is_some());
+        assert_eq!(
+            mounted.get("bash").unwrap().name(),
+            "run_command",
+            "canonical name is run_command; bash is an alias"
+        );
         assert!(mounted.get("grep").is_some());
         // An unmounted tool must not be resolvable.
         assert!(

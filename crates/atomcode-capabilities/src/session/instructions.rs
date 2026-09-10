@@ -97,9 +97,7 @@ pub fn render_instructions(home: &Path, project: &Path) -> String {
     let mut out: Vec<String> = Vec::new();
     let global = home.join("ATOMCODE.md");
     if let Some(body) = read_tier(&global) {
-        out.push(format!(
-            "=== GLOBAL INSTRUCTIONS (ATOMCODE.md) ===\n{body}"
-        ));
+        out.push(format!("=== GLOBAL INSTRUCTIONS (ATOMCODE.md) ===\n{body}"));
     }
     if let Some(proj) = project_file(project) {
         if let Some(body) = read_tier(&proj) {
@@ -107,9 +105,7 @@ pub fn render_instructions(home: &Path, project: &Path) -> String {
                 .file_name()
                 .and_then(|f| f.to_str())
                 .unwrap_or("AGENTS.md");
-            out.push(format!(
-                "=== PROJECT INSTRUCTIONS ({filename}) ===\n{body}"
-            ));
+            out.push(format!("=== PROJECT INSTRUCTIONS ({filename}) ===\n{body}"));
         }
     }
     let user = project.join(".atomcode.user.md");
@@ -144,7 +140,10 @@ they do not describe or override the host application or active configured model
 (Safety, approval, and destructive-action gates are not overridable here.) \
 DOMAIN GLOSSARY / BUSINESS RULES / DB WORDS (if present) are project knowledge packs: \
 use them for term expansion, policy, and schema mapping; they do not override safety gates.";
-    format!("{INSTRUCTIONS_HEADER}\n\n{PREAMBLE}\n\n{}", out.join("\n\n"))
+    format!(
+        "{INSTRUCTIONS_HEADER}\n\n{PREAMBLE}\n\n{}",
+        out.join("\n\n")
+    )
 }
 
 /// The first existing project-tier file (precedence order), if any.

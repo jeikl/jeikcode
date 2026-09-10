@@ -4971,7 +4971,11 @@ public class OrderController
             )
             .unwrap();
         }
-        std::fs::write(focus.join("hot.rs"), "pub fn focused_sym() { /* dirty */ }\n").unwrap();
+        std::fs::write(
+            focus.join("hot.rs"),
+            "pub fn focused_sym() { /* dirty */ }\n",
+        )
+        .unwrap();
 
         let idx = CodeIndex::new();
         let g = idx.get_scoped(d.path(), Some(&focus));

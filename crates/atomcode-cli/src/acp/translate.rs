@@ -150,6 +150,7 @@ mod tests {
         assert_eq!(tool_kind("read_file"), ToolKind::Read);
         assert_eq!(tool_kind("edit_file"), ToolKind::Edit);
         assert_eq!(tool_kind("bash"), ToolKind::Execute);
+        assert_eq!(tool_kind("run_command"), ToolKind::Execute);
         assert_eq!(tool_kind("grep"), ToolKind::Search);
         assert_eq!(tool_kind("web_fetch"), ToolKind::Fetch);
         assert_eq!(tool_kind("totally_unknown"), ToolKind::Other);

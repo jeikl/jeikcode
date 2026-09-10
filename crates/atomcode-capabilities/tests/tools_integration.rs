@@ -58,7 +58,7 @@ fn full_toolset_registers_and_mounts() {
         "edit_file",
         "list_directory",
         "open_file",
-        "bash",
+        "run_command",
         "grep",
         "glob",
         "global_search_replace",

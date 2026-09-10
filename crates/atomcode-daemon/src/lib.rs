@@ -1860,7 +1860,7 @@ fn extract_artifacts_from_call_fields<'a>(
                 language: Some(language.to_string()),
                 content,
             });
-        } else if name == "bash" {
+        } else if atomcode_capabilities::tools::is_shell_tool_name(name) {
             // Extract artifacts from bash commands that create files
             let args: serde_json::Value = match serde_json::from_str(arguments) {
                 Ok(v) => v,
@@ -2038,7 +2038,7 @@ fn format_tool_args(tool_name: &str, args_json: &str) -> String {
             let path = args.get("file_path").and_then(|v| v.as_str()).unwrap_or("");
             short_path(path)
         }
-        "bash" => {
+        "bash" | "run_command" => {
             let cmd = args.get("command").and_then(|v| v.as_str()).unwrap_or("");
             if cmd.chars().count() > 80 {
                 format!("`{}...`", cmd.chars().take(77).collect::<String>())
@@ -4784,6 +4784,36 @@ mod chat_event_type_tests {
                 message: Some(message),
                 ..
             }] if reason == "provider_error" && message == "provider failed"
+        ));
+    }
+
+    #[test]
+    fn start_failure_snapshot_unavailable_is_an_authoritative_error() {
+        // `/chat` used to emit Agent Error (a Warning) when prepare hit
+        // SessionInUse, so the WebUI spinner never got a terminal event.
+        let mut projector = ChatRuntimeProjector::default();
+        let events = projector.project_runtime(
+            atomcode_coding::CodingRuntimeEvent::TurnFinished(
+                atomcode_coding::TurnCompletion::SnapshotUnavailable {
+                    turn_id: 0,
+                    reason: atomcode_kernel::event::StopReason::ProviderError,
+                    error: atomcode_coding::RuntimeSnapshotError {
+                        message: r#"session "ed6dc9be" is already in use by another runtime"#
+                            .into(),
+                    },
+                    stats: atomcode_coding::RuntimeTurnStats::default(),
+                },
+            ),
+            "session-1",
+        );
+        assert!(
+            projector.terminal_seen,
+            "start failure must close the /chat SSE as a turn terminal"
+        );
+        assert!(matches!(
+            events.as_slice(),
+            [ChatEvent::Error { message }]
+                if message.contains("already in use by another runtime")
         ));
     }
 }

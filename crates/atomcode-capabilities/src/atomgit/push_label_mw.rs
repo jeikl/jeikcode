@@ -109,7 +109,7 @@ impl ToolMiddleware for GitPushLabelMiddleware {
         tool: &Arc<dyn Tool>,
         _rt: &RequestCtx,
     ) -> BeforeOutcome {
-        if tool.name() == "bash" {
+        if crate::tools::is_shell_tool_name(tool.name()) {
             let matched = is_git_push(&call.arguments);
             if matched {
                 self.pending

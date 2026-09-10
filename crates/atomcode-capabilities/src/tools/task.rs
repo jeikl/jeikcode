@@ -204,11 +204,7 @@ impl WorkerScopeGate {
     /// `.`/`..`-collapsed path with `/` separators. `None` if it escapes the working dir
     /// (absolute-outside, or `..` above the root) — such writes are denied.
     fn workspace_relative(&self, raw: &str) -> Option<String> {
-        let joined = if Path::new(raw).is_absolute() {
-            PathBuf::from(raw)
-        } else {
-            self.working_dir.join(raw)
-        };
+        let joined = crate::pathutil::resolve_path(raw, &self.working_dir);
         let base = lexical_normalize(&self.working_dir);
         let full = lexical_normalize(&joined);
         full.strip_prefix(&base)

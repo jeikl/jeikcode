@@ -11,6 +11,17 @@ pub fn coding_config_from_runtime(cfg: &CodingRuntimeConfig) -> CodingAgentConfi
     cfg.agent_config()
 }
 
+fn map_lease_error(
+    error: atomcode_capabilities::session::SessionStoreError,
+) -> atomcode_coding::RuntimeStartError {
+    match error {
+        atomcode_capabilities::session::SessionStoreError::SessionInUse { id, .. } => {
+            atomcode_coding::RuntimeStartError::SessionInUse { id }
+        }
+        other => atomcode_coding::RuntimeStartError::Prepare(std::io::Error::from(other)),
+    }
+}
+
 pub async fn start_native_runtime(
     cfg: CodingRuntimeConfig,
 ) -> Result<(atomcode_coding::CodingRuntime, CodingAgentConfig), atomcode_coding::RuntimeStartError>
@@ -45,9 +56,7 @@ async fn start_native_runtime_with_session_bootstrap(
             let manager = atomcode_capabilities::session::SessionManager::for_project(
                 &coding_cfg.working_dir,
             );
-            let lease = manager.acquire_lease(&id).map_err(|error| {
-                atomcode_coding::RuntimeStartError::Prepare(std::io::Error::from(error))
-            })?;
+            let lease = manager.acquire_lease(&id).map_err(map_lease_error)?;
             crate::legacy_convert::converge_session(&manager, &lease).map_err(|error| {
                 atomcode_coding::RuntimeStartError::Prepare(std::io::Error::other(error))
             })?;
@@ -57,9 +66,7 @@ async fn start_native_runtime_with_session_bootstrap(
             let manager = atomcode_capabilities::session::SessionManager::for_project(
                 &coding_cfg.working_dir,
             );
-            let lease = manager.acquire_lease(&id).map_err(|error| {
-                atomcode_coding::RuntimeStartError::Prepare(std::io::Error::from(error))
-            })?;
+            let lease = manager.acquire_lease(&id).map_err(map_lease_error)?;
             let has_existing = [
                 manager.meta_path(&id),
                 manager.snapshot_path(&id),

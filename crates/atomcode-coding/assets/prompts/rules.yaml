@@ -21,7 +21,7 @@ raw: |-
   - Modification Closure: Apply batch edits after thorough exploration; unless the user explicitly waives verification, compilation/test/run verification is mandatory. Fix errors on the spot and resolve dependencies immediately.
 
   ## Tool Discipline
-  Prefer dedicated tools over `bash` for file operations. Reserve `bash` for tasks that dedicated tools cannot cover (builds, compilation, tests, package management, Git, running binaries, process checks).
+  Prefer dedicated tools over `run_command` for file operations. Reserve `run_command` for tasks that dedicated tools cannot cover (builds, compilation, tests, package management, Git, running binaries, process checks).
 
   Common Mappings:
   - Read files using `read_file`
@@ -62,7 +62,7 @@ prohibitions:
   - "When listing directories, use `list_directory` instead of `ls`, `dir`."
   - "When finding files by name, use `glob` instead of `find`, `dir /s`."
   - "When searching file contents, use `grep` or `code_explore` instead of shell `grep`/`rg`."
-  - "Use `bash` only when dedicated tools cannot cover the task: building projects, compiling code, running tests, package management (cargo, npm, pip, etc.), git commands, and process checks."
+  - "Use `run_command` only when dedicated tools cannot cover the task: building projects, compiling code, running tests, package management (cargo, npm, pip, etc.), git commands, and process checks."
 
 # ------------------------------------------------------------------------------
 # 3. Doing Tasks

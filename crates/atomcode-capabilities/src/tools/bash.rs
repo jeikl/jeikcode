@@ -81,7 +81,10 @@ fn command_for_policy(args: &Args) -> Cow<'_, str> {
 #[async_trait]
 impl Tool for BashTool {
     fn name(&self) -> &str {
-        "bash"
+        super::shell_route::SHELL_TOOL_NAME
+    }
+    fn aliases(&self) -> &'static [&'static str] {
+        super::shell_route::SHELL_TOOL_ALIASES
     }
     fn description(&self) -> &str {
         // Only advertise interactive password support when the askpass helper is
@@ -161,10 +164,17 @@ impl Tool for BashTool {
             Ok(a) => a,
             Err(e) => {
                 return err(format!(
-                    "bash: invalid arguments: {e}. Expected {{\"command\":\"<shell command>\"}}."
+                    "run_command: invalid arguments: {e}. Expected {{\"command\":\"<shell command>\"}}."
                 ))
             }
         };
+        if a.shell == ShellMode::Default {
+            if let Some(routed) =
+                super::shell_route::maybe_route_shell_command(&a.command, ctx).await
+            {
+                return routed;
+            }
+        }
         let bash_cfg = resolve_bash_timeout_config();
         let max_timeout = bash_cfg.max_timeout_secs.max(1);
 
@@ -646,15 +656,11 @@ pub(crate) fn windows_shell_label(bash_present: bool) -> &'static str {
     }
 }
 
-/// The `bash` tool description for the current platform.
+/// The `run_command` tool description for the current platform.
 ///
-/// The tool keeps the name `bash` (every provider's model is trained to reach
-/// for a `bash` tool), but on Windows it actually executes via `cmd.exe` (see
-/// `build_command`). Left unsaid, weak models follow the `bash` name and emit
-/// bash-only syntax — heredocs, `$(...)`, `printf '\n'`, single-quote quoting —
-/// which cmd.exe can't parse, so the model thrashes into temp-file workarounds.
-/// Naming the real shell here removes the contradiction. Pure (takes a bool) so
-/// the Windows wording is unit-testable off Windows.
+/// Canonical tool name is `run_command` (alias `bash` for old transcripts).
+/// On Windows the interpreter may be Git Bash or cmd.exe; naming the real
+/// shell here keeps the model from emitting the wrong syntax.
 fn shell_tool_description(
     is_windows: bool,
     bash_present: bool,
@@ -664,10 +670,10 @@ fn shell_tool_description(
     // macro (not a `const`) because `concat!` only splices literals.
     macro_rules! base {
         () => {
-            "Execute a shell command and return stdout, stderr, and exit code. \
+            "Run a shell command and return stdout, stderr, and exit code. \
              Use for builds, tests, package management, Git operations, binaries, and process checks. \
+             Prefer dedicated tools for files: `read_file`, `grep`, `glob`, `list_directory`, `edit_file`, `write_file`. \
              Chaining commands with `&&` is not supported; use `;` instead. \
-             `read_file`, `grep`, `glob`, `list_directory`, `ls`, `head`, `tail`, `sed`, `awk`, and `find` are not available in this shell tool. \
              Shell pipelines and aggregation (such as wc, sort, uniq, git log) are supported. \
              This shell has no keyboard input; pagers, REPLs, `tail -f`, and commands requiring keyboard interaction are not supported."
         };
@@ -4188,6 +4194,23 @@ mod tests {
             Some(Duration::from_secs(60))
         );
         assert_eq!(super::agent_bash_idle_timeout("ls", 0), None);
+    }
+
+    #[test]
+    fn advertised_name_is_run_command() {
+        assert_eq!(BashTool.name(), "run_command");
+        assert!(BashTool.aliases().contains(&"bash"));
+        let desc = shell_tool_description(false, false, false);
+        assert!(
+            desc.contains("`read_file`")
+                && desc.contains("`grep`")
+                && desc.contains("`list_directory`"),
+            "schema must steer file work to dedicated tools: {desc}"
+        );
+        assert!(
+            !desc.contains("not available in this shell tool"),
+            "must not claim file tools are unavailable: {desc}"
+        );
     }
 
     #[test]

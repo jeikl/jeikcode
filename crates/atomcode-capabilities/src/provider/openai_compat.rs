@@ -1044,7 +1044,12 @@ fn build_request_body(
     body.insert("model".into(), json!(model));
     body.insert(
         "messages".into(),
-        json!(format_messages(messages, policy, cfg.supports_vision, cfg.coalesce_system)),
+        json!(format_messages(
+            messages,
+            policy,
+            cfg.supports_vision,
+            cfg.coalesce_system
+        )),
     );
     body.insert("stream".into(), json!(true));
     body.insert("stream_options".into(), json!({ "include_usage": true }));
@@ -2057,7 +2062,12 @@ mod tests {
     fn user_without_images_stays_a_content_string() {
         // Byte-identical to the pre-multimodal path → a no-image conversation's prefix
         // cache is unperturbed.
-        let out = format_messages(&[Message::user("hi")], ReasoningPolicy::Exclude, true, false);
+        let out = format_messages(
+            &[Message::user("hi")],
+            ReasoningPolicy::Exclude,
+            true,
+            false,
+        );
         assert_eq!(out[0], json!({"role":"user","content":"hi"}));
     }
 

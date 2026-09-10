@@ -60,10 +60,11 @@ impl Tool for ListDirTool {
     }
     // listing is non-destructive → risk() defaults to Safe.
     async fn execute(&self, args: &str, ctx: &ToolContext) -> ToolResult {
-        let a: Args = match parse_tool_args("list_directory", args, r#"{"target_directory":"<dir>"}"#) {
-            Ok(a) => a,
-            Err(e) => return e.into_tool_result(),
-        };
+        let a: Args =
+            match parse_tool_args("list_directory", args, r#"{"target_directory":"<dir>"}"#) {
+                Ok(a) => a,
+                Err(e) => return e.into_tool_result(),
+            };
         let raw = a.target_directory.unwrap_or_else(|| ".".to_string());
         let root = resolve_path(&raw, &ctx.working_dir);
         let depth = a.depth.unwrap_or(1).min(MAX_DEPTH_CAP);

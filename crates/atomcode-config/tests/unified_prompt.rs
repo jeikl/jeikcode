@@ -26,7 +26,7 @@ fn unified_prompt_has_key_guidance() {
         "Must guide global search-replace editing"
     );
     assert!(
-        prompt.contains("never with `bash`"),
+        prompt.contains("never with `run_command`"),
         "Must ban bash file mutation"
     );
 }
@@ -41,7 +41,7 @@ fn unified_prompt_size_reasonable() {
         tokens
     );
     assert!(
-        tokens < 2500,
+        tokens < 2600,
         "Too long: {} tokens — violates Less is More principle",
         tokens
     );

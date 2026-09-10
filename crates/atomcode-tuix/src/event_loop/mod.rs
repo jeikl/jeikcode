@@ -34,6 +34,7 @@ use crate::session::{Session, SessionId};
 use anyhow::Result;
 use atomcode_coding::runtime::{CodingRuntimeEvent, CompactTrigger, CompactionCompletion};
 use atomcode_coding::CodingRuntimeHandle;
+use atomcode_capabilities::tools::is_shell_tool_name;
 use atomcode_config::config::Config;
 use atomcode_config::{ConfigCommit, ConfigRevision, ConfigSnapshot, ConfigStore};
 use crossterm::event::{KeyCode, KeyEvent, KeyEventKind};
@@ -15501,7 +15502,7 @@ fn approval_choice_to_decision(
 }
 
 fn get_approval_cache_key(tool: &str, args: &str) -> String {
-    if tool == "bash" {
+    if is_shell_tool_name(tool) {
         let command = if let Ok(val) = serde_json::from_str::<serde_json::Value>(args) {
             val.get("command")
                 .and_then(|v| v.as_str())
@@ -15511,7 +15512,7 @@ fn get_approval_cache_key(tool: &str, args: &str) -> String {
             args.to_string()
         };
         let normalized = atomcode_capabilities::tools::normalize_command_for_grant(&command);
-        format!("bash::{normalized}")
+        format!("run_command::{normalized}")
     } else {
         format!("{tool}::")
     }
@@ -15527,9 +15528,9 @@ pub(crate) fn build_approval_options(tool: &str) -> Vec<crate::state::ApprovalOp
     // Display names (snake→Pascal) of the directory-scoped write tools.
     let always_label = if matches!(tool, "WriteFile" | "EditFile") {
         crate::i18n::t(crate::i18n::Msg::ApprovalAlwaysAllowFolder).into_owned()
-    } else if tool == "bash" {
-        // bash's grant is scoped to THIS COMMAND (not the whole tool), so don't imply
-        // "Always allow bash" — say "this command".
+    } else if is_shell_tool_name(tool) {
+        // run_command's grant is scoped to THIS COMMAND (not the whole tool), so don't imply
+        // "Always allow run_command" — say "this command".
         crate::i18n::t(crate::i18n::Msg::ApprovalAlwaysAllowCommand).into_owned()
     } else {
         crate::i18n::t(crate::i18n::Msg::ApprovalAlwaysAllow { tool }).into_owned()
@@ -21096,7 +21097,7 @@ fn handle_agent_event(
         } => {
             // Bash arguments appear here BEFORE the tool runs. A freeze
             // at "参数出来了键盘就死" shows up as bash=args with into_loop=false.
-            if name.eq_ignore_ascii_case("bash") {
+            if is_shell_tool_name(&name) {
                 crate::trace::set_bash("args");
                 crate::trace::set_phase(&format!("{:?}", state.phase));
                 crate::trace::pulse(
@@ -21127,7 +21128,7 @@ fn handle_agent_event(
                 "before_exec",
                 format_args!("call_id={} name={}", id, name),
             );
-            if name.eq_ignore_ascii_case("bash") {
+            if is_shell_tool_name(&name) {
                 crate::tuix_trace!(
                     "BASH",
                     "stage=started call_id={} {}",
@@ -21335,7 +21336,7 @@ fn handle_agent_event(
                     duration.as_millis()
                 ),
             );
-            if name.eq_ignore_ascii_case("bash") {
+            if is_shell_tool_name(&name) {
                 crate::tuix_stage!(
                     "BASH",
                     "stage=finished call_id={} success={} output_bytes={}",
@@ -21348,7 +21349,7 @@ fn handle_agent_event(
             // Short bash that printed then went silent: process is still live.
             // Keep the inflight pane so later stdout / kill / promote lines
             // land on the same window. add/kill tools have their own rows.
-            if name.eq_ignore_ascii_case("bash") && output.contains("[bash-await-decision]") {
+            if is_shell_tool_name(&name) && output.contains("[bash-await-decision]") {
                 renderer.flush();
                 return;
             }
@@ -21431,7 +21432,7 @@ fn handle_agent_event(
                 let prefix = pending_tools
                     .remove(&call_id)
                     .map(|(_, det, _)| {
-                        if name.eq_ignore_ascii_case("bash") {
+                        if is_shell_tool_name(&name) {
                             format!("{} {}", display_tool_name_short(&name), det)
                         } else {
                             format!("{}({})", display_tool_name_short(&name), det)
@@ -21554,7 +21555,7 @@ fn handle_agent_event(
                     };
                     let diff_entries = if matches!(
                         name.as_str(),
-                        "edit_file" | "write_file" | "create_file" | "global_search_replace" | "search_replace" | "bash"
+                        "edit_file" | "write_file" | "create_file" | "global_search_replace" | "search_replace" | "bash" | "run_command"
                     ) {
                         let entries = crate::render::diff::parse_unified_diff(&output, 120);
                         (!entries.is_empty()).then_some(entries)
@@ -24417,7 +24418,7 @@ pub(crate) fn format_tool_detail(name: &str, args_json: &str) -> String {
         "grep" => get_str("pattern")
             .map(|p| crate::width::truncate_with_ellipsis(&p, 100))
             .unwrap_or_default(),
-        "bash" => get_str("command")
+        "bash" | "run_command" => get_str("command")
             .map(|c| crate::width::truncate_with_ellipsis(&c, 500))
             .unwrap_or_default(),
         // Schema primary key is `target_directory`; `path` is a serde alias for older calls.
@@ -24938,7 +24939,7 @@ pub(crate) fn build_replay_tool_batch(
             };
             // bash → `Short det` (no parens); others → `Short(det)`. Matches the
             // live completed-child (`ToolGroupChildUpdate`) formatting.
-            let body = if c.name.eq_ignore_ascii_case("bash") {
+            let body = if is_shell_tool_name(&c.name) {
                 format!("{} {}", display_tool_name_short(&c.name), detail)
             } else {
                 format!("{}({})", display_tool_name_short(&c.name), detail)

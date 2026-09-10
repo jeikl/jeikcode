@@ -1,9 +1,10 @@
 //! Path helpers shared by the `tools` and `codeintel` tool families. Kept OUTSIDE
 //! `tools/` and free of any feature `cfg` because `codeintel` is deliberately
 //! independent of the `tools` feature (see `codeintel/mod.rs`) yet must resolve
-//! model-supplied paths the SAME way — including leading-`~` expansion, so
-//! `read_file("~/x")` and `code_explore("~/x")` and `glob("~/x/**")` agree with the
-//! shell (which the `bash` tool relies on).
+//! model-supplied paths the SAME way — including leading-`~` expansion and
+//! cross-platform absolute vs relative classification (POSIX `/…`, Windows
+//! drive/UNC) so `read_file`, `code_explore`, `repo_map`, and `glob` agree with
+//! the shell the `bash` tool runs.
 
 use std::path::{Path, PathBuf};
 
@@ -40,6 +41,136 @@ pub(crate) fn expand_tilde_with_home(raw: &str, home: Option<&Path>) -> Option<P
 pub(crate) fn expand_tilde(raw: &str) -> Option<PathBuf> {
     tilde_rest(raw)?; // fast-path: skip the env read entirely unless there's a `~`
     expand_tilde_with_home(raw, home_dir().as_deref())
+}
+
+/// Resolve a model-supplied path on every platform: leading `~`/`~/` → home;
+/// POSIX `/…` and Windows drive/UNC → absolute (never joined onto `working_dir`);
+/// relative → joined to `working_dir`.
+///
+/// On Windows, Git-Bash POSIX forms (`/tmp/foo`, `/c/Users/foo`) are mapped to the
+/// native location so they do not become `{cwd_drive}:\tmp\foo`. On Unix those
+/// strings are already native absolute paths and are left unchanged.
+pub(crate) fn resolve_path(raw: &str, working_dir: &Path) -> PathBuf {
+    if let Some(home) = expand_tilde(raw) {
+        return home;
+    }
+    if let Some(translated) = maybe_translate_posix_absolute(raw) {
+        return translated;
+    }
+    if is_absolute_path(raw) {
+        PathBuf::from(raw)
+    } else {
+        working_dir.join(raw)
+    }
+}
+
+/// Cross-platform absolute-path test for model-supplied paths.
+///
+/// `Path::is_absolute()` is platform-dependent:
+/// - Unix rejects `G:\foo` (one relative name) → `working_dir.join` produces garbage.
+/// - Windows rejects POSIX `/tmp/foo` (root, no drive) → join becomes `{drive}:\tmp\foo`.
+///
+/// Recognize POSIX `/…`, Windows `C:\` / `C:/`, and UNC `\\server\share` on every
+/// build target so Linux CI, macOS, and Windows agree.
+pub(crate) fn is_absolute_path(raw: &str) -> bool {
+    if Path::new(raw).is_absolute() {
+        return true;
+    }
+    let b = raw.as_bytes();
+    if !b.is_empty() && b[0] == b'/' {
+        return true;
+    }
+    if b.len() >= 3 && b[0].is_ascii_alphabetic() && b[1] == b':' && (b[2] == b'\\' || b[2] == b'/')
+    {
+        return true;
+    }
+    b.len() >= 2 && b[0] == b'\\' && b[1] == b'\\'
+}
+
+/// On Windows, map a POSIX-absolute path that Git Bash / a Linux-trained model
+/// would emit onto a native path. No-op off Windows (POSIX `/tmp` is already native,
+/// and remapping it to `$TMPDIR` would mis-resolve `/tmp` on macOS).
+///
+/// Windows `Path::join` treats `/tmp/foo` as "root, no drive prefix" and produces
+/// `{cwd_drive}:\tmp\foo` (e.g. workspace on `E:` → `E:\tmp\foo`). Git for Windows
+/// mounts `%TEMP%` at `/tmp`, and MSYS drive form is `/c/Users/...` → `C:\Users\...`.
+pub(crate) fn maybe_translate_posix_absolute(raw: &str) -> Option<PathBuf> {
+    if !cfg!(windows) {
+        return None;
+    }
+    translate_posix_absolute_for_windows(raw, &std::env::temp_dir())
+}
+
+/// Pure mapper used by [`maybe_translate_posix_absolute`]. `temp_dir` is injected so
+/// unit tests run on Unix CI without reading the host `%TEMP%`. Returns `None` when
+/// `raw` is not a POSIX-absolute form we know how to map.
+pub(crate) fn translate_posix_absolute_for_windows(raw: &str, temp_dir: &Path) -> Option<PathBuf> {
+    let s = raw.trim();
+    if s.len() < 2 || !s.starts_with('/') || s.starts_with("//") {
+        return None;
+    }
+    let s = s.replace('\\', "/");
+    if let Some(mapped) = map_tmp_prefix(&s, temp_dir) {
+        return Some(mapped);
+    }
+    if let Some(rest) = s.strip_prefix("/mnt/") {
+        return map_msys_drive(&format!("/{rest}"));
+    }
+    if let Some(rest) = s.strip_prefix("/cygdrive/") {
+        return map_msys_drive(&format!("/{rest}"));
+    }
+    map_msys_drive(&s)
+}
+
+const TMP_PREFIXES: &[&str] = &["/tmp", "/var/tmp", "/private/tmp"];
+
+fn map_tmp_prefix(s: &str, temp_dir: &Path) -> Option<PathBuf> {
+    for prefix in TMP_PREFIXES {
+        if s == *prefix {
+            return Some(temp_dir.to_path_buf());
+        }
+        if let Some(rest) = s.strip_prefix(prefix) {
+            let rest = rest.strip_prefix('/')?;
+            return Some(join_posix_under(temp_dir, rest));
+        }
+    }
+    None
+}
+
+fn join_posix_under(base: &Path, rest: &str) -> PathBuf {
+    let mut p = base.to_path_buf();
+    for comp in rest.split('/') {
+        if !comp.is_empty() {
+            p.push(comp);
+        }
+    }
+    p
+}
+
+/// `/c/Users/x` → `C:/Users/x`; `/e` → `E:/`. First component must be exactly one
+/// ASCII letter so `/tmp`, `/dev/null`, `/etc/hosts` are not treated as drives.
+fn map_msys_drive(s: &str) -> Option<PathBuf> {
+    let rest = s.strip_prefix('/')?;
+    let mut chars = rest.chars();
+    let letter = chars.next()?;
+    if !letter.is_ascii_alphabetic() {
+        return None;
+    }
+    match chars.next() {
+        None => Some(windows_drive_path(letter, "")),
+        Some('/') => Some(windows_drive_path(letter, chars.as_str())),
+        Some(_) => None,
+    }
+}
+
+fn windows_drive_path(letter: char, rest: &str) -> PathBuf {
+    let mut p = PathBuf::from(format!("{}:/", letter.to_ascii_uppercase()));
+    for comp in rest.split('/') {
+        if !comp.is_empty() {
+            p.push(comp);
+        }
+    }
+    p
 }
 
 /// The part of `raw` AFTER a leading `~` separator (empty for a bare `~`), or `None`
@@ -195,5 +326,140 @@ mod tests {
         if std::env::var("SUDO_USER").is_err() {
             assert_eq!(super::real_home_dir(), dirs::home_dir());
         }
+    }
+
+    fn fwd(p: &Path) -> String {
+        p.to_string_lossy().replace('\\', "/")
+    }
+
+    #[test]
+    fn posix_tmp_maps_onto_injected_temp_dir() {
+        let tmp = Path::new("win-temp");
+        assert_eq!(
+            translate_posix_absolute_for_windows("/tmp/submit_comment.md", tmp),
+            Some(tmp.join("submit_comment.md"))
+        );
+        assert_eq!(
+            translate_posix_absolute_for_windows("/tmp", tmp),
+            Some(tmp.to_path_buf())
+        );
+        assert_eq!(
+            translate_posix_absolute_for_windows("/tmp/", tmp),
+            Some(tmp.to_path_buf())
+        );
+        assert_eq!(
+            translate_posix_absolute_for_windows("/var/tmp/x.log", tmp),
+            Some(tmp.join("x.log"))
+        );
+        // `/tmpfoo` is not `/tmp/...`.
+        assert_eq!(translate_posix_absolute_for_windows("/tmpfoo", tmp), None);
+    }
+
+    #[test]
+    fn posix_msys_and_wsl_drive_forms_map_to_windows_drive() {
+        let tmp = Path::new("win-temp");
+        assert_eq!(
+            fwd(
+                &translate_posix_absolute_for_windows("/e/my/dingtalk-workspace-cli", tmp).unwrap()
+            )
+            .to_lowercase(),
+            "e:/my/dingtalk-workspace-cli"
+        );
+        assert_eq!(
+            fwd(&translate_posix_absolute_for_windows("/c/Users/x", tmp).unwrap()).to_lowercase(),
+            "c:/Users/x".to_lowercase()
+        );
+        assert_eq!(
+            fwd(&translate_posix_absolute_for_windows("/mnt/c/Users/x", tmp).unwrap())
+                .to_lowercase(),
+            "c:/Users/x".to_lowercase()
+        );
+        assert_eq!(
+            fwd(&translate_posix_absolute_for_windows("/cygdrive/e/tmp/f", tmp).unwrap())
+                .to_lowercase(),
+            "e:/tmp/f"
+        );
+    }
+
+    #[test]
+    fn posix_translator_ignores_relative_unc_and_non_drive_roots() {
+        let tmp = Path::new("win-temp");
+        assert_eq!(
+            translate_posix_absolute_for_windows("src/main.rs", tmp),
+            None
+        );
+        assert_eq!(
+            translate_posix_absolute_for_windows(r"C:\Windows", tmp),
+            None
+        );
+        assert_eq!(
+            translate_posix_absolute_for_windows("//server/share/f", tmp),
+            None
+        );
+        assert_eq!(translate_posix_absolute_for_windows("/dev/null", tmp), None);
+        assert_eq!(
+            translate_posix_absolute_for_windows("/etc/hosts", tmp),
+            None
+        );
+        assert_eq!(
+            translate_posix_absolute_for_windows("/abs/dir/file.rs", tmp),
+            None
+        );
+    }
+
+    #[test]
+    fn is_absolute_path_agrees_on_posix_and_windows_roots_on_every_os() {
+        assert!(is_absolute_path("/tmp/submit_comment.md"));
+        assert!(is_absolute_path("/usr/bin/ls"));
+        assert!(is_absolute_path("G:/VR2024/keystore"));
+        assert!(is_absolute_path(r"G:\VR2024\keystore"));
+        assert!(is_absolute_path(r"\\server\share\f"));
+        assert!(!is_absolute_path("src/main.rs"));
+        assert!(!is_absolute_path("./foo"));
+        assert!(!is_absolute_path("C:foo"));
+    }
+
+    #[test]
+    fn resolve_path_never_joins_absolute_forms_onto_cwd() {
+        // Runs on Linux, macOS, and Windows: POSIX `/…` and Windows drive/UNC must
+        // not be treated as relative and joined under the working dir.
+        let wd = Path::new("/work/proj");
+        let tmp = resolve_path("/tmp/submit_comment.md", wd);
+        #[cfg(windows)]
+        {
+            assert_eq!(tmp, std::env::temp_dir().join("submit_comment.md"));
+            assert_ne!(
+                tmp,
+                wd.join("/tmp/submit_comment.md"),
+                "POSIX /tmp must not become {{cwd_drive}}:/tmp/..."
+            );
+            let msys = resolve_path("/e/my/dingtalk-workspace-cli/src/main.rs", wd);
+            assert_eq!(
+                crate::pathnorm::to_display(&msys).to_lowercase(),
+                "e:/my/dingtalk-workspace-cli/src/main.rs"
+            );
+        }
+        #[cfg(not(windows))]
+        {
+            assert_eq!(tmp, PathBuf::from("/tmp/submit_comment.md"));
+            assert_ne!(tmp, wd.join("tmp/submit_comment.md"));
+        }
+        assert_eq!(
+            resolve_path("/usr/bin/ls", wd),
+            PathBuf::from("/usr/bin/ls")
+        );
+        assert_eq!(
+            resolve_path("G:/VR2024/keystore", wd),
+            PathBuf::from("G:/VR2024/keystore")
+        );
+        assert_eq!(
+            resolve_path(r"G:\VR2024\keystore", wd),
+            PathBuf::from(r"G:\VR2024\keystore")
+        );
+        assert_eq!(
+            resolve_path(r"\\server\share\f", wd),
+            PathBuf::from(r"\\server\share\f")
+        );
+        assert_eq!(resolve_path("src/main.rs", wd), wd.join("src/main.rs"));
     }
 }

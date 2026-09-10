@@ -13,7 +13,7 @@
 //! tracks `cd` for the common case. Expose this tool only when a real directory-switch
 //! affordance is wanted.
 
-use super::{err, ok};
+use super::{err, ok, resolve_path};
 use async_trait::async_trait;
 use atomcode_kernel::tool::{Tool, ToolContext, ToolResult};
 use serde::Deserialize;
@@ -76,13 +76,10 @@ impl Tool for ChangeDirTool {
             return err("change_dir: `path` must be non-empty.");
         }
         // Resolve relative to the CURRENT shared cwd (the source of truth).
+        // Same `resolve_path` as read_file so `/tmp` and Git-Bash `/c/...` map
+        // on Windows instead of becoming `{cwd_drive}:\tmp\...`.
         let current = self.cwd.read().map(|g| g.clone()).unwrap_or_default();
-        let raw = Path::new(&a.path);
-        let target = if raw.is_absolute() {
-            raw.to_path_buf()
-        } else {
-            current.join(raw)
-        };
+        let target = resolve_path(&a.path, &current);
 
         let meta = match std::fs::metadata(&target) {
             Ok(m) => m,

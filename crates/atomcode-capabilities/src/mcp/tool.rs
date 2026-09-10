@@ -82,8 +82,8 @@ pub struct McpToolAdapter {
 
 pub use crate::schema_sanitizer::{
     ensure_object_schema, extract_quoted_enums, is_bare_object, sanitize_description,
-    sanitize_mcp_schema, truncate_description, LEAKED_HTTP_HEADERS,
-    MAX_MCP_DESCRIPTION_LENGTH, TRUNCATION_SUFFIX,
+    sanitize_mcp_schema, truncate_description, LEAKED_HTTP_HEADERS, MAX_MCP_DESCRIPTION_LENGTH,
+    TRUNCATION_SUFFIX,
 };
 
 impl McpToolAdapter {
@@ -367,7 +367,9 @@ mod tests {
     fn test_adapter_description_sanitization_and_truncation() {
         let reg = Arc::new(McpRegistry::new());
         let mut t = info("docs", "search");
-        t.description = "  Search documentation.\n  Supports multi-line\r\nqueries with  whitespace. ".to_string();
+        t.description =
+            "  Search documentation.\n  Supports multi-line\r\nqueries with  whitespace. "
+                .to_string();
         let adapter = McpToolAdapter::new(reg, t).unwrap();
         assert_eq!(
             adapter.description(),
@@ -424,6 +426,9 @@ mod tests {
         // goggles retains type: "array" and items intact (Gemini protobuf requirement)
         let goggles = props.get("goggles").unwrap().as_object().unwrap();
         assert_eq!(goggles.get("type").unwrap(), "array");
-        assert_eq!(goggles.get("items").unwrap(), &serde_json::json!({ "type": "string" }));
+        assert_eq!(
+            goggles.get("items").unwrap(),
+            &serde_json::json!({ "type": "string" })
+        );
     }
 }

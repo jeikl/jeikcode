@@ -56,9 +56,19 @@ struct Args {
     max_results: Option<usize>,
     #[serde(default, alias = "-C", deserialize_with = "lenient_usize")]
     context: Option<usize>,
-    #[serde(default, rename = "-B", alias = "before_context", deserialize_with = "lenient_usize")]
+    #[serde(
+        default,
+        rename = "-B",
+        alias = "before_context",
+        deserialize_with = "lenient_usize"
+    )]
     before_context: Option<usize>,
-    #[serde(default, rename = "-A", alias = "after_context", deserialize_with = "lenient_usize")]
+    #[serde(
+        default,
+        rename = "-A",
+        alias = "after_context",
+        deserialize_with = "lenient_usize"
+    )]
     after_context: Option<usize>,
     /// File-name glob (`*.rs`, `*.{ts,tsx}`, `src/**/*.go`). Ripgrep-style:
     /// a pattern with no `/` matches at any depth.
@@ -1208,9 +1218,21 @@ mod tests {
             .execute(r#"{"pattern":"TARGET","-A":2}"#, &ctx(d.path()))
             .await;
         assert!(!r_after.is_error, "{}", r_after.content);
-        assert!(r_after.content.contains("code.rs:3:TARGET"), "{}", r_after.content);
-        assert!(r_after.content.contains("code.rs-4-line 4"), "{}", r_after.content);
-        assert!(r_after.content.contains("code.rs-5-line 5"), "{}", r_after.content);
+        assert!(
+            r_after.content.contains("code.rs:3:TARGET"),
+            "{}",
+            r_after.content
+        );
+        assert!(
+            r_after.content.contains("code.rs-4-line 4"),
+            "{}",
+            r_after.content
+        );
+        assert!(
+            r_after.content.contains("code.rs-5-line 5"),
+            "{}",
+            r_after.content
+        );
         assert!(!r_after.content.contains("line 2"), "{}", r_after.content);
 
         // Test before_context (-B 1): should show line 2 and TARGET, but NOT line 4
@@ -1218,8 +1240,16 @@ mod tests {
             .execute(r#"{"pattern":"TARGET","-B":1}"#, &ctx(d.path()))
             .await;
         assert!(!r_before.is_error, "{}", r_before.content);
-        assert!(r_before.content.contains("code.rs-2-line 2"), "{}", r_before.content);
-        assert!(r_before.content.contains("code.rs:3:TARGET"), "{}", r_before.content);
+        assert!(
+            r_before.content.contains("code.rs-2-line 2"),
+            "{}",
+            r_before.content
+        );
+        assert!(
+            r_before.content.contains("code.rs:3:TARGET"),
+            "{}",
+            r_before.content
+        );
         assert!(!r_before.content.contains("line 4"), "{}", r_before.content);
     }
 
@@ -1275,28 +1305,57 @@ mod tests {
         let r_csharp = GrepTool
             .execute(r#"{"pattern":"COMMON_MARKER","type":"c#"}"#, &ctx(d.path()))
             .await;
-        assert!(r_csharp.content.contains("Program.cs"), "{}", r_csharp.content);
-        assert!(!r_csharp.content.contains("App.vue"), "{}", r_csharp.content);
+        assert!(
+            r_csharp.content.contains("Program.cs"),
+            "{}",
+            r_csharp.content
+        );
+        assert!(
+            !r_csharp.content.contains("App.vue"),
+            "{}",
+            r_csharp.content
+        );
 
         // vue
         let r_vue = GrepTool
-            .execute(r#"{"pattern":"COMMON_MARKER","type":"vue"}"#, &ctx(d.path()))
+            .execute(
+                r#"{"pattern":"COMMON_MARKER","type":"vue"}"#,
+                &ctx(d.path()),
+            )
             .await;
         assert!(r_vue.content.contains("App.vue"), "{}", r_vue.content);
         assert!(!r_vue.content.contains("Program.cs"), "{}", r_vue.content);
 
         // react (tsx/jsx/ts/js)
         let r_react = GrepTool
-            .execute(r#"{"pattern":"COMMON_MARKER","type":"react"}"#, &ctx(d.path()))
+            .execute(
+                r#"{"pattern":"COMMON_MARKER","type":"react"}"#,
+                &ctx(d.path()),
+            )
             .await;
-        assert!(r_react.content.contains("Component.tsx"), "{}", r_react.content);
-        assert!(!r_react.content.contains("Program.cs"), "{}", r_react.content);
+        assert!(
+            r_react.content.contains("Component.tsx"),
+            "{}",
+            r_react.content
+        );
+        assert!(
+            !r_react.content.contains("Program.cs"),
+            "{}",
+            r_react.content
+        );
 
         // java
         let r_java = GrepTool
-            .execute(r#"{"pattern":"COMMON_MARKER","type":"java"}"#, &ctx(d.path()))
+            .execute(
+                r#"{"pattern":"COMMON_MARKER","type":"java"}"#,
+                &ctx(d.path()),
+            )
             .await;
-        assert!(r_java.content.contains("Service.java"), "{}", r_java.content);
+        assert!(
+            r_java.content.contains("Service.java"),
+            "{}",
+            r_java.content
+        );
         assert!(!r_java.content.contains("Program.cs"), "{}", r_java.content);
 
         // c
@@ -1308,7 +1367,10 @@ mod tests {
 
         // semantic alias after_context
         let r_alias = GrepTool
-            .execute(r#"{"pattern":"COMMON_MARKER","type":"js","after_context":1}"#, &ctx(d.path()))
+            .execute(
+                r#"{"pattern":"COMMON_MARKER","type":"js","after_context":1}"#,
+                &ctx(d.path()),
+            )
             .await;
         assert!(r_alias.content.contains("index.js"), "{}", r_alias.content);
     }
@@ -1321,7 +1383,7 @@ mod tests {
         std::fs::write(d.path().join("event.rs"), "cached tokens here\n").unwrap();
         let r = GrepTool
             .execute(
-                r#"{"pattern":"cached","path":"event.rs","glob":"*.rs"}"#, 
+                r#"{"pattern":"cached","path":"event.rs","glob":"*.rs"}"#,
                 &ctx(d.path()),
             )
             .await;
@@ -1370,7 +1432,7 @@ mod tests {
         assert!(r_smart.content.contains("hello"), "{}", r_smart.content);
         let r_strict = GrepTool
             .execute(
-                r#"{"pattern":"hello","case_insensitive":false}"#, 
+                r#"{"pattern":"hello","case_insensitive":false}"#,
                 &ctx(d.path()),
             )
             .await;

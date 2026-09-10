@@ -92,7 +92,7 @@ impl ToolMiddleware for TurnExecutionPolicy {
         _tool: &Arc<dyn Tool>,
         _rt: &RequestCtx,
     ) -> BeforeOutcome {
-        if call.name != "bash" {
+        if !atomcode_capabilities::tools::is_shell_tool_name(&call.name) {
             return BeforeOutcome::Proceed;
         }
         let command = bash_command(&call.arguments).unwrap_or_default();

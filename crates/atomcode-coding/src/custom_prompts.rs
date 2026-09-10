@@ -906,7 +906,7 @@ doing_tasks:
                 .as_ref()
                 .unwrap()
                 .iter()
-                .any(|p| p.contains("bash")),
+                .any(|p| p.contains("run_command")),
             "prohibitions is a live rules.yaml field"
         );
         assert!(

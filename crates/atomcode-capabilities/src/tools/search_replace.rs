@@ -63,7 +63,10 @@ impl Tool for GlobalSearchReplaceTool {
             Ok(a) => a,
             Err(e) => {
                 if let Ok(val) = serde_json::from_str::<serde_json::Value>(args) {
-                    if val.get("file_path").is_some() || val.get("old_string").is_some() || val.get("new_string").is_some() {
+                    if val.get("file_path").is_some()
+                        || val.get("old_string").is_some()
+                        || val.get("new_string").is_some()
+                    {
                         return err(
                             "global_search_replace is for project-wide batch replacements across multiple files. \
                              To edit a single file, please use `edit_file` with `path` and `edits: [{old_string, new_string}]`."
@@ -96,7 +99,12 @@ impl Tool for GlobalSearchReplaceTool {
         let re = if a.regex {
             match regex::Regex::new(&a.search) {
                 Ok(r) => Some(r),
-                Err(e) => return err(format!("global_search_replace: invalid regex '{}': {e}", a.search)),
+                Err(e) => {
+                    return err(format!(
+                        "global_search_replace: invalid regex '{}': {e}",
+                        a.search
+                    ))
+                }
             }
         } else {
             None
@@ -505,6 +513,11 @@ mod tests {
             )
             .await;
         assert!(r.is_error);
-        assert!(r.content.contains("To edit a single file, please use `edit_file`"), "{}", r.content);
+        assert!(
+            r.content
+                .contains("To edit a single file, please use `edit_file`"),
+            "{}",
+            r.content
+        );
     }
 }

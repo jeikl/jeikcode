@@ -8,7 +8,7 @@
 #![deny(clippy::print_stdout, clippy::print_stderr, clippy::dbg_macro)]
 
 use std::collections::HashMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex as StdMutex};
 
 use atomcode_capabilities::mcp::McpRegistry;
@@ -174,6 +174,124 @@ fn live_current_working_dir(fallback: &Path) -> std::path::PathBuf {
     crate::native_live::binding()
         .map(|binding| binding.working_dir)
         .unwrap_or_else(|_| fallback.to_path_buf())
+}
+
+/// Event source for one `/chat` turn. Owned runtimes expose the native event
+/// receiver. Observed unique runtimes (TUI / another tab already holds the
+/// lease) fan out through the session registry — this view never acquires a
+/// second storage lock and never shuts the shared handle down.
+enum ChatTurnEventSource {
+    Owned(atomcode_coding::CodingRuntimeEvents),
+    Observed(
+        tokio::sync::broadcast::Receiver<atomcode_coding::SequencedSessionEvent>,
+    ),
+}
+
+impl ChatTurnEventSource {
+    async fn recv(&mut self) -> Option<CodingRuntimeEvent> {
+        match self {
+            Self::Owned(rx) => rx.recv().await.map(|envelope| envelope.event),
+            Self::Observed(rx) => loop {
+                match rx.recv().await {
+                    Ok(sequenced) => {
+                        if let Some(event) = sequenced.runtime {
+                            return Some(event);
+                        }
+                    }
+                    Err(broadcast::error::RecvError::Lagged(_)) => continue,
+                    Err(broadcast::error::RecvError::Closed) => return None,
+                }
+            },
+        }
+    }
+}
+
+struct PreparedChatTurn {
+    handle: atomcode_coding::CodingRuntimeHandle,
+    events: ChatTurnEventSource,
+    coding_cfg: atomcode_coding::CodingAgentConfig,
+    owned_task: Option<tokio::task::JoinHandle<atomcode_coding::RuntimeExit>>,
+}
+
+fn observe_existing_chat_turn(
+    session_id: &str,
+    working_dir: PathBuf,
+    handle: atomcode_coding::CodingRuntimeHandle,
+    coding_cfg: atomcode_coding::CodingAgentConfig,
+) -> Result<PreparedChatTurn, String> {
+    let key = session_id.to_string();
+    let reg = atomcode_coding::session_runtime_registry::SessionRuntimeRegistry::global();
+    let _ = reg.open_or_attach(key.clone(), working_dir.clone());
+    let _ = reg.bind_handle(&key, handle.clone(), None);
+    let (_replay, rx) = reg
+        .subscribe_or_empty(&key, working_dir, None)
+        .map_err(|error| error.to_string())?;
+    Ok(PreparedChatTurn {
+        handle,
+        events: ChatTurnEventSource::Observed(rx),
+        coding_cfg,
+        owned_task: None,
+    })
+}
+
+async fn prepare_chat_turn_runtime(
+    session_id: &str,
+    runtime_cfg: atomcode_coding::CodingRuntimeConfig,
+    prefix: SessionSnapshot,
+) -> Result<PreparedChatTurn, String> {
+    let coding_cfg = crate::kernel_runtime::coding_config_from_runtime(&runtime_cfg);
+    let working_dir = runtime_cfg.working_dir.clone();
+    if let Some(handle) = crate::native_live::existing_runner_handle(session_id) {
+        return observe_existing_chat_turn(session_id, working_dir, handle, coding_cfg);
+    }
+
+    match crate::start_native_runtime_with_session(
+        runtime_cfg,
+        atomcode_coding::SessionMode::ExternalSnapshot {
+            id: session_id.to_string(),
+            snapshot: prefix,
+        },
+    )
+    .await
+    {
+        Ok((runtime, started_cfg)) => {
+            let atomcode_coding::CodingRuntime {
+                handle,
+                events,
+                task,
+                ..
+            } = runtime;
+            Ok(PreparedChatTurn {
+                handle,
+                events: ChatTurnEventSource::Owned(events),
+                coding_cfg: started_cfg,
+                owned_task: Some(task),
+            })
+        }
+        Err(error) if crate::native_live::runtime_start_is_session_in_use(&error) => {
+            let handle = crate::native_live::wait_for_existing_runner_handle(session_id)
+                .await
+                .ok_or_else(|| error.to_string())?;
+            observe_existing_chat_turn(session_id, working_dir, handle, coding_cfg)
+        }
+        Err(error) => Err(error.to_string()),
+    }
+}
+
+fn send_chat_start_failure(
+    events: &mpsc::UnboundedSender<CodingRuntimeEvent>,
+    message: impl Into<String>,
+) {
+    let _ = events.send(CodingRuntimeEvent::TurnFinished(
+        atomcode_coding::TurnCompletion::SnapshotUnavailable {
+            turn_id: 0,
+            reason: atomcode_kernel::event::StopReason::ProviderError,
+            error: atomcode_coding::RuntimeSnapshotError {
+                message: message.into(),
+            },
+            stats: atomcode_coding::RuntimeTurnStats::default(),
+        },
+    ));
 }
 
 struct AuthoritativeTerminal {
@@ -529,7 +647,7 @@ pub(crate) async fn run_chat_turn_v2(
     approval_mode: ApprovalMode,
 ) {
     use atomcode_capabilities::tools::{ApprovalRequest, ApprovalResponse, APPROVAL_KIND};
-    use atomcode_coding::{CodingRuntime, TurnCompletion};
+    use atomcode_coding::TurnCompletion;
 
     // Split the just-submitted user input from the persisted prefix before runtime
     // startup. The buffer already holds kernel messages (cold summaries inline as
@@ -557,30 +675,26 @@ pub(crate) async fn run_chat_turn_v2(
     let naming_session_id = session_id.clone();
     let naming_project_bucket =
         atomcode_capabilities::session::SessionManager::project_hash(&runtime_cfg.working_dir);
-    let (runtime, coding_cfg) = match crate::start_native_runtime_with_session(
-        runtime_cfg,
-        atomcode_coding::SessionMode::ExternalSnapshot {
-            id: session_id.clone(),
-            snapshot: prefix,
-        },
-    )
-    .await
-    {
-        Ok(runtime) => runtime,
+    // Views are observers of one unique session runtime. If TUI / another
+    // tab already holds the lease, attach and submit instead of spawning a
+    // second runtime (which used to fail with SessionInUse and leave WebUI
+    // spinning).
+    let prepared = match prepare_chat_turn_runtime(&session_id, runtime_cfg, prefix).await {
+        Ok(prepared) => prepared,
         Err(error) => {
-            send_chat_runtime_error(&runtime_event_tx, error.to_string());
+            send_chat_start_failure(&runtime_event_tx, error);
             return;
         }
     };
-    let CodingRuntime {
+    let PreparedChatTurn {
         handle,
         mut events,
-        task,
-        ..
-    } = runtime;
-    // The non-sync `/chat` path creates a short-lived runtime for every turn.
-    // Its first provider request must not race a cold shared daemon registry.
-    // Bound the wait so one stalled MCP server cannot block chat forever.
+        coding_cfg,
+        owned_task,
+    } = prepared;
+    // The non-sync `/chat` path creates a short-lived runtime for every turn
+    // when this view is the first owner. Observed unique runtimes are already
+    // MCP-warm; the wait is still bounded so a stalled catalog cannot block send.
     match handle
         .wait_mcp_ready_status(atomcode_capabilities::mcp::CONNECT_TIMEOUT)
         .await
@@ -588,22 +702,30 @@ pub(crate) async fn run_chat_turn_v2(
         Ok(true) => {}
         Ok(false) => {
             tracing::warn!("MCP catalog was not ready before the chat timeout");
-            send_chat_runtime_error(
+            send_chat_start_failure(
                 &runtime_event_tx,
                 "MCP 工具目录初始化超时，本次消息未发送；请检查 MCP 状态后重试。",
             );
-            let _ = handle.shutdown().await;
-            let _ = task.await;
+            if owned_task.is_some() {
+                let _ = handle.shutdown().await;
+                if let Some(task) = owned_task {
+                    let _ = task.await;
+                }
+            }
             return;
         }
         Err(error) => {
             tracing::warn!(?error, "MCP readiness wait failed");
-            send_chat_runtime_error(
+            send_chat_start_failure(
                 &runtime_event_tx,
                 format!("MCP 工具目录初始化失败，本次消息未发送：{error}"),
             );
-            let _ = handle.shutdown().await;
-            let _ = task.await;
+            if owned_task.is_some() {
+                let _ = handle.shutdown().await;
+                if let Some(task) = owned_task {
+                    let _ = task.await;
+                }
+            }
             return;
         }
     }
@@ -615,7 +737,11 @@ pub(crate) async fn run_chat_turn_v2(
         user_images
     };
     if let Err(error) = handle.set_mode(native_runtime_mode(approval_mode)).await {
-        send_chat_runtime_error(&runtime_event_tx, format!("切换模式失败：{error}"));
+        send_chat_start_failure(&runtime_event_tx, format!("切换模式失败：{error}"));
+        if let Some(task) = owned_task {
+            let _ = handle.shutdown().await;
+            let _ = task.await;
+        }
         return;
     }
     let input = atomcode_coding::UserInput {
@@ -623,7 +749,11 @@ pub(crate) async fn run_chat_turn_v2(
         images: user_images,
     };
     if let Err(error) = handle.submit(input).await {
-        send_chat_runtime_error(&runtime_event_tx, format!("发送用户消息失败：{error}"));
+        send_chat_start_failure(&runtime_event_tx, format!("发送用户消息失败：{error}"));
+        if let Some(task) = owned_task {
+            let _ = handle.shutdown().await;
+            let _ = task.await;
+        }
         return;
     }
 
@@ -637,7 +767,7 @@ pub(crate) async fn run_chat_turn_v2(
             }
             ev = events.recv() => ev,
         };
-        let Some(ev) = ev.map(|event| event.event) else {
+        let Some(ev) = ev else {
             send_chat_runtime_error(
                 &runtime_event_tx,
                 "coding runtime event stream closed before turn terminal",
@@ -819,8 +949,12 @@ pub(crate) async fn run_chat_turn_v2(
         let mut c = conv.lock().await;
         install_authoritative_terminal_snapshot(&mut c, terminal.snapshot, &turn_base);
     }
-    let _ = handle.shutdown().await;
-    let _ = task.await;
+    // Observed unique runtimes stay alive for TUI / other tabs. Only the
+    // short-lived `/chat` owner spawned for this turn may shut down.
+    if let Some(task) = owned_task {
+        let _ = handle.shutdown().await;
+        let _ = task.await;
+    }
     // Dropping runtime_event_tx here closes the consumer loop, which then shapes
     // the final HTTP events and sends Done.
 }

@@ -192,7 +192,7 @@ fn repair_stringified_structured_fields(args: &str, schema: &serde_json::Value) 
 /// left at its schema default), which would otherwise let Git Bash expand `$_`
 /// before PowerShell ever sees it.
 fn route_native_windows_shell(tool_name: &str, args: &str) -> String {
-    if !cfg!(target_os = "windows") || !tool_name.eq_ignore_ascii_case("bash") {
+    if !cfg!(target_os = "windows") || !super::is_shell_tool_name(tool_name) {
         return args.to_string();
     }
     let Ok(mut value) = serde_json::from_str::<serde_json::Value>(args) else {
@@ -1473,7 +1473,10 @@ mod tests {
     fn extract_edit_hunks_drops_truncated_new_string() {
         let input = r#"[{"old_string":"keep-me","new_string":"cut-off"#;
         let hunks = extract_edit_hunks_from_text(input);
-        assert!(hunks.is_empty(), "truncated new_string must not become a hunk: {hunks:?}");
+        assert!(
+            hunks.is_empty(),
+            "truncated new_string must not become a hunk: {hunks:?}"
+        );
     }
 
     #[test]
@@ -1489,7 +1492,8 @@ mod tests {
 
     #[test]
     fn extract_edit_file_args_from_edits_array_form() {
-        let input = r#"{"file_path":"/src/lib.rs","edits":[{"old_string":"foo","new_string":"bar"}]}"#;
+        let input =
+            r#"{"file_path":"/src/lib.rs","edits":[{"old_string":"foo","new_string":"bar"}]}"#;
         let result = extract_edit_file_args(input).expect("should parse edits array");
         assert_eq!(result["file_path"], "/src/lib.rs");
         assert_eq!(result["old_string"], "foo");

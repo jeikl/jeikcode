@@ -6,14 +6,16 @@
 //! message; `None` lets it stop. The kernel's `max_continuations` fuse bounds
 //! the loop, and our own state nudges ONCE per edit-batch so we never spin.
 //!
-//! Language-agnostic: detection keys on tool NAMES (edit_file / write_file / bash) and, for
-//! bash, EXCLUDES a small denylist of read-only / navigation commands (`ls`, `echo`, `cat`,
-//! …) so a throwaway `bash ls` after an edit no longer counts as "verified". It never
+//! Language-agnostic: detection keys on tool NAMES (edit_file / write_file / run_command)
+//! and, for the shell tool, EXCLUDES a small denylist of read-only / navigation commands
+//! (`ls`, `echo`, `cat`, …) so a throwaway `run_command ls` after an edit no longer counts
+//! as "verified". It never
 //! enumerates build commands (no cargo/npm allowlist) — a real check of ANY language still
 //! counts. The nudge text lists `cargo check` / `tsc --noEmit` only as examples.
 
 use crate::execution_policy::{execution_policy_for_messages, TurnExecutionPolicy};
 use async_trait::async_trait;
+use atomcode_capabilities::tools::is_shell_tool_name;
 use atomcode_kernel::hook::{Continuation, LifecycleHooks};
 use atomcode_kernel::message::{Conversation, Role};
 use std::collections::HashMap;
@@ -249,7 +251,7 @@ fn unverified_edit(convo: &Conversation, workspace: &Path) -> Option<NudgedEdit>
             Role::Assistant => {
                 for tc in &msg.tool_calls {
                     names.insert(tc.id.as_str(), tc.name.as_str());
-                    if tc.name == "bash" {
+                    if is_shell_tool_name(&tc.name) {
                         if let Some(cmd) = bash_command(&tc.arguments) {
                             bash_cmds.insert(tc.id.as_str(), cmd);
                         }
@@ -284,7 +286,7 @@ fn unverified_edit(convo: &Conversation, workspace: &Path) -> Option<NudgedEdit>
                         bash_after_edit = false;
                     }
                     // Only a real check counts — a read-only/navigation command does NOT verify.
-                    Some("bash") => {
+                    Some(name) if is_shell_tool_name(name) => {
                         if bash_cmds.get(id).is_some_and(|c| bash_verifies(c)) {
                             bash_after_edit = true;
                         }

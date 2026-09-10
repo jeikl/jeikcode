@@ -203,7 +203,14 @@ impl LlmProvider for AnthropicProvider {
         tools: &[ToolDef],
         options: &ChatOptions,
     ) -> Result<BoxStream<'static, StreamEvent>, ProviderError> {
-        let body = build_request_body(&self.cfg.model, messages, tools, options, &self.cfg, self.policy);
+        let body = build_request_body(
+            &self.cfg.model,
+            messages,
+            tools,
+            options,
+            &self.cfg,
+            self.policy,
+        );
         super::wire_dump_request(&self.cfg.model, &body); // byte-level dump (ATOMCODE_WIRE_DUMP=1)
 
         // Open the stream. A hard failure here returns `Err` so the kernel's
@@ -483,10 +490,7 @@ fn build_request_body(
     body.insert("model".into(), json!(model));
     // `max_tokens` is REQUIRED. Per-call override wins; else the cfg default.
     let max_tokens = options.max_tokens.unwrap_or(cfg.max_tokens);
-    body.insert(
-        "max_tokens".into(),
-        json!(max_tokens),
-    );
+    body.insert("max_tokens".into(), json!(max_tokens));
     body.insert("stream".into(), json!(true));
 
     let is_official = is_official_anthropic(&cfg.base_url);
@@ -810,13 +814,19 @@ fn format_assistant_message(m: &Message, echo_thinking: bool, is_official: bool)
             // Anthropic fails hard (400) — so we filter on `provider`, honoring the
             // [`ReasoningBlock`](atomcode_kernel::message::ReasoningBlock) INVARIANT. A `None`
             // provider is treated as foreign (never echoed).
-            for b in m.reasoning_blocks.iter().filter(|b| b.provider.as_deref() == Some("anthropic")) {
+            for b in m
+                .reasoning_blocks
+                .iter()
+                .filter(|b| b.provider.as_deref() == Some("anthropic"))
+            {
                 has_thinking_blocks = true;
                 let opaque = b.opaque.as_deref().unwrap_or_default();
                 if b.text.is_empty() {
                     parts.push(json!({ "type": "redacted_thinking", "data": opaque }));
                 } else {
-                    parts.push(json!({ "type": "thinking", "thinking": b.text, "signature": opaque }));
+                    parts.push(
+                        json!({ "type": "thinking", "thinking": b.text, "signature": opaque }),
+                    );
                 }
             }
         } else {
@@ -828,7 +838,9 @@ fn format_assistant_message(m: &Message, echo_thinking: bool, is_official: bool)
                 if b.text.is_empty() && !opaque.is_empty() {
                     parts.push(json!({ "type": "redacted_thinking", "data": opaque }));
                 } else {
-                    parts.push(json!({ "type": "thinking", "thinking": b.text, "signature": opaque }));
+                    parts.push(
+                        json!({ "type": "thinking", "thinking": b.text, "signature": opaque }),
+                    );
                 }
             }
             // If no reasoning_blocks were present, synthesize a thinking block from m.reasoning or placeholder
@@ -1183,11 +1195,13 @@ impl AnthropicSseDecoder {
                     .get("signature")
                     .or_else(|| v.get("thought_signature"))
                     .or_else(|| v.get("thoughtSignature"))
-                    .or_else(|| v.get("content_block").and_then(|c| {
-                        c.get("signature")
-                            .or_else(|| c.get("thought_signature"))
-                            .or_else(|| c.get("thoughtSignature"))
-                    }))
+                    .or_else(|| {
+                        v.get("content_block").and_then(|c| {
+                            c.get("signature")
+                                .or_else(|| c.get("thought_signature"))
+                                .or_else(|| c.get("thoughtSignature"))
+                        })
+                    })
                     .and_then(|s| s.as_str())
                 {
                     if !s.is_empty() && self.blocks[index].signature.is_empty() {
@@ -1629,7 +1643,10 @@ mod tests {
         let (_s, out) = format_messages(&[Message::user("hi"), a], true);
         let content = out[1]["content"].as_array().unwrap();
         // only the Anthropic block is echoed, then the text — the foreign one is dropped.
-        assert_eq!(content[0], json!({"type":"thinking","thinking":"ours","signature":"sig-a"}));
+        assert_eq!(
+            content[0],
+            json!({"type":"thinking","thinking":"ours","signature":"sig-a"})
+        );
         assert_eq!(content[1], json!({"type":"text","text":"answer"}));
         assert_eq!(content.len(), 2, "the foreign block must not appear");
     }
@@ -1640,7 +1657,9 @@ mod tests {
         a.reasoning = Some("synthesized reasoning from gateway".into());
         // Non-official gateway (is_official = false) with echo_thinking = true
         let (_s, out) = super::format_messages(&[Message::user("hi"), a], true, false);
-        let content = out[1]["content"].as_array().expect("array of content blocks");
+        let content = out[1]["content"]
+            .as_array()
+            .expect("array of content blocks");
         assert_eq!(
             content[0],
             json!({
@@ -1664,7 +1683,9 @@ mod tests {
         );
         // Non-official gateway (is_official = false) with echo_thinking = true and no reasoning
         let (_s, out) = super::format_messages(&[Message::user("hi"), a], true, false);
-        let content = out[1]["content"].as_array().expect("array of content blocks");
+        let content = out[1]["content"]
+            .as_array()
+            .expect("array of content blocks");
         assert_eq!(
             content[0],
             json!({
@@ -1682,7 +1703,13 @@ mod tests {
         c.thinking = true;
         c.max_tokens = 16384;
         c.thinking_budget = Some(5000);
-        let body = build_request_body("claude-opus-4-8", &[Message::user("hi")], &[], &ChatOptions::default(), &c);
+        let body = build_request_body(
+            "claude-opus-4-8",
+            &[Message::user("hi")],
+            &[],
+            &ChatOptions::default(),
+            &c,
+        );
         assert_eq!(
             body["thinking"],
             json!({
@@ -1697,7 +1724,13 @@ mod tests {
         let mut c = cfg();
         c.thinking = true;
         c.thinking_type = Some("adaptive".into());
-        let body = build_request_body("claude-opus-4-8", &[Message::user("hi")], &[], &ChatOptions::default(), &c);
+        let body = build_request_body(
+            "claude-opus-4-8",
+            &[Message::user("hi")],
+            &[],
+            &ChatOptions::default(),
+            &c,
+        );
         assert_eq!(body["thinking"], json!({ "type": "adaptive" }));
     }
 
@@ -1707,7 +1740,13 @@ mod tests {
         c.thinking = false;
         c.max_tokens = 8192;
         c.reasoning_policy = Some(ReasoningPolicy::Include);
-        let body = build_request_body("claude-opus-4-8", &[Message::user("hi")], &[], &ChatOptions::default(), &c);
+        let body = build_request_body(
+            "claude-opus-4-8",
+            &[Message::user("hi")],
+            &[],
+            &ChatOptions::default(),
+            &c,
+        );
         assert_eq!(body["thinking"]["type"], "enabled");
         // default budget clamped to max_tokens - 1 (or 75%): 8192 * 3 / 4 = 6144
         assert_eq!(body["thinking"]["budget_tokens"], 6144);
@@ -2077,19 +2116,37 @@ mod tests {
     fn sse_thinking_captures_signature_from_content_block_start() {
         let mut d = AnthropicSseDecoder::new();
         let mut ev = Vec::new();
-        ev.extend(d.feed(line("content_block_start", json!({
-            "type": "content_block_start",
-            "index": 0,
-            "content_block": {
-                "type": "thinking",
-                "thinking": "",
-                "thought_signature": "gemini-sig-start"
-            }
-        })).as_bytes()));
+        ev.extend(
+            d.feed(
+                line(
+                    "content_block_start",
+                    json!({
+                        "type": "content_block_start",
+                        "index": 0,
+                        "content_block": {
+                            "type": "thinking",
+                            "thinking": "",
+                            "thought_signature": "gemini-sig-start"
+                        }
+                    }),
+                )
+                .as_bytes(),
+            ),
+        );
         ev.extend(d.feed(line("content_block_delta", json!({"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"thinking..."}})).as_bytes()));
-        ev.extend(d.feed(line("content_block_stop", json!({"type":"content_block_stop","index":0})).as_bytes()));
+        ev.extend(
+            d.feed(
+                line(
+                    "content_block_stop",
+                    json!({"type":"content_block_stop","index":0}),
+                )
+                .as_bytes(),
+            ),
+        );
         assert_eq!(kinds(&ev), vec!["reason", "reasonsig"]);
-        assert!(matches!(&ev[1], StreamEvent::ReasoningSignature { opaque, .. } if opaque == "gemini-sig-start"));
+        assert!(
+            matches!(&ev[1], StreamEvent::ReasoningSignature { opaque, .. } if opaque == "gemini-sig-start")
+        );
     }
 
     #[test]
@@ -2097,18 +2154,36 @@ mod tests {
         let mut d = AnthropicSseDecoder::new();
         let mut ev = Vec::new();
         ev.extend(d.feed(line("content_block_start", json!({"type":"content_block_start","index":0,"content_block":{"type":"thinking","thinking":""}})).as_bytes()));
-        ev.extend(d.feed(line("content_block_delta", json!({
-            "type": "content_block_delta",
-            "index": 0,
-            "delta": {
-                "type": "thinking_delta",
-                "thinking": "thinking...",
-                "thoughtSignature": "gemini-sig-delta"
-            }
-        })).as_bytes()));
-        ev.extend(d.feed(line("content_block_stop", json!({"type":"content_block_stop","index":0})).as_bytes()));
+        ev.extend(
+            d.feed(
+                line(
+                    "content_block_delta",
+                    json!({
+                        "type": "content_block_delta",
+                        "index": 0,
+                        "delta": {
+                            "type": "thinking_delta",
+                            "thinking": "thinking...",
+                            "thoughtSignature": "gemini-sig-delta"
+                        }
+                    }),
+                )
+                .as_bytes(),
+            ),
+        );
+        ev.extend(
+            d.feed(
+                line(
+                    "content_block_stop",
+                    json!({"type":"content_block_stop","index":0}),
+                )
+                .as_bytes(),
+            ),
+        );
         assert_eq!(kinds(&ev), vec!["reason", "reasonsig"]);
-        assert!(matches!(&ev[1], StreamEvent::ReasoningSignature { opaque, .. } if opaque == "gemini-sig-delta"));
+        assert!(
+            matches!(&ev[1], StreamEvent::ReasoningSignature { opaque, .. } if opaque == "gemini-sig-delta")
+        );
     }
 
     #[test]

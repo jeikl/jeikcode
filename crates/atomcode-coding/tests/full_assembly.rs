@@ -110,7 +110,7 @@ async fn full_assembly_lifecycle() {
         let calls = calls1.lock().unwrap();
         let defs: Vec<&str> = calls[0].1.iter().map(|d| d.name.as_str()).collect();
         for expected in [
-            "bash",
+            "run_command",
             "read_file",
             "code_explore",
             "web_fetch",

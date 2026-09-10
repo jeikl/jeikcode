@@ -224,8 +224,10 @@ fn sanitize_schema_for_wire_inner(val: &Value) -> Value {
                                                 }
                                             }
                                         } else {
-                                            merged_props
-                                                .insert(k.clone(), sanitize_schema_for_wire_inner(v));
+                                            merged_props.insert(
+                                                k.clone(),
+                                                sanitize_schema_for_wire_inner(v),
+                                            );
                                         }
                                     } else {
                                         merged_props
@@ -270,9 +272,7 @@ fn sanitize_schema_for_wire_inner(val: &Value) -> Value {
             }
             Value::Object(out)
         }
-        Value::Array(arr) => {
-            Value::Array(arr.iter().map(sanitize_schema_for_wire_inner).collect())
-        }
+        Value::Array(arr) => Value::Array(arr.iter().map(sanitize_schema_for_wire_inner).collect()),
         _ => val.clone(),
     }
 }

@@ -496,7 +496,10 @@ mod tests {
         });
 
         let cleaned = sanitize_mcp_schema(raw);
-        assert!(!cleaned.as_object().unwrap().contains_key("additionalProperties"));
+        assert!(!cleaned
+            .as_object()
+            .unwrap()
+            .contains_key("additionalProperties"));
     }
 
     #[test]
@@ -542,4 +545,3 @@ mod tests {
         assert_eq!(required, &vec![json!("goggles")]);
     }
 }
-

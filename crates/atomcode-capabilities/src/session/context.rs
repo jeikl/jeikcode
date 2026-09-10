@@ -233,7 +233,9 @@ mod tests {
         let hook = SessionContextHook::with_home(d.path(), d.path().join("nohome"));
         let mut convo = Conversation::new();
         convo.push(Message::system("persona"));
-        convo.push(Message::system(format!("{BASELINE_HEADER}\nWorking directory: /old")));
+        convo.push(Message::system(format!(
+            "{BASELINE_HEADER}\nWorking directory: /old"
+        )));
         hook.session_start(&mut convo, false).await;
         // Redundant baseline is removed because environment facts are in Block 1
         assert_eq!(convo.messages.len(), 1);
@@ -352,7 +354,7 @@ mod tests {
         git_commit(repo.path(), "first");
         let hook = SessionContextHook::with_home(repo.path(), repo.path().join("nohome"));
         let saved = hook.render_baseline(); // captures HEAD #1
-        // HEAD moves after the save.
+                                            // HEAD moves after the save.
         std::fs::write(repo.path().join("b.txt"), "2").unwrap();
         git_commit(repo.path(), "second");
         assert!(saved.contains("=== GIT STATUS"));

@@ -100,9 +100,10 @@ pub mod pathnorm;
 ))]
 pub(crate) mod proxy;
 
-/// Ungated path helpers (leading-`~` expansion, home dir) shared by the `tools` and
-/// `codeintel` families so model-supplied paths resolve identically across both — see
-/// [`pathutil`]. Free of any feature `cfg` because `codeintel` is independent of `tools`.
+/// Ungated path helpers (leading-`~` expansion, home dir, Windows POSIX `/tmp`
+/// and `/c/Users` mapping) shared by the `tools` and `codeintel` families so
+/// model-supplied paths resolve identically across both — see [`pathutil`].
+/// Free of any feature `cfg` because `codeintel` is independent of `tools`.
 pub(crate) mod pathutil;
 
 /// Structured tool-argument errors + path-not-found "Did you mean?" enrichment.

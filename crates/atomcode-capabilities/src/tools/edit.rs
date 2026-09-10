@@ -105,7 +105,9 @@ impl Tool for EditFileTool {
             Vec::new()
         };
         if hunks.is_empty()
-            || hunks.iter().all(|h| h.old_string.is_empty() && h.new_string.is_empty())
+            || hunks
+                .iter()
+                .all(|h| h.old_string.is_empty() && h.new_string.is_empty())
         {
             return err(
                 "edit_file: provide a non-empty `edits` array with `old_string` and `new_string`."
@@ -167,7 +169,13 @@ impl Tool for EditFileTool {
                 kinds.push("skipped-identical");
                 continue;
             }
-            match apply_hunk(&buf, &h.old_string, &h.new_string, h.replace_all, h.occurrence) {
+            match apply_hunk(
+                &buf,
+                &h.old_string,
+                &h.new_string,
+                h.replace_all,
+                h.occurrence,
+            ) {
                 Ok((next, n, kind, actual_matched)) => {
                     buf = next;
                     total += n;
@@ -231,16 +239,10 @@ impl Tool for EditFileTool {
             format!(" ({} hunks: {})", kinds.len(), kinds.join(", "))
         };
 
-        let mut out = format!(
-            "> ⏱️ **Cost Time**: {:.2?}ms\n\n",
-            cost_time.as_millis()
-        );
+        let mut out = format!("> ⏱️ **Cost Time**: {:.2?}ms\n\n", cost_time.as_millis());
 
         if !auto_healed_old_strings.is_empty() {
-            let ext = path
-                .extension()
-                .and_then(|s| s.to_str())
-                .unwrap_or("");
+            let ext = path.extension().and_then(|s| s.to_str()).unwrap_or("");
             let latest_str = auto_healed_old_strings.join("\n---\n");
             out.push_str(&format!(
                 "⚠️ **[自动安全修改提示]**：\n你的 old_string 存在冲突，已为你自动执行成功后的安全修改，请你下次如果修改涉及到这块old str 请记得使用新的old str 不用去读源文件。\n\n当前位置最新的实际 old_string 为：\n```{ext}\n{latest_str}\n```\n\n本次修改已成功！以下为最终生效的差异：\n\n"
@@ -442,7 +444,8 @@ fn sort_hunks_topologically(content: &str, hunks: &[EditHunk]) -> Vec<EditHunk> 
         let mut suffix_len = 0;
         while suffix_len < (old_lines.len() - prefix_len)
             && suffix_len < (new_lines.len() - prefix_len)
-            && old_lines[old_lines.len() - 1 - suffix_len] == new_lines[new_lines.len() - 1 - suffix_len]
+            && old_lines[old_lines.len() - 1 - suffix_len]
+                == new_lines[new_lines.len() - 1 - suffix_len]
         {
             suffix_len += 1;
         }
@@ -523,7 +526,10 @@ fn sort_hunks_topologically(content: &str, hunks: &[EditHunk]) -> Vec<EditHunk> 
         }
     }
 
-    result_indices.into_iter().map(|idx| hunks[idx].clone()).collect()
+    result_indices
+        .into_iter()
+        .map(|idx| hunks[idx].clone())
+        .collect()
 }
 
 fn locate_hunk_lines(content_lines: &[&str], old_string: &str) -> Option<(usize, usize)> {
@@ -619,7 +625,9 @@ fn apply_text_hunk(
         if let Some(clean_old) = strip_line_prefix_hints(old_string) {
             let clean_new =
                 strip_line_prefix_hints(new_string).unwrap_or_else(|| new_string.to_string());
-            if let Ok(res) = apply_text_hunk(content, &clean_old, &clean_new, replace_all, occurrence) {
+            if let Ok(res) =
+                apply_text_hunk(content, &clean_old, &clean_new, replace_all, occurrence)
+            {
                 let actual = res.3.unwrap_or(clean_old);
                 return Ok((res.0, res.1, "stripped-arrow prefix match", Some(actual)));
             }
@@ -628,24 +636,40 @@ fn apply_text_hunk(
             try_fuzzy_replace(content, old_string, new_string, replace_all)
         {
             if fuzzy_result != content {
-                return Ok((fuzzy_result, fuzzy_count, "line-trimmed whitespace match", Some(actual)));
+                return Ok((
+                    fuzzy_result,
+                    fuzzy_count,
+                    "line-trimmed whitespace match",
+                    Some(actual),
+                ));
             }
         }
         if let Some((token_result, token_count, actual)) =
             try_token_normalized_replace(content, old_string, new_string, replace_all)
         {
             if token_result != content {
-                return Ok((token_result, token_count, "token-normalized match", Some(actual)));
+                return Ok((
+                    token_result,
+                    token_count,
+                    "token-normalized match",
+                    Some(actual),
+                ));
             }
         }
         if let Some((comment_result, comment_count, actual)) =
             try_comment_style_replace(content, old_string, new_string, replace_all)
         {
             if comment_result != content {
-                return Ok((comment_result, comment_count, "comment-style match", Some(actual)));
+                return Ok((
+                    comment_result,
+                    comment_count,
+                    "comment-style match",
+                    Some(actual),
+                ));
             }
         }
-        if let Some((anchor_result, _, actual)) = try_block_anchor_replace(content, old_string, new_string)
+        if let Some((anchor_result, _, actual)) =
+            try_block_anchor_replace(content, old_string, new_string)
         {
             if anchor_result != content {
                 return Ok((anchor_result, 1, "anchored block match", Some(actual)));
@@ -1709,8 +1733,14 @@ mod tests {
                 {"old_string": "fn b() { 2 }", "new_string": "fn b() { 20 }"}
             ]
         });
-        let r = EditFileTool.execute(&args.to_string(), &ctx(d.path())).await;
-        assert!(!r.is_error, "identical hunk must skip, not fail: {}", r.content);
+        let r = EditFileTool
+            .execute(&args.to_string(), &ctx(d.path()))
+            .await;
+        assert!(
+            !r.is_error,
+            "identical hunk must skip, not fail: {}",
+            r.content
+        );
         assert!(r.content.contains("skipped hunks"), "{}", r.content);
         assert_eq!(
             std::fs::read_to_string(d.path().join("a.rs")).unwrap(),
@@ -1728,8 +1758,14 @@ mod tests {
                 {"old_string": "fn a() { 1 }", "new_string": "fn a() { 1 }"}
             ]
         });
-        let r = EditFileTool.execute(&args.to_string(), &ctx(d.path())).await;
-        assert!(!r.is_error, "noop batch should not be an error: {}", r.content);
+        let r = EditFileTool
+            .execute(&args.to_string(), &ctx(d.path()))
+            .await;
+        assert!(
+            !r.is_error,
+            "noop batch should not be an error: {}",
+            r.content
+        );
         assert!(r.content.contains("not modified"), "{}", r.content);
         assert_eq!(
             std::fs::read_to_string(d.path().join("a.rs")).unwrap(),
@@ -1747,7 +1783,9 @@ mod tests {
                 {"old_string": "dup", "new_string": "second", "occurrence": 2}
             ]
         });
-        let r = EditFileTool.execute(&args.to_string(), &ctx(d.path())).await;
+        let r = EditFileTool
+            .execute(&args.to_string(), &ctx(d.path()))
+            .await;
         assert!(!r.is_error, "{}", r.content);
         assert_eq!(
             std::fs::read_to_string(d.path().join("a.rs")).unwrap(),
@@ -1757,7 +1795,6 @@ mod tests {
 
     #[tokio::test]
     async fn replace_all_handles_duplicates() {
-
         let d = tempfile::tempdir().unwrap();
         std::fs::write(d.path().join("a.txt"), "dup\ndup\ndup\n").unwrap();
         let r = EditFileTool
@@ -2262,9 +2299,17 @@ mod tests {
             r.content
         );
         assert!(r.content.contains("```diff"), "{}", r.content);
-        assert!(r.content.contains("expected (your old_string)"), "{}", r.content);
+        assert!(
+            r.content.contains("expected (your old_string)"),
+            "{}",
+            r.content
+        );
         assert!(r.content.contains("actual (in file)"), "{}", r.content);
-        assert!(r.content.contains("adjust your old_string"), "{}", r.content);
+        assert!(
+            r.content.contains("adjust your old_string"),
+            "{}",
+            r.content
+        );
     }
 
     #[tokio::test]
@@ -2281,7 +2326,9 @@ mod tests {
                 }
             ]
         });
-        let r = EditFileTool.execute(&args.to_string(), &ctx(d.path())).await;
+        let r = EditFileTool
+            .execute(&args.to_string(), &ctx(d.path()))
+            .await;
         assert!(!r.is_error, "{}", r.content);
         assert_eq!(
             std::fs::read_to_string(d.path().join("code.rs")).unwrap(),
@@ -2358,7 +2405,11 @@ mod tests {
         })
         .to_string();
         let r = EditFileTool.execute(&args, &ctx(d.path())).await;
-        assert!(!r.is_error, "truncated closers must still apply: {}", r.content);
+        assert!(
+            !r.is_error,
+            "truncated closers must still apply: {}",
+            r.content
+        );
         assert_eq!(
             std::fs::read_to_string(d.path().join("a.rs")).unwrap(),
             "fn a() { 10 }\n"
@@ -2376,7 +2427,11 @@ mod tests {
         })
         .to_string();
         let r = EditFileTool.execute(&args, &ctx(d.path())).await;
-        assert!(r.is_error, "truncated new_string must not write: {}", r.content);
+        assert!(
+            r.is_error,
+            "truncated new_string must not write: {}",
+            r.content
+        );
         assert_eq!(
             std::fs::read_to_string(d.path().join("a.rs")).unwrap(),
             "fn a() { 1 }\n",
@@ -2399,7 +2454,11 @@ mod tests {
         })
         .to_string();
         let r = EditFileTool.execute(&args, &ctx(d.path())).await;
-        assert!(!r.is_error, "nested args object must unwrap edits: {}", r.content);
+        assert!(
+            !r.is_error,
+            "nested args object must unwrap edits: {}",
+            r.content
+        );
         assert_eq!(
             std::fs::read_to_string(d.path().join("a.rs")).unwrap(),
             "fn a() { 10 }\n"
@@ -2596,7 +2655,9 @@ mod tests {
             "old_string": "fn alpha() { 1 }",
             "new_string": "fn alpha() { 100 }"
         });
-        let r1 = EditFileTool.execute(&args1.to_string(), &ctx(d.path())).await;
+        let r1 = EditFileTool
+            .execute(&args1.to_string(), &ctx(d.path()))
+            .await;
         assert!(!r1.is_error, "{}", r1.content);
 
         // Turn 2: Modify beta
@@ -2605,7 +2666,9 @@ mod tests {
             "old_string": "fn beta() { 2 }",
             "new_string": "fn beta() { 200 }"
         });
-        let r2 = EditFileTool.execute(&args2.to_string(), &ctx(d.path())).await;
+        let r2 = EditFileTool
+            .execute(&args2.to_string(), &ctx(d.path()))
+            .await;
         assert!(!r2.is_error, "{}", r2.content);
 
         // Turn 3: Model has attention time-travel and emits edit based on Turn 0 (before beta was modified):
@@ -2615,7 +2678,9 @@ mod tests {
             "old_string": "fn beta() { 2 }\nfn gamma() { 3 }",
             "new_string": "fn beta() { 2 }\nfn gamma() { 999 }"
         });
-        let r3 = EditFileTool.execute(&args3.to_string(), &ctx(d.path())).await;
+        let r3 = EditFileTool
+            .execute(&args3.to_string(), &ctx(d.path()))
+            .await;
         assert!(
             !r3.is_error,
             "historical 3-way rebase must recover and succeed: {}",
@@ -2644,13 +2709,7 @@ mod tests {
         // hunk first, ensuring that expanding lines in the top hunk does NOT alter the line
         // offsets or match positions of the bottom hunk.
         let d = tempfile::tempdir().unwrap();
-        let initial = [
-            "AAA_top = 1",
-            "AAA_middle = 2",
-            "AAA_bottom = 3",
-            "",
-        ]
-        .join("\n");
+        let initial = ["AAA_top = 1", "AAA_middle = 2", "AAA_bottom = 3", ""].join("\n");
         std::fs::write(d.path().join("scenario1.txt"), &initial).unwrap();
 
         let top_expansion = [
@@ -2675,7 +2734,9 @@ mod tests {
             ]
         });
 
-        let r = EditFileTool.execute(&args.to_string(), &ctx(d.path())).await;
+        let r = EditFileTool
+            .execute(&args.to_string(), &ctx(d.path()))
+            .await;
         assert!(!r.is_error, "independent hunks must succeed: {}", r.content);
 
         let on_disk = std::fs::read_to_string(d.path().join("scenario1.txt")).unwrap();
@@ -2689,12 +2750,7 @@ mod tests {
         // Scenario 2: Single turn where Hunk B writes line 1, and Hunk A reads line 1 as context
         // to uniquely modify line 2. Regardless of input array order, Hunk A must run before Hunk B.
         let d = tempfile::tempdir().unwrap();
-        let initial = [
-            "AAA_line1 = \"first\";",
-            "AAA_line2 = \"second\";",
-            "",
-        ]
-        .join("\n");
+        let initial = ["AAA_line1 = \"first\";", "AAA_line2 = \"second\";", ""].join("\n");
         std::fs::write(d.path().join("scenario2.txt"), &initial).unwrap();
 
         let hunk_write_line1 = serde_json::json!({
@@ -2714,12 +2770,26 @@ mod tests {
             "edits": [hunk_write_line1, hunk_read1_write2]
         });
 
-        let r = EditFileTool.execute(&args.to_string(), &ctx(d.path())).await;
-        assert!(!r.is_error, "WAR dependency must be correctly reordered: {}", r.content);
+        let r = EditFileTool
+            .execute(&args.to_string(), &ctx(d.path()))
+            .await;
+        assert!(
+            !r.is_error,
+            "WAR dependency must be correctly reordered: {}",
+            r.content
+        );
 
         let on_disk = std::fs::read_to_string(d.path().join("scenario2.txt")).unwrap();
-        assert!(on_disk.contains("BBB_line1 = \"first_modified\";"), "{}", on_disk);
-        assert!(on_disk.contains("BBB_line2 = \"second_modified\";"), "{}", on_disk);
+        assert!(
+            on_disk.contains("BBB_line1 = \"first_modified\";"),
+            "{}",
+            on_disk
+        );
+        assert!(
+            on_disk.contains("BBB_line2 = \"second_modified\";"),
+            "{}",
+            on_disk
+        );
     }
 
     #[tokio::test]
@@ -2745,7 +2815,9 @@ mod tests {
             "old_string": "AAA_port = 8080",
             "new_string": "BBB_port = 9000"
         });
-        let r1 = EditFileTool.execute(&args1.to_string(), &ctx(d.path())).await;
+        let r1 = EditFileTool
+            .execute(&args1.to_string(), &ctx(d.path()))
+            .await;
         assert!(!r1.is_error, "{}", r1.content);
 
         // Turn 2 (Stale context from V0)
@@ -2754,8 +2826,14 @@ mod tests {
             "old_string": "AAA_port = 8080\nAAA_host = \"127.0.0.1\"\nAAA_timeout = 30",
             "new_string": "AAA_port = 8080\nAAA_host = \"127.0.0.1\"\nCCC_timeout = 60"
         });
-        let r2 = EditFileTool.execute(&args2.to_string(), &ctx(d.path())).await;
-        assert!(!r2.is_error, "stale context rebase must succeed: {}", r2.content);
+        let r2 = EditFileTool
+            .execute(&args2.to_string(), &ctx(d.path()))
+            .await;
+        assert!(
+            !r2.is_error,
+            "stale context rebase must succeed: {}",
+            r2.content
+        );
         assert!(
             r2.content.contains("⚠️ **[自动安全修改提示]**："),
             "should emit auto-heal notice: {}",
@@ -2763,8 +2841,16 @@ mod tests {
         );
 
         let on_disk = std::fs::read_to_string(&path).unwrap();
-        assert!(on_disk.contains("BBB_port = 9000"), "disk must retain Turn 1 edit: {}", on_disk);
-        assert!(on_disk.contains("CCC_timeout = 60"), "disk must apply Turn 2 edit: {}", on_disk);
+        assert!(
+            on_disk.contains("BBB_port = 9000"),
+            "disk must retain Turn 1 edit: {}",
+            on_disk
+        );
+        assert!(
+            on_disk.contains("CCC_timeout = 60"),
+            "disk must apply Turn 2 edit: {}",
+            on_disk
+        );
     }
 
     #[tokio::test]
@@ -2784,9 +2870,14 @@ mod tests {
             "old_string": "AAA_item = \"original\";",
             "new_string": "BBB_item = \"modified\";"
         });
-        let r1 = EditFileTool.execute(&args1.to_string(), &ctx(d.path())).await;
+        let r1 = EditFileTool
+            .execute(&args1.to_string(), &ctx(d.path()))
+            .await;
         assert!(!r1.is_error, "{}", r1.content);
-        assert_eq!(std::fs::read_to_string(&path).unwrap(), "BBB_item = \"modified\";\n");
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "BBB_item = \"modified\";\n"
+        );
 
         // Turn 2: Addition at previous site (append CCC)
         let args2 = serde_json::json!({
@@ -2794,7 +2885,9 @@ mod tests {
             "old_string": "BBB_item = \"modified\";",
             "new_string": "BBB_item = \"modified\";\nCCC_addition = \"appended\";"
         });
-        let r2 = EditFileTool.execute(&args2.to_string(), &ctx(d.path())).await;
+        let r2 = EditFileTool
+            .execute(&args2.to_string(), &ctx(d.path()))
+            .await;
         assert!(!r2.is_error, "{}", r2.content);
         assert_eq!(
             std::fs::read_to_string(&path).unwrap(),
@@ -2807,7 +2900,9 @@ mod tests {
             "old_string": "BBB_item = \"modified\";\n",
             "new_string": ""
         });
-        let r3 = EditFileTool.execute(&args3.to_string(), &ctx(d.path())).await;
+        let r3 = EditFileTool
+            .execute(&args3.to_string(), &ctx(d.path()))
+            .await;
         assert!(!r3.is_error, "{}", r3.content);
         assert_eq!(
             std::fs::read_to_string(&path).unwrap(),
@@ -2836,8 +2931,14 @@ mod tests {
                 "old_string": old_s,
                 "new_string": new_s
             });
-            let r = EditFileTool.execute(&args.to_string(), &ctx(d.path())).await;
-            assert!(!r.is_error, "step {} -> {} failed: {}", old_s, new_s, r.content);
+            let r = EditFileTool
+                .execute(&args.to_string(), &ctx(d.path()))
+                .await;
+            assert!(
+                !r.is_error,
+                "step {} -> {} failed: {}",
+                old_s, new_s, r.content
+            );
         }
 
         let final_content = std::fs::read_to_string(&path).unwrap();
@@ -2861,7 +2962,9 @@ mod tests {
             "old_string": "AAA_val = 10;",
             "new_string": "BBB_val = 20;"
         });
-        let r1 = EditFileTool.execute(&args1.to_string(), &ctx(d.path())).await;
+        let r1 = EditFileTool
+            .execute(&args1.to_string(), &ctx(d.path()))
+            .await;
         assert!(!r1.is_error, "{}", r1.content);
 
         // Turn 2: Conflicting modification on same line
@@ -2870,17 +2973,26 @@ mod tests {
             "old_string": "AAA_val = 10;",
             "new_string": "CCC_val = 30;"
         });
-        let r2 = EditFileTool.execute(&args2.to_string(), &ctx(d.path())).await;
-        assert!(r2.is_error, "conflicting edit on same line must be rejected");
+        let r2 = EditFileTool
+            .execute(&args2.to_string(), &ctx(d.path()))
+            .await;
         assert!(
-            r2.content.contains("not found") || r2.content.contains("diff") || r2.content.contains("Closest"),
+            r2.is_error,
+            "conflicting edit on same line must be rejected"
+        );
+        assert!(
+            r2.content.contains("not found")
+                || r2.content.contains("diff")
+                || r2.content.contains("Closest"),
             "should report failure and diff context: {}",
             r2.content
         );
 
         // Disk must preserve Turn 1's value intact!
         let on_disk = std::fs::read_to_string(&path).unwrap();
-        assert_eq!(on_disk, "BBB_val = 20;\n", "Turn 1 content must not be overwritten or corrupted");
+        assert_eq!(
+            on_disk, "BBB_val = 20;\n",
+            "Turn 1 content must not be overwritten or corrupted"
+        );
     }
 }
-

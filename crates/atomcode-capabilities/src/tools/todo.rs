@@ -1863,7 +1863,8 @@ mod tests {
             res.content
         );
         assert!(
-            res.content.contains("Example: {\"action\": \"add\", \"content\": \"Implement feature X\"}"),
+            res.content
+                .contains("Example: {\"action\": \"add\", \"content\": \"Implement feature X\"}"),
             "{}",
             res.content
         );
@@ -1885,7 +1886,9 @@ mod tests {
             res.content
         );
         assert!(
-            res.content.contains("Example: {\"action\": \"update\", \"id\": 1, \"status\": \"in_progress\"}"),
+            res.content.contains(
+                "Example: {\"action\": \"update\", \"id\": 1, \"status\": \"in_progress\"}"
+            ),
             "{}",
             res.content
         );
@@ -1905,7 +1908,8 @@ mod tests {
             .await;
         assert!(res.is_error);
         assert!(
-            res.content.contains("`update` needs at least one of `status`"),
+            res.content
+                .contains("`update` needs at least one of `status`"),
             "{}",
             res.content
         );

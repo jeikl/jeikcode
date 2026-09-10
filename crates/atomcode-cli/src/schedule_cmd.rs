@@ -646,6 +646,7 @@ mod tests {
     fn strict_unattended_denies_escalated_bash() {
         // Normal -p: bash escalated to approval → allow (current behaviour).
         assert!(crate::headless_auto_approve(false, false, "bash"));
+        assert!(crate::headless_auto_approve(false, false, "run_command"));
         // scheduled (strict): bash escalated to approval (= dangerous/out-of-workspace) → deny.
         assert!(!crate::headless_auto_approve(true, false, "bash"));
         // scheduled (strict): non-bash tool needs approval → deny (no human present).

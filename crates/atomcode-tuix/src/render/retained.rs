@@ -1565,7 +1565,7 @@ impl<W: Write + Send> RetainedRenderer<W> {
             self.style_bold(Role::ToolName)
         };
 
-        let is_bash = safe_name.eq_ignore_ascii_case("bash");
+        let is_bash = atomcode_capabilities::tools::is_shell_tool_name(&safe_name);
         if is_bash {
             crate::trace::pulse(
                 "BASH",
@@ -6315,7 +6315,7 @@ impl<W: Write + Send> RetainedRenderer<W> {
             // double-gap in screenshots). Use `remove` (not just 1)
             // so multi-row inflight spinners are fully covered.
             self.skip_body_scroll_count = self.skip_body_scroll_count.saturating_add(remove as u16);
-            if safe_name.eq_ignore_ascii_case("bash") && !safe_detail.is_empty() {
+            if atomcode_capabilities::tools::is_shell_tool_name(&safe_name) && !safe_detail.is_empty() {
                 // Live bash commit: produce the same `● Bash` + `  └ <cmd>` block as
                 // the static `UiLine::ToolCall` arm, via the shared helper.
                 self.push_bash_command_block(&safe_name, &safe_detail);
@@ -7863,7 +7863,7 @@ impl<W: Write + Send> Renderer for RetainedRenderer<W> {
                 // via `format_shell_command` (shell-boundary wrapping, no
                 // truncation). The `● Bash` header + `└` gutter already mark it
                 // as a shell command, so the command text renders plainly.
-                let is_bash = safe_name.eq_ignore_ascii_case("bash");
+                let is_bash = atomcode_capabilities::tools::is_shell_tool_name(&safe_name);
                 if is_bash && !safe_detail.is_empty() {
                     self.push_bash_command_block(&safe_name, &safe_detail);
                 } else {

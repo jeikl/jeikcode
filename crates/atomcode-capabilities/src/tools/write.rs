@@ -210,7 +210,10 @@ mod tests {
                 &ctx(d.path()),
             )
             .await;
-        assert!(r.is_error, "writing to unread existing file must be intercepted");
+        assert!(
+            r.is_error,
+            "writing to unread existing file must be intercepted"
+        );
         assert!(
             r.content.contains("写入拦截：目标文件未读取确认"),
             "{}",
@@ -237,7 +240,11 @@ mod tests {
                 &ctx(d.path()),
             )
             .await;
-        assert!(!r2.is_error, "subsequent write in same turn must succeed: {}", r2.content);
+        assert!(
+            !r2.is_error,
+            "subsequent write in same turn must succeed: {}",
+            r2.content
+        );
         let disk2 = std::fs::read_to_string(&target).unwrap();
         assert_eq!(disk2, "overwritten directly\n");
     }
@@ -257,9 +264,13 @@ mod tests {
                 &ctx(d.path()),
             )
             .await;
-        assert!(r.is_error, "writing to unread huge file must be intercepted");
         assert!(
-            r.content.contains("[Showing lines 1-1500 of 1600. 100 lines remaining.]"),
+            r.is_error,
+            "writing to unread huge file must be intercepted"
+        );
+        assert!(
+            r.content
+                .contains("[Showing lines 1-1500 of 1600. 100 lines remaining.]"),
             "{}",
             r.content
         );
@@ -277,7 +288,10 @@ mod tests {
                 &ctx(d.path()),
             )
             .await;
-        assert!(r2.is_error, "must still be intercepted because file was truncated");
+        assert!(
+            r2.is_error,
+            "must still be intercepted because file was truncated"
+        );
     }
 
     #[tokio::test]
@@ -290,10 +304,7 @@ mod tests {
 
         // 1. Read file first
         let read_res = crate::tools::read::ReadFileTool::default()
-            .execute(
-                r#"{"file_path":"flow.txt"}"#,
-                &ctx(d.path()),
-            )
+            .execute(r#"{"file_path":"flow.txt"}"#, &ctx(d.path()))
             .await;
         assert!(!read_res.is_error, "{}", read_res.content);
 
@@ -304,7 +315,11 @@ mod tests {
                 &ctx(d.path()),
             )
             .await;
-        assert!(!write_res.is_error, "write after read must succeed: {}", write_res.content);
+        assert!(
+            !write_res.is_error,
+            "write after read must succeed: {}",
+            write_res.content
+        );
 
         let disk = std::fs::read_to_string(&target).unwrap();
         assert_eq!(disk, "modified content\n");
@@ -337,7 +352,11 @@ mod tests {
                 &ctx(d.path()),
             )
             .await;
-        assert!(!r2.is_error, "2nd write in same turn must succeed: {}", r2.content);
+        assert!(
+            !r2.is_error,
+            "2nd write in same turn must succeed: {}",
+            r2.content
+        );
 
         let disk = std::fs::read_to_string(&target).unwrap();
         assert_eq!(disk, "v2\n");
@@ -371,7 +390,11 @@ mod tests {
                 &ctx(d.path()),
             )
             .await;
-        assert!(r2.is_error, "Turn 2 write without read must be intercepted: {}", r2.content);
+        assert!(
+            r2.is_error,
+            "Turn 2 write without read must be intercepted: {}",
+            r2.content
+        );
         assert!(r2.content.contains("写入拦截：目标文件未读取确认"));
 
         // Turn 2: Read then write -> succeeds!
@@ -382,7 +405,11 @@ mod tests {
                 &ctx(d.path()),
             )
             .await;
-        assert!(!r3.is_error, "Turn 2 write after read must succeed: {}", r3.content);
+        assert!(
+            !r3.is_error,
+            "Turn 2 write after read must succeed: {}",
+            r3.content
+        );
         assert_eq!(std::fs::read_to_string(&target).unwrap(), "turn2_ok\n");
     }
 

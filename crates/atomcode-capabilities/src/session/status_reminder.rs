@@ -66,6 +66,8 @@ impl StatusReminderHook {
         lines.push(format!("Turn round: {}", ctx.round));
         #[cfg(feature = "tools")]
         append_session_long_keyword_lines(&mut lines);
+        #[cfg(feature = "tools")]
+        append_background_task_lines(&mut lines);
         crate::reminder::system_reminder(&lines.join("\n"))
     }
 
@@ -83,6 +85,8 @@ impl StatusReminderHook {
         )];
         #[cfg(feature = "tools")]
         append_session_long_keyword_lines(&mut lines);
+        #[cfg(feature = "tools")]
+        append_background_task_lines(&mut lines);
         lines.join("\n")
     }
 }
@@ -99,6 +103,41 @@ fn append_session_long_keyword_lines(lines: &mut Vec<String>) {
         "暂存长bash列表：{}（如果长bash运行效果不达预期，可通过 long_bash_keyword_actions action=delete 取消）",
         kws.join("、")
     ));
+}
+
+#[cfg(feature = "tools")]
+fn append_background_task_lines(lines: &mut Vec<String>) {
+    let alerts = crate::tools::bash_runtime::drain_background_alerts();
+    if !alerts.is_empty() {
+        lines.push("[Background Task Alert]".to_string());
+        for a in alerts {
+            let exit_info = a
+                .exit_code
+                .map(|c| format!("exit code {c}"))
+                .unwrap_or_else(|| "terminated".to_string());
+            lines.push(format!(
+                "- bashid: {} (`{}`) CRASHED with {}!",
+                a.bashid, a.command, exit_info
+            ));
+            if !a.error_tail.is_empty() {
+                lines.push("  Recent error output:".to_string());
+                for l in a.error_tail.lines() {
+                    lines.push(format!("    {l}"));
+                }
+            }
+        }
+    }
+
+    let tasks = crate::tools::bash_runtime::active_background_tasks();
+    if !tasks.is_empty() {
+        lines.push("[Active Background Tasks]".to_string());
+        for t in tasks {
+            lines.push(format!(
+                "- bashid: {} | cmd: `{}` | status: running | uptime: {}s (stop with `bash_kill_by_id`)",
+                t.bashid, t.command, t.uptime_secs
+            ));
+        }
+    }
 }
 
 impl Default for StatusReminderHook {
@@ -306,5 +345,32 @@ mod tests {
             convo.messages, before,
             "second turn_start on the same query is idempotent"
         );
+    }
+
+    #[test]
+    #[cfg(feature = "tools")]
+    fn background_alert_is_one_shot_drained() {
+        use crate::tools::bash_runtime::{push_background_alert, BackgroundAlert};
+
+        push_background_alert(BackgroundAlert {
+            bashid: "b-test01".into(),
+            command: "npm run dev".into(),
+            exit_code: Some(1),
+            error_tail: "Error: Port 5173 is already in use".into(),
+        });
+
+        let mut lines = Vec::new();
+        append_background_task_lines(&mut lines);
+        let joined = lines.join("\n");
+        assert!(joined.contains("[Background Task Alert]"));
+        assert!(joined.contains("b-test01"));
+        assert!(joined.contains("npm run dev"));
+        assert!(joined.contains("Port 5173 is already in use"));
+
+        // Second call: already drained, alert disappears completely!
+        let mut lines2 = Vec::new();
+        append_background_task_lines(&mut lines2);
+        let joined2 = lines2.join("\n");
+        assert!(!joined2.contains("[Background Task Alert]"));
     }
 }

@@ -12,9 +12,10 @@
 //! destructive git, remote-script-piped-to-shell, …); everything else is `Safe`.
 
 use super::bash_runtime::{
-    add_live_long_keyword, classify_idle, decision_prompt, is_generic_long_keyword, new_bashid,
-    register_live_bash, tree_is_busy, unregister_live_bash, IdleAction, LiveBash,
-    KILLED_BY_TOOL_MARK, PROMOTED_MARK,
+    active_background_tasks, add_live_long_keyword, classify_idle, decision_prompt,
+    is_generic_long_keyword, new_bashid, push_background_alert, register_live_bash, tree_is_busy,
+    unregister_live_bash, BackgroundAlert, IdleAction, LiveBash, KILLED_BY_TOOL_MARK,
+    PROMOTED_MARK,
 };
 use super::{err, ok};
 use async_trait::async_trait;
@@ -23,8 +24,9 @@ use base64::Engine;
 use serde::Deserialize;
 use serde_json::json;
 use std::borrow::Cow;
+use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tokio::io::AsyncReadExt;
 use tokio::process::Command;
@@ -59,6 +61,14 @@ struct Args {
     command: String,
     #[serde(default)]
     shell: ShellMode,
+    #[serde(default)]
+    background: bool,
+    #[serde(default = "default_settle_secs")]
+    settle_secs: Option<u64>,
+}
+
+fn default_settle_secs() -> Option<u64> {
+    Some(3)
 }
 
 #[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq)]
@@ -115,6 +125,16 @@ impl Tool for BashTool {
                     "enum": shell_values,
                     "default": "default",
                     "description": "Interpreter selection. `default` uses the platform shell (Git Bash/MSYS2 or cmd.exe on Windows). On Windows, choose `powershell` for Get-*, Where-Object, $_, $env:, CIM and other PowerShell syntax; choose `cmd` for cmd.exe builtins, %VAR%, FOR /F and IF EXIST. PowerShell mode internally encodes the original script, bypassing outer-shell expansion; do not encode it yourself and do not nest powershell -Command/cmd /C. For UNC paths use -LiteralPath, e.g. Get-ChildItem -LiteralPath '\\\\server\\share$'."
+                },
+                "background": {
+                    "type": "boolean",
+                    "default": false,
+                    "description": "Run the command as a managed background task (e.g. resident services like `npm run dev`, `uvicorn`, web servers). Observes the process for `settle_secs` to catch fast startup errors, then detaches and returns a `bashid` so the conversation can proceed. Stop it later with `bash_kill_by_id`."
+                },
+                "settle_secs": {
+                    "type": "integer",
+                    "default": 3,
+                    "description": "Initial startup grace window in seconds when background=true (default: 3). If the process crashes during this window (e.g. port already in use, missing dependencies), the error is returned immediately."
                 }
             },
             "required": ["command"]
@@ -198,6 +218,20 @@ impl Tool for BashTool {
         };
         #[cfg(not(unix))]
         let effective_command = a.command.clone();
+
+        if a.background {
+            let running = active_background_tasks();
+            if let Some(existing) = running
+                .iter()
+                .find(|t| t.command.trim() == effective_command.trim())
+            {
+                return annotate(err(format!(
+                    "bash: a background task with the exact same command is already running (bashid: `{}`). \
+                     If you want to restart it, stop it first using `bash_kill_by_id` with {{\"bashid\":\"{}\"}}.",
+                    existing.bashid, existing.bashid
+                )));
+            }
+        }
 
         let mut cmd = match build_command(&effective_command, a.shell) {
             Ok(c) => c,
@@ -316,8 +350,11 @@ impl Tool for BashTool {
             command: effective_command.clone(),
             promoted: AtomicBool::new(idle.is_none()),
             second_level: AtomicBool::new(false),
+            is_background: AtomicBool::new(a.background),
+            started_at: Instant::now(),
             kill: tokio_util::sync::CancellationToken::new(),
             progress: progress.clone(),
+            ring_buffer: Arc::new(Mutex::new(VecDeque::new())),
         });
         register_live_bash(live.clone());
 
@@ -345,6 +382,182 @@ impl Tool for BashTool {
                     .unwrap_or_else(|e| e.into_inner())
                     .is_empty()
         };
+
+        if a.background {
+            let settle_secs = a.settle_secs.unwrap_or(3).max(1);
+            let settle_deadline = Instant::now() + Duration::from_secs(settle_secs);
+
+            while Instant::now() < settle_deadline {
+                tokio::select! {
+                    biased;
+                    _ = ctx.cancel.cancelled() => {
+                        #[cfg(windows)]
+                        crate::process_utils::kill_windows_tree(&job_guard, child_pid);
+                        #[cfg(not(target_os = "windows"))]
+                        if let Some(pgid) = child_pid {
+                            unsafe { killpg(pgid as i32, SIGKILL) };
+                        }
+                        unregister_live_bash(&bashid);
+                        let (out, errb) = snapshot();
+                        return annotate(err(with_note(&out, &errb, "bash: cancelled before completion.")));
+                    }
+                    _ = live.kill.cancelled() => {
+                        #[cfg(windows)]
+                        crate::process_utils::kill_windows_tree(&job_guard, child_pid);
+                        #[cfg(not(target_os = "windows"))]
+                        if let Some(pgid) = child_pid {
+                            unsafe { killpg(pgid as i32, SIGKILL) };
+                        }
+                        unregister_live_bash(&bashid);
+                        let (out, errb) = snapshot();
+                        return annotate(err(with_note(&out, &errb, KILLED_BY_TOOL_MARK)));
+                    }
+                    status = child.wait() => {
+                        #[cfg(not(target_os = "windows"))]
+                        {
+                            child.terminated = true;
+                        }
+                        unregister_live_bash(&bashid);
+                        let (out, errb) = snapshot();
+                        return annotate(match status {
+                            Ok(st) if st.success() => {
+                                ok(format_streams(&out, &errb, Some((true, st.code())), false))
+                            }
+                            Ok(st) => {
+                                err(format!(
+                                    "bash: background command failed during startup (exit code: {:?}):\n{}",
+                                    st.code(),
+                                    format_streams(&out, &errb, Some((false, st.code())), false)
+                                ))
+                            }
+                            Err(e) => err(format!("bash: error running command: {e}")),
+                        });
+                    }
+                    n = stdout.read(&mut out_buf), if !stdout_done => {
+                        match n {
+                            Ok(0) => stdout_done = true,
+                            Ok(n) => {
+                                *last_byte.lock().unwrap_or_else(|e| e.into_inner()) = Instant::now();
+                                stdout_cap.lock().unwrap_or_else(|e| e.into_inner()).extend_from_slice(&out_buf[..n]);
+                                if let Some(chunk) = decode_stream_chunk(&mut stdout_decode, &out_buf[..n], false) {
+                                    emit_live_chunk(&progress, live_sent.as_ref(), &chunk);
+                                    for line in chunk.lines() {
+                                        live.push_log_line(line);
+                                    }
+                                }
+                            }
+                            Err(_) => stdout_done = true,
+                        }
+                    }
+                    n = stderr.read(&mut err_buf), if !stderr_done => {
+                        match n {
+                            Ok(0) => stderr_done = true,
+                            Ok(n) => {
+                                *last_byte.lock().unwrap_or_else(|e| e.into_inner()) = Instant::now();
+                                stderr_cap.lock().unwrap_or_else(|e| e.into_inner()).extend_from_slice(&err_buf[..n]);
+                                if let Some(chunk) = decode_stream_chunk(&mut stderr_decode, &err_buf[..n], false) {
+                                    emit_live_chunk(&progress, live_sent.as_ref(), &chunk);
+                                    for line in chunk.lines() {
+                                        live.push_log_line(line);
+                                    }
+                                }
+                            }
+                            Err(_) => stderr_done = true,
+                        }
+                    }
+                    _ = tokio::time::sleep(settle_deadline.saturating_duration_since(Instant::now())) => {
+                        break;
+                    }
+                }
+            }
+
+            let (init_out, init_err) = snapshot();
+            let initial_output = format_streams(&init_out, &init_err, None, false);
+
+            let bg_live = live.clone();
+            let bg_bashid = bashid.clone();
+            let bg_cmd = effective_command.clone();
+            tokio::spawn(async move {
+                #[cfg(windows)]
+                let _keep_job = job_guard;
+                let mut bg_child = child;
+                let mut bg_stdout = stdout;
+                let mut bg_stderr = stderr;
+                let mut out_buf = vec![0u8; 16384];
+                let mut err_buf = vec![0u8; 16384];
+                let mut out_done = stdout_done;
+                let mut err_done = stderr_done;
+                let mut out_dec = stdout_decode;
+                let mut err_dec = stderr_decode;
+
+                loop {
+                    tokio::select! {
+                        biased;
+                        _ = bg_live.kill.cancelled() => {
+                            #[cfg(windows)]
+                            crate::process_utils::kill_windows_tree(&_keep_job, child_pid);
+                            #[cfg(not(target_os = "windows"))]
+                            if let Some(pgid) = child_pid {
+                                unsafe { killpg(pgid as i32, SIGKILL) };
+                            }
+                            unregister_live_bash(&bg_bashid);
+                            break;
+                        }
+                        status = bg_child.wait() => {
+                            #[cfg(not(target_os = "windows"))]
+                            {
+                                bg_child.terminated = true;
+                            }
+                            unregister_live_bash(&bg_bashid);
+                            if !bg_live.kill.is_cancelled() {
+                                if let Ok(st) = status {
+                                    if !st.success() {
+                                        let tail = bg_live.tail_logs(5).join("\n");
+                                        push_background_alert(BackgroundAlert {
+                                            bashid: bg_bashid,
+                                            command: bg_cmd,
+                                            exit_code: st.code(),
+                                            error_tail: tail,
+                                        });
+                                    }
+                                }
+                            }
+                            break;
+                        }
+                        n = bg_stdout.read(&mut out_buf), if !out_done => {
+                            match n {
+                                Ok(0) => out_done = true,
+                                Ok(n) => {
+                                    if let Some(chunk) = decode_stream_chunk(&mut out_dec, &out_buf[..n], false) {
+                                        for line in chunk.lines() {
+                                            bg_live.push_log_line(line);
+                                        }
+                                    }
+                                }
+                                Err(_) => out_done = true,
+                            }
+                        }
+                        n = bg_stderr.read(&mut err_buf), if !err_done => {
+                            match n {
+                                Ok(0) => err_done = true,
+                                Ok(n) => {
+                                    if let Some(chunk) = decode_stream_chunk(&mut err_dec, &err_buf[..n], false) {
+                                        for line in chunk.lines() {
+                                            bg_live.push_log_line(line);
+                                        }
+                                    }
+                                }
+                                Err(_) => err_done = true,
+                            }
+                        }
+                    }
+                }
+            });
+
+            return annotate(ok(format!(
+                "Background task started successfully with bashid: `{bashid}`\nCommand: `{effective_command}`\n\nInitial output (settled for {settle_secs}s):\n{initial_output}\n\nThe process is now running in the background. You can proceed to the next turn or stop it later with `bash_kill_by_id` using `{{\"bashid\":\"{bashid}\"}}`."
+            )));
+        }
 
         enum Drive {
             Result(ToolResult),
@@ -508,7 +721,7 @@ impl Tool for BashTool {
                                 &errb,
                                 "bash: this looks like a resident service (web server / proxy / compose without -d). \
                                  Do not run it in the foreground and do not long_bash_keyword_actions. \
-                                 Start it detached (`nohup … &`, `systemctl start`, `docker run -d`) \
+                                 Start it in the background (`run_command` with `background=true`) or detached (`nohup … &`, `systemctl start`, `docker run -d`) \
                                  then probe with ss/curl/systemctl is-active.",
                             )));
                         }
@@ -701,7 +914,7 @@ fn shell_tool_description(
              disk/network IO is NOT auto-promoted and takes the `second_levell_secs` \
              grace, then `[bash-await-decision]` so you can kill or temporarily upgrade. \
              A silent idle with no output is killed (pager/REPL). \
-             Resident servers (uvicorn/nginx/npm run dev) must be started detached. \
+             Resident servers (uvicorn/nginx/npm run dev) should be started with background=true (or started detached). \
              Compile/test families wait on `max_timeout_secs`."
         };
     }
@@ -4082,6 +4295,107 @@ mod tests {
         assert!(!super::looks_like_long_job(
             "ss -tulpn | grep -E ':(4097|4098|5000)\\b'"
         ));
+    }
+
+    #[test]
+    fn run_command_parameters_schema_advertises_background() {
+        let tool = BashTool;
+        let schema = tool.parameters_schema();
+        let props = &schema["properties"];
+        assert!(props.get("background").is_some(), "must advertise background parameter");
+        assert_eq!(props["background"]["type"], "boolean");
+        assert!(props.get("settle_secs").is_some(), "must advertise settle_secs parameter");
+    }
+
+    #[tokio::test]
+    async fn run_command_background_fast_failure_in_settle_period() {
+        let tool = BashTool;
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = ToolContext {
+            working_dir: dir.path().to_path_buf(),
+            cancel: tokio_util::sync::CancellationToken::new(),
+            progress: atomcode_kernel::tool::ProgressSink::noop(),
+            requester: None,
+        };
+        // exit 42 fails during settle period
+        let args = serde_json::json!({
+            "command": "exit 42",
+            "shell": "powershell",
+            "background": true,
+            "settle_secs": 1
+        })
+        .to_string();
+
+        let res = tool.execute(&args, &ctx).await;
+        assert!(res.is_error, "fast-failing command must return error: {res:?}");
+        assert!(
+            res.content.contains("failed during startup") || res.content.contains("42"),
+            "error was: {:?}",
+            res.content
+        );
+    }
+
+    #[tokio::test]
+    async fn run_command_background_success_and_kill() {
+        use crate::tools::bash_runtime;
+        let tool = BashTool;
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = ToolContext {
+            working_dir: dir.path().to_path_buf(),
+            cancel: tokio_util::sync::CancellationToken::new(),
+            progress: atomcode_kernel::tool::ProgressSink::noop(),
+            requester: None,
+        };
+        // Sleep command stays alive past 1s settle window
+        let cmd = if cfg!(target_os = "windows") {
+            "powershell -Command Start-Sleep -Seconds 10"
+        } else {
+            "sleep 10"
+        };
+        let args = serde_json::json!({
+            "command": cmd,
+            "background": true,
+            "settle_secs": 1
+        })
+        .to_string();
+
+        let res = tool.execute(&args, &ctx).await;
+        assert!(
+            !res.is_error,
+            "must succeed past settle window: {:?}",
+            res.content
+        );
+        assert!(
+            res.content.contains("Background task started successfully"),
+            "content: {:?}",
+            res.content
+        );
+
+        // Find bashid in active tasks
+        let active = bash_runtime::active_background_tasks();
+        let matched = active.iter().find(|t| t.command == cmd);
+        assert!(matched.is_some(), "must be in active_background_tasks");
+        let bashid = matched.unwrap().bashid.clone();
+
+        // Testing idempotency guard: starting the exact same command while active must fail
+        let duplicate_res = tool.execute(&args, &ctx).await;
+        assert!(duplicate_res.is_error, "duplicate background command must be rejected");
+        assert!(
+            duplicate_res.content.contains("already running"),
+            "error was: {:?}",
+            duplicate_res.content
+        );
+
+        // Kill the task using kill_by_id
+        assert!(bash_runtime::kill_by_id(&bashid), "kill_by_id must return true");
+
+        // Wait a small moment for unregister
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        let active_after = bash_runtime::active_background_tasks();
+        assert!(
+            !active_after.iter().any(|t| t.bashid == bashid),
+            "killed task must be removed from active tasks"
+        );
     }
 
     #[test]

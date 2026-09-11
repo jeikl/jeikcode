@@ -6,9 +6,11 @@
 //! `config.toml` is only touched when the model passes `global: true`.
 
 use atomcode_kernel::tool::ProgressSink;
+use std::collections::VecDeque;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
+use std::time::Instant;
 use tokio_util::sync::CancellationToken;
 
 /// Marker in bash output / tool result: the process is still running and the
@@ -26,8 +28,33 @@ pub struct LiveBash {
     /// First-level idle already elapsed with output but 0 CPU; now on
     /// `second_levell_secs` grace in case a silent compile is about to start.
     pub second_level: AtomicBool,
+    pub is_background: AtomicBool,
+    pub started_at: Instant,
     pub kill: CancellationToken,
     pub progress: ProgressSink,
+    pub ring_buffer: Arc<Mutex<VecDeque<String>>>,
+}
+
+impl LiveBash {
+    pub fn push_log_line(&self, line: &str) {
+        let mut g = self.ring_buffer.lock().unwrap_or_else(|e| e.into_inner());
+        if g.len() >= 200 {
+            g.pop_front();
+        }
+        g.push_back(line.to_string());
+    }
+
+    pub fn tail_logs(&self, n: usize) -> Vec<String> {
+        let g = self.ring_buffer.lock().unwrap_or_else(|e| e.into_inner());
+        g.iter()
+            .rev()
+            .take(n)
+            .cloned()
+            .collect::<Vec<_>>()
+            .into_iter()
+            .rev()
+            .collect()
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -117,6 +144,54 @@ pub fn unregister_live_bash(bashid: &str) {
         .lock()
         .unwrap_or_else(|e| e.into_inner())
         .retain(|e| e.bashid != bashid);
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct BackgroundAlert {
+    pub bashid: String,
+    pub command: String,
+    pub exit_code: Option<i32>,
+    pub error_tail: String,
+}
+
+static BACKGROUND_ALERTS: Mutex<Vec<BackgroundAlert>> = Mutex::new(Vec::new());
+
+pub fn push_background_alert(alert: BackgroundAlert) {
+    let mut g = BACKGROUND_ALERTS.lock().unwrap_or_else(|e| e.into_inner());
+    g.push(alert);
+}
+
+/// Drains all pending background alerts for one-shot injection into the next turn reminder.
+pub fn drain_background_alerts() -> Vec<BackgroundAlert> {
+    let mut g = BACKGROUND_ALERTS.lock().unwrap_or_else(|e| e.into_inner());
+    std::mem::take(&mut *g)
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ActiveBackgroundTask {
+    pub bashid: String,
+    pub command: String,
+    pub uptime_secs: u64,
+}
+
+/// Returns a snapshot of currently running background tasks.
+pub fn active_background_tasks() -> Vec<ActiveBackgroundTask> {
+    let snapshot: Vec<Arc<LiveBash>> = REGISTRY.lock().unwrap_or_else(|e| e.into_inner()).clone();
+    snapshot
+        .into_iter()
+        .filter(|e| e.is_background.load(Ordering::SeqCst))
+        .map(|e| ActiveBackgroundTask {
+            bashid: e.bashid.clone(),
+            command: e.command.clone(),
+            uptime_secs: e.started_at.elapsed().as_secs(),
+        })
+        .collect()
+}
+
+/// Returns the last `lines` logs for a background task by bashid.
+pub fn get_background_logs(bashid: &str, lines: usize) -> Option<Vec<String>> {
+    let entry = find_live_bash(bashid)?;
+    Some(entry.tail_logs(lines))
 }
 
 pub fn find_live_bash(bashid: &str) -> Option<Arc<LiveBash>> {

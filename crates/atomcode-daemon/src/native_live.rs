@@ -17,6 +17,11 @@ static HEADLESS: OnceLock<Mutex<Option<HeadlessRuntime>>> = OnceLock::new();
 static REMOTE_COMMAND: StdMutex<Option<tokio::sync::mpsc::UnboundedSender<String>>> =
     StdMutex::new(None);
 
+fn embedded_controls() -> &'static StdMutex<HashMap<String, Arc<dyn LiveRuntimeControl>>> {
+    static MAP: OnceLock<StdMutex<HashMap<String, Arc<dyn LiveRuntimeControl>>>> = OnceLock::new();
+    MAP.get_or_init(|| StdMutex::new(HashMap::new()))
+}
+
 struct HeadlessRuntime {
     binding: LiveBinding,
     handle: atomcode_coding::CodingRuntimeHandle,
@@ -58,6 +63,7 @@ pub fn register_embedded_runtime(
     if headless_owner.is_some() {
         return Err(HubError::RuntimeUnavailable);
     }
+    let control_for_lookup = Arc::clone(&control);
     let binding = hub().bind_with_provider(
         session_id,
         working_dir,
@@ -66,6 +72,18 @@ pub fn register_embedded_runtime(
         snapshot,
         control,
     )?;
+    embedded_controls()
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .insert(binding.session_id.clone(), Arc::clone(&control_for_lookup));
+    if let Some(handle) = control_for_lookup.handle() {
+        publish_unique_runtime(
+            &binding.session_id,
+            binding.working_dir.clone(),
+            handle,
+            Some(binding.provider_fingerprint.clone()),
+        );
+    }
     *EMBEDDED_BINDING
         .lock()
         .unwrap_or_else(|error| error.into_inner()) = Some(binding.clone());
@@ -94,6 +112,10 @@ pub fn unregister_embedded_runtime(binding: &LiveBinding) -> Result<(), HubError
         .as_ref()
         .is_some_and(|current| current.id == binding.id)
     {
+        embedded_controls()
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .remove(&binding.session_id);
         *embedded = None;
         *REMOTE_COMMAND
             .lock()
@@ -183,6 +205,82 @@ pub(crate) fn unique_runtime_plan(has_existing_handle: bool) -> UniqueRuntimePla
     }
 }
 
+fn publish_unique_runtime(
+    session_id: &str,
+    working_dir: PathBuf,
+    handle: atomcode_coding::CodingRuntimeHandle,
+    fingerprint: Option<String>,
+) {
+    let key = session_id.to_string();
+    let reg = atomcode_coding::session_runtime_registry::SessionRuntimeRegistry::global();
+    let _ = reg.open_or_attach(key.clone(), working_dir);
+    let _ = reg.bind_handle(&key, handle, None);
+    if fingerprint.is_some() {
+        reg.set_provider_fingerprint(&key, fingerprint);
+    }
+}
+
+/// True when this process's unique CodingRuntime for `requested` is the
+/// TUI/embedded execution runtime — independent of which session the hub VIEW
+/// currently projects.
+pub(crate) fn hub_owns_session(
+    requested: &str,
+    execution_session_id: Option<&str>,
+    embedded_session_id: Option<&str>,
+) -> bool {
+    execution_session_id == Some(requested) || embedded_session_id == Some(requested)
+}
+
+fn handle_from_embedded_control(
+    session_id: &str,
+) -> Option<atomcode_coding::CodingRuntimeHandle> {
+    let control = {
+        let guard = embedded_controls()
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        guard.get(session_id).cloned()
+    }?;
+    let handle = control.handle()?;
+    let dir = hub()
+        .execution_working_dir()
+        .or_else(|| embedded_binding().map(|binding| binding.working_dir))
+        .unwrap_or_else(|| PathBuf::from("."));
+    let fingerprint = embedded_binding()
+        .filter(|binding| binding.session_id == session_id)
+        .map(|binding| binding.provider_fingerprint);
+    publish_unique_runtime(session_id, dir, handle.clone(), fingerprint);
+    Some(handle)
+}
+
+fn cache_hub_execution_handle(
+    session_id: &str,
+    handle: atomcode_coding::CodingRuntimeHandle,
+) {
+    let dir = hub()
+        .execution_working_dir()
+        .unwrap_or_else(|| PathBuf::from("."));
+    // Prefer the execution-session fingerprint. After a view-only switch the
+    // current VIEW identity may be another session and must not overwrite this
+    // runner's cached provider.
+    let cached_fp = if hub().execution_session_id().as_deref() == Some(session_id) {
+        hub()
+            .binding()
+            .ok()
+            .filter(|binding| binding.session_id == session_id)
+            .map(|binding| binding.provider_fingerprint)
+            .or_else(|| {
+                embedded_binding()
+                    .filter(|binding| binding.session_id == session_id)
+                    .map(|binding| binding.provider_fingerprint)
+            })
+    } else {
+        embedded_binding()
+            .filter(|binding| binding.session_id == session_id)
+            .map(|binding| binding.provider_fingerprint)
+    };
+    publish_unique_runtime(session_id, dir, handle, cached_fp);
+}
+
 /// In-process handle of the unique runtime for `session_id`, if any view
 /// already owns it. Does not spawn and does not acquire a lease.
 pub fn existing_runner_handle(
@@ -192,24 +290,18 @@ pub fn existing_runner_handle(
     if let Some(handle) = reg.handle(&session_id.to_string()) {
         return Some(handle);
     }
-    if hub().execution_session_id().as_deref() == Some(session_id) {
+    if let Some(handle) = handle_from_embedded_control(session_id) {
+        return Some(handle);
+    }
+    let execution = hub().execution_session_id();
+    let embedded = embedded_binding();
+    if hub_owns_session(
+        session_id,
+        execution.as_deref(),
+        embedded.as_ref().map(|binding| binding.session_id.as_str()),
+    ) {
         if let Ok(handle) = hub().execution_handle() {
-            let dir = hub()
-                .execution_working_dir()
-                .unwrap_or_else(|| PathBuf::from("."));
-            // Mirror the hub binding's provider identity so a subsequent
-            // `/live/message` can compare against the requested provider
-            // without reaching back into the hub. `binding()` may return an
-            // error if the hub is mid-reconfigure — fall back to None in that
-            // case and let the next reload fix the cache.
-            let cached_fp = hub()
-                .binding()
-                .ok()
-                .filter(|b| b.session_id == session_id)
-                .map(|b| b.provider_fingerprint);
-            let _ = reg.open_or_attach(session_id.to_string(), dir);
-            let _ = reg.bind_handle(&session_id.to_string(), handle.clone(), None);
-            reg.set_provider_fingerprint(&session_id.to_string(), cached_fp);
+            cache_hub_execution_handle(session_id, handle.clone());
             return Some(handle);
         }
     }
@@ -226,11 +318,14 @@ fn try_attach_existing_runner(session_id: &str, working_dir: &Path) -> bool {
 pub async fn wait_for_existing_runner_handle(
     session_id: &str,
 ) -> Option<atomcode_coding::CodingRuntimeHandle> {
-    for _ in 0..120 {
+    // Deferred TUI runtimes publish the handle once Starting → Ready. A short
+    // wait covers that handoff; a 6s poll previously just delayed the same
+    // SessionInUse error when `/webui` never bound the handle at all.
+    for _ in 0..40 {
         if let Some(handle) = existing_runner_handle(session_id) {
             return Some(handle);
         }
-        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
     }
     None
 }
@@ -1197,6 +1292,23 @@ mod tests {
         assert!(!super::prefer_registry_decision(
             "sess-b", false, None, true, false, false,
         ));
+    }
+
+    #[test]
+    fn hub_owns_session_follows_execution_not_the_hub_view() {
+        assert!(super::hub_owns_session(
+            "tui-a",
+            Some("tui-a"),
+            Some("tui-a")
+        ));
+        assert!(super::hub_owns_session("tui-a", Some("tui-a"), None));
+        assert!(super::hub_owns_session("tui-a", None, Some("tui-a")));
+        assert!(!super::hub_owns_session(
+            "web-b",
+            Some("tui-a"),
+            Some("tui-a")
+        ));
+        assert!(!super::hub_owns_session("tui-a", None, None));
     }
 
     #[test]

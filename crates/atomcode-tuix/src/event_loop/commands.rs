@@ -1042,6 +1042,19 @@ pub(crate) fn attach_live_runtime(
         std::sync::Arc::new(ctx.runtime.clone()),
     )
     .map_err(|error| format!("共享当前 runtime 失败：{error:?}"))?;
+    // `/webui` must publish the unique handle before any WebUI `/chat` or
+    // `/live/provider` runs. Waiting for a later runtime event used to miss
+    // the bind, and the next send then collided with this lease.
+    if let Some(handle) = ctx.runtime.active_handle_for_registry() {
+        let session_id = ctx.current_session.id.clone();
+        let reg = atomcode_coding::session_runtime_registry::SessionRuntimeRegistry::global();
+        let _ = reg.open_or_attach(session_id.clone(), ctx.working_dir.clone());
+        let _ = reg.bind_handle(
+            &session_id,
+            handle,
+            Some(ctx.foreground_runtime_id.as_u64()),
+        );
+    }
     // The runtime binding owns execution; the process-level mode seeds the first
     // live snapshot before any ModeChanged event exists.
     atomcode_daemon::live_set_mode(mode);

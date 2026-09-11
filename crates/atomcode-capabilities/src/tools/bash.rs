@@ -175,6 +175,15 @@ impl Tool for BashTool {
                 return routed;
             }
         }
+        let soft_hint = if a.shell == ShellMode::Default {
+            super::shell_route::soft_hint_for_unrouted_builtin_equivalent(&a.command)
+        } else {
+            None
+        };
+        let annotate =
+            |r: atomcode_kernel::tool::ToolResult| -> atomcode_kernel::tool::ToolResult {
+                super::shell_route::annotate_with_soft_hint(soft_hint, r)
+            };
         let bash_cfg = resolve_bash_timeout_config();
         let max_timeout = bash_cfg.max_timeout_secs.max(1);
 
@@ -192,7 +201,7 @@ impl Tool for BashTool {
 
         let mut cmd = match build_command(&effective_command, a.shell) {
             Ok(c) => c,
-            Err(reason) => return err(reason),
+            Err(reason) => return annotate(err(reason)),
         };
         #[cfg(unix)]
         crate::process_utils::apply_utf8_locale_env(&mut cmd);
@@ -272,7 +281,7 @@ impl Tool for BashTool {
 
         let child = match cmd.spawn() {
             Ok(c) => c,
-            Err(e) => return err(format!("bash: failed to spawn shell: {e}")),
+            Err(e) => return annotate(err(format!("bash: failed to spawn shell: {e}"))),
         };
         // Reap the WHOLE shell process tree (mvn → java, pipeline sub-shells,
         // busybox applets) on cancel / hard-cap — not just the direct child.
@@ -285,11 +294,11 @@ impl Tool for BashTool {
         let child_pid = child.id();
         let mut stdout = match child.stdout.take() {
             Some(pipe) => pipe,
-            None => return err("bash: failed to capture stdout".to_string()),
+            None => return annotate(err("bash: failed to capture stdout".to_string())),
         };
         let mut stderr = match child.stderr.take() {
             Some(pipe) => pipe,
-            None => return err("bash: failed to capture stderr".to_string()),
+            None => return annotate(err("bash: failed to capture stderr".to_string())),
         };
 
         let progress = ctx.progress.clone();
@@ -529,7 +538,7 @@ impl Tool for BashTool {
         };
 
         match driven {
-            Drive::Result(r) => r,
+            Drive::Result(r) => annotate(r),
             Drive::Yield => {
                 let suggested = suggested_long_keyword(&effective_command);
                 let prompt =
@@ -621,7 +630,7 @@ impl Tool for BashTool {
                         }
                     }
                 });
-                ok(body)
+                annotate(ok(body))
             }
         }
     }

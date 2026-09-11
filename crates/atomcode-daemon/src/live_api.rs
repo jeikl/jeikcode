@@ -234,6 +234,63 @@ fn observe_existing_chat_turn(
     })
 }
 
+async fn reassemble_observed_provider_if_needed(
+    session_id: &str,
+    handle: &atomcode_coding::CodingRuntimeHandle,
+    next: &atomcode_coding::CodingAgentConfig,
+) -> Result<(), String> {
+    if next.provider_name.is_empty() {
+        return Ok(());
+    }
+    let config = match Config::load(&Config::default_path()) {
+        Ok(config) => config,
+        Err(_) => return Ok(()),
+    };
+    if !config.selection_exists(&next.provider_name) {
+        return Ok(());
+    }
+    let requested_fp = match crate::native_live::provider_fingerprint(&config, &next.provider_name)
+    {
+        Ok(fp) => fp,
+        Err(_) => return Ok(()),
+    };
+    let key = session_id.to_string();
+    let reg = atomcode_coding::session_runtime_registry::SessionRuntimeRegistry::global();
+    let cached_fp = reg.provider_fingerprint(&key);
+    let execution = crate::native_live::join_for_provider(Some(session_id)).ok();
+    let already = execution
+        .as_ref()
+        .map(|join| {
+            !provider_reload_required(
+                &join.binding.provider,
+                &join.binding.provider_fingerprint,
+                &next.provider_name,
+                &requested_fp,
+            )
+        })
+        .or_else(|| cached_fp.map(|fp| fp == requested_fp))
+        .unwrap_or(false);
+    if already {
+        return Ok(());
+    }
+    // Explicit WebUI model switch (or a /chat body carrying a different
+    // provider) must reassemble the unique runtime. Do not spawn a second one.
+    match handle.status().phase {
+        atomcode_coding::RuntimePhase::InTurn
+        | atomcode_coding::RuntimePhase::WaitingApproval
+        | atomcode_coding::RuntimePhase::Reconfiguring => {
+            return Err("a turn is running; stop it before switching the model".into());
+        }
+        _ => {}
+    }
+    handle
+        .reassemble_provider(next.clone())
+        .await
+        .map_err(|error| format!("切换模型失败：{error}"))?;
+    reg.set_provider_fingerprint(&key, Some(requested_fp));
+    Ok(())
+}
+
 async fn prepare_chat_turn_runtime(
     session_id: &str,
     runtime_cfg: atomcode_coding::CodingRuntimeConfig,
@@ -242,6 +299,7 @@ async fn prepare_chat_turn_runtime(
     let coding_cfg = crate::kernel_runtime::coding_config_from_runtime(&runtime_cfg);
     let working_dir = runtime_cfg.working_dir.clone();
     if let Some(handle) = crate::native_live::existing_runner_handle(session_id) {
+        reassemble_observed_provider_if_needed(session_id, &handle, &coding_cfg).await?;
         return observe_existing_chat_turn(session_id, working_dir, handle, coding_cfg);
     }
 
@@ -271,7 +329,13 @@ async fn prepare_chat_turn_runtime(
         Err(error) if crate::native_live::runtime_start_is_session_in_use(&error) => {
             let handle = crate::native_live::wait_for_existing_runner_handle(session_id)
                 .await
-                .ok_or_else(|| error.to_string())?;
+                .ok_or_else(|| {
+                    format!(
+                        "session {session_id:?} is already in use by another runtime; \
+                         observer attach failed (TUI / another view still holds the unique runtime)"
+                    )
+                })?;
+            reassemble_observed_provider_if_needed(session_id, &handle, &coding_cfg).await?;
             observe_existing_chat_turn(session_id, working_dir, handle, coding_cfg)
         }
         Err(error) => Err(error.to_string()),
@@ -2420,13 +2484,17 @@ pub(crate) async fn live_provider(
         });
     }
 
+    let requested_fingerprint =
+        match crate::native_live::provider_fingerprint(&config, &req.provider) {
+            Ok(fingerprint) => fingerprint,
+            Err(error) => {
+                return Json(serde_json::json!({ "ok": false, "error": error }));
+            }
+        };
+
     let join = match crate::native_live::join_for_provider(requested_session_id.as_deref()) {
-        Ok(join) => join,
-        Err(crate::live_hub::HubError::Unbound | crate::live_hub::HubError::StaleBinding) => {
-            // Not the live runtime's session (or no hub). The selection is already
-            // persisted above; /chat sends carry the provider on the next turn.
-            return Json(serde_json::json!({ "ok": true }));
-        }
+        Ok(join) => Some(join),
+        Err(crate::live_hub::HubError::Unbound | crate::live_hub::HubError::StaleBinding) => None,
         Err(error) => {
             let active_turn = matches!(error, crate::live_hub::HubError::ActiveTurn);
             return Json(serde_json::json!({
@@ -2437,46 +2505,114 @@ pub(crate) async fn live_provider(
         }
     };
 
-    let requested_fingerprint =
-        match crate::native_live::provider_fingerprint(&config, &req.provider) {
-            Ok(fingerprint) => fingerprint,
-            Err(error) => {
-                return Json(serde_json::json!({ "ok": false, "error": error }));
+    if let Some(join) = join {
+        if !provider_reload_required(
+            &join.binding.provider,
+            &join.binding.provider_fingerprint,
+            &req.provider,
+            &requested_fingerprint,
+        ) {
+            return Json(serde_json::json!({ "ok": true }));
+        }
+        let runtime_config = chat_runtime_config(
+            &config,
+            &req.provider,
+            &join.binding.working_dir,
+            state.telemetry.clone(),
+        );
+        match crate::native_live::reload_provider(
+            &join.binding,
+            crate::kernel_runtime::coding_config_from_runtime(&runtime_config),
+            requested_fingerprint.clone(),
+        )
+        .await
+        {
+            Ok(_) => return Json(serde_json::json!({ "ok": true })),
+            // A turn is running: reassembling the provider would hard-kill it and drop
+            // the interrupted turn's context. Surface a distinct flag so the client can
+            // revert its optimistic selection and tell the user to stop the turn first.
+            Err(crate::live_hub::HubError::ActiveTurn) => {
+                return Json(serde_json::json!({
+                    "ok": false,
+                    "active_turn": true,
+                    "error": "a turn is running; stop it before switching the model",
+                }));
             }
-        };
-    if !provider_reload_required(
-        &join.binding.provider,
-        &join.binding.provider_fingerprint,
-        &req.provider,
-        &requested_fingerprint,
-    ) {
+            // View identity drifted from the execution session (e.g. `/webui`
+            // landing switched the hub VIEW). Reload the unique handle below.
+            Err(
+                crate::live_hub::HubError::StaleBinding
+                | crate::live_hub::HubError::Unbound
+                | crate::live_hub::HubError::RuntimeUnavailable,
+            ) => {}
+            Err(error) => {
+                return Json(serde_json::json!({
+                    "ok": false,
+                    "error": format!("provider reload rejected: {error:?}"),
+                }));
+            }
+        }
+    }
+
+    // Hub VIEW is on another session (or unbound), but this process still owns
+    // the unique runtime — typical TUI `/webui` then WebUI sidebar back onto
+    // that TUI session. Reload that handle instead of returning ok and letting
+    // the next `/chat` spawn a second runtime (SessionInUse).
+    let unique = requested_session_id
+        .as_deref()
+        .and_then(crate::native_live::existing_runner_handle);
+    let Some(handle) = unique else {
         return Json(serde_json::json!({ "ok": true }));
+    };
+    let cached_fp = requested_session_id.as_deref().and_then(|id| {
+        atomcode_coding::session_runtime_registry::SessionRuntimeRegistry::global()
+            .provider_fingerprint(&id.to_string())
+    });
+    if cached_fp.as_deref() == Some(requested_fingerprint.as_str()) {
+        return Json(serde_json::json!({ "ok": true }));
+    }
+    match handle.status().phase {
+        atomcode_coding::RuntimePhase::InTurn
+        | atomcode_coding::RuntimePhase::WaitingApproval
+        | atomcode_coding::RuntimePhase::Reconfiguring => {
+            return Json(serde_json::json!({
+                "ok": false,
+                "active_turn": true,
+                "error": "a turn is running; stop it before switching the model",
+            }));
+        }
+        _ => {}
     }
     let runtime_config = chat_runtime_config(
         &config,
         &req.provider,
-        &join.binding.working_dir,
+        &working_dir,
         state.telemetry.clone(),
     );
-    match crate::native_live::reload_provider(
-        &join.binding,
-        crate::kernel_runtime::coding_config_from_runtime(&runtime_config),
-        requested_fingerprint,
-    )
-    .await
+    match handle
+        .reassemble_provider(crate::kernel_runtime::coding_config_from_runtime(
+            &runtime_config,
+        ))
+        .await
     {
-        Ok(_) => Json(serde_json::json!({ "ok": true })),
-        // A turn is running: reassembling the provider would hard-kill it and drop
-        // the interrupted turn's context. Surface a distinct flag so the client can
-        // revert its optimistic selection and tell the user to stop the turn first.
-        Err(crate::live_hub::HubError::ActiveTurn) => Json(serde_json::json!({
+        Ok(_) => {
+            if let Some(session_id) = requested_session_id.as_deref() {
+                atomcode_coding::session_runtime_registry::SessionRuntimeRegistry::global()
+                    .set_provider_fingerprint(
+                        &session_id.to_string(),
+                        Some(requested_fingerprint),
+                    );
+            }
+            Json(serde_json::json!({ "ok": true }))
+        }
+        Err(atomcode_coding::RuntimeError::Busy) => Json(serde_json::json!({
             "ok": false,
             "active_turn": true,
             "error": "a turn is running; stop it before switching the model",
         })),
         Err(error) => Json(serde_json::json!({
             "ok": false,
-            "error": format!("provider reload rejected: {error:?}"),
+            "error": format!("provider reload rejected: {error}"),
         })),
     }
 }

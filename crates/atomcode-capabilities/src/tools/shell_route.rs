@@ -2,8 +2,9 @@
 //! `grep`, `glob`, `write_file`) so a model that still emits `cat`/`ls`/`grep`
 //! through the shell tool gets the builtin implementation plus a one-line hint.
 //!
-//! Conservative: pipelines, `&&` / `||` / `;`, unknown flags, and multi-file
-//! `cat` fall through to the real shell.
+//! Also: when a command is clearly a builtin-equivalent but too complex to rewrite
+//! (multi-segment `;`, unsupported flags), the real shell still runs and a soft
+//! hint is prepended so the model is told to use dedicated tools next time.
 
 use super::glob::GlobTool;
 use super::grep::GrepTool;
@@ -27,6 +28,27 @@ pub fn is_shell_tool_name(name: &str) -> bool {
 
 const ROUTE_HINT: &str = "检测到你正在用run_command运行内置工具存在的命令，已为你自动路由到内置工具，下次请全程使用内置工具，比如read_file、grep等。\n\n";
 
+/// Soft hint when the command looks like a builtin file-op but was too complex to
+/// auto-rewrite (pipes with non-head tails, `;` chains, unsupported flags, …).
+const SOFT_HINT: &str = "检测到你正在用run_command运行内置工具可覆盖的命令（如 cat/ls/grep/find/head）。本次因管道/多段命令/复杂参数未能完整自动路由，下次请直接使用内置工具：read_file、list_directory、grep、glob 等。\n\n";
+
+const BUILTIN_EQUIV_HEADS: &[&str] = &[
+    "cat",
+    "type",
+    "get-content",
+    "gc",
+    "head",
+    "ls",
+    "dir",
+    "get-childitem",
+    "gci",
+    "grep",
+    "rg",
+    "find",
+    "echo",
+    "printf",
+];
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum BuiltinRoute {
     ReadFile {
@@ -41,6 +63,7 @@ pub(crate) enum BuiltinRoute {
         pattern: String,
         path: Option<String>,
         case_insensitive: bool,
+        glob: Option<String>,
     },
     Glob {
         pattern: String,
@@ -55,6 +78,27 @@ pub(crate) enum BuiltinRoute {
 pub(crate) async fn maybe_route_shell_command(command: &str, ctx: &ToolContext) -> Option<ToolResult> {
     let route = try_route_shell_command(command)?;
     Some(with_route_hint(dispatch_route(route, ctx).await))
+}
+
+/// When auto-route misses but the command clearly duplicates a dedicated tool,
+/// return the soft hint to prepend onto the real shell result.
+pub(crate) fn soft_hint_for_unrouted_builtin_equivalent(command: &str) -> Option<&'static str> {
+    if try_route_shell_command(command).is_some() {
+        // Caller should have routed; no soft hint needed on the shell path.
+        return None;
+    }
+    if looks_like_builtin_file_op(command) {
+        Some(SOFT_HINT)
+    } else {
+        None
+    }
+}
+
+pub(crate) fn annotate_with_soft_hint(hint: Option<&'static str>, mut result: ToolResult) -> ToolResult {
+    if let Some(hint) = hint {
+        result.content = format!("{hint}{}", result.content);
+    }
+    result
 }
 
 fn with_route_hint(mut result: ToolResult) -> ToolResult {
@@ -88,6 +132,7 @@ async fn dispatch_route(route: BuiltinRoute, ctx: &ToolContext) -> ToolResult {
             pattern,
             path,
             case_insensitive,
+            glob,
         } => {
             let mut args = json!({ "pattern": pattern });
             if let Some(path) = path {
@@ -95,6 +140,9 @@ async fn dispatch_route(route: BuiltinRoute, ctx: &ToolContext) -> ToolResult {
             }
             if case_insensitive {
                 args["case_insensitive"] = json!(true);
+            }
+            if let Some(glob) = glob {
+                args["glob"] = json!(glob);
             }
             GrepTool.execute(&args.to_string(), ctx).await
         }
@@ -112,9 +160,38 @@ async fn dispatch_route(route: BuiltinRoute, ctx: &ToolContext) -> ToolResult {
     }
 }
 
-/// Parse a simple file-op command into a builtin route. `None` → run the shell.
-pub(crate) fn try_route_shell_command(command: &str) -> Option<BuiltinRoute> {
+/// True when any shell segment's command head is a dedicated-tool equivalent.
+pub(crate) fn looks_like_builtin_file_op(command: &str) -> bool {
     let cmd = strip_trailing_comment(command.trim());
+    if cmd.is_empty() {
+        return false;
+    }
+    for segment in split_shell_segments(cmd) {
+        let tokens = match tokenize(segment) {
+            Some(t) if !t.is_empty() => t,
+            _ => continue,
+        };
+        let head = command_head(&tokens[0]);
+        if BUILTIN_EQUIV_HEADS.contains(&head.as_str()) {
+            return true;
+        }
+    }
+    false
+}
+
+/// Parse a file-op command into a builtin route. `None` → run the shell.
+pub(crate) fn try_route_shell_command(command: &str) -> Option<BuiltinRoute> {
+    let normalized = normalize_shell_for_route(command);
+    if normalized.is_empty() {
+        return None;
+    }
+    // Do not peel off the first `;` / `&&` segment alone — that would drop the
+    // rest of the compound command. Soft-hint covers those instead.
+    try_route_normalized(&normalized)
+}
+
+fn try_route_normalized(cmd: &str) -> Option<BuiltinRoute> {
+    let cmd = strip_trailing_comment(cmd.trim());
     if cmd.is_empty() {
         return None;
     }
@@ -144,6 +221,144 @@ pub(crate) fn try_route_shell_command(command: &str) -> Option<BuiltinRoute> {
         "find" => route_find(&tokens[1..]),
         _ => None,
     }
+}
+
+/// Strip noise the model often appends so a simple file-op can still route:
+/// `2>/dev/null`, `2>&1`, and trailing `| head -N` / `| tail -N`.
+fn normalize_shell_for_route(command: &str) -> String {
+    let mut s = strip_trailing_comment(command.trim()).to_string();
+    if s.is_empty() {
+        return s;
+    }
+    loop {
+        let trimmed = s.trim_end();
+        let lower = trimmed.to_ascii_lowercase();
+        let stripped = if let Some(rest) = strip_unquoted_suffix(&lower, trimmed, "2>/dev/null") {
+            rest
+        } else if let Some(rest) = strip_unquoted_suffix(&lower, trimmed, ">/dev/null") {
+            rest
+        } else if let Some(rest) = strip_unquoted_suffix(&lower, trimmed, "1>/dev/null") {
+            rest
+        } else if let Some(rest) = strip_unquoted_suffix(&lower, trimmed, "&>/dev/null") {
+            rest
+        } else if let Some(rest) = strip_unquoted_suffix(&lower, trimmed, "2>&1") {
+            rest
+        } else if let Some(rest) = strip_trailing_head_or_tail_pipe(trimmed) {
+            rest
+        } else {
+            break;
+        };
+        s = stripped.trim_end().to_string();
+    }
+    s
+}
+
+fn strip_unquoted_suffix<'a>(lower: &str, original: &'a str, suffix: &str) -> Option<&'a str> {
+    if !lower.ends_with(suffix) {
+        return None;
+    }
+    let start = original.len().checked_sub(suffix.len())?;
+    // Refuse if the suffix sits inside quotes (cheap: scan to start).
+    if has_unquoted_char(&original[..start], '\'') || has_unquoted_char(&original[..start], '"') {
+        // still ok if quotes are balanced before the suffix; only reject when the
+        // cut point is inside an open quote.
+    }
+    if quote_state_open(&original[..start]) {
+        return None;
+    }
+    Some(original[..start].trim_end())
+}
+
+fn quote_state_open(s: &str) -> bool {
+    let mut in_single = false;
+    let mut in_double = false;
+    for c in s.chars() {
+        match c {
+            '\'' if !in_double => in_single = !in_single,
+            '"' if !in_single => in_double = !in_double,
+            _ => {}
+        }
+    }
+    in_single || in_double
+}
+
+fn strip_trailing_head_or_tail_pipe(cmd: &str) -> Option<&str> {
+    let (left, right) = rsplit_unquoted(cmd, '|')?;
+    let right = right.trim();
+    let toks = tokenize(right)?;
+    if toks.is_empty() {
+        return None;
+    }
+    let head = command_head(&toks[0]);
+    if head != "head" && head != "tail" {
+        return None;
+    }
+    // Only swallow simple `head`/`tail` with optional `-n N` / `-N`.
+    for t in &toks[1..] {
+        if t == "-n" || t.starts_with('-') {
+            continue;
+        }
+        if t.chars().all(|c| c.is_ascii_digit()) {
+            continue;
+        }
+        return None;
+    }
+    Some(left.trim_end())
+}
+
+fn split_shell_segments(cmd: &str) -> Vec<&str> {
+    let mut out = Vec::new();
+    let mut start = 0;
+    let mut in_single = false;
+    let mut in_double = false;
+    let bytes = cmd.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        let c = bytes[i] as char;
+        match c {
+            '\'' if !in_double => in_single = !in_single,
+            '"' if !in_single => in_double = !in_double,
+            '|' | ';' if !in_single && !in_double => {
+                let seg = cmd[start..i].trim();
+                if !seg.is_empty() {
+                    out.push(seg);
+                }
+                start = i + 1;
+            }
+            '&' if !in_single && !in_double && bytes.get(i + 1) == Some(&b'&') => {
+                let seg = cmd[start..i].trim();
+                if !seg.is_empty() {
+                    out.push(seg);
+                }
+                // stop at && — later segments are not independently routed
+                start = cmd.len();
+                break;
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    let seg = cmd[start..].trim();
+    if !seg.is_empty() {
+        out.push(seg);
+    }
+    out
+}
+
+fn rsplit_unquoted(s: &str, sep: char) -> Option<(&str, &str)> {
+    let mut in_single = false;
+    let mut in_double = false;
+    let mut last = None;
+    for (i, c) in s.char_indices() {
+        match c {
+            '\'' if !in_double => in_single = !in_single,
+            '"' if !in_single => in_double = !in_double,
+            c if c == sep && !in_single && !in_double => last = Some(i),
+            _ => {}
+        }
+    }
+    let i = last?;
+    Some((&s[..i], &s[i + sep.len_utf8()..]))
 }
 
 fn command_head(tok: &str) -> String {
@@ -232,24 +447,72 @@ fn route_ls(args: &[String]) -> Option<BuiltinRoute> {
 fn route_grep(args: &[String]) -> Option<BuiltinRoute> {
     let mut case_insensitive = false;
     let mut positional = Vec::new();
-    for t in args {
+    let mut includes: Vec<String> = Vec::new();
+    let mut i = 0;
+    while i < args.len() {
+        let t = args[i].as_str();
         if t == "-i" || t == "--ignore-case" {
             case_insensitive = true;
+            i += 1;
             continue;
         }
-        if t == "-n" || t == "-r" || t == "-R" || t == "-I" || t == "--" {
+        // Harmless / already-default flags our GrepTool covers implicitly.
+        if matches!(
+            t,
+            "-n" | "-r"
+                | "-R"
+                | "-I"
+                | "-H"
+                | "-h"
+                | "-E"
+                | "-F"
+                | "-G"
+                | "-P"
+                | "-w"
+                | "-x"
+                | "-a"
+                | "--"
+                | "--line-number"
+                | "--with-filename"
+                | "--no-filename"
+                | "--extended-regexp"
+                | "--fixed-strings"
+                | "--perl-regexp"
+                | "--basic-regexp"
+        ) {
+            i += 1;
             continue;
         }
         if t.starts_with("--color") {
+            i += 1;
             continue;
         }
+        if let Some(pat) = t.strip_prefix("--include=") {
+            includes.push(pat.to_string());
+            i += 1;
+            continue;
+        }
+        if t == "--include" {
+            i += 1;
+            includes.push(args.get(i)?.clone());
+            i += 1;
+            continue;
+        }
+        if t == "-e" || t == "--regexp" {
+            i += 1;
+            positional.insert(0, args.get(i)?.clone());
+            i += 1;
+            continue;
+        }
+        // Unsupported context / binary / exclude flags → leave to shell (+ soft hint).
         if t.starts_with('-') {
             return None;
         }
-        positional.push(t.as_str());
+        positional.push(t.to_string());
+        i += 1;
     }
-    let pattern = positional.first()?.to_string();
-    let path = positional.get(1).map(|s| (*s).to_string());
+    let pattern = positional.first()?.clone();
+    let path = positional.get(1).cloned();
     if positional.len() > 2 {
         return None;
     }
@@ -257,7 +520,31 @@ fn route_grep(args: &[String]) -> Option<BuiltinRoute> {
         pattern,
         path,
         case_insensitive,
+        glob: merge_include_globs(&includes),
     })
+}
+
+fn merge_include_globs(globs: &[String]) -> Option<String> {
+    if globs.is_empty() {
+        return None;
+    }
+    if globs.len() == 1 {
+        return Some(globs[0].clone());
+    }
+    let mut exts = Vec::new();
+    for g in globs {
+        if let Some(ext) = g.strip_prefix("*.") {
+            if !ext.is_empty()
+                && !ext.contains(['*', '?', '/', '\\', '{', '}'])
+            {
+                exts.push(ext.to_string());
+                continue;
+            }
+        }
+        // Non-uniform patterns: keep the first include only.
+        return Some(globs[0].clone());
+    }
+    Some(format!("*.{{{}}}", exts.join(",")))
 }
 
 fn route_find(args: &[String]) -> Option<BuiltinRoute> {
@@ -470,6 +757,7 @@ mod tests {
                 pattern: "TODO".into(),
                 path: Some("src/lib.rs".into()),
                 case_insensitive: false,
+                glob: None,
             })
         );
         assert_eq!(
@@ -490,7 +778,15 @@ mod tests {
 
     #[test]
     fn does_not_route_pipelines_or_unknown_flags() {
-        assert!(try_route_shell_command("cat a | head").is_none());
+        // `| head` is stripped, so simple `cat a | head` DOES route — that's intended.
+        assert_eq!(
+            try_route_shell_command("cat a | head"),
+            Some(BuiltinRoute::ReadFile {
+                file_path: "a".into(),
+                offset: None,
+                limit: None,
+            })
+        );
         assert!(try_route_shell_command("ls && pwd").is_none());
         assert!(try_route_shell_command("grep -A 3 foo bar").is_none());
         assert!(try_route_shell_command("sed -i s/a/b/ file").is_none());
@@ -507,7 +803,34 @@ mod tests {
                 pattern: "foo bar".into(),
                 path: Some(".".into()),
                 case_insensitive: true,
+                glob: None,
             })
+        );
+    }
+
+    #[test]
+    fn routes_grep_with_include_and_head_pipe() {
+        let cmd = r#"grep -n -H -E "def |class |import |password|login" --include="*.py" --include="*.js" . 2>/dev/null | head -80"#;
+        assert_eq!(
+            try_route_shell_command(cmd),
+            Some(BuiltinRoute::Grep {
+                pattern: "def |class |import |password|login".into(),
+                path: Some(".".into()),
+                case_insensitive: false,
+                glob: Some("*.{py,js}".into()),
+            })
+        );
+    }
+
+    #[test]
+    fn compound_ls_grep_gets_soft_hint_not_full_route() {
+        let cmd = r#"ls -la *.py *.js 2>/dev/null; echo "===="; grep -n "def \|class \|import " jxtx_login.py jxtx_crypto.py login_jxtx.py login_component.js 2>&1 | head -80"#;
+        // First segment is multi-glob ls → cannot fully route; soft hint must fire.
+        assert!(try_route_shell_command(cmd).is_none());
+        assert!(looks_like_builtin_file_op(cmd));
+        assert_eq!(
+            soft_hint_for_unrouted_builtin_equivalent(cmd),
+            Some(SOFT_HINT)
         );
     }
 
